@@ -213,8 +213,17 @@ fn usb_scan_begin() {
 
 /// One enumerated device, checked against the wireless id list.
 fn usb_note(vid: u16, pid: u16) {
-    if let Some(name) = super::rtl8188eu::identify(vid, pid) {
-        unsafe { *USB_WIRELESS.get() = Some(Some((vid, pid, name))) };
+    // **The id list lived in the driver and went with it.** `dev::registry` is
+    // the one table that says which part is which now, so a wireless dongle is
+    // recognised there rather than here -- which is where it belonged anyway,
+    // for the reason `registry.rs` gives about nine drivers keeping nine private
+    // lists. `USB_WIRELESS` stays because `net::wifi` reports it.
+    if let Some(e) = super::registry::lookup(&super::registry::Ident::of_usb(
+        vid, pid, 0xFF, 0xFF, 0xFF,
+    )) {
+        if e.role == super::registry::Role::Wireless {
+            unsafe { *USB_WIRELESS.get() = Some(Some((vid, pid, e.what))) };
+        }
     }
 }
 
@@ -339,71 +348,17 @@ pub fn report(ecam: u64) {
                 // the id list is the whole of the detection.
                 usb_note(dev.vid, dev.pid);
                 note_device(&dev, (0, 0, 0));
-                if let Some(name) = super::rtl8188eu::identify(dev.vid, dev.pid) {
-                    kprintln!("    {} -- wireless", name);
-                    // One register read is the whole point of getting this far:
-                    // REG_SYS_CFG is readable from reset, so a plausible answer
-                    // proves rings, enumeration, control transfers and vendor
-                    // requests all at once, and a garbage one says the fault is
-                    // below the driver rather than in its tables.
-                    match dma(64, 16) {
-                        None => kprintln!("    no memory for a register read"),
-                        Some(scratch) => {
-                            // One controller operation per take, and `Regs`
-                            // rebuilt around each: it holds borrows and
-                            // nothing more, so constructing it twice costs
-                            // nothing and keeps the lock off the `kprintln`
-                            // between them.
-                            let chip = with_ctl(|x| {
-                                super::rtl8188eu::Regs::new(x, &mut dev, scratch).chip_id()
-                            })
-                            .unwrap_or(Err("no controller"));
-                            match chip {
-                                Err(e) => {
-                                    console::set_color(LTRED);
-                                    kprintln!("    chip id unreadable: {}", e);
-                                    console::set_color(LTGRAY);
-                                }
-                                Ok(id) => {
-                                    kprintln!(
-                                        "    sys_cfg 0x{:08x}  version {}  {}{}",
-                                        id.raw, id.version,
-                                        if id.vendor_umc { "UMC" } else { "TSMC" },
-                                        if id.test_chip { "  TEST CHIP -- suspect read" }
-                                        else { "" }
-                                    );
-                                    // This writes to the chip, which `usb` is
-                                    // otherwise too passive a name for -- but
-                                    // scanning already reset the bus, nothing
-                                    // else is using this device, and it is the
-                                    // only place the sequence can be run at
-                                    // all. Said out loud rather than done
-                                    // quietly.
-                                    kprintln!("    powering on and loading the MAC table...");
-                                    let up = with_ctl(|x| {
-                                        super::rtl8188eu::Regs::new(x, &mut dev, scratch)
-                                            .bring_up()
-                                    })
-                                    .unwrap_or(Err("no controller"));
-                                    match up {
-                                        Ok(()) => {
-                                            console::set_color(LTGREEN);
-                                            kprintln!("    MAC up -- power sequence and 92 registers accepted");
-                                            console::set_color(LTGRAY);
-                                            kprintln!("    (PHY, radio and firmware are not written yet)");
-                                        }
-                                        Err(e) => {
-                                            console::set_color(LTRED);
-                                            kprintln!("    bring-up failed: {}", e);
-                                            console::set_color(LTGRAY);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
+                // **The RTL8188EU bring-up was here and is gone.** It read
+                // REG_SYS_CFG, reported the chip id, ran the power sequence and
+                // applied the MAC table -- and it never carried a frame, because
+                // the on-wire sequence and `impl Radio` were never written. The
+                // test dongle has since failed, so nothing could finish it or
+                // even re-run it, and it was the tree's only GPL-2.0 code.
+                //
+                // What it proved is worth keeping in words: one vendor register
+                // read over a control transfer, answered plausibly, demonstrates
+                // rings, enumeration, control transfers and vendor requests all
+                // at once. Any future USB wireless driver should start there.
                 let mut best: Option<Config> = None;
                 // Every configuration, because the interesting one is rarely
                 // the first: QEMU's usb-net puts RNDIS on configuration 1 and

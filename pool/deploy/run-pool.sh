@@ -33,8 +33,25 @@ PIDFILE="${STATE}/run-pool.pid"
 
 # The coins, and the only line here that is a decision rather than plumbing.
 # `bits` is how many leading zero bits a share must have -- a difficulty said
-# in a way that has no float in it. Twelve suits a laptop on yespower; sha256d
-# and blake2s are thousands of times cheaper to check and can afford far more.
+# in a way that has no float in it. Twelve suits a laptop on a 2 MiB
+# yescrypt-family algorithm; sha256d and blake2s are thousands of times cheaper
+# to check and can afford far more.
+#
+# **The algorithm is `yescrypt`, and it was `yespower-10-2048-8`.** This is the
+# line that is worth money rather than the one that is worth tuning.
+# `design/mining.md` read zpool's own `actual_last24h`: yespower's whole network
+# pays **$3/day** to everybody mining it, so taking all of it earns three
+# dollars and no hardware changes that. yescrypt's pays about **$21,600/day**.
+# Same family, same working set, and `--bench` measures 3,557 us a share against
+# yespower's 3,520 on a 12th-gen i7 -- so the twelve bits, the 25% budget and
+# the 45-second share target all carry over unchanged. It is a different string.
+#
+# It is **not** `yescryptr8`, which is BitZeny's: the "Client Key"
+# personalisation makes those different functions at the same N and r, so the
+# old `bitzeny` label on a `yescrypt` port would have named a coin this does not
+# mine. The label is the algorithm because at zpool that is what it is -- an
+# algorithm port paid in BTC -- which is the form the upstream line below
+# already shows.
 # `--cpu-percent` is the total validation budget, as a share of *one* core,
 # and on a borrowed machine it is the setting that matters most. The
 # per-connection rate limit does not sum -- 256 connections were never bounded
@@ -47,14 +64,27 @@ PIDFILE="${STATE}/run-pool.pid"
 # reason `DEFAULT_WINDOW_WORK` says so. Leaving it default here was the same
 # rounding error `run-pool.wg.sh` shipped explicitly: against Bitzeny it is
 # 5e-5 of one block, so the window paid the last few shares and nothing else.
-# 2^46 is about 0.80 of a Bitzeny block. See the longer note in the WireGuard
-# script for why one block is the dial's midpoint and why there is no optimum.
+# See the longer note in the WireGuard script for why one block is the dial's
+# midpoint and why there is no optimum.
+#
+# **2^46 was 0.80 of a Bitzeny block, and moving to yescrypt voided that
+# reasoning rather than the number.** A window can only be chosen from a coin's
+# real difficulty, and a zpool algorithm port has no single coin behind it to
+# have a block -- so there is no figure to take 0.80 of. With no upstream
+# configured the pool cannot even ask: `window_in_blocks` answers `None` and the
+# payout line correctly prints nothing about blocks.
+#
+# So the number stays and its justification does not. It is a placeholder large
+# enough not to repeat the five-seconds-of-mining failure, and it is **not** a
+# considered choice until an upstream supplies a difficulty. For a bounded event
+# the honest answer is to not use it at all: `tools/distribute.py --basis tally`
+# pays every credited share and sidesteps the window entirely, which is what
+# `design/runbook.md` step 5 says an event wants.
 #
 # Bitcoin testnet is the other coin on this listener, and its difficulty swings
 # by orders of magnitude under the 20-minute minimum-difficulty rule, so one
-# window cannot be a considered choice for both. It is chosen for bitzeny, the
-# coin this pool is actually pointed at, and the payout line prints what it is
-# worth on each.
+# window could never have been a considered choice for both anyway. The payout
+# line prints what it is worth on each.
 # `--roster` is the file `refresh_roster` below keeps current, and answering
 # "can this name be paid" at the greeting is the whole point of it: a rig
 # configured with an unregistered name otherwise mines perfectly for
@@ -82,7 +112,7 @@ PIDFILE="${STATE}/run-pool.pid"
 # to whoever owns that address. That is the one misconfiguration here that is
 # silent, profitable for a stranger and irreversible, so the field is empty:
 #
-#     yespower:yespower-10-2048-8:12@<zpool yespower host>:<port>,<addr>,<pass>
+#     yescrypt:yescrypt:12@<zpool yescrypt host>:<port>,<addr>,<pass>
 #
 # **The three placeholders are three different questions and none is guessable.**
 # The host and port come off zpool.ca's own port list, the payout coin is
@@ -128,7 +158,7 @@ set -- \
     --share-seconds 45 \
     --max-connections 900 \
     --window 70368744177664 \
-    bitzeny:yespower-10-2048-8:12 \
+    yescrypt:yescrypt:12 \
     testnet:sha256d:24
 
 # Where the worker-name to payout-address mapping is served from. Kept beside

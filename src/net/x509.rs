@@ -559,7 +559,37 @@ impl Cert {
 }
 
 /// Verify a chain as presented by a server: leaf first, then issuers.
+/// What `validate_with` needs to know about the trust store.
+///
+/// Passed in rather than read from `trust`, so the decision is a pure function
+/// of its arguments and every one of its answers can be asserted at boot with
+/// no network and no roots file -- the discipline `update::decide` and
+/// `ws::admit` follow, for the reason they give: the branch that matters here
+/// is the one that almost never runs.
+pub trait Anchors {
+    /// Whether this exact certificate is a trusted root.
+    fn trusts(&self, fingerprint: &[u8; 32]) -> bool;
+    /// Every trusted CA root whose subject is `subject`, as DER.
+    fn issued_by(&self, subject: &[u8]) -> Vec<Vec<u8>>;
+}
+
+/// The loaded trust store, which is what every real caller validates against.
+struct Store;
+
+impl Anchors for Store {
+    fn trusts(&self, fingerprint: &[u8; 32]) -> bool {
+        super::trust::is_trusted(fingerprint)
+    }
+    fn issued_by(&self, subject: &[u8]) -> Vec<Vec<u8>> {
+        super::trust::issuers(subject)
+    }
+}
+
 pub fn validate(chain: &[Cert], host: &str, now: u64) -> Result<(), Error> {
+    validate_with(chain, host, now, &Store)
+}
+
+pub fn validate_with(chain: &[Cert], host: &str, now: u64, anchors: &dyn Anchors) -> Result<(), Error> {
     if chain.is_empty() {
         return Err(Error::Malformed);
     }
@@ -586,30 +616,43 @@ pub fn validate(chain: &[Cert], host: &str, now: u64) -> Result<(), Error> {
         }
     }
 
+    // Why a trusted root that *did* have the right name failed to sign, kept so
+    // "a root by that name exists and this is not its signature" is not reported
+    // as "no root by that name" -- they send somebody to different places.
+    let mut near_miss: Option<Error> = None;
+
     for i in 0..chain.len() {
         let cert = &chain[i];
 
         // Stop as soon as a certificate is itself trusted.
-        if super::trust::is_trusted(&cert.fingerprint()) {
+        if anchors.trusts(&cert.fingerprint()) {
             return Ok(());
+        }
+
+        // **Ask the store who issued this before following the server.** The
+        // walk used to consult trusted roots only once the served chain ran out,
+        // and recognised a trusted certificate only by its fingerprint. A server
+        // that sends a cross-signed copy of a root the store holds -- same key,
+        // same subject, different issuer, different fingerprint -- therefore led
+        // it past the root it trusted and on to whoever cross-signed it, and a
+        // store that has since dropped that legacy root refused a chain one step
+        // from an anchor it held. Cloudflare's GTS chains are exactly this shape.
+        //
+        // It stayed invisible because the store it was developed against still
+        // carried the legacy root: the walk reached *a* trusted root, just not
+        // the one the chain needed, so correctness depended on the store holding
+        // a certificate nothing should have required.
+        match anchored(cert, anchors) {
+            Anchor::Yes => return Ok(()),
+            Anchor::No => {}
+            Anchor::NearMiss(e) => near_miss = Some(e),
         }
 
         let issuer = match chain.get(i + 1) {
             Some(next) => next,
-            None => {
-                // The chain ran out. A server usually omits the root, so look
-                // for one that signed this and is trusted.
-                return match super::trust::find_issuer(&cert.issuer) {
-                    Some(root) => {
-                        let parsed = parse(&root)?;
-                        if !parsed.is_ca {
-                            return Err(Error::NotACa);
-                        }
-                        cert.verify_signed_by(&parsed)
-                    }
-                    None => Err(Error::NoTrustAnchor),
-                };
-            }
+            // The store was asked about this certificate's issuer just above, so
+            // running out of served certificates here is running out of chain.
+            None => return Err(near_miss.unwrap_or(Error::NoTrustAnchor)),
         };
         if !issuer.is_ca {
             return Err(Error::NotACa);
@@ -617,5 +660,177 @@ pub fn validate(chain: &[Cert], host: &str, now: u64) -> Result<(), Error> {
         cert.verify_signed_by(issuer)?;
     }
 
-    Err(Error::NoTrustAnchor)
+    Err(near_miss.unwrap_or(Error::NoTrustAnchor))
+}
+
+/// What the store says about a certificate's issuer.
+enum Anchor {
+    /// A trusted CA with that name signed it.
+    Yes,
+    /// The store holds nothing by that name.
+    No,
+    /// It holds something by that name, and it did not sign this.
+    NearMiss(Error),
+}
+
+/// Whether a trusted root issued `cert`, trying **every** root by that name.
+///
+/// A name is not an identity: a re-keyed root keeps its subject, and trying only
+/// the first match -- which this used to, through `trust::find_issuer` -- makes
+/// the answer depend on the order of `roots.der`. The signature decides; the
+/// name only nominates candidates.
+fn anchored(cert: &Cert, anchors: &dyn Anchors) -> Anchor {
+    let mut miss = None;
+    for der in anchors.issued_by(&cert.issuer) {
+        let root = match parse(&der) {
+            Ok(r) => r,
+            Err(e) => {
+                miss = Some(e);
+                continue;
+            }
+        };
+        // Both stores in this tree already filter on this. Checked again because
+        // `Anchors` is a trait, and the next implementation of it is the one that
+        // will not have read this comment.
+        if !root.is_ca {
+            miss = Some(Error::NotACa);
+            continue;
+        }
+        match cert.verify_signed_by(&root) {
+            Ok(()) => return Anchor::Yes,
+            Err(e) => miss = Some(e),
+        }
+    }
+    match miss {
+        Some(e) => Anchor::NearMiss(e),
+        None => Anchor::No,
+    }
+}
+
+/// A trust store made of DER roots handed in, for the claims below.
+struct Fixed<'a>(&'a [&'a [u8]]);
+
+impl Anchors for Fixed<'_> {
+    fn trusts(&self, fingerprint: &[u8; 32]) -> bool {
+        self.0.iter().any(|der| sha256::hash(der) == *fingerprint)
+    }
+    fn issued_by(&self, subject: &[u8]) -> Vec<Vec<u8>> {
+        self.0
+            .iter()
+            .filter(|der| parse(der).map(|c| c.is_ca && c.subject == subject).unwrap_or(false))
+            .map(|der| der.to_vec())
+            .collect()
+    }
+}
+
+fn check(ok: &mut bool, what: &str, good: bool) {
+    if !good {
+        *ok = false;
+    }
+    crate::kprintln!("  {}  {}", if good { "ok  " } else { "FAIL" }, what);
+}
+
+/// Chain validation, against the chain that exposed it.
+///
+/// **`validate` had no claims at all**, which for the function deciding whether
+/// a certificate is anybody's is the wrong amount. What found that was a miner
+/// image fetching a Cloudflare-fronted URL with 121 roots loaded and being told
+/// `NOT VERIFIED`: Cloudflare serves `leaf <- WE1 <- GTS Root R4`, where that
+/// last certificate is the copy of GTS Root R4 **cross-signed by GlobalSign Root
+/// CA**. The self-signed GTS Root R4 in the store has the same key and the same
+/// subject and a different fingerprint, so a walk that only recognises roots by
+/// fingerprint followed the served copy to GlobalSign's legacy root -- which
+/// current stores have dropped -- and gave up one step short of a root it held.
+///
+/// The fixtures are those four certificates, byte for byte, and `NOW` is a
+/// fixed instant inside all four validity windows, so these claims do not
+/// expire when the leaf does.
+pub fn selftest() -> bool {
+    const LEAF: &[u8] = include_bytes!("fixtures/gts-leaf.der");
+    const WE1: &[u8] = include_bytes!("fixtures/gts-we1.der");
+    const CROSS: &[u8] = include_bytes!("fixtures/gts-r4-cross.der");
+    const ROOT: &[u8] = include_bytes!("fixtures/gts-r4-root.der");
+    // Matches the leaf's `*.supabase.co`. 2026-09-28 12:00 UTC, which is after
+    // the leaf's notBefore (2026-08-26) and before its notAfter (2026-11-24).
+    const HOST: &str = "vermcdgpqncfsralpesz.supabase.co";
+    const NOW: u64 = 1_790_596_800;
+
+    let mut ok = true;
+    let parsed: Vec<Cert> = [LEAF, WE1, CROSS].iter().filter_map(|d| parse(d).ok()).collect();
+    check(&mut ok, "the four fixture certificates parse", parsed.len() == 3 && parse(ROOT).is_ok());
+    if parsed.len() != 3 {
+        return false;
+    }
+    let served = &parsed[..];
+    let root_only = Fixed(&[ROOT]);
+
+    check(
+        &mut ok,
+        "the chain as Cloudflare serves it validates against the self-signed GTS Root R4",
+        validate_with(served, HOST, NOW, &root_only) == Ok(()),
+    );
+    // The same answer with the cross-signed copy dropped, which is what a server
+    // that sends a tidy chain looks like. It passed before and must still pass.
+    check(
+        &mut ok,
+        "and so does the same chain without the cross-signed copy",
+        validate_with(&served[..2], HOST, NOW, &root_only) == Ok(()),
+    );
+    check(
+        &mut ok,
+        "and a store trusting the served copy itself still anchors there",
+        validate_with(served, HOST, NOW, &Fixed(&[CROSS])) == Ok(()),
+    );
+
+    // **The refusals, which are what makes the acceptance above worth anything.**
+    // Anchoring on a trusted issuer is a new way to say yes, so the claims that
+    // matter are the ones showing it still says no.
+    check(
+        &mut ok,
+        "an empty store trusts nothing",
+        validate_with(served, HOST, NOW, &Fixed(&[])) == Err(Error::NoTrustAnchor),
+    );
+    check(
+        &mut ok,
+        "a leaf alone is not anchored by a root that did not sign it",
+        validate_with(&served[..1], HOST, NOW, &root_only) == Err(Error::NoTrustAnchor),
+    );
+    // One byte at the end of WE1 is the last byte of its ECDSA `s`, so the
+    // structure still parses and only the signature is wrong. GTS Root R4 is
+    // trusted and its subject matches WE1's issuer exactly -- the precise case
+    // where a check that matched names and skipped the signature would say yes.
+    let mut forged = WE1.to_vec();
+    *forged.last_mut().unwrap() ^= 0x01;
+    match parse(&forged) {
+        Ok(bad) => {
+            let chain = [served[0].clone(), bad];
+            check(
+                &mut ok,
+                "a trusted root's name on a signature it did not make is refused",
+                validate_with(&chain, HOST, NOW, &root_only) == Err(Error::BadSignature),
+            );
+        }
+        Err(_) => check(&mut ok, "a forged WE1 still parses, so the forgery test ran", false),
+    }
+    check(
+        &mut ok,
+        "another host's name is refused before any signature is looked at",
+        validate_with(served, "example.com", NOW, &root_only) == Err(Error::NameMismatch),
+    );
+    // 2026-12-01, a week past the leaf's notAfter and years inside everything
+    // above it. The first figure written here was 2026-11-18, which is *before*
+    // the leaf expires, and the claim would have failed for a reason that had
+    // nothing to do with expiry -- so the instants are computed, not estimated.
+    check(
+        &mut ok,
+        "a chain read after the leaf expires is refused as expired",
+        validate_with(served, HOST, 1_796_083_200, &root_only) == Err(Error::Expired),
+    );
+    // 2026-07-25, a month before the leaf's notBefore.
+    check(
+        &mut ok,
+        "and one read before it was issued as not yet valid",
+        validate_with(served, HOST, 1_785_000_000, &root_only) == Err(Error::NotYetValid),
+    );
+    ok
 }

@@ -29,95 +29,16 @@ use std::sync::{Arc, Mutex};
 
 use glados_pool::mine::algo::Algo;
 use glados_pool::mine::stratum::unhex;
-use glados_pool::pool::{target_with_leading_zeros, Coin, Pool, Source};
+use glados_pool::pool::{Coin, Pool, Source};
 use glados_pool::server;
-
-fn parse_coin(spec: &str) -> Result<Coin, String> {
-    // Split the upstream off first. `@` rather than another `:`, because a
-    // `host:port` already contains one and a positional parser would have to
-    // count colons from the right to tell them apart -- which breaks the first
-    // time somebody omits the port.
-    let (spec, source) = match spec.split_once('@') {
-        None => (spec, Source::Local),
-        Some((left, up)) => {
-            let mut f = up.split(',');
-            let hostport = f.next().unwrap_or("");
-            let user = f.next().unwrap_or("");
-            // Most pools ignore the password entirely and the convention is a
-            // single `x`. Defaulted rather than required, since demanding a
-            // field nobody reads is how a config gets copied wrong.
-            let pass = f.next().unwrap_or("x");
-            if user.is_empty() {
-                return Err(format!("'{up}' has no worker name after the host"));
-            }
-            let (host, port) = match hostport.rsplit_once(':') {
-                Some((h, p)) => match p.parse::<u16>() {
-                    Ok(n) => (h.to_string(), n),
-                    Err(_) => return Err(format!("'{p}' is not a port")),
-                },
-                None => return Err(format!("'{hostport}' needs a :port")),
-            };
-            (
-                left,
-                Source::Upstream {
-                    host,
-                    port,
-                    user: String::from(user),
-                    pass: String::from(pass),
-                },
-            )
-        }
-    };
-
-    let mut it = spec.split(':');
-    let label = it.next().unwrap_or("").trim();
-    let algo_s = it.next().unwrap_or("");
-    let bits_s = it.next().unwrap_or("");
-    // A fourth field, optional, naming the traded asset. Positional and last
-    // so every configuration written before it still parses -- and defaulting
-    // to the label, so a pool whose coins are named as `prices.py` names them
-    // needs nothing at all.
-    let asset = it.next().unwrap_or(label).trim().to_string();
-    if label.is_empty() || algo_s.is_empty() || bits_s.is_empty() {
-        return Err(format!("'{spec}' is not label:algo:bits"));
-    }
-    let bits: u32 = bits_s
-        .parse()
-        .map_err(|_| format!("'{bits_s}' is not a number of bits"))?;
-    // 256 leading zero bits is a target of zero, which nothing ever meets. A
-    // pool configured that way accepts no share ever and looks exactly like a
-    // pool with a broken hash, so it is refused at the argument instead.
-    if bits >= 256 {
-        return Err(format!("{bits} leading bits is a target nothing can meet"));
-    }
-
-    // One parser, in `record`, because a share record has to spell the
-    // algorithm in exactly this form -- and two parsers for one format is what
-    // `differ.rs` exists to catch elsewhere in this tree.
-    let algo = glados_pool::record::parse_algo(algo_s)?;
-
-    Ok(Coin {
-        label: String::from(label),
-        asset,
-        algo,
-        share_bits: bits,
-        share_target: target_with_leading_zeros(bits),
-        // Filled from upstream's `set_difficulty` when there is an upstream,
-        // and `None` otherwise -- rather than a plausible constant, because an
-        // expected value derived from an invented difficulty is worse than one
-        // that refuses to print.
-        network_target: None,
-        source,
-        work: None,
-        e2: 0,
-    })
-}
+use glados_pool::spec::parse_coin;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut roster_path: Option<String> = None;
     let mut roster_url = String::new();
     let mut require_roster = false;
+    let mut require_upstream = false;
     if args.iter().any(|a| a == "--selftest") {
         // The roster first, and separately, because it needs no socket: a
         // suite that binds a port before checking pure functions fails for the
@@ -252,6 +173,7 @@ fn main() {
                 }
             },
             "--require-roster" => require_roster = true,
+            "--require-upstream" => require_upstream = true,
             "--prices" => match it.next() {
                 Some(v) => prices = Some(v.clone()),
                 None => {
@@ -288,6 +210,7 @@ fn main() {
                 println!("--roster PATH checks worker names against a mapping file at greeting.");
                 println!("--roster-url URL is where a refused miner is told to register.");
                 println!("--require-roster refuses an unregistered name instead of warning.");
+                println!("--require-upstream refuses to serve a coin with no upstream, which pays nobody.");
                 return;
             }
             other => match parse_coin(other) {
@@ -347,6 +270,38 @@ fn main() {
     }
     for c in &coins {
         println!("[pool] {}", glados_pool::market::verdict(market.as_ref(), &c.label, &c.asset));
+    }
+
+    // **A coin with no upstream pays nobody, and saying so in a log line is not
+    // enough.** A local coin prints `(local)` beside its slot and then serves
+    // miners perfectly: they connect, they hash, shares are accepted and credited
+    // to the ledger, and there is no upstream for any of it to be submitted to. The
+    // work is real and the payment channel does not exist.
+    //
+    // That is the same shape as a miner configured with an address that cannot be
+    // paid, which `mine::boot` refuses for the same reason -- a machine that hashes
+    // all night for nobody looks exactly like one that is working. So this is a
+    // refusal an operator asks for by name, in the `--require-roster` idiom: the
+    // default stays permissive because a local coin is exactly what `--selftest`
+    // and every development run wants, and an event does not.
+    //
+    // Checked after the coins are parsed and before a socket is bound, so the
+    // refusal costs nothing and cannot half-start.
+    if require_upstream {
+        let local: Vec<&str> = coins
+            .iter()
+            .filter(|c| matches!(c.source, Source::Local))
+            .map(|c| c.label.as_str())
+            .collect();
+        if !local.is_empty() {
+            eprintln!(
+                "--require-upstream: {} coin(s) have no upstream and would pay nobody: {}",
+                local.len(),
+                local.join(", ")
+            );
+            eprintln!("  a coin spec takes one: label:algo:bits@host:port,worker,pass");
+            std::process::exit(2);
+        }
     }
 
     let mut built = Pool::new(coins);
@@ -614,15 +569,39 @@ fn bench() {
     use glados_pool::mine::algo::{Algo, Hasher};
     use std::time::Instant;
 
+    // **The version is in every name here, and it was not.** Two rows read
+    // "yespower 2 MiB" and "yespower 8 MiB" while both were `v10: true`, so a
+    // reader comparing the 2 MiB row against cpuminer-opt's `-a yescrypt` was
+    // comparing yespower 1.0 against yespower 0.5 -- different functions at the
+    // same N and r, and the 0.5 one does six pwxform rounds where 1.0 does three.
+    // That comparison was made in this project and the wrong conclusion drawn
+    // from it, so the labels now carry what cpuminer-opt would call each row.
+    //
+    // 0.5 rows first, because those are the ones worth money: zpool's `yescrypt`
+    // and `yescryptr8` are both 0.5, and `yespower` is worth $3/day across its
+    // whole network.
     let algos = [
         ("sha256d", Algo::Sha256d),
         ("blake2s", Algo::Blake2s),
         (
-            "yespower 2 MiB",
+            "yescrypt   0.5 n2048 r8",
+            Algo::Yespower { v10: false, n: 2048, r: 8, pers: None },
+        ),
+        (
+            "yescryptr8 0.5 n2048 r8",
+            Algo::Yespower {
+                v10: false,
+                n: 2048,
+                r: 8,
+                pers: Some(b"Client Key".to_vec()),
+            },
+        ),
+        (
+            "yespower   1.0 n2048 r8",
             Algo::Yespower { v10: true, n: 2048, r: 8, pers: None },
         ),
         (
-            "yespower 8 MiB",
+            "yespower   1.0 n2048 r32",
             Algo::Yespower { v10: true, n: 2048, r: 32, pers: None },
         ),
     ];

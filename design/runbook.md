@@ -13,10 +13,14 @@ what step 8 is for.
 
 ## 0. Before anything: decide two numbers
 
-**The gate.** `design/live800.md` shows 1,000,000 is unreachable for 800
-entrants -- the pool holds about 130 whole gates -- and that 50,000 is the
-number at which an event can happen. The contract takes it per epoch and does
-not care what you choose, so this is a decision nobody will make for you.
+**The gate is 1,000,000 GLADOS, decided 2026-09-30 on community feedback**
+(it was 50,000). `design/live800.md` argued 50,000 for an 800-entrant event,
+where 1,000,000 was unreachable; that analysis stands as a record of the other
+choice. One consequence is arithmetic rather than opinion: the supply is
+1,000,000,000 and the pair alone holds about 252,000,000 (read on 2026-09-30),
+so **at most about 747 addresses can hold the gate at once** -- the ceiling on
+how many miners any one epoch can pay. The contract takes the gate per epoch;
+the pool reads it from `GATE_MIN`.
 
 **The payout basis.** `window` or `tally`, and they are not the same number.
 See step 5; choosing wrong cannot be undone.
@@ -121,7 +125,8 @@ python tools/distribute.py ~/.local/state/glados-pool/ledger.json \
   --coin btc \
   --map <(curl -fsS https://<project>.supabase.co/functions/v1/worker/map) \
   --map-since 2026-09-08T00:00:00Z \
-  --gate 50000e18 --token 0x3d609ecafc6aa7dba67dd7ad1d10b49c52d57777 \
+  --gate 1000000e18 --token 0x3d609ecafc6aa7dba67dd7ad1d10b49c52d57777 \
+  --split equal --min-work 1e9 \
   --out epoch.json
 ```
 
@@ -199,6 +204,42 @@ the operator's own float; a recipient argument is one typo away from bridging
 an event's funding to a stranger, irreversibly, with the transaction
 succeeding.
 
+## 6b. Semi-automatic payout: RVN to an open epoch
+
+The live pool is paid by zpool in **RVN**, to the operator's own Ravencoin
+wallet -- chosen for a 0.05 RVN minimum, so a payout lands the same day. This
+is every step from there to miners being able to claim $GLaDOS, each one a
+command the operator runs. No key is held by anything but the operator's own
+wallets; that is the arrangement for testing, and the unattended form moves the
+same steps into the pool's treasury.
+
+```bash
+# 0. once: a free ChangeNOW partner key, in your own shell only
+export CHANGENOW_KEY=...
+
+# 1. how much has zpool paid, and is it past the swap minimum (~151 RVN)?
+node contracts/swap.mjs min
+curl -s https://blockbook.ravencoin.org/api/v2/address/<your R... address> | jq .balance
+
+# 2. register the swap, RVN -> ETH on Robinhood Chain, paid to your 4663 wallet
+node contracts/swap.mjs quote  --rvn 500
+node contracts/swap.mjs create --rvn 500 --to 0xYOUR4663WALLET
+#    ...then send exactly that RVN to the printed address from your wallet,
+#    and wait for it to fill:
+node contracts/swap.mjs status --id <id>
+
+# 3. close the epoch and build the tree: steps 5 and 6 above
+
+# 4. open it, funded with that ETH as WETH: step 7 below, simulate first
+node contracts/deploy.mjs open epoch.json --amount <ETH> --gate 1000000
+node contracts/deploy.mjs open epoch.json --amount <ETH> --gate 1000000 --send
+```
+
+**Batch.** ChangeNOW's cost is mostly fixed: about 9% of a $2 swap and far
+less of a $20 one, so the first swap should wait until it is worth doing.
+The distributor must be deployed before step 4 -- `deploy.mjs deploy --send`,
+once, after `design/audit-2.md`'s fixes, which are applied.
+
 ## 7. Open the epoch
 
 ### Three things to check before the first `--send`, from `design/audit.md`
@@ -243,14 +284,14 @@ node contracts/deploy.mjs deploy --send                    # first time only
 Then, paying in $GLADOS through the V2 pair:
 
 ```bash
-node contracts/deploy.mjs open epoch.json --amount 0.005 --gate 50000
-node contracts/deploy.mjs open epoch.json --amount 0.005 --gate 50000 --send
+node contracts/deploy.mjs open epoch.json --amount 0.005 --gate 1000000
+node contracts/deploy.mjs open epoch.json --amount 0.005 --gate 1000000 --send
 ```
 
 Or paying in a tokenized equity through a Uniswap V3 pool:
 
 ```bash
-node contracts/deploy.mjs open epoch.json --amount 0.005 --gate 50000 \
+node contracts/deploy.mjs open epoch.json --amount 0.005 --gate 1000000 \
   --v3-pool 0xd4eb21209c4d6093f80b5b84f5c45cc093ea14a3 \
   --reward  0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec        # NVDA
 ```

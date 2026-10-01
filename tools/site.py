@@ -75,6 +75,11 @@ VARIANTS = {
                          note="Four times faster per token than Qwen3, and the "
                               "only image that fits QEMU's 516 MB disk ceiling. "
                               "The one to reach for under emulation."),
+    # The mining image: boots straight to the $GLaDOS miner, no model and no
+    # desktop. Shipped under mining-v* tags by .github/workflows/mining.yml.
+    "miner": dict(model="$GLaDOS miner", ctx="", kv="", ram="2 GB", order=-1,
+                  note="Boots straight to the miner and pays in $GLaDOS. "
+                       "Wired Ethernet or USB tethering; Secure Boot off."),
     "nomodel": dict(model="Kernel only", ctx="", kv="", ram="1 GB", order=0,
                     note="Kernel only. Boots to a desktop, reports that it has "
                          "no model, and everything except inference works."),
@@ -127,7 +132,8 @@ NAV = [
     ("screenshots/", "Screenshots"),
     ("archive/", "Archive"),
     ("token/", "Token"),
-    # The pool's published share log. Its own tab rather than a link under
+    # The pool: how to mine $GLADOS, live miners and every payout. Its own tab
+    # rather than a link under
     # Token, because the audience is different: a miner arriving to check
     # whether their worker's shares are in the record is not the reader the
     # token page is written for, and `--roster-url` on the pool daemon already
@@ -304,7 +310,11 @@ UNDER = {"wallet/": "token/"}
 #
 # It is still in the sitemap and still reachable from the tab strip, because
 # neither of those edits the file.
-STANDALONE = {"pool/index.html"}
+# The pool tab was the verbatim share log until 1.3.9, when payouts became an
+# equal split in $GLADOS and the page was rewritten for miners rather than for
+# auditing a PPLNS window. The share log still ships with the pool daemon
+# (`pool/site/`); the site's page is an ordinary one now and gets the chrome.
+STANDALONE = set()
 
 
 def section_of(relpath):
@@ -501,6 +511,11 @@ def current(releases):
     A release with no images is reported, so a release that never gets its
     ISOs uploaded is visible instead of silently skipped.
     """
+    # The miner ships under its own `mining-v*` tags with its own notes, and is
+    # linked from the pool page. Presenting it here would make the download
+    # table and the sidebar describe a 33 MB miner as the operating system's
+    # current release, with the three OS images gone from the page.
+    releases = [r for r in releases if not r["tag_name"].startswith("mining-")] or releases
     for i, r in enumerate(releases):
         if images_of(r):
             if i:
@@ -836,7 +851,7 @@ def check(releases, fetch=False):
     `--fetch` does the end-to-end version anyway, for when that is what is
     wanted. It is off by default because it is not free.
     """
-    latest_names = {a["name"] for a in releases[0].get("assets", [])}
+    latest_names = {a["name"] for a in current(releases).get("assets", [])}
     tags = {r["tag_name"] for r in releases}
     asset_urls = {a["browser_download_url"]
                   for r in releases for a in r.get("assets", [])}
@@ -869,6 +884,8 @@ def check(releases, fetch=False):
                     why = "not an asset of that release"
                 elif mp:
                     ok, why = mp.group("tag") in tags, "no such release tag"
+                elif href.rstrip("/").endswith("/releases/latest"):
+                    ok, why = True, ""      # GitHub resolves it to the newest release
                 else:
                     ok = href in asset_urls or href in page_urls
                     why = "unrecognised release URL"

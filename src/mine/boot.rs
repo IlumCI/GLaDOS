@@ -32,8 +32,18 @@
 //! as long as nobody noticed. So `worker` has no default: without it `plan`
 //! answers `None` and the machine sits at a prompt doing nothing, which is the
 //! failure that is visible rather than the one that is profitable.
+//!
+//! **And a typo is the same theft by a different route.** A default pays a
+//! stranger; a transposed pair of characters pays nobody, and both look exactly
+//! like a miner that is working. Every address form that turns up here carries a
+//! checksum for precisely that reason, so `mine::addr` reads it before the first
+//! share and the plan carries the verdict. Four answers rather than two, because
+//! "this carries no checksum" and "this is a worker name the pool's roster maps"
+//! are facts of their own and filing either under pass or fail is wrong.
 use alloc::string::String;
 use alloc::vec::Vec;
+
+use super::addr;
 
 /// Where the file lives on the boot volume.
 ///
@@ -50,14 +60,39 @@ use alloc::vec::Vec;
 pub const FILE: &str = "\\GLADOS\\MINER.TXT";
 
 /// What the file is allowed to say. Every field is typed and none is a command.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
     pub host: String,
     pub port: u16,
     pub user: String,
     pub pass: String,
     pub glados_proto: bool,
+    /// The WebSocket path, when the pool is reached over `wss://`.
+    ///
+    /// Present means TLS then a WebSocket upgrade; absent means a plain TCP
+    /// connection. A Cloudflare Durable Object can only be reached the first
+    /// way -- a Worker accepts no inbound TCP at all -- so this is what lets an
+    /// image mine to the serverless pool with nothing beside it.
+    pub ws: Option<String>,
+    /// `worker ask`: nobody's address is in the image, so the miner asks for
+    /// one at boot and starts on the answer.
+    ///
+    /// **This is what a published image carries.** It is read-only, so the file
+    /// is fixed the day the ISO is cut, and any address written into it is
+    /// either the publisher's or a placeholder -- and a placeholder is worse
+    /// than it looks: `0xdeadbeef...` is a perfectly well-formed lowercase EVM
+    /// address, which the payout judge rightly calls unchecked rather than
+    /// broken, so an image carrying it *mined to it*. Asking is the only
+    /// default that pays the person at the keyboard.
+    pub ask: bool,
     pub slices: Option<u32>,
+    /// What could be established about where `user` pays.
+    ///
+    /// A field rather than a check inside `parse`, because it is a pure function
+    /// of the name and so belongs in what a claim can read -- and because
+    /// refusing here would throw away the reason. `apply` is what declines, where
+    /// there is a line to print it on.
+    pub payout: addr::Payout,
     /// Lines whose first word this parser does not know. Counted rather than
     /// ignored, because a typo in a file nobody can edit after the image is cut
     /// should be visible at boot instead of presenting as a miner that will not
@@ -69,11 +104,19 @@ pub struct Plan {
 /// which are the two things that have no safe default.
 pub fn parse(bytes: &[u8]) -> Option<Plan> {
     let text = core::str::from_utf8(bytes).ok()?;
+    // **Edited in Notepad.** The file is meant to be opened on the stick and
+    // have an address pasted into it, and Notepad may save a byte-order mark:
+    // an invisible U+FEFF glued to the first line, which would make a first
+    // line of `pool ...` a directive nobody knows and refuse the whole file.
+    // CRLF needs nothing -- `lines` takes both.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut host = String::new();
     let mut port = 3333u16;
     let mut user = String::new();
     let mut pass = String::from("x");
     let mut glados_proto = false;
+    let mut said_protocol = false;
+    let mut ws = None;
     let mut slices = None;
     let mut unknown = 0usize;
 
@@ -97,7 +140,21 @@ pub fn parse(bytes: &[u8]) -> Option<Plan> {
                 // `stratum+tcp://` is stripped because it is what a pool's own
                 // page gives you to paste, and refusing it would be refusing
                 // the only form most people will ever have in front of them.
-                let a = value.trim_start_matches("stratum+tcp://");
+                let mut a = value.trim_start_matches("stratum+tcp://");
+                let mut default_port = 3333u16;
+                if let Some(rest) = a.strip_prefix("wss://") {
+                    // The path is everything from the first slash, and `/mine`
+                    // when there is none: that is the only path the pool serves
+                    // miners on, and a bare host is how people will write it.
+                    let (hp, path) = match rest.find('/') {
+                        Some(i) => (&rest[..i], &rest[i..]),
+                        None => (rest, "/mine"),
+                    };
+                    ws = Some(String::from(path));
+                    default_port = 443;
+                    a = hp;
+                }
+                port = default_port;
                 match a.rsplit_once(':') {
                     Some((h, p)) => match p.parse::<u16>() {
                         Ok(n) => {
@@ -115,8 +172,14 @@ pub fn parse(bytes: &[u8]) -> Option<Plan> {
             "worker" => user = String::from(value),
             "pass" => pass = String::from(value),
             "protocol" => match value {
-                "glados" => glados_proto = true,
-                "stratum" => glados_proto = false,
+                "glados" => {
+                    glados_proto = true;
+                    said_protocol = true;
+                }
+                "stratum" => {
+                    glados_proto = false;
+                    said_protocol = true;
+                }
                 _ => return None,
             },
             "slices" => match value.parse::<u32>() {
@@ -127,10 +190,21 @@ pub fn parse(bytes: &[u8]) -> Option<Plan> {
         }
     }
 
-    if host.is_empty() || user.is_empty() {
+    let ask = user == "ask";
+    if ask {
+        user.clear();
+    }
+    if host.is_empty() || (user.is_empty() && !ask) {
         return None;
     }
-    Some(Plan { host, port, user, pass, glados_proto, slices, unknown })
+    // The serverless pool speaks the native protocol and nothing else, so a
+    // `wss://` pool means it unless the file says otherwise. A miner's whole
+    // configuration is then two lines: where, and whose address.
+    if ws.is_some() && !said_protocol {
+        glados_proto = true;
+    }
+    let payout = addr::judge(&user);
+    Some(Plan { host, port, user, pass, glados_proto, ws, ask, slices, payout, unknown })
 }
 
 /// Apply a plan and start mining. Answers a line to print.
@@ -140,6 +214,45 @@ pub fn parse(bytes: &[u8]) -> Option<Plan> {
 /// table, and everything that cannot be is here.
 pub fn apply(p: &Plan) -> String {
     use alloc::format;
+
+    MINER_IMAGE.store(true, core::sync::atomic::Ordering::Relaxed);
+
+    // Nobody's address is in the image. One typed on this PC before is saved
+    // in its firmware, and is used rather than asked for again: typing forty
+    // hex digits by hand on every boot is the thing this exists to stop.
+    if p.ask {
+        if let Some(saved) = saved() {
+            if let Ok(payout) = verdict(&saved) {
+                let mut q = p.clone();
+                q.user = saved;
+                q.payout = payout;
+                q.ask = false;
+                return format!("{}\n  (the address saved on this PC; type another 0x address to switch)", apply(&q));
+            }
+        }
+    }
+
+    // Nothing saved: hold the plan and ask. Nothing is configured and nothing
+    // connects until there is somebody to pay.
+    if p.ask {
+        *ASKING.lock_irq() = Some(p.clone());
+        // The question is the screen, not two lines under a shell prompt.
+        // PROMPT still goes to the console and so to serial, for a harness.
+        super::screen::take();
+        super::screen::ask_draw();
+        return String::from(PROMPT);
+    }
+
+    // **Refused before anything is configured, not after.** A broken checksum
+    // means the string is not an address at all, so every share found under it
+    // is work given away -- and an image on read-only media will do it again
+    // every boot, for as long as nobody looks. The refusal names the form and
+    // the name, because the operator has to find the character that is wrong in
+    // a file they can no longer edit and the next thing they do is cut another
+    // image.
+    if !p.payout.may_mine() {
+        return format!("not mining: {} ({})", p.payout.say(), p.user);
+    }
     {
         let mut g = super::client::CONFIG.lock_irq();
         *g = Some(super::client::Config {
@@ -147,6 +260,7 @@ pub fn apply(p: &Plan) -> String {
             port: p.port,
             user: p.user.clone(),
             pass: p.pass.clone(),
+            ws: p.ws.clone(),
             proto: if p.glados_proto {
                 super::client::Protocol::Glados
             } else {
@@ -179,10 +293,7 @@ pub fn apply(p: &Plan) -> String {
     // `set_exclusive` is the other half: it is what makes the desktop's periodic
     // painters stand down, the same flag `port::with_screen` takes for the length
     // of a call and this holds for the life of the machine.
-    if let Some(fb) = crate::gfx::primary() {
-        crate::gfx::set_exclusive(true);
-        crate::gfx::console::with(|c| c.reflow(0, 0, fb.width(), fb.height()));
-    }
+    super::screen::take();
 
     // No task for the screen: `client::run` draws it, because this kernel has no
     // sleep and a once-a-second task can only spin. `screen::tick` is one
@@ -191,7 +302,15 @@ pub fn apply(p: &Plan) -> String {
 
     match super::client::start() {
         Ok(()) => {
-            let mut s = format!("mining as {} at {}:{}", p.user, p.host, p.port);
+            // The mining screen, now, in its CONNECTING state. It is otherwise
+            // drawn only from the socket loop, which is busy resolving and
+            // shaking hands for the first seconds -- so an accepted address sat
+            // under WAITING FOR ADDRESS for about three of them, measured on a
+            // capture. The loop cannot be drawing yet (it has not connected),
+            // so this frame does not race it.
+            super::screen::draw();
+            let scheme = if p.ws.is_some() { "wss://" } else { "" };
+            let mut s = format!("mining as {} at {}{}:{}", p.user, scheme, p.host, p.port);
             if let (Some(want), Some(n)) = (p.slices, got) {
                 // Says what it got rather than what was asked for. `set_slices`
                 // clamps to what the task table can actually spare, and a file
@@ -206,9 +325,151 @@ pub fn apply(p: &Plan) -> String {
             if p.unknown > 0 {
                 s.push_str(&format!(", {} line(s) not understood", p.unknown));
             }
+            // Said on the way up rather than only on a refusal: "checks out" and
+            // "carries no checksum" are different assurances and the operator is
+            // owed which one they have before walking away from the machine.
+            s.push_str(&format!("\n  {}", p.payout.say()));
             s
         }
         Err(e) => format!("miner configured but did not start: {}", e),
+    }
+}
+
+const PROMPT: &str = "type your 0x payout address and press Enter to start mining\n  \
+     (the address you want $GLaDOS paid to; nothing else is needed)";
+
+/// Whether this boot is a miner image, so a typed 0x address means "pay here"
+/// and not a line for the shell.
+static MINER_IMAGE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn is_miner_image() -> bool {
+    MINER_IMAGE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+// ---- the address, kept in the PC's firmware ---------------------------------
+//
+// **Why the firmware and not the boot volume.** A miner image is an ISO: on a
+// CD it is read-only, and on a stick this kernel has no USB storage driver to
+// write it with. The UEFI variable store is the one thing every PC has that
+// survives a power cycle and is writable after `ExitBootServices`. It holds
+// forty-two bytes of public information -- an address, never a key -- so
+// leaving it on somebody's machine costs them nothing.
+
+/// `GladosPayout`, NUL-terminated.
+const SAVED_NAME: [u16; 13] = [
+    b'G' as u16, b'l' as u16, b'a' as u16, b'd' as u16, b'o' as u16, b's' as u16,
+    b'P' as u16, b'a' as u16, b'y' as u16, b'o' as u16, b'u' as u16, b't' as u16, 0,
+];
+/// This project's own vendor GUID, so the variable cannot collide with anybody
+/// else's: 7a1d0c3e-5b2f-4e8a-9c41-6d3b2a90f1e7.
+const SAVED_GUID: crate::uefi::Guid = crate::uefi::Guid {
+    d1: 0x7a1d_0c3e,
+    d2: 0x5b2f,
+    d3: 0x4e8a,
+    d4: [0x9c, 0x41, 0x6d, 0x3b, 0x2a, 0x90, 0xf1, 0xe7],
+};
+
+/// The address saved on this PC, if there is one and it still reads as one.
+pub fn saved() -> Option<String> {
+    let mut buf = [0u8; 64];
+    let n = crate::cpu::efi_get_variable(&SAVED_NAME, &SAVED_GUID, &mut buf)?;
+    let s = core::str::from_utf8(&buf[..n]).ok()?.trim();
+    verdict(s).ok().map(|_| String::from(s))
+}
+
+fn save(addr: &str) -> bool {
+    crate::cpu::efi_set_variable(&SAVED_NAME, &SAVED_GUID, addr.as_bytes())
+}
+
+/// Forget the saved address: the next boot asks again.
+pub fn forget() -> bool {
+    crate::cpu::efi_set_variable(&SAVED_NAME, &SAVED_GUID, &[])
+}
+
+/// A plan waiting for its address. Set by `apply` on `worker ask`.
+static ASKING: crate::sync::Spin<Option<Plan>> = crate::sync::Spin::new(None);
+
+/// Whether a typed line is being asked for.
+pub fn asking() -> bool {
+    ASKING.lock_irq().is_some()
+}
+
+/// The shell hands every typed line here first while a plan is waiting.
+///
+/// `None` means "not mine": nothing is being asked, or the line does not start
+/// with `0x`, so it goes on to be a command as usual -- which keeps the shell
+/// usable on a miner that has not been told where to pay yet.
+pub fn answer(line: &str) -> Option<String> {
+    let line = line.trim();
+    if !(line.starts_with("0x") || line.starts_with("0X")) {
+        // A command, not an address: it has left the field.
+        super::screen::typed("");
+        return None;
+    }
+    // An address is *not* cleared here. It used to be, first thing, so a
+    // good address emptied the field and the screen sat on "0x..." under
+    // WAITING FOR ADDRESS until the miner's first frame -- half a second
+    // that reads as "your address was rejected". A refusal clears it itself
+    // (`screen::refused`); an acceptance leaves it standing until the mining
+    // screen replaces the whole view.
+    // Already mining on a miner image: a new address is a switch. It is saved
+    // first, and the machine restarts onto it -- a reconnect under a new name
+    // in the middle of a session is a state the miner was never built to be
+    // in, and a restart is ten seconds and certainly right.
+    if ASKING.lock_irq().is_none() {
+        if !is_miner_image() {
+            return None;
+        }
+        return Some(match verdict(line) {
+            Err(why) => alloc::format!("{why} -- the current address is unchanged"),
+            Ok(_) if save(line) => {
+                crate::kprintln!("[miner] switching to {line}; restarting");
+                crate::cpu::reboot();
+            }
+            Ok(_) => String::from("this PC's firmware would not save the address; nothing changed"),
+        });
+    }
+    let mut plan = ASKING.lock_irq().clone()?;
+    match verdict(line) {
+        Err(why) => {
+            super::screen::refused(why);
+            Some(alloc::format!("{why} -- type it again\n  {PROMPT}"))
+        }
+        Ok(payout) => {
+            *ASKING.lock_irq() = None;
+            super::screen::accepted();
+            plan.user = String::from(line);
+            plan.payout = payout;
+            plan.ask = false;
+            let kept = if save(line) {
+                "saved on this PC: the next boot starts mining without asking"
+            } else {
+                "this PC's firmware would not save it, so the next boot asks again"
+            };
+            Some(alloc::format!("{}\n  {kept}", apply(&plan)))
+        }
+    }
+}
+
+/// Whether a typed answer is an address the distributor can pay.
+///
+/// **EVM only, and that is where the money goes rather than a preference.**
+/// Miners are paid in $GLaDOS on chain 4663, so a Bitcoin address typed here
+/// would be well-formed, pass every checksum, and never receive anything.
+/// Pure, so the rule is asserted with no keyboard and no pool.
+fn verdict(line: &str) -> Result<addr::Payout, &'static str> {
+    match addr::judge(line) {
+        p @ (addr::Payout::Checked(addr::Kind::Evm) | addr::Payout::Unchecked(addr::Kind::Evm)) => {
+            // All one digit is somebody's typing test, not an address anyone
+            // holds a key for, and it is exactly what a placeholder looks like.
+            let hex = line.split('.').next().unwrap_or("")[2..].to_ascii_lowercase();
+            if hex.bytes().all(|b| b == hex.as_bytes()[0]) {
+                return Err("that is a placeholder, not an address");
+            }
+            Ok(p)
+        }
+        addr::Payout::Broken(_) => Err("that address has a typo: its checksum fails"),
+        _ => Err("that is not a 0x address: 0x and 40 hex digits"),
     }
 }
 
@@ -217,8 +478,19 @@ pub fn checks() -> Vec<(bool, String)> {
     let mut out: Vec<(bool, String)> = Vec::new();
     let mut ok = |c: bool, w: &str| out.push((c, String::from(w)));
 
+    // Saved by Notepad: a byte-order mark and CRLF, around a pasted address.
+    let notepad = parse(b"\xef\xbb\xbfpool wss://pool.example.com/mine\r\nworker 0x6ef4fa014b72e9c99840b9e03ce9182be223527d\r\n");
+    ok(
+        notepad.as_ref().is_some_and(|p| p.host == "pool.example.com" && p.user == "0x6ef4fa014b72e9c99840b9e03ce9182be223527d" && !p.ask),
+        "a file saved by Notepad -- byte-order mark, CRLF -- reads the same as one that was not",
+    );
+
     let full = parse(b"pool p.example.com:3334\nworker 0xabc.rig1\nslices 3\n");
     ok(full.is_some(), "a file naming a pool and a worker is a plan");
+    ok(
+        full.as_ref().map(|p| p.payout) == Some(addr::Payout::Name),
+        "and a worker that is not an address shape is carried as a name",
+    );
     if let Some(p) = &full {
         ok(p.host == "p.example.com" && p.port == 3334, "the host and port are split on the last colon");
         ok(p.user == "0xabc.rig1", "the worker name is carried whole");
@@ -238,6 +510,32 @@ pub fn checks() -> Vec<(bool, String)> {
     ok(parse(b"pool stratum+tcp://p.example.com:1\nworker w\n").map(|p| p.host)
            == Some(String::from("p.example.com")),
        "the scheme a pool's own page hands out is stripped");
+    let edge = parse(b"pool wss://pool.example.com/mine\nworker w\n");
+    ok(
+        edge.as_ref().map(|p| (p.host.as_str(), p.port, p.ws.as_deref())) == Some(("pool.example.com", 443, Some("/mine"))),
+        "a wss pool is split into host, port 443 and its path",
+    );
+    ok(edge.map(|p| p.glados_proto) == Some(true), "and speaks the native protocol without being told");
+    ok(
+        parse(b"pool wss://h:8443\nworker w\n").map(|p| (p.port, p.ws)) == Some((8443, Some(String::from("/mine")))),
+        "a wss pool with a port and no path takes /mine",
+    );
+    ok(
+        parse(b"protocol stratum\npool wss://h\nworker w\n").map(|p| p.glados_proto) == Some(false),
+        "a protocol line still wins over the scheme's default",
+    );
+    ok(parse(b"pool h:1\nworker w\n").map(|p| p.ws) == Some(None), "a plain pool is plain TCP");
+    let asks = parse(b"pool wss://h\nworker ask\n");
+    ok(asks.as_ref().map(|p| (p.ask, p.user.is_empty())) == Some((true, true)),
+       "`worker ask` is a plan that carries no address and asks for one");
+    ok(verdict("0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed").is_ok(), "a typed EIP-55 address is taken");
+    ok(verdict("0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed.rig2").is_ok(), "and a lowercase one with a rig suffix");
+    ok(verdict("0x5aAeb6053F3E94C9b9A09f33669435E7Ef1Beaed").is_err(), "a typed address with one letter's case wrong is refused");
+    ok(verdict("0xdeadbeef").is_err(), "a short one is refused");
+    ok(verdict("0x0000000000000000000000000000000000000000").is_err(), "the zero address is refused");
+    ok(verdict("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef").is_ok(),
+       "0xdeadbeef... is well formed, which is why the image must not ship it");
+    ok(verdict("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa").is_err(), "a Bitcoin address is refused, since nothing pays one");
     ok(parse(b"pool p:notaport\nworker w\n").is_none(), "a port that is not a number refuses the whole file");
     ok(parse(b"slices two\npool p:1\nworker w\n").is_none(), "and so does a slice count that is not one");
     ok(parse(b"protocol carrier-pigeon\npool p:1\nworker w\n").is_none(), "an unknown protocol is refused, not defaulted");
@@ -255,5 +553,47 @@ pub fn checks() -> Vec<(bool, String)> {
     ok(parse(&[0xff, 0xfe, 0x00]).is_none(), "bytes that are not text are not a plan");
     ok(parse(b"").is_none(), "and neither is an empty file");
 
+    // **The payout verdict reaches the plan, and the broken one is the point.**
+    // `addr` asserts its own arithmetic; what is asserted here is the join --
+    // that a file naming a mistyped address parses into a plan that says so,
+    // rather than into one that mines.
+    let good = parse(b"pool p:1\nworker 0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed\n");
+    ok(
+        good.as_ref().map(|p| p.payout) == Some(addr::Payout::Checked(addr::Kind::Evm)),
+        "an EIP-55 payout address in the file is checked and passes",
+    );
+    ok(good.map(|p| p.payout.may_mine()) == Some(true), "and such a plan may mine");
+
+    let typo = parse(b"pool p:1\nworker 0x5aAeb6053F3E94C9b9A09f33669435E7Ef1Beaed\n");
+    ok(
+        typo.as_ref().map(|p| p.payout) == Some(addr::Payout::Broken(addr::Kind::Evm)),
+        "one letter's case wrong in it is carried as broken",
+    );
+    ok(
+        typo.as_ref().map(|p| p.payout.may_mine()) == Some(false),
+        "and such a plan may not mine",
+    );
+    // Still a plan, deliberately: parsing succeeded and it is `apply` that
+    // declines, so the reason survives to be printed instead of becoming a
+    // `None` indistinguishable from an absent file.
+    ok(typo.is_some(), "a broken address still parses, so the refusal can name it");
+
+    let lower = parse(b"pool p:1\nworker 0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed\n");
+    ok(
+        lower.as_ref().map(|p| p.payout) == Some(addr::Payout::Unchecked(addr::Kind::Evm)),
+        "an all-lowercase address is well-formed with nothing to verify",
+    );
+    ok(lower.map(|p| p.payout.may_mine()) == Some(true), "and it is allowed rather than refused");
+
+    // The suffix, through the file rather than through `judge` directly, because
+    // this is the spelling every multi-rig venue's own page hands out.
+    ok(
+        parse(b"pool p:1\nworker 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa.gf63\n")
+            .map(|p| p.payout)
+            == Some(addr::Payout::Checked(addr::Kind::Base58)),
+        "and an address with a rig suffix is still checked",
+    );
+
+    out.extend(addr::checks());
     out
 }

@@ -125,6 +125,12 @@ def dir_entries(entry):
     if entry.name is not None:
         out += raw(b'.          ', 0x10, entry.cluster, 0)
         out += raw(b'..         ', 0x10, entry.parent_cluster, 0)
+    else:
+        # The volume label, as a root entry: the boot sector carries one too,
+        # but Windows and macOS name a drive from this, and without it a
+        # flashed stick shows up as "USB Drive" -- not what somebody looking
+        # for the file to paste their address into is looking for.
+        out += raw(b'GLADOS     ', 0x08, 0, 0)
 
     for child in entry.children:
         stem, ext = short_name(child.name, taken)
@@ -156,7 +162,7 @@ def dir_entries(entry):
     return bytes(out)
 
 
-def build_fat(root, out, cluster_size):
+def build_fat(root, out, cluster_size, hidden=0):
     """Write a FAT32 filesystem containing `root` to the open file `out`.
 
     Returns the image size in bytes.
@@ -216,7 +222,7 @@ def build_fat(root, out, cluster_size):
     bs[3:11] = b'GLADOS  '
     struct.pack_into('<HBHBHHBHHHII', bs, 11,
                      SECTOR, spc, reserved, 2, 0, 0, 0xF8, 0,
-                     63, 255, 0, total_sectors)
+                     63, 255, hidden, total_sectors)
     struct.pack_into('<IHHIHH', bs, 36, fat_sectors, 0, 0, 2, 1, 6)
     bs[64] = 0x80
     bs[66] = 0x29
@@ -327,6 +333,31 @@ def build_iso(out_path, efi_img, efi_size, label):
     with open(out_path, 'r+b') as out:
         out.seek(0)
         out.write(b'\x00' * (ISO_SECTOR * 16))
+
+        # **A partition table, so the image works written to a USB stick.**
+        # El Torito is how *optical* media boot, and firmware reads it only
+        # from a CD: the same bytes written to a stick with Etcher or `dd` had
+        # no partition table at all, so most PCs would not offer the stick as
+        # bootable, and no computer would mount it -- which left MINER.TXT,
+        # where an address can be pasted before booting, unreachable to
+        # anybody holding the stick. One MBR entry pointing at the FAT volume
+        # the El Torito entry already points at fixes both, and costs nothing
+        # on a CD, where the ISO 9660 system area it lives in is ignored.
+        #
+        # **Type 0x0C (FAT32 LBA), not 0xEF.** Windows gives an EFI System
+        # Partition no drive letter, which would hide the one file this exists
+        # to expose. Firmware boots any FAT partition on removable media that
+        # carries \EFI\BOOT\BOOTX64.EFI, whatever its type byte says.
+        start = esp_lba_512 = ESP_LBA * ISO_SECTOR // 512
+        count = (efi_size + 511) // 512
+        mbr = bytearray(512)
+        struct.pack_into('<I', mbr, 440, 0x474C4D4E)   # disk signature, fixed
+        entry = bytes([0x80, 0xFE, 0xFF, 0xFF, 0x0C, 0xFE, 0xFF, 0xFF]) + struct.pack('<II', start, count)
+        mbr[446:462] = entry
+        mbr[510:512] = b'\x55\xaa'
+        out.seek(0)
+        out.write(mbr)
+        out.seek(ISO_SECTOR * 16)
 
         # Primary volume descriptor.
         pvd = bytearray(ISO_SECTOR)
@@ -539,7 +570,10 @@ def main():
     esp_offset = 24 * ISO_SECTOR
     with open(out, 'wb') as f:
         f.write(b'\x00' * esp_offset)
-        size = build_fat(root, f, cluster)
+        # Hidden sectors is where the FAT volume starts on the disk, which on
+        # a stick is the partition's start. Firmware reading the El Torito
+        # entry ignores it.
+        size = build_fat(root, f, cluster, hidden=esp_offset // 512)
         # ISO images are a whole number of 2048-byte sectors.
         tail = f.tell() % ISO_SECTOR
         if tail:

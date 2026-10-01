@@ -8,7 +8,6 @@
 //! nobody reproduces.
 
 use std::collections::{BTreeMap, HashMap};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::mine::algo::{Algo, Hasher};
 use crate::mine::hash::below_target;
@@ -324,6 +323,10 @@ impl Default for Window {
 
 pub struct Pool {
     pub coins: Vec<Coin>,
+    /// See `work_serial`.
+    work_serial: u64,
+    /// In switched mode, the one slot every miner is working. See `switched`.
+    switched: Option<usize>,
     /// Where to append a recomputable record of every accepted share, if
     /// anywhere.
     ///
@@ -479,6 +482,9 @@ pub const DEFAULT_WINDOW_WORK: u64 = 1u64 << 32;
 /// different, and only one of them is worth refusing over.
 const LEDGER_VERSION: u32 = 3;
 
+/// How much better a candidate must pay before the pool switches to it.
+pub const SWITCH_MARGIN: f64 = 1.10;
+
 /// How many issued jobs to remember. Sixty-four is four coins' worth of a
 /// couple of minutes at a thirty-second job cadence, which is comfortably
 /// longer than any honest share takes to arrive.
@@ -491,6 +497,8 @@ impl Pool {
     pub fn new(coins: Vec<Coin>) -> Pool {
         Pool {
             coins,
+            work_serial: 0,
+            switched: None,
             sharelog: None,
             issued: Vec::new(),
             seen: Vec::new(),
@@ -601,8 +609,23 @@ impl Pool {
         let coin = self.coins.get(slot as usize)?;
         let label = coin.label.clone();
         let algo = coin.algo.clone();
-        let target = target_with_leading_zeros(bits);
         let work = coin.work.clone();
+        // **Never harder than upstream.** Upstream pays each share at *its own*
+        // difficulty, so a miner held above it earns only upstream's figure per
+        // share while doing ours: measured live against zpool's heavyhash port,
+        // the GPU was retargeted to 31 bits against zpool's ~27.7, and zpool
+        // credited 18 MH/s of a 170 MH/s card -- about nine tenths of the work
+        // given away, with every share accepted and every counter healthy.
+        // Capping at upstream's leading zeros makes the local target at least
+        // as easy, so every hash upstream would pay for is submitted and
+        // forwarded; the credit below is still `2^bits`, so the ledger and the
+        // target cannot disagree. Upstream retargets its own difficulty as the
+        // share rate rises, and this follows it down or up job by job.
+        let bits = match &work {
+            Some(w) if matches!(coin.source, Source::Upstream { .. }) => bits.min(leading_zero_bits(&w.up_target)),
+            _ => bits,
+        };
+        let target = target_with_leading_zeros(bits);
         let upstream = matches!(coin.source, Source::Upstream { .. });
 
         // An upstream coin with no work yet yields no job. Building one anyway
@@ -676,10 +699,7 @@ impl Pool {
                 // Deliberately *not* a fixed fixture -- an unchanging header
                 // means every job is the same search, and a nonce found once
                 // would be a share forever.
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs() as u32)
-                    .unwrap_or(0);
+                let now = crate::clock::unix_secs() as u32;
                 let mut h = [0u8; 80];
                 h[0..4].copy_from_slice(&1u32.to_le_bytes());
                 h[36..44].copy_from_slice(&id.to_le_bytes());
@@ -741,7 +761,70 @@ impl Pool {
         // that is not the one the network asked for.
         coin.network_target = U256::from_nbits(w.nbits);
         coin.work = Some(w);
+        self.work_serial += 1;
         true
+    }
+
+    /// Bumped whenever upstream installs work, so a transport can hand miners
+    /// the new job at once rather than at their next idle period.
+    pub fn work_serial(&self) -> u64 {
+        self.work_serial
+    }
+
+    /// The slot every miner is working, when the pool is switching.
+    ///
+    /// **Switched mode shows a miner one slot and moves it.** The pool holds an
+    /// upstream per algorithm, and a miner is given only the one that pays best
+    /// now, always on wire slot 0, re-issued `clean` the moment the choice
+    /// changes. Nothing new is needed on the miner: a job already carries its
+    /// algorithm and `work::install` already resets a slot whose algorithm
+    /// changed. Nothing is lost in accounting either, because a share names its
+    /// *job* and the job remembers which slot and algorithm it was issued for --
+    /// a share for the previous choice arriving after a switch is validated and
+    /// forwarded exactly as it would have been.
+    pub fn switched(&self) -> Option<usize> {
+        self.switched
+    }
+
+    /// Choose the active slot. Answers whether the choice changed, and bumps
+    /// `work_serial` when it did, so every connection is re-issued at once.
+    pub fn set_switched(&mut self, slot: Option<usize>) -> bool {
+        let slot = slot.filter(|&s| s < self.coins.len());
+        if slot == self.switched {
+            return false;
+        }
+        self.switched = slot;
+        self.work_serial += 1;
+        true
+    }
+
+    /// Which slot pays best per unit of a miner's time, given what upstream pays
+    /// per hash for each label (any unit, so long as it is one unit throughout).
+    ///
+    /// Pays-per-hash divided by `Algo::hash_cost` is pays per unit of work, which
+    /// is what a miner actually has to spend. Only slots with an upstream that
+    /// has sent work, a rate, and a cost are candidates -- a slot that cannot be
+    /// worked is not a choice. **Hysteresis of `SWITCH_MARGIN`**: a switch
+    /// abandons every miner's current job and restarts their difficulty
+    /// retargeting on another slot, so a candidate must beat the incumbent by a
+    /// margin rather than by noise in a rate that is itself an estimate.
+    pub fn choose(&self, rate: &dyn Fn(&str) -> Option<f64>) -> Option<usize> {
+        let score = |i: usize| -> Option<f64> {
+            let c = &self.coins[i];
+            if !matches!(c.source, Source::Upstream { .. }) || c.work.is_none() {
+                return None;
+            }
+            let r = rate(&c.label)?;
+            let cost = c.algo.hash_cost()?;
+            (r > 0.0).then(|| r / cost)
+        };
+        let best = (0..self.coins.len())
+            .filter_map(|i| score(i).map(|v| (i, v)))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal))?;
+        match self.switched.and_then(|cur| score(cur).map(|v| (cur, v))) {
+            Some((cur, v)) if best.1 <= v * SWITCH_MARGIN => Some(cur),
+            _ => Some(best.0),
+        }
     }
 
     /// The payout window as a fraction of one block's expected work, where a
@@ -795,8 +878,28 @@ impl Pool {
     /// correct rather than careless: a share is only worth anything on the
     /// connection whose extranonce1 it was found under, so holding one for a
     /// reconnection would be keeping something already worthless.
+    /// Queue a forward directly, for tests of the upstream that consumes them.
+    #[cfg(test)]
+    pub fn push_forward(&mut self, f: Forward) {
+        self.forwards.push(f);
+    }
+
     pub fn take_forwards(&mut self) -> Vec<Forward> {
         core::mem::take(&mut self.forwards)
+    }
+
+    /// This slot's forwards only, leaving every other slot's in the queue.
+    ///
+    /// **`take_forwards` with a filter after it dropped shares.** Each upstream
+    /// took the whole queue and skipped what was not its own, so with two
+    /// upstreams a share for one could be taken by the other's loop and thrown
+    /// away -- a share good enough to pay, discarded, depending on which thread
+    /// woke first. One upstream hides it completely.
+    pub fn take_forwards_for(&mut self, slot: usize) -> Vec<Forward> {
+        let (mine, rest): (Vec<Forward>, Vec<Forward>) =
+            core::mem::take(&mut self.forwards).into_iter().partition(|f| f.slot as usize == slot);
+        self.forwards = rest;
+        mine
     }
 
     /// Validate a submitted share by computing the hash the miner computed.
@@ -1105,6 +1208,36 @@ impl Pool {
     /// contract can verify; this is a flat digest over a tally. It exists so
     /// the published record is fixed to a value now, and so the day the tree
     /// is built there is something to check it against.
+    /// Add another shard's ledger into this one: tallies summed per
+    /// (worker, coin), windows ignored. Answers the rows merged.
+    ///
+    /// **This is what lets the pool shard.** Every Durable Object serving a
+    /// slice of the miners keeps its own ledger; a coordinator sums them into
+    /// the one record payouts are built from. Tallies are plain counters, so
+    /// summing is exact -- the same worker mining on two shards is simply the
+    /// sum of both. Windows are *not* merged: they are ordered share lists
+    /// whose order decides eviction, and interleaving several has no correct
+    /// answer. Nothing needs them -- equal-split payouts are built on the tally
+    /// basis (`tools/distribute.py --basis tally --split equal`).
+    ///
+    /// The shard's document goes through `load_ledger` into a scratch pool
+    /// first, so its digest is checked by the one parser there is, and a
+    /// tampered or truncated shard is refused rather than summed.
+    pub fn merge_ledger(&mut self, text: &str) -> Result<usize, String> {
+        let mut scratch = Pool::new(Vec::new());
+        scratch.load_ledger(text)?;
+        let n = scratch.tallies.len();
+        for (k, t) in scratch.tallies {
+            let e = self.tallies.entry(k).or_default();
+            e.work = e.work.saturating_add(t.work);
+            e.accepted = e.accepted.saturating_add(t.accepted);
+            e.stale = e.stale.saturating_add(t.stale);
+            e.bad = e.bad.saturating_add(t.bad);
+            e.duplicate = e.duplicate.saturating_add(t.duplicate);
+        }
+        Ok(n)
+    }
+
     pub fn ledger_json(&self, epoch: u64, generated_at: u64) -> String {
         let rows = self.ledger();
 
@@ -1256,6 +1389,21 @@ fn approx_hashes_per_block(t: &U256) -> Option<f64> {
     } else {
         None
     }
+}
+
+/// Leading zero bits of a big-endian target: the difficulty, in the pool's own
+/// unit, of the easiest target no easier than it.
+pub fn leading_zero_bits(t: &U256) -> u32 {
+    let b = t.to_be_bytes();
+    let mut n = 0;
+    for x in b.iter() {
+        if *x == 0 {
+            n += 8;
+        } else {
+            return n + x.leading_zeros();
+        }
+    }
+    256
 }
 
 pub fn target_with_leading_zeros(leading: u32) -> U256 {
@@ -1473,6 +1621,170 @@ mod tests {
             work: None,
             e2: 0,
         }])
+    }
+
+    fn yespower_coin(label: &str, v10: bool, n: u32, r: u32) -> Coin {
+        Coin {
+            label: String::from(label),
+            asset: String::from(label),
+            algo: Algo::Yespower { v10, n, r, pers: None },
+            share_bits: 8,
+            share_target: target_with_leading_zeros(8),
+            network_target: None,
+            source: Source::Upstream {
+                host: String::from("nowhere"),
+                port: 1,
+                user: String::from("w"),
+                pass: String::from("x"),
+            },
+            work: None,
+            e2: 0,
+        }
+    }
+
+    /// The switching pool: yescrypt in slot 0, yespowerR16 in slot 1, both live.
+    fn switching_pool() -> Pool {
+        let mut p = Pool::new(vec![
+            yespower_coin("yescrypt", false, 2048, 8),
+            yespower_coin("yespowerr16", true, 4096, 16),
+        ]);
+        p.set_work(0, some_work());
+        p.set_work(1, some_work());
+        p
+    }
+
+    /// Choosing by what a miner's *time* earns, not what a hash earns.
+    ///
+    /// zpool's figures on 2026-09-29: yespowerR16 paid 9.5x yescrypt per hash
+    /// and costs 5.44x as much to compute, so it wins -- by 1.75x, which is the
+    /// measured gain on the i7-12650H. A rule reading per-hash pay alone would
+    /// also pick it, and would pick yescryptR32 over both, which costs 46x.
+    #[test]
+    fn the_pool_switches_to_what_pays_per_unit_of_work() {
+        let mut p = switching_pool();
+        let rates = |l: &str| match l {
+            "yescrypt" => Some(0.16),
+            "yespowerr16" => Some(1.53),
+            _ => None,
+        };
+        assert_eq!(p.choose(&rates), Some(1));
+        // A rate that halves the other way flips it back.
+        let turned = |l: &str| match l {
+            "yescrypt" => Some(0.16),
+            "yespowerr16" => Some(0.60),
+            _ => None,
+        };
+        p.set_switched(Some(1));
+        assert_eq!(p.choose(&turned), Some(0));
+    }
+
+    /// Within the margin the incumbent stays: a switch drops every miner's job.
+    #[test]
+    fn a_switch_needs_a_margin_not_noise() {
+        let mut p = switching_pool();
+        p.set_switched(Some(0));
+        // R16 at 5% better per unit of work than yescrypt: not enough.
+        let close = |l: &str| match l {
+            "yescrypt" => Some(1.0),
+            "yespowerr16" => Some(1.0 * 5.4400000000000004 * 1.05),
+            _ => None,
+        };
+        assert_eq!(p.choose(&close), Some(0));
+    }
+
+    /// A slot with no upstream work, or no published rate, is not a choice.
+    #[test]
+    fn an_unworkable_slot_is_never_chosen() {
+        let mut p = Pool::new(vec![
+            yespower_coin("yescrypt", false, 2048, 8),
+            yespower_coin("yespowerr16", true, 4096, 16),
+        ]);
+        p.set_work(0, some_work());
+        let rates = |l: &str| match l {
+            "yescrypt" => Some(0.16),
+            "yespowerr16" => Some(99.0),
+            _ => None,
+        };
+        assert_eq!(p.choose(&rates), Some(0), "slot 1 has no work");
+        let only_r16 = |l: &str| (l == "yespowerr16").then_some(1.0);
+        p.set_work(1, some_work());
+        assert_eq!(p.choose(&only_r16), Some(1), "slot 0 has no rate");
+    }
+
+    /// Every connection must be re-issued when the choice changes, and only then.
+    #[test]
+    fn a_switch_bumps_the_work_serial_once() {
+        let mut p = switching_pool();
+        let before = p.work_serial();
+        assert!(p.set_switched(Some(1)));
+        assert_eq!(p.work_serial(), before + 1);
+        assert!(!p.set_switched(Some(1)), "choosing the incumbent is not a switch");
+        assert_eq!(p.work_serial(), before + 1);
+        assert!(!p.set_switched(Some(9)) || p.switched().is_none(), "no such slot");
+    }
+
+    /// zpool's own document, parsed. Units checked against the live API:
+    /// `estimate_current` in BTC, `actual_last24h` in mBTC, per factor MH/s.
+    #[test]
+    fn zpool_rates_are_read_in_one_unit_and_capped() {
+        let doc = r#"{
+            "yescrypt": {"estimate_current": "0.00014995", "actual_last24h": "0.16014", "mbtc_mh_factor": 1},
+            "sha256": {"estimate_current": "0.00000000062", "actual_last24h": "0.61526", "mbtc_mh_factor": 1000000000},
+            "spiky": {"estimate_current": "0.01", "actual_last24h": "0.5", "mbtc_mh_factor": 1}
+        }"#;
+        let r = crate::market::zpool_rates(doc).unwrap();
+        assert!((r["yescrypt"] - 0.14995).abs() < 1e-9, "the estimate, below twice actual");
+        assert!(r["sha256"] < 1e-9, "per MH, after the factor");
+        assert!((r["spiky"] - 1.0).abs() < 1e-9, "an estimate at 20x is capped at twice what was paid");
+    }
+
+    /// The pool validates HeavyHash with the kernel's own code, against a block
+    /// somebody else mined: OBTC's mainnet genesis, whose hash its node asserts.
+    #[test]
+    fn heavyhash_reproduces_obtc_genesis() {
+        let (h, want) = crate::mine::heavyhash::genesis();
+        let mut hs = crate::mine::algo::Hasher::new(&Algo::HeavyHash, &h).unwrap();
+        assert_eq!(hs.hash(&h, u32::from_le_bytes([h[76], h[77], h[78], h[79]])), want);
+        assert!(matches!(crate::record::parse_algo("heavyhash"), Ok(Algo::HeavyHash)));
+    }
+
+    /// A miner is never held harder than upstream, or upstream credits it for
+    /// less work than it did -- the heavyhash port was paying for a tenth.
+    #[test]
+    fn a_miner_is_never_held_harder_than_upstream() {
+        let mut p = upstream_pool();
+        let mut w = some_work();
+        w.up_target = target_with_leading_zeros(20);
+        p.set_work(0, w);
+        let j = p.make_job(0, 31).unwrap();
+        assert!(j.target == target_with_leading_zeros(20), "capped at upstream's 20 bits");
+        let easy = p.make_job(0, 12).unwrap();
+        assert!(easy.target == target_with_leading_zeros(12), "an easier local target is left alone");
+        assert_eq!(leading_zero_bits(&target_with_leading_zeros(27)), 27);
+    }
+
+    /// Two shards' ledgers sum exactly, and a tampered shard is refused.
+    #[test]
+    fn shard_ledgers_merge_by_summing_tallies() {
+        let mut a = a_pool();
+        let mut b = a_pool();
+        a.tallies.insert((String::from("0xw1.rig"), String::from("c")), Tally { work: 100, accepted: 2, ..Default::default() });
+        a.tallies.insert((String::from("0xw2.rig"), String::from("c")), Tally { work: 7, accepted: 1, ..Default::default() });
+        b.tallies.insert((String::from("0xw1.rig"), String::from("c")), Tally { work: 50, accepted: 1, stale: 3, ..Default::default() });
+        let (da, db) = (a.ledger_json(1, 0), b.ledger_json(1, 0));
+        let mut sum = Pool::new(Vec::new());
+        assert_eq!(sum.merge_ledger(&da).unwrap(), 2);
+        assert_eq!(sum.merge_ledger(&db).unwrap(), 1);
+        let w1 = &sum.tallies[&(String::from("0xw1.rig"), String::from("c"))];
+        assert_eq!((w1.work, w1.accepted, w1.stale), (150, 3, 3), "the same worker on two shards is the sum");
+        assert_eq!(sum.tallies[&(String::from("0xw2.rig"), String::from("c"))].work, 7);
+        // The merged document is itself a valid ledger, digest and all.
+        let mut back = Pool::new(Vec::new());
+        assert_eq!(back.load_ledger(&sum.ledger_json(1, 0)).unwrap(), 2);
+        // A shard whose rows were edited after it was written is refused.
+        let forged = db.replace("\"work\": 50", "\"work\": 5000");
+        assert_ne!(forged, db, "the forgery changed something");
+        assert!(sum.merge_ledger(&forged).is_err(), "a tampered shard is not summed");
     }
 
     /// An upstream coin with no work must not invent a header.

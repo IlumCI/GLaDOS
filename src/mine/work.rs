@@ -48,9 +48,10 @@ use super::client::{Template, MAX_SLICES};
 
 /// How many coins may be worked at once.
 ///
-/// Four, matching `MAX_SLICES`, because a slot with no slice on it produces
-/// nothing -- and the ceiling on slices is the task table rather than anything
-/// about coins. More slots than slices would let the operator build a table
+/// Four, and **not** matching `MAX_SLICES`, which this line claimed while the
+/// two drifted from four to eight to sixteen. A slot with no slice on it
+/// produces nothing, so what matters is that slices are never fewer than slots,
+/// and they are. More slots than slices would let the operator build a table
 /// where some coins are silently never mined, which reads from the report
 /// exactly like a coin whose pool has gone quiet.
 pub const MAX_COINS: usize = 4;
@@ -127,6 +128,14 @@ const NONE: u32 = u32::MAX;
 // above it -- and long enough now that the next change to `MAX_SLICES` will be
 // a compile error here rather than a silent mismatch, which is what it was.
 static ASSIGN: [AtomicU32; MAX_SLICES] = [
+    AtomicU32::new(NONE),
+    AtomicU32::new(NONE),
+    AtomicU32::new(NONE),
+    AtomicU32::new(NONE),
+    AtomicU32::new(NONE),
+    AtomicU32::new(NONE),
+    AtomicU32::new(NONE),
+    AtomicU32::new(NONE),
     AtomicU32::new(NONE),
     AtomicU32::new(NONE),
     AtomicU32::new(NONE),
@@ -491,6 +500,9 @@ pub fn fixture_template(seed: u8) -> Template {
 /// Claims. Pure over the table, so none of this needs a pool or a task.
 pub fn checks() -> Vec<(&'static str, bool)> {
     let mut out: Vec<(&'static str, bool)> = Vec::new();
+
+    // Placement first, because it needs nothing set up and nothing torn down.
+    out.extend(super::client::placement_checks());
 
     // Saved and restored, because `diag` may run on a machine that is mining.
     // The templates are not saved: a job is re-sent within seconds by any live

@@ -1,0 +1,22 @@
+[package]
+name = "glados-edge"
+version = "0.1.0"
+edition = "2021"
+description = "The pool's rules, compiled to WebAssembly for a Cloudflare Durable Object"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# The one dependency is the pool itself. Nothing here decides anything; it hands
+# lines to `session::Conn` and hands back what it answers, the way `server.rs`
+# does over TCP.
+[dependencies]
+glados-pool = { path = ".." }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[workspace]

@@ -859,6 +859,34 @@ impl Framebuffer {
         }
     }
 
+    /// A string with no background: only the lit pixels are written.
+    ///
+    /// `draw_text` paints each cell's background too, which is right on a flat
+    /// fill and wrong over a gradient or a pane of glass, where it leaves a
+    /// solid box behind every word. The miner's screen is nothing but text over
+    /// a sky, so it draws with this. A lit run within a glyph row goes down as
+    /// one `rect` rather than a `put` per pixel.
+    pub fn draw_text_over(&self, x: u32, y: u32, s: &str, fg: Color, scale: u32) {
+        let scale = scale.max(1);
+        for (i, ch) in s.chars().enumerate() {
+            let ox = x + i as u32 * font::GLYPH_W * scale;
+            for (gy, bits) in font::rows(font::index_of(ch)).iter().enumerate() {
+                let mut gx = 0;
+                while gx < font::GLYPH_W {
+                    if bits & (0x80 >> gx) == 0 {
+                        gx += 1;
+                        continue;
+                    }
+                    let start = gx;
+                    while gx < font::GLYPH_W && bits & (0x80 >> gx) != 0 {
+                        gx += 1;
+                    }
+                    self.rect(ox + start * scale, y + gy as u32 * scale, (gx - start) * scale, scale, fg);
+                }
+            }
+        }
+    }
+
     /// One glyph by index, for a caller that already resolved it.
     ///
     /// `edit.rs` keeps a cell grid of indices, and rebuilding a `&str` per

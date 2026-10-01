@@ -106,12 +106,19 @@ pub fn is_trusted(fingerprint: &[u8; 32]) -> bool {
     roots().iter().any(|r| &r.fingerprint == fingerprint)
 }
 
-/// Find a trusted root whose subject matches the given issuer name.
-pub fn find_issuer(issuer: &[u8]) -> Option<Vec<u8>> {
+/// Every trusted CA root whose subject matches the given issuer name.
+///
+/// **All of them, not the first.** A subject is a name and not an identity: a
+/// root that is re-keyed keeps its name, and a store carrying both generations
+/// holds two roots that answer to one issuer field and only one of which signed
+/// any particular certificate. This was `find_issuer` and returned the first
+/// match, so which generation got tried depended on the order of `roots.der`.
+pub fn issuers(issuer: &[u8]) -> Vec<Vec<u8>> {
     roots()
         .iter()
-        .find(|r| r.is_ca && r.subject == issuer)
+        .filter(|r| r.is_ca && r.subject == issuer)
         .map(|r| r.der.clone())
+        .collect()
 }
 
 /// Verify every root's signature against its own key, and time it.

@@ -7,7 +7,7 @@ GLADOS, against a Merkle root published from the share log.
 ```bash
 npm install          # solc, an EVM, and an ABI coder. No framework.
 npm run build        # compile
-npm test             # 60 claims, mostly about what it refuses
+npm test             # 106 + 54 claims (run.mjs, audit2.mjs), mostly refusals
 ```
 
 The end-to-end check, which is the one that matters:
@@ -120,12 +120,20 @@ else. `test/evm.mjs` is ninety lines and is the whole harness.
   anything else uses this.
 - **Not deployed.** No address, no verified source on any explorer.
 - ~~**Not reviewed by anybody.**~~ Read once, by somebody who did not write it:
-  `design/audit.md`. Six findings, none a theft vector, and the first has to be
-  acted on *before* the first deployment because `pair` is immutable and is
-  never checked against the pair it is supposed to be. The suite carries
-  fourteen more claims for them and the source is deliberately unchanged, so
-  each one inverts when its fix lands. That is a different sentence from
-  "reviewed", and a contract holding tokens still deserves a second reader.
+  `design/audit.md`. Eight findings, none a theft vector, plus a ninth in the fork
+  harness rather than in the contract. **The fixes have landed** -- including the
+  first, which had to be acted on before any deployment because `pair` is
+  immutable and was never checked against the pair it is supposed to be. That is
+  a different sentence from "reviewed", and a contract holding tokens still
+  deserves a second reader.
+- **The count on that line above was 60 and the suite had 106**, which is the
+  whole argument for `.github/workflows/contracts.yml` in one line: 60, then 79,
+  then 93, then 106, and nothing was watching. The workflow builds from the
+  lockfile, runs the claims, turns `pool/site/ledger.json` into an epoch and
+  requires Python, JavaScript and the compiled bytecode to agree on the tree,
+  then runs `tools/loop.py` end to end. `test/fork.mjs` is not in it, on purpose:
+  it needs Robinhood Chain's public RPC, which stops answering mid-run at a point
+  that moves, so a job resting on it would fail for reasons that are nobody's.
 - **The gate size is not decided.** `design/live800.md` shows 1,000,000 is
   unreachable for 800 entrants -- the pool holds 130 gates -- and that 50,000
   is the number that lets an event happen. The contract takes it per epoch and

@@ -1,0 +1,40 @@
+# What the Supabase CLI needs to deploy this project, so a deploy stops being
+# hand-typed flags.
+#
+# **`project_id` is deliberately absent.** The project reference is already pinned
+# in `src/update/channel.rs` as `DEFAULT_SOURCE`, and that pin is the one every
+# shipped kernel actually asks. A second copy here would be free to disagree with
+# it -- which is exactly how the previous project went missing with three workflows
+# and every image still naming it -- so `tools/supadeploy.sh` reads the ref out of
+# the kernel's own constant and passes `--project-ref`. One pin, and
+# `tools/origin.py` is what checks it.
+#
+# What is here is the per-function setting that was being passed by hand on every
+# line of `supabase/README.md`:
+#
+#     supabase functions deploy link --no-verify-jwt
+#
+# A flag typed per deploy is a flag somebody forgets, and forgetting it here does
+# not fail: the function deploys with JWT verification *on*, every caller gets a
+# 401, and the symptom is a machine that cannot reach a channel that is plainly
+# there. Declared instead.
+
+# **Every one of these is called by something with no Supabase user.** A kernel in
+# the field holds a device code, not a JWT; CI holds an ingest token; a wallet
+# holds a signature. Each function does its own authentication and says so at the
+# top of its file, which is why the platform's is turned off rather than layered
+# on top of one that cannot be satisfied.
+[functions.channel]
+verify_jwt = false
+
+[functions.link]
+verify_jwt = false
+
+[functions.worker]
+verify_jwt = false
+
+[functions.proposal]
+verify_jwt = false
+
+[functions.verdict]
+verify_jwt = false

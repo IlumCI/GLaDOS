@@ -123,6 +123,10 @@ const YESPOWER: &[(bool, u32, u32, Option<&[u8]>, &str)] = &[
 
 #[test]
 fn yespower_matches_every_upstream_vector() {
+    vectors_under("sse2");
+}
+
+fn vectors_under(path: &str) {
     let src: [u8; 80] = core::array::from_fn(|i| (i as u32 * 3) as u8);
     for (v10, n, r, pers, want) in YESPOWER {
         let algo = Algo::Yespower {
@@ -138,7 +142,47 @@ fn yespower_matches_every_upstream_vector() {
         // The nonce lives at offset 76 of the input, so hashing `src` with the
         // nonce it already contains has to reproduce upstream's digest.
         let nonce = u32::from_le_bytes([src[76], src[77], src[78], src[79]]);
-        assert_eq!(h.hash(&src, nonce), h32(want), "v10={v10} n={n} r={r}");
+        assert_eq!(h.hash(&src, nonce), h32(want), "{path}: v10={v10} n={n} r={r}");
+    }
+}
+
+/// The four names the world calls "yescrypt", checked against the table above.
+///
+/// zpool and cpuminer-opt both use these spellings, and every one of them is
+/// `yespower` 0.5 with different parameters -- cpuminer's own
+/// `register_yescrypt_algo` is commented "Legacy Yescrypt (yespower v0.5)". So
+/// `parse_algo` expands them rather than implementing anything, and what has to
+/// be true is that the expansion lands on parameters `YESPOWER` already pins.
+///
+/// **Checked against the vectors, not against itself.** The parameters are
+/// typed into two files -- `shell::parse_algo` and `record::parse_algo` -- and a
+/// digit wrong in either hashes a different function perfectly correctly and has
+/// every share rejected, which is the exact failure `shell::parse_algo` refuses
+/// presets to avoid. Looking the alias up in a second copy of the same table
+/// would prove nothing; reproducing upstream's digest proves it.
+#[test]
+fn every_yescrypt_alias_expands_to_a_verified_vector() {
+    let src: [u8; 80] = core::array::from_fn(|i| (i as u32 * 3) as u8);
+    let nonce = u32::from_le_bytes([src[76], src[77], src[78], src[79]]);
+
+    // (alias, the vector it must reproduce)
+    let aliases: &[(&str, &str)] = &[
+        ("yescrypt", "5ecbd8e8d7c90baed4bbf8916a1225dcc3c65f5c9165bae81cdde3cffad128e8"),
+        ("yescryptr8", "a59fec4c4fdda16e3b1405adda66d525b68e7cadfcfe6ac066c7ad118cd80590"),
+        ("yescryptr16", "927e72d0ded3d80475473f40f1743c67289d453d5242d4f55af4e325e06699c5"),
+        ("yescryptr32", "3ae05abb3c5cf6f75415a92554c98d50e38ec9552cfa78373616f480b24e559f"),
+    ];
+    for (spec, want) in aliases {
+        let algo = glados_pool::record::parse_algo(spec)
+            .unwrap_or_else(|e| panic!("the alias '{spec}' does not parse: {e}"));
+        // Every expected digest must also be a row of YESPOWER, or this test is
+        // checking an alias against a constant nobody else believes.
+        assert!(
+            YESPOWER.iter().any(|(_, _, _, _, v)| v == want),
+            "the alias '{spec}' expects a digest that is not an upstream vector"
+        );
+        let mut h = Hasher::new(&algo, &src).expect("alias expands to refused parameters");
+        assert_eq!(h.hash(&src, nonce), h32(want), "alias {spec}");
     }
 }
 
@@ -448,10 +492,26 @@ fn contention_follows_the_bound_and_not_the_algorithm() {
     let yes = Algo::Yespower { v10: true, n: 2048, r: 8, pers: None };
     assert_eq!(Algo::Sha256d.bound(), Bound::Arithmetic);
     assert_eq!(Algo::Blake2s.bound(), Bound::Arithmetic);
-    assert_eq!(yes.bound(), Bound::Memory);
+    // **Latency, not Memory, and the distinction is worth a fifth of the hash
+    // rate.** `work::cache_budget` caps a `Memory` algorithm's slice count so the
+    // working sets fit the cache, which is right for NeoScrypt and backwards for
+    // yespower: a dependent chain of random reads wants *more* slices than cores,
+    // because one slice's stall is another's turn. Capping it held a sixteen-core
+    // machine to seven slices and cost 2.09x of peak throughput.
+    assert_eq!(yes.bound(), Bound::Latency);
+    assert_eq!(Algo::Neoscrypt.bound(), Bound::Memory);
 
     assert!(Algo::Sha256d.contends_with(&Algo::Blake2s));
     assert!(!Algo::Sha256d.contends_with(&yes));
+    // **Different bounds, and they still contend**, which `contends_with` got
+    // wrong the moment `Bound` grew a third variant: it compared the bounds for
+    // equality, so yespower and NeoScrypt stopped contending. They wait on
+    // different properties of one memory system and still queue behind each
+    // other in it.
+    assert!(yes.contends_with(&Algo::Neoscrypt));
+    assert!(Algo::Neoscrypt.contends_with(&yes));
+    // And neither of them contends with arithmetic work.
+    assert!(!Algo::Neoscrypt.contends_with(&Algo::Blake2s));
     // Reflexive, or a slot would not contend with a second copy of itself --
     // which is the commonest case a scheduler actually meets.
     assert!(Algo::Sha256d.contends_with(&Algo::Sha256d));

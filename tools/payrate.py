@@ -120,6 +120,25 @@ OURS = {
     "heavyhash": (0.383e9, "native", "RTX 3050, cuda/kheavy.cu heavy step -- an upper bound"),
     "neoscrypt": (0.190e6, "native", "RTX 3050, cuda/neoscrypt.cu, 32768 threads"),
     "yespower": (1368.0, "emulated", "4 kernel slices under QEMU on 4 of 16 threads, reference code"),
+    # **Measured natively, and the number is about contention rather than about
+    # the algorithm.** Eight `glados-miner --cpu` processes against a
+    # yescrypt-only pool on the i7-12650H, 2026-09-28: 3,086 H/s in total, where
+    # *one* process alone did 838. Eight times the processes bought 3.7 times the
+    # hashrate, because eight 2 MiB working sets do not fit the 24 MB of L3 and
+    # yescrypt is memory-hard by construction -- the same contention `smp bench`
+    # records as one core reading 4570 MB/s alone and 3526 MB/s with seven merely
+    # idling beside it.
+    #
+    # So this is a *measurement of this host* and not a rating of the algorithm,
+    # and it is deliberately the sum of per-process bests, which is an upper bound:
+    # the windows are not aligned, so a figure taken over one common window would
+    # be slightly lower. Extrapolating the single-process 838 H/s by sixteen
+    # threads would have given 13,400 -- the invented multiplier this file already
+    # records being caught on, wrong here by a factor of four.
+    #
+    # This is the algorithm the pool is configured for, so its absence was the
+    # ranking being blind to the one row that matters.
+    "yescrypt": (3086.0, "native", "8 glados-miner --cpu processes on 16 threads, i7-12650H"),
 }
 
 # Who wins each algorithm, and what it costs to join.
@@ -212,6 +231,18 @@ WHERE = {
     "heavyhash": ("gpu", "arithmetic"),
     "neoscrypt": ("gpu", "memory"),
     "yespower": ("cpu", "memory"),
+    # **The same bucket as yespower, and that is the point rather than an
+    # omission.** They are one family at the same N and r, so they contend for
+    # exactly the same thing -- the measurement that put `yescrypt` in `OURS`
+    # showed it directly: eight processes bought 3.7x one process's hashrate
+    # because eight 2 MiB working sets do not fit 24 MB of L3.
+    #
+    # Sharing a bucket means the concurrency section will not add them together,
+    # which is correct: running both would split one memory system between two
+    # jobs, not earn both figures. Without this row `yescrypt` printed as device
+    # `?` and `waits on unknown`, so the one algorithm the pool is configured for
+    # was the one the "what can run at once" answer could not reason about.
+    "yescrypt": ("cpu", "memory"),
 }
 
 

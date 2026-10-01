@@ -34,7 +34,9 @@
 //! 19,359 us for the 8 MiB one -- a factor of 3.5 between two coins that both
 //! spell their algorithm `yespower`, because the working set is the cost and
 //! `N` and `r` set it. The 19,000 above is the 8 MiB figure; `run-pool.sh`
-//! configures `yespower-10-2048-8`, which is 2 MiB. So the ninety-seven cores
+//! configures `yescrypt`, which is the same 2 MiB profile at `n2048 r8` (it was
+//! `yespower-10-2048-8`, and the cost is within one per cent either way). So the
+//! ninety-seven cores
 //! is the right arithmetic for the worst profile and about 28 for the one
 //! actually running. Both are far past four, so the conclusion does not move --
 //! but a reader taking 19 ms as a property of the algorithm would size the

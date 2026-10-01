@@ -74,6 +74,9 @@ fn note_if_mind_busy() {
 /// benefit of one caller. A window onto the line needs neither, and a shell
 /// that scrolls its input is a shell every user has already met.
 fn redraw(line: &str, cursor: usize) {
+    // A miner image asking for its payout address shows the line in its own
+    // field; the console underneath is dark while it does.
+    crate::mine::screen::typed(line);
     console::with(|c| {
         let avail = c.cols().saturating_sub(PROMPT_LEN + 1);
         if avail == 0 {
@@ -2344,6 +2347,12 @@ fn store_cmd(rest: &str) {
 }
 
 fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi::Interp) {
+    // A miner image asking for its payout address takes a typed `0x...` line
+    // before anything else can. See `mine::boot::answer`.
+    if let Some(msg) = crate::mine::boot::answer(line) {
+        kprintln!("[miner] {}", msg);
+        return;
+    }
     let mut parts = line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim();
@@ -4833,6 +4842,24 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             );
             mem::fixed::report();
         }
+        // **The notice, readable from the machine that carries it.** The BSD arm
+        // asks that a binary distribution reproduce it "in the documentation
+        // and/or other materials provided with the distribution", and for a
+        // kernel that ships as one file the machine itself is the material. A
+        // verb, because `NOTICE.md` is not on the ISO and a doc comment is not in
+        // the binary.
+        "licence" | "license" => {
+            console::set_color(YELLOW);
+            kprintln!("[licence]");
+            console::set_color(LTGRAY);
+            kprintln!("  This kernel is this tree's own work. Rust `core` is linked in under");
+            kprintln!("  Apache-2.0 OR MIT. Nothing here is under the GPL.");
+            kprintln!();
+            for line in crate::dev::iwx::ctxt::NOTICE.lines() {
+                kprintln!("  {}", line);
+            }
+        }
+
         "uptime" => {
             let t = lapic::ticks();
             let hz = crate::TIMER_HZ as u64;
@@ -4989,6 +5016,386 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         // `pci` lists what is on the bus. This says what each thing *is* and
         // what would drive it, which is the question somebody actually has --
         // and it covers USB, which `pci` structurally cannot.
+        // **The bring-up list, which answers as well as asks.**
+        //
+        // `design/gf63.md` is this in prose and cannot say what already happened.
+        // Bare-metal testing takes the editor and the notes away with it, so the
+        // list has to be on the machine -- and every status is derived from state
+        // the kernel already holds rather than recorded, so it cannot go stale
+        // against the machine it describes.
+        "checklist" | "bringup" => crate::checklist::show(),
+
+        // **The Intel radio, in three steps because they are three risks.**
+        // `iwx` only scans the bus. `iwx probe` reads two registers, which needs
+        // a BAR mapped and memory-space decoding enabled. `iwx up` *writes* --
+        // reset, handshake, clock -- to a part whose firmware has never run.
+        // Folding them into one verb would mean an operator who only wanted to
+        // know whether the part exists had already written to it.
+        "iwx" => {
+            let step = rest.trim();
+            // **The one step that needs no radio, so it is handled before the
+            // bus is even swept.** Building the boot structures is parsing a file
+            // and laying out memory: it is the only part of this bring-up that can
+            // be driven anywhere but the GF63, and putting it behind the radio
+            // enumeration made it unreachable under emulation -- which is the one
+            // place it is useful. Its own step rather than part of a `boot`,
+            // because a command that checks a firmware file must not also start a
+            // radio with it.
+            if step.starts_with("ctxt") {
+                let path = step.trim_start_matches("ctxt").trim();
+                if path.is_empty() {
+                    kprintln!("  usage: iwx ctxt <path to a .ucode in the namespace>");
+                    kprintln!("  builds the AX210 boot structures and prints them. Touches no");
+                    kprintln!("  register, so it works under emulation and needs no radio.");
+                    return;
+                }
+                let bytes = match crate::sysbox::read_blob(path) {
+                    Some(b) => b,
+                    None => {
+                        kprintln!("  no such blob: {}", path);
+                        return;
+                    }
+                };
+                let image = match crate::dev::iwx::fw::parse(&bytes) {
+                    Ok(i) => i,
+                    Err(e) => {
+                        console::set_color(LTRED);
+                        kprintln!("  {}", e.why());
+                        console::set_color(LTGRAY);
+                        crate::dev::iwx::note_ctxt(Err("the firmware file did not parse"));
+                        return;
+                    }
+                };
+                console::set_color(YELLOW);
+                kprintln!("[iwx] {}", image.human);
+                console::set_color(LTGRAY);
+                kprintln!(
+                    "  {} record(s), {} section(s), {} loadable, {} byte(s), {} cpu(s)",
+                    image.records.len(),
+                    image.sections.len(),
+                    image.loadable().len(),
+                    image.bytes(),
+                    image.cpus.unwrap_or(0)
+                );
+                match image.iml {
+                    Some((_, n)) => kprintln!("  image loader {} byte(s)", n),
+                    None => kprintln!("  no image loader, so an AX210 part cannot boot this"),
+                }
+                // What the firmware says it can do, which gates three of the
+                // configuration commands. Printed because a capability read wrongly
+                // is a command sent that firmware rejects, and nothing else here
+                // would say which.
+                {
+                    use crate::dev::iwx::fw::{api, capa};
+                    kprintln!(
+                        "  capabilities {:08x?}, api {:08x?}",
+                        image.capa, image.api
+                    );
+                    kprintln!(
+                        "  LAR {}  DQA {}  CT-kill {}  MLD {}  NVM-v4 {}  reduced-scan {}",
+                        image.has_capa(capa::LAR_SUPPORT),
+                        image.has_capa(capa::DQA_SUPPORT),
+                        image.has_capa(capa::CT_KILL_BY_FW),
+                        image.has_capa(capa::MLD_API_SUPPORT),
+                        image.has_api(api::REGULATORY_NVM_INFO),
+                        image.has_api(api::REDUCED_SCAN_CONFIG),
+                    );
+                }
+                match crate::dev::iwx::ctxt::group(&image.sections) {
+                    Err(e) => {
+                        console::set_color(LTRED);
+                        kprintln!("  {}", e.why());
+                        console::set_color(LTGRAY);
+                    }
+                    Ok(placed) => {
+                        use crate::dev::iwx::ctxt::Dest;
+                        let n = |d: Dest| placed.iter().filter(|p| p.dest == d).count();
+                        kprintln!(
+                            "  LMAC {} section(s), UMAC {}, paged {}",
+                            n(Dest::Lmac),
+                            n(Dest::Umac),
+                            n(Dest::Paging)
+                        );
+                        // 0x370 is the GF63's own CSR_HW_REV, which its Linux
+                        // printed. Passed rather than read, because there is no
+                        // radio here to read it from and the structure has to
+                        // carry something the part would recognise.
+                        match crate::dev::iwx::gen3::build(0x0000_0370, &image, &bytes) {
+                            Err(e) => {
+                                console::set_color(LTRED);
+                                kprintln!("  {}", e.why());
+                                console::set_color(LTGRAY);
+                                crate::dev::iwx::note_ctxt(Err("the boot structures could not be built"));
+                            }
+                            Ok(b) => {
+                                use crate::dev::iwx::gen3;
+                                crate::dev::iwx::note_ctxt(Ok((
+                                    b.sections.len(),
+                                    b.sections.iter().map(|d| d.len()).sum::<usize>(),
+                                )));
+                                console::set_color(LTGREEN);
+                                kprintln!("  built the AX210 boot structures");
+                                console::set_color(LTGRAY);
+                                kprintln!("    context info {:#012x}  {} B", b.info.pa(), b.info.len());
+                                kprintln!(
+                                    "    scratch      {:#012x}  {} B, control {:#x}",
+                                    b.scratch.pa(),
+                                    b.scratch.len(),
+                                    gen3::control_flags()
+                                );
+                                kprintln!("    prph info    {:#012x}  {} B", b.prph_info.pa(), b.prph_info.len());
+                                kprintln!("    image loader {:#012x}  {} B", b.iml.pa(), b.iml.len());
+                                kprintln!(
+                                    "    rings        free {} used {} stat {} cmd {} B",
+                                    b.rings.free.len(),
+                                    b.rings.used.len(),
+                                    b.rings.stat.len(),
+                                    b.rings.cmd.len()
+                                );
+                                kprintln!(
+                                    "    {} firmware region(s), {} B copied",
+                                    b.sections.len(),
+                                    b.sections.iter().map(|d| d.len()).sum::<usize>()
+                                );
+                                // Read back through the bytes, because what
+                                // firmware sees is the bytes and not what the
+                                // builder meant.
+                                let ok_scratch =
+                                    gen3::get64(&b.info, gen3::at::PRPH_SCRATCH_BASE) == Some(b.scratch.pa());
+                                let ok_info =
+                                    gen3::get64(&b.info, gen3::at::PRPH_INFO_BASE) == Some(b.prph_info.pa());
+                                let ok_free = gen3::get64(&b.scratch, gen3::scratch_at::FREE_RBD_ADDR)
+                                    == Some(b.rings.free.pa());
+                                console::set_color(if ok_scratch && ok_info && ok_free { LTGREEN } else { LTRED });
+                                kprintln!(
+                                    "    read back: scratch {} prph info {} free ring {}",
+                                    ok_scratch, ok_info, ok_free
+                                );
+                                console::set_color(LTGRAY);
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+            let Some(ecam) = acpi.as_ref().and_then(|a| a.mcfg) else {
+                kprintln!("  no ECAM: configuration space is unreachable, so nothing can be asked");
+                return;
+            };
+            let found = crate::dev::iwx::find(ecam);
+            crate::dev::iwx::note_seen(found.len());
+            console::set_color(YELLOW);
+            kprintln!("[iwx] {} Intel wireless function(s)", found.len());
+            console::set_color(LTGRAY);
+            if found.is_empty() {
+                kprintln!("  `devices` lists what is present and names what is missing");
+                return;
+            }
+            for r in &found {
+                match r.bar0 {
+                    Some(b) if b != 0 => kprintln!(
+                        "  {} at {:02x}:{:02x}.{}  aperture {:#012x}",
+                        r.id(), r.dev.bus, r.dev.dev, r.dev.func, b
+                    ),
+                    _ => kprintln!(
+                        "  {} at {:02x}:{:02x}.{}  no aperture assigned by firmware",
+                        r.id(), r.dev.bus, r.dev.dev, r.dev.func
+                    ),
+                }
+            }
+            let r = &found[0];
+            match step {
+                "" => kprintln!("  `iwx probe` reads the revision; `iwx up` resets it and starts its clock"),
+                "probe" => {
+                    let got = r.hw_rev(ecam);
+                    crate::dev::iwx::note_rev(got.map(|(rev, _)| rev));
+                    match got {
+                        Err(e) => {
+                            console::set_color(LTRED);
+                            kprintln!("  {}", e.why());
+                            console::set_color(LTGRAY);
+                        }
+                        Ok((rev, rf)) => {
+                            let r = crate::dev::iwx::rf_of(rf);
+                            console::set_color(LTGREEN);
+                            kprintln!(
+                                "  {} step {}   radio {} step {}{}{}",
+                                rev.mac.name(),
+                                rev.step,
+                                r.rf.name(),
+                                r.step,
+                                if r.cdb { ", two dies" } else { "" },
+                                if r.jacket { ", on a jacket board" } else { "" },
+                            );
+                            // The pair is what names the part, and saying it is
+                            // the point of reading both: one PCI id carries an
+                            // AX201 and an AX211 and only the radio tells them
+                            // apart.
+                            match crate::dev::iwx::product_name(rev.mac, r.rf) {
+                                Some(n) => kprintln!("  which is sold as an {}", n),
+                                None => kprintln!("  no name is known for that controller and radio together"),
+                            }
+                            console::set_color(LTGRAY);
+                            kprintln!(
+                                "  family {}   CSR_HW_REV {:#010x}  RF_ID {:#010x}",
+                                rev.mac.family().map(|f| f.name()).unwrap_or("unknown"),
+                                rev.raw,
+                                rf
+                            );
+                            if !rev.mac.known() {
+                                kprintln!("  no firmware is named for that type, so `iwx up` will refuse");
+                            }
+                        }
+                    }
+                }
+                "up" => {
+                    // The revision first, and not as a courtesy: the offsets the
+                    // sequence writes are family 22000's, and poking them at
+                    // another family is a part that goes quiet or a machine
+                    // check. The same rule `dev::power` applies to an MSR whose
+                    // gate it cannot confirm.
+                    match r.hw_rev(ecam) {
+                        Err(e) => {
+                            console::set_color(LTRED);
+                            kprintln!("  nothing will be written: {}", e.why());
+                            console::set_color(LTGRAY);
+                        }
+                        Ok((rev, _)) if !rev.mac.known() => {
+                            console::set_color(LTRED);
+                            kprintln!("  {} is not a family this kernel has offsets for; refusing", rev.mac.name());
+                            console::set_color(LTGRAY);
+                        }
+                        Ok(_) => {
+                            kprintln!("  resetting and powering up -- this writes to the radio");
+                            let got = r.power_up(ecam);
+                            crate::dev::iwx::note_power_up(got);
+                            match got {
+                                Ok(()) => {
+                                    console::set_color(LTGREEN);
+                                    kprintln!("  reset, handshake and clock accepted");
+                                    console::set_color(LTGRAY);
+                                    kprintln!("  no firmware is loaded, so nothing can be asked of it yet");
+                                }
+                                Err(f) => {
+                                    console::set_color(LTRED);
+                                    kprintln!("  {}", f.why());
+                                    console::set_color(LTGRAY);
+                                }
+                            }
+                        }
+                    }
+                }
+                // **The whole sequence, and the only step that grants the part
+                // DMA.** Separate from `up` in the `update stage` idiom: powering a
+                // radio up reads registers and writes a handful, where this lets it
+                // fetch a megabyte and a half out of host memory on its own
+                // initiative. Somebody should have to ask for that by name.
+                b if b.starts_with("boot") => {
+                    let path = b.trim_start_matches("boot").trim();
+                    if path.is_empty() {
+                        kprintln!("  usage: iwx boot <path to a .ucode in the namespace>");
+                        kprintln!("  powers the part up, loads its firmware and waits for it to");
+                        kprintln!("  report alive. This grants the radio bus-master DMA.");
+                        return;
+                    }
+                    let bytes = match crate::sysbox::read_blob(path) {
+                        Some(b) => b,
+                        None => {
+                            kprintln!("  no such blob: {}", path);
+                            return;
+                        }
+                    };
+                    let image = match crate::dev::iwx::fw::parse(&bytes) {
+                        Ok(i) => i,
+                        Err(e) => {
+                            console::set_color(LTRED);
+                            kprintln!("  {}", e.why());
+                            console::set_color(LTGRAY);
+                            return;
+                        }
+                    };
+                    kprintln!("  {} -- powering up and loading, this writes to the radio", image.human);
+                    match r.boot(ecam, &image, &bytes, 5000) {
+                        Ok(b) => {
+                            crate::dev::iwx::note_alive(Ok(b.alive));
+                            console::set_color(LTGREEN);
+                            kprintln!("  the firmware is alive: {}", b.alive.say());
+                            console::set_color(LTGRAY);
+                            kprintln!(
+                                "  error tables lmac {:#010x}/{:#010x} umac {:#010x}, log {:#010x}",
+                                b.alive.lmac_error_table[0],
+                                b.alive.lmac_error_table[1],
+                                b.alive.umac_error_table,
+                                b.alive.log_event_table
+                            );
+                            // Said plainly, because a radio that is alive and a
+                            // radio that can carry a frame are a long way apart and
+                            // the first reads like the second.
+                            kprintln!("  {}", b.alive.say_sku());
+                            kprintln!("  configuring, then asking it what it is");
+                            // **And ask it what it is, while the firmware is
+                            // still running.** The NVM is a command, so it needs a
+                            // live part -- asking it in a separate verb would mean
+                            // booting twice and sending the microcode twice, and
+                            // the receive cursor from the first boot would be
+                            // thrown away. So one verb does both and the second
+                            // half is reported separately.
+                            let mut b = b;
+                            match r.nvm(&mut b, 2000) {
+                                Ok(n) => {
+                                    crate::dev::iwx::note_nvm(Ok(n));
+                                    console::set_color(LTGREEN);
+                                    kprintln!(
+                                        "  address {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                                        n.mac[0], n.mac[1], n.mac[2], n.mac[3], n.mac[4], n.mac[5]
+                                    );
+                                    console::set_color(LTGRAY);
+                                    kprintln!("  {}", n.say());
+                                    kprintln!("  {}", n.channels());
+                                    // And configure it, which needs the NVM: the
+                                    // antenna mask is a value out of it.
+                                    match r.configure(ecam, &mut b, &image, &n) {
+                                        Ok(d) => {
+                                            console::set_color(LTGREEN);
+                                            kprintln!("  {}", d.say());
+                                            console::set_color(LTGRAY);
+                                        }
+                                        Err(e) => {
+                                            console::set_color(LTRED);
+                                            kprintln!("  {}", e.why());
+                                            console::set_color(LTGRAY);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    crate::dev::iwx::note_nvm(Err(e.why()));
+                                    console::set_color(LTRED);
+                                    kprintln!("  the NVM could not be read: {}", e.why());
+                                    console::set_color(LTGRAY);
+                                }
+                            }
+                            // **Dropped here, and on purpose.** Keeping it would
+                            // mean a static holding two megabytes and a live DMA
+                            // target with nothing to service it; the part goes back
+                            // to quiet when its regions go away, which is the
+                            // honest state until there is something to do next.
+                            drop(b);
+                        }
+                        Err(f) => {
+                            crate::dev::iwx::note_alive(Err(f.why()));
+                            console::set_color(LTRED);
+                            kprintln!("  {}", f.why());
+                            console::set_color(LTGRAY);
+                        }
+                    }
+                }
+                other => kprintln!(
+                    "  no such step '{}' -- try `iwx`, `iwx probe`, `iwx up`, `iwx ctxt <fw>` or `iwx boot <fw>`",
+                    other
+                ),
+            }
+        }
+
         "devices" => {
             console::set_color(YELLOW);
             kprintln!("[devices]");
@@ -6915,6 +7322,47 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         "smp" => {
             let n = crate::smp::online();
             kprintln!("  {} core(s) online", n);
+            // **Online and scheduling are different questions.** A core answers
+            // the startup handshake before it tries to adopt an idle task, and it
+            // only joins the scheduler if that succeeded -- so a core can be
+            // counted here and still never run anything, with a task pinned to it
+            // sitting `Ready` for good. That is invisible from `tasks`, which
+            // shows such a task as healthy, and it is what a slice that reports as
+            // spawned and never hashes looks like.
+            // **Hybrid topology, because on such a part the cores are not
+            // interchangeable and nothing said so.** A slice on an efficiency
+            // core is worth about half one on a performance core -- 1700 MHz
+            // against 2300 on this part, and narrower -- so `mine slices` places
+            // performance cores first. `None` means not hybrid, where every core
+            // is the same kind and there is nothing to prefer.
+            match crate::smp::performance_cores() {
+                Some(pmask) => {
+                    let p = pmask.count_ones() as usize;
+                    kprintln!(
+                        "  hybrid: {} performance core(s) (mask {:#x}), {} efficiency",
+                        p,
+                        pmask,
+                        n.saturating_sub(p)
+                    );
+                }
+                None => kprintln!("  not a hybrid part, or too old to say -- every core alike"),
+            }
+            let mask = crate::task::joined_mask();
+            let idle = crate::task::idle_count();
+            kprintln!(
+                "  {} scheduling (mask {:#x}), {} idle task(s) -- {} of {} cores took a slot",
+                mask.count_ones(),
+                mask,
+                idle,
+                idle + 1,
+                n
+            );
+            if mask.count_ones() as usize != n {
+                console::set_color(YELLOW);
+                kprintln!("  {} core(s) answered at boot and never joined the scheduler", n - mask.count_ones() as usize);
+                kprintln!("  a task pinned to one of those will stay 'ready' for ever");
+                console::set_color(LTGRAY);
+            }
             if rest.starts_with("bench") {
                 // Runs on one core too, and reports the same number twice.
                 // That is the measurement worth having on its own: a machine
@@ -7765,6 +8213,31 @@ fn parse_algo<'a>(w: &mut impl Iterator<Item = &'a str>) -> Option<crate::mine::
         // profile, so a chain that changed them would be a different proof of
         // work rather than this one configured differently.
         "neoscrypt" => Some(Algo::Neoscrypt),
+        // **The four names the world calls "yescrypt", which are all this.**
+        //
+        // The comment below refuses presets because one would be "a number this
+        // tree would be asserting about somebody else's network without having
+        // read their source". These four are the exception that satisfies it
+        // rather than overrides it: the parameters are read straight out of
+        // cpuminer-opt's `register_yescrypt*_algo`, whose own comment reads
+        // "Legacy Yescrypt (yespower v0.5)", and every one is checked against
+        // upstream yespower's published vectors in `TESTS-OK` by
+        // `glados-pool --selftest`. So the source was read and the bytes agree.
+        //
+        // They are input spellings only. `algo_spec` still renders the
+        // canonical `yespower-05-2048-8-<pers hex>`, so nothing stored ever
+        // depends on this table and a record cannot be invalidated by editing
+        // it.
+        "yescrypt" => Some(Algo::Yespower { v10: false, n: 2048, r: 8, pers: None }),
+        "yescryptr8" => Some(Algo::Yespower {
+            v10: false, n: 2048, r: 8, pers: Some(b"Client Key".to_vec()),
+        }),
+        "yescryptr16" => Some(Algo::Yespower {
+            v10: false, n: 4096, r: 16, pers: Some(b"Client Key".to_vec()),
+        }),
+        "yescryptr32" => Some(Algo::Yespower {
+            v10: false, n: 4096, r: 32, pers: Some(b"WaviBanana".to_vec()),
+        }),
         "yespower" => {
             // Explicit parameters and no per-coin preset table. A preset is a
             // number this tree would be asserting about somebody else's network
@@ -7785,7 +8258,11 @@ fn parse_algo<'a>(w: &mut impl Iterator<Item = &'a str>) -> Option<crate::mine::
             }
         }
         other => {
-            kprintln!("  no such algorithm '{}' -- try sha256d, blake2s, neoscrypt or yespower", other);
+            kprintln!(
+                "  no such algorithm '{}' -- try sha256d, blake2s, neoscrypt, yespower,",
+                other
+            );
+            kprintln!("  yescrypt, yescryptr8, yescryptr16 or yescryptr32");
             None
         }
     }
@@ -8031,11 +8508,43 @@ fn mine_cmd(rest: &str) {
 
     match sub {
         "" => mine_report(),
+        // The payout address this PC keeps in its firmware for a miner image.
+        "forget" => {
+            if crate::mine::boot::forget() {
+                kprintln!("  forgotten: the next boot asks for an address");
+            } else {
+                kprintln!("  nothing was saved, or the firmware refused to delete it");
+            }
+        }
         "pool" => {
             if arg.is_empty() {
                 kprintln!("  usage: mine pool <host>[:port] [glados]");
                 kprintln!("  the trailing word picks the dialect. Without it this speaks");
                 kprintln!("  Stratum V1, which is what somebody else's pool speaks.");
+                return;
+            }
+            // A `wss://` pool goes through the boot file's own parser, so the
+            // typed form and MINER.TXT cannot disagree about what a URL means.
+            if arg.starts_with("wss://") {
+                let probe = alloc::format!("pool {}\nworker -\n", arg);
+                let Some(p) = crate::mine::boot::parse(probe.as_bytes()) else {
+                    kprintln!("  '{}' is not a pool address", arg);
+                    return;
+                };
+                let mut g = client::CONFIG.lock_irq();
+                let (user, pass) = match g.as_ref() {
+                    Some(c) => (c.user.clone(), c.pass.clone()),
+                    None => (String::new(), String::from("x")),
+                };
+                kprintln!("  pool wss://{}:{}{}  speaking glados", p.host, p.port, p.ws.as_deref().unwrap_or(""));
+                *g = Some(client::Config {
+                    host: p.host,
+                    port: p.port,
+                    user,
+                    pass,
+                    proto: client::Protocol::Glados,
+                    ws: p.ws,
+                });
                 return;
             }
             // stratum+tls is refused by name rather than connected in the
@@ -8077,6 +8586,7 @@ fn mine_cmd(rest: &str) {
                 user,
                 pass,
                 proto,
+                ws: None,
             });
             kprintln!("  pool {}:{}  speaking {}", host, port, proto.name());
         }
@@ -8133,6 +8643,38 @@ fn mine_cmd(rest: &str) {
             // other slots get theirs, which is the whole point of the table.
             client::set_pool_algo(a);
         }
+        // **Measuring hybrid placement where the machine cannot see it.** No
+        // hypervisor exposes CPUID leaf 0x1A, correctly -- a vCPU has no core
+        // type, the host moves it. Pin the vCPU threads one to a host CPU and the
+        // mapping becomes fixed and knowable from outside, so the operator can
+        // supply it. `mine cores 0xffe` then places slices on guest cores 1..11,
+        // and `mine cores 0xf000` on 12..15, which on a pinned run are the
+        // performance and efficiency halves of this part.
+        "cores" => {
+            let a = arg.trim();
+            if a.is_empty() {
+                match client::core_override() {
+                    Some(m) => kprintln!("  forced performance mask {:#x}", m),
+                    None => kprintln!("  no override; CPUID decides, and under a hypervisor it cannot"),
+                }
+                return;
+            }
+            if a == "off" {
+                client::set_core_override(0);
+                kprintln!("  override cleared");
+                return;
+            }
+            let hex = a.trim_start_matches("0x");
+            match u32::from_str_radix(hex, 16) {
+                Ok(0) => kprintln!("  zero is not a mask; use 'off' to clear"),
+                Ok(m) => {
+                    client::set_core_override(m);
+                    kprintln!("  performance cores forced to {:#x} ({} core(s))", m, m.count_ones());
+                    kprintln!("  takes effect for slices spawned after this; 'mine slices 0' first");
+                }
+                Err(_) => kprintln!("  not hex: {}", a),
+            }
+        }
         "bench" => {
             let ms: u64 = arg.parse().unwrap_or(3000);
             if ms < 500 {
@@ -8145,6 +8687,9 @@ fn mine_cmd(rest: &str) {
             console::set_color(LTGRAY);
             match client::bench(&a, ms) {
                 Some((n, took, foot)) if took > 0 => {
+                    // Kept for `checklist`, which otherwise cannot tell that
+                    // anything was measured: this path never touches `HASHES`.
+                    client::note_bench(n * 1000 / took, (foot / 1024) as u64);
                     kprintln!(
                         "  {} H/s over {} hashes in {} ms, sharing the core with {} task(s)",
                         n * 1000 / took,
@@ -8350,9 +8895,33 @@ fn mine_cmd(rest: &str) {
             kprintln!("  no pool: a fixture job, and a target nothing will meet");
             kprintln!("  the coin table is set aside for the sweep and put back after");
             let saved = client::sweep_begin(a.clone());
+
+            // **A discarded point first, because the machine is cold.** The
+            // control proved this rather than suggesting it: one slice read 117
+            // H/s at the start of a sweep and 163 at the end, +39%, so an
+            // ascending curve credited the last points with a warming host and
+            // called it scaling. `video bench` and `core bench` both discard a
+            // first reading; the sweep measured its coldest point first and
+            // normalised everything to it, which is the same mistake inverted.
+            //
+            // Not printed, so the curve below starts at a figure taken on a warm
+            // machine and the control at the end has something fair to compare
+            // against.
+            // **At `max`, not at one, and the difference is what was drifting.**
+            // Warming with a single slice left the other fifteen to allocate and
+            // first-touch a 2 MiB working set each *during the measurement*, so
+            // every new point paid a page-population cost the points before it
+            // had not. That reads as the curve flattening out and is nothing of
+            // the kind. Warming at the top spawns every slice and faults in every
+            // working set before the first figure is taken.
+            //
+            // It cut the control's drift from 39% to 23% when it warmed one
+            // slice; the remaining 23% is what this line is for.
+            kprintln!("  warming up at {} slice(s), discarded", max);
+            let _ = client::sweep_point(max, ms);
             let mut first = 0u64;
             for n in 1..=max {
-                let (have, hashes, took) = client::sweep_point(n, ms);
+                let (have, cores, hashes, took) = client::sweep_point(n, ms);
                 let hs = if took > 0 { hashes * 1000 / took } else { 0 };
                 if n == 1 {
                     first = hs;
@@ -8361,15 +8930,69 @@ fn mine_cmd(rest: &str) {
                 // the slices are not fighting; anything less is where they are.
                 let scale = if first > 0 { hs * 100 / first } else { 0 };
                 kprintln!(
-                    "  {} slice(s)  {} H/s  ({}% of one)  over {} hashes in {} ms",
-                    have, hs, scale, hashes, took
+                    "  {} slice(s) on {} core(s)  {} H/s  ({}% of one)  over {} hashes in {} ms",
+                    have, cores, hs, scale, hashes, took
                 );
                 if have < n {
                     kprintln!("    only {} could be spawned; the rest of the curve is not real", have);
                     break;
                 }
+                // **The line this curve was missing.** A point where the slices
+                // did not reach that many cores is not a slow point, it is a
+                // measurement of something else -- and the number it produces
+                // is indistinguishable from cache contention, which is the one
+                // thing the curve is for. Said per point, because it is a fact
+                // about that interval and the next one may be fine.
+                if cores < have {
+                    console::set_color(YELLOW);
+                    kprintln!(
+                        "    {} slice(s) shared {} core(s) -- this point measures scheduling, not cache",
+                        have, cores
+                    );
+                    console::set_color(LTGRAY);
+                }
             }
+            // **The control, and the sweep had none.** Every ratio above is
+            // normalised to the one-slice point, so that point's noise becomes
+            // the curve's shape -- and it is noisy: two consecutive runs of this
+            // command on one build read 181 and 101 H/s for one slice, a factor
+            // of 1.8, which turned 375% at seven slices into 569% from *lower*
+            // absolute throughput. A lower baseline reads as better scaling.
+            //
+            // So the first point is taken again at the end. It is the same
+            // measurement of the same thing, so anything it moved by is drift --
+            // the host, the clocks, a warming cache -- and it bounds what the
+            // rest of the curve can be trusted to mean. This is `video bench`'s
+            // rule arriving where it was missing: read the control first and the
+            // figures second.
+            let (_, _, h2, t2) = client::sweep_point(1, ms);
+            let again = if t2 > 0 { h2 * 1000 / t2 } else { 0 };
             client::sweep_end(saved);
+            if first > 0 && again > 0 {
+                let drift = if again > first {
+                    (again - first) * 100 / first
+                } else {
+                    (first - again) * 100 / first
+                };
+                let hot = again < first;
+                kprintln!(
+                    "  control  one slice again: {} H/s against {} at the start, {}{}%",
+                    again,
+                    first,
+                    if hot { "-" } else { "+" },
+                    drift
+                );
+                if drift > 10 {
+                    console::set_color(YELLOW);
+                    kprintln!("  the control moved {}%, so the curve above is not a measurement of", drift);
+                    kprintln!("  slice count -- it is that drift with a slice count printed beside it");
+                    console::set_color(LTGRAY);
+                } else {
+                    console::set_color(LTGREEN);
+                    kprintln!("  the control held to {}%, so the shape above is about slices", drift);
+                    console::set_color(LTGRAY);
+                }
+            }
             virtual_caveat();
             kprintln!("  the number this is for is L3 contention, which an emulator does not");
             kprintln!("  model faithfully. Run it on the GF63 before believing the shape.");
@@ -8439,6 +9062,17 @@ fn mine_report() {
         }
     }
     kprintln!("  state    {}", client::phase().name());
+    // What the full-screen view costs, measured on every frame it has drawn.
+    // At one frame a second, the share of one core is simply the mean frame
+    // time over a million microseconds.
+    if let Some((n, draw, present, worst)) = crate::mine::screen::cost() {
+        let (w, h) = crate::gfx::primary().map(|f| (f.width(), f.height())).unwrap_or((0, 0));
+        let per = draw + present;
+        kprintln!(
+            "  screen   {}x{}, {} frame(s): {} us each ({} draw + {} present), worst {} us -- {}.{:02}% of one core at 1/s",
+            w, h, n, per, draw, present, worst, per / 10_000, (per / 100) % 100
+        );
+    }
     let (m, s) = client::difficulty();
     // Printed as the pool sent it rather than as a float, because there are no
     // floats here and rounding one for display would be a second number.

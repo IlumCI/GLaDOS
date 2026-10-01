@@ -3104,6 +3104,13 @@ fn terminal_strip(well: Rect) -> Option<Rect> {
 /// Its own flush, because nothing else is going to present this rectangle:
 /// the console flushes only its grid.
 pub fn refresh_status() {
+    // A full-screen program owns every pixel, the clock and the pointer already
+    // stand down for it, and so does this: on a miner image it painted the
+    // terminal's gutter and status strip ("no model | mind on") over the
+    // address screen after every line typed.
+    if super::exclusive() {
+        return;
+    }
     let Some(fb) = super::primary() else { return };
     let screen = screen_rect(&fb);
     let mut well = None;

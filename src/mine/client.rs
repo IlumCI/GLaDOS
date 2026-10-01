@@ -142,6 +142,8 @@ pub struct Config {
     pub user: String,
     pub pass: String,
     pub proto: Protocol,
+    /// The WebSocket path when the pool is `wss://`, and `None` for plain TCP.
+    pub ws: Option<String>,
 }
 
 pub static CONFIG: Spin<Option<Config>> = Spin::new(None);
@@ -271,10 +273,27 @@ static HASH_SINCE: AtomicU64 = AtomicU64::new(0);
 /// boot asking for eight gets whatever the table can spare and says so.
 ///
 /// The nonce stride divides by this, so raising it narrows each slice's range:
-/// at eight that is 536,870,912 nonces each, which a slice at a quarter of a
-/// megahash exhausts in half an hour against jobs that change every thirty
+/// at sixteen that is 268,435,456 nonces each, which a slice at a quarter of a
+/// megahash exhausts in eighteen minutes against jobs that change every thirty
 /// seconds. Not a constraint, but it is the thing that would become one.
-pub const MAX_SLICES: usize = 8;
+///
+/// **Sixteen, and the number came from a measurement rather than from the task
+/// table.** Eight was chosen as what the table could spare; what the table can
+/// spare turned out not to be the binding constraint. Measured under KVM with
+/// sixteen cores, `mine sweep 8` on yescrypt: eight slices reach seven cores,
+/// because `set_slices` keeps core 0 clear for the shell and the socket task, so
+/// a sixteen-thread machine was mining with seven execution units while
+/// cpuminer-opt used all sixteen. Per unit this kernel was *ahead* -- 256 H/s
+/// against 236, adjusting for the pool's `opt-level = 3` against the kernel's
+/// `2` -- and behind overall purely on count.
+///
+/// `MAX_CPUS` is sixteen, so there is nothing to gain past it: a seventeenth
+/// slice would share a core with another and the sweep reports that as
+/// `shared`. And `tasks` on a sixteen-core boot with eight slices reads **11 of
+/// 24**, so the slots exist -- `set_slices` still clamps to what `task::spawn`
+/// actually gives it and reports what it got, so this stays a ceiling rather
+/// than a promise.
+pub const MAX_SLICES: usize = 16;
 
 /// How many slices are wanted. Slices above this park.
 static SLICES: AtomicU32 = AtomicU32::new(1);
@@ -285,6 +304,25 @@ static SPAWNED_SLICES: AtomicU32 = AtomicU32::new(0);
 /// Claimed once by each slice task at entry, since `task::spawn` takes a bare
 /// `fn()` and there is nowhere to pass an index.
 static NEXT_SLICE: AtomicU32 = AtomicU32::new(0);
+
+/// Which cores have completed a batch since this was last cleared, one bit
+/// each.
+///
+/// **A slice count is not a core count, and reporting the first as though it
+/// were the second is how the sweep lied for as long as it has existed.**
+/// `set_slices` answers how many slices *exist*; what a concurrency curve is
+/// about is how many are hashing at once, and those differ whenever two slices
+/// share a core. Nothing else in the kernel can answer it after the fact: the
+/// scheduler records a task's pin, not where it has been, and by the time the
+/// interval is over the evidence is gone. So each slice ORs its own core in as
+/// it finishes a batch, which costs one atomic per batch -- against a batch
+/// that is milliseconds of yespower.
+///
+/// It is the cores that *hashed*, deliberately, and not the cores the slices
+/// were pinned to. A slice pinned to a core it never ran on is exactly the
+/// failure worth catching, and a mask built from the pins could not see it.
+static SLICE_CORES: AtomicU32 = AtomicU32::new(0);
+
 
 pub fn slices() -> u32 {
     SLICES.load(Ordering::Relaxed)
@@ -300,21 +338,237 @@ pub fn spawned_slices() -> u32 {
 /// the task table is full -- and saying so is the point, since the alternative
 /// is a sweep that reports a flat curve because half its slices were never
 /// created.
+/// Which core the `nth` slice goes on, best first.
+///
+/// **A hybrid part's cores are not interchangeable and round-robin treated them
+/// as though they were.** On this i7-12650H six cores are performance cores at
+/// 2300 MHz with SMT and four are efficiency cores at 1700 with none, and
+/// `glados-pool --bench` shows what that costs: left unpinned it reads 850 H/s or
+/// 432, bimodally, depending on which kind it landed on. Handing slice four an
+/// efficiency core while a performance core sits idle is giving away half a
+/// slice, and `cpuminer -t N` cannot express the difference at all -- it asks the
+/// host scheduler for N threads and takes what it is given.
+///
+/// The order is: performance cores, then efficiency cores, then core 0. Core 0 is
+/// last for the reason it always was -- the shell, the socket task and the clock
+/// live there, so a slice on it is the one that has to share -- and it is *in* the
+/// list rather than excluded, because on a machine with sixteen slices and sixteen
+/// cores refusing to use one of them is a sixteenth of the hash rate thrown away.
+///
+/// `performance_cores` answers `None` on a part that is not hybrid, and then this
+/// is exactly the round-robin it replaced. That is deliberate: the fallback is the
+/// old behaviour rather than a guess, so a machine this cannot describe loses
+/// nothing.
+/// A forced performance-core mask, for measuring placement where CPUID cannot.
+///
+/// **No hypervisor reports leaf 0x1A and none should**: a vCPU has no core type,
+/// because the host moves it between a P core and an E core whenever it likes. So
+/// under QEMU the preference never engages and its effect cannot be measured --
+/// unless the vCPU threads are pinned, one to each host CPU, at which point guest
+/// core N really does live on host CPU N for good and the mapping is knowable from
+/// outside. It is still not knowable from *inside*, which is what this is for: the
+/// operator supplies what the guest cannot read.
+///
+/// Zero means no override, which is why the mask is wrapped rather than bare -- a
+/// mask of zero would otherwise mean "no core is fast" and place everything on the
+/// efficiency cores, the exact opposite of not having been told.
+static CORE_OVERRIDE: AtomicU32 = AtomicU32::new(0);
+
+pub fn set_core_override(mask: u32) {
+    CORE_OVERRIDE.store(mask, Ordering::Relaxed);
+}
+
+pub fn core_override() -> Option<u32> {
+    match CORE_OVERRIDE.load(Ordering::Relaxed) {
+        0 => None,
+        m => Some(m),
+    }
+}
+
+fn slice_core(nth: usize) -> usize {
+    // The override wins, because it exists to answer a question the machine
+    // cannot. Falling back to CPUID and then to round-robin.
+    let perf = core_override().or_else(crate::smp::performance_cores);
+    let order = slice_order(crate::smp::online(), perf, crate::smp::first_thread_cores());
+    order[nth % order.len()]
+}
+
+/// The order itself, pure, so it can be asserted without a hybrid machine.
+///
+/// **QEMU does not expose leaf 0x1A**, so a guest sees a non-hybrid part and the
+/// preference never engages -- which is the safe fallback and also means the
+/// effect cannot be measured here at all. What *can* be checked anywhere is the
+/// decision, so it is separated from the two lookups that need a machine, the way
+/// `update::decide` and `code::locate` are. `diag mine` walks every case.
+fn slice_order(cores: usize, perf: Option<u32>, first: Option<u32>) -> alloc::vec::Vec<usize> {
+    if cores <= 1 {
+        return alloc::vec![0];
+    }
+    // Four tiers, and the order between them is measured rather than assumed.
+    // Four slices under a pinned QEMU, control holding to 1%:
+    //
+    //     four distinct physical performance cores   700 H/s
+    //     four performance cores, one a sibling      605 H/s
+    //     four distinct efficiency cores             535 H/s
+    //
+    // So a sibling collision costs 1.16x, and an efficiency core beats a sibling
+    // outright: an idle efficiency core adds about 71% of a slice where a second
+    // thread on a busy performance core adds 21%. Hence efficiency cores rank
+    // *above* performance siblings, which is the one ordering here that is not
+    // obvious and the only one worth measuring.
+    let tier = |c: usize| -> u8 {
+        let p = perf.map(|m| m & (1 << c) != 0).unwrap_or(true);
+        let f = first.map(|m| m & (1 << c) != 0).unwrap_or(true);
+        match (f, p) {
+            (true, true) => 0,   // its own physical core, and the fast kind
+            (true, false) => 1,  // its own physical core, the slower kind
+            (false, true) => 2,  // sharing a fast core with another thread
+            (false, false) => 3, // sharing a slow core, if such a part exists
+        }
+    };
+    let mut rest: alloc::vec::Vec<usize> = (1..cores).collect();
+    // Stable, so cores of one tier stay in index order and the placement is
+    // reproducible rather than merely good.
+    rest.sort_by_key(|&c| tier(c));
+    // **Core 0 last always, and included only when there is nothing to starve.**
+    //
+    // The shell and the socket task live there and neither minds waiting. The
+    // *compositor* does: it owns the frame, so a slice competing with it is a
+    // desktop that stops repainting while mining -- which was measured firing
+    // `gfx::render::watch` during a sixteen-slice sweep.
+    //
+    // A miner image spawns no compositor and no clock at all, so there is nothing
+    // on core 0 to protect and refusing to mine on it would throw away a
+    // sixteenth of the rate for nobody's benefit. A desktop boot has both, and
+    // keeping the picture moving is worth one core of sixteen.
+    //
+    // Asked of `comp_state`, which answers `None` when no compositor was ever
+    // spawned, rather than of a mode flag: the question is whether anything is
+    // drawing, and that is the thing that actually answers it. Derived, so it
+    // cannot disagree with the machine -- the rule `checklist` is built on.
+    if crate::gfx::render::comp_state().is_none() {
+        rest.push(0);
+    }
+    rest
+}
+
+/// What `diag mine` asserts about placement, with no machine involved.
+pub fn placement_checks() -> alloc::vec::Vec<(&'static str, bool)> {
+    let mut out: alloc::vec::Vec<(&'static str, bool)> = alloc::vec::Vec::new();
+    let mut claim = |what: &'static str, ok: bool| out.push((what, ok));
+
+    // The shape this part actually has: cores 1..5 performance, 6..9 efficiency,
+    // core 0 performance but reserved for the shell.
+    // This part's actual shape: cpus 0-11 are performance, in SMT pairs, so the
+    // first thread of each is even; cpus 12-15 are efficiency and have no sibling.
+    let perf = Some(0x0FFFu32);
+    let first = Some(0b1111_0101_0101_0101u32);
+    let o = slice_order(16, perf, first);
+    claim(
+        "distinct performance cores come first",
+        o[..5] == [2, 4, 6, 8, 10],
+    );
+    claim("then the efficiency cores, which beat a busy sibling", o[5..9] == [12, 13, 14, 15]);
+    claim(
+        "then the performance siblings",
+        o[9..15] == [1, 3, 5, 7, 9, 11],
+    );
+    // Core 0's presence depends on whether a compositor is running, so the suite
+    // asserts the shape it can see rather than a fixed length -- and asserts the
+    // *rule* separately below.
+    //
+    // **Both branches run in one boot, and that is the ordering rather than luck.**
+    // `main::selftest` is called before the compositor is spawned, so the boot
+    // pass asserts the sixteen-core shape; `diag mine` from the shell asserts the
+    // fifteen-core one. Anything that moves the selftests past the spawn silently
+    // costs half the coverage, so it is written down here rather than left to be
+    // noticed by a suite that still passes.
+    let desktop = crate::gfx::render::comp_state().is_some();
+    if desktop {
+        claim("with a compositor, core 0 is left out of the rotation", !o.contains(&0));
+        claim("so fifteen cores are offered", o.len() == 15);
+    } else {
+        claim("with no compositor, core 0 is last rather than wasted", o[15] == 0);
+        claim("so every core is offered", o.len() == 16);
+    }
+    claim(
+        "and none appears twice, either way",
+        (1..16).all(|c| o.iter().filter(|&&x| x == c).count() == 1),
+    );
+    claim(
+        "core 0 is never anywhere but last",
+        o.iter().position(|&c| c == 0).map(|i| i + 1 == o.len()).unwrap_or(true),
+    );
+    // Within a tier the order is the index order, so the same machine places the
+    // same way twice -- reproducible rather than merely good.
+    claim("a tier is ordered by index, so placement repeats", o[..5] == [2, 4, 6, 8, 10]);
+
+    // A part that cannot be described loses nothing: this is the round-robin it
+    // had before, which is the point of the fallback being the old behaviour.
+    let flat = slice_order(10, None, None);
+    claim(
+        "a part that says nothing keeps the plain order",
+        flat[..9] == [1, 2, 3, 4, 5, 6, 7, 8, 9],
+    );
+    // Hybrid but no SMT: efficiency cores still rank behind performance ones, and
+    // nothing is treated as a sibling.
+    let no_smt = slice_order(6, Some(0b000_111), None);
+    claim("hybrid without SMT still prefers the fast kind", no_smt[..5] == [1, 2, 3, 4, 5]);
+
+    // Single core: there is nowhere else to be.
+    claim("one core places everything on core 0", slice_order(1, None, None) == alloc::vec![0]);
+    claim("and so does none", slice_order(0, perf, first) == alloc::vec![0]);
+
+    // Wrapping is by the order's length, not the core count, or a slice past the
+    // end would land on whatever index arithmetic produced rather than on the best
+    // remaining core.
+    let o2 = slice_order(4, Some(0b0100), None);
+    claim("the best core is chosen first even when it is not the lowest", o2[0] == 2);
+    claim("and the rest follow in order", o2[..3] == [2, 1, 3]);
+    out
+}
+
 pub fn set_slices(n: u32) -> u32 {
     let n = n.clamp(1, MAX_SLICES as u32);
     while SPAWNED_SLICES.load(Ordering::Relaxed) < n {
-        match crate::task::spawn("mine slice", mine_task) {
-            Some(i) => {
+        // **`task::spawn` and `unpin` were here, and `unpin` was the wrong
+        // verb.** The claim it made is the audit above -- everything this task
+        // touches is an atomic, a `Spin`, or its own stack -- and that claim is
+        // unchanged. What it does not do is *place* the task: it makes it
+        // eligible everywhere and leaves the choice to whichever core reaches
+        // it first. Two slices sat together on core 0 for a whole four-second
+        // sweep point and hashed at one slice's rate, twice out of four runs,
+        // while the report said two slices. That is not a slow measurement, it
+        // is a wrong one, and nothing in the output could tell it apart from
+        // cache contention -- which is the single thing the curve is for.
+        //
+        // So each slice is placed on a core of its own, which is deterministic
+        // where migration is a race, and placed *at spawn* rather than pinned
+        // afterwards for the reason `spawn_on` gives.
+        //
+        // **Offset by one, so the first slice takes core 1.** Core 0 carries
+        // the shell, the socket task and the clock; starting there would make
+        // the one-slice baseline the crowded core and every ratio after it
+        // flattering. The slice that has to share is the last one added rather
+        // than the first, and the sweep says so per point when it happens.
+        //
+        // That leaves a ceiling of `cores - 1` working slices, and it is free on
+        // the machine this is for: the GF63 has sixteen logical processors, so
+        // all eight slices fit on cores 1-8 with core 0 still clear. It bites
+        // only on a smaller test host -- an eight-core one doubles up the last
+        // slice -- and there the sweep prints which point it happened at rather
+        // than folding it into the curve. Spending core 0 to avoid that would
+        // trade the desktop's responsiveness for a slice the real target does
+        // not need.
+        //
+        // Pinning is strictly tighter than unpinning, so this weakens nothing
+        // that was audited. A machine with one core gets core 0 and behaves
+        // exactly as it did.
+        let nth = SPAWNED_SLICES.load(Ordering::Relaxed) as usize;
+        let cpu = slice_core(nth);
+        match crate::task::spawn_on("mine slice", mine_task, cpu) {
+            Some(_) => {
                 SPAWNED_SLICES.fetch_add(1, Ordering::Relaxed);
-                // **This kernel's first `unpin` caller outside the selftest.**
-                // The claim it makes is the audit above: everything this task
-                // touches is an atomic, a `Spin`, or its own stack. Without it
-                // every slice shares core 0 and the concurrency curve would be
-                // measuring round-robin overhead rather than cache contention,
-                // which is the one thing it exists to find.
-                if !crate::task::unpin(i) {
-                    note("a slice could not be unpinned; it stays on core 0");
-                }
             }
             None => {
                 note("no task slot for another slice");
@@ -330,6 +584,25 @@ pub fn set_slices(n: u32) -> u32 {
     // and reading, from the report, exactly like a slice that could not spawn.
     super::work::assign();
     have
+}
+
+/// The last foreground bench, for the bring-up list.
+///
+/// **`bench` runs on the caller's task with its own hasher and never touches
+/// `HASHES`**, which is right -- the sweep zeroes that counter and a foreground
+/// measurement must not perturb it -- and it meant the checklist could not see
+/// that anything had been measured. So the figure is kept here, which is worth
+/// having anyway: the rate is the number the bare-metal trip exists to bring
+/// back, and it belongs on the page that gets photographed.
+static LAST_BENCH: crate::sync::Racy<Option<(u64, u64)>> = crate::sync::Racy::new(None);
+
+/// `(hashes per second, working set in KiB)` of the last `mine bench`.
+pub fn last_bench() -> Option<(u64, u64)> {
+    unsafe { *LAST_BENCH.get() }
+}
+
+pub fn note_bench(hs: u64, kib: u64) {
+    unsafe { *LAST_BENCH.get() = Some((hs, kib)) };
 }
 
 pub fn hash_ms() -> u64 {
@@ -489,9 +762,77 @@ fn sleep_ms(ms: u64) {
     }
 }
 
+/// The socket under a session, whichever kind the pool is reached over.
+///
+/// **One interface over both, so nothing above it knows which.** A line is a
+/// line: over TCP it is bytes up to a newline, over a WebSocket it is one text
+/// message carrying the same bytes, and the pool's WebAssembly core splits on
+/// newlines either way. So the Stratum and glados paths above this are the
+/// same code on both transports, and a bug in one cannot hide in the other.
+///
+/// The WebSocket form exists for the serverless pool: a Cloudflare Worker
+/// accepts no inbound TCP, so a Durable Object is reachable only this way.
+///
+/// **It rides the kernel's single default TCP connection**, because
+/// `tls::connect` does, where the plain form has a handle of its own. On a
+/// mining image nothing else opens one; on a full machine an `https` or an
+/// update fetch while mining over `wss://` takes the connection away, and the
+/// miner reconnects through its ordinary backoff -- noticed, not corrupted.
+enum Link {
+    Tcp(tcp::Handle),
+    Ws(crate::net::ws::Socket),
+}
+
+impl Link {
+    /// Send, and `false` if the peer has gone.
+    fn send(&mut self, bytes: &[u8]) -> bool {
+        match self {
+            Link::Tcp(h) => tcp::send_at(*h, bytes, 5_000).is_ok(),
+            Link::Ws(w) => w.send_text(&String::from_utf8_lossy(bytes)).is_ok(),
+        }
+    }
+
+    /// Whatever arrived within `ms`, possibly nothing. `None` when the peer
+    /// has gone -- kept apart from a quiet peer, or a dead pool reads as an idle
+    /// one forever, which is the failure `fill` exists to prevent.
+    fn recv(&mut self, ms: u64) -> Option<Vec<u8>> {
+        use crate::net::ws::Msg;
+        match self {
+            Link::Tcp(h) => {
+                let data = tcp::recv_at(*h, ms);
+                if data.is_empty() && !tcp::alive(*h) {
+                    return None;
+                }
+                Some(data)
+            }
+            Link::Ws(w) => match w.recv(ms) {
+                Ok(Some(Msg::Text(t))) => Some(t.into_bytes()),
+                Ok(Some(Msg::Binary(b))) => Some(b),
+                Ok(Some(Msg::Close(_))) | Err(_) => None,
+                Ok(None) if w.closed() => None,
+                Ok(None) => Some(Vec::new()),
+            },
+        }
+    }
+
+    fn abort(&mut self) {
+        match self {
+            Link::Tcp(h) => tcp::abort_at(*h),
+            Link::Ws(w) => w.close(),
+        }
+    }
+
+    fn close(&mut self) {
+        match self {
+            Link::Tcp(h) => tcp::close_at(*h, 2_000),
+            Link::Ws(w) => w.close(),
+        }
+    }
+}
+
 struct Session {
     proto: Protocol,
-    h: tcp::Handle,
+    link: Link,
     buf: Vec<u8>,
     e1: Vec<u8>,
     e2_size: usize,
@@ -521,7 +862,7 @@ fn stratum_task() {
             Some(mut s) => {
                 backoff = BACKOFF_MIN;
                 run(&mut s);
-                tcp::abort_at(s.h);
+                s.link.abort();
             }
             None => {
                 sleep_ms(backoff);
@@ -544,10 +885,10 @@ fn stratum_task() {
 
 /// Resolve, connect, subscribe, authorize. `None` on any refusal.
 fn connect() -> Option<Session> {
-    let (host, port, user, pass, proto) = {
+    let (host, port, user, pass, proto, ws) = {
         let g = CONFIG.lock_irq();
         let c = g.as_ref()?;
-        (c.host.clone(), c.port, c.user.clone(), c.pass.clone(), c.proto)
+        (c.host.clone(), c.port, c.user.clone(), c.pass.clone(), c.proto, c.ws.clone())
     };
 
     set_phase(Phase::Resolving);
@@ -560,16 +901,33 @@ fn connect() -> Option<Session> {
     };
 
     set_phase(Phase::Connecting);
-    let h = match tcp::open(ip, port, CONNECT_MS) {
-        Ok(h) => h,
-        Err(_) => {
-            note("connection refused or timed out");
-            return None;
-        }
+    let link = match &ws {
+        None => match tcp::open(ip, port, CONNECT_MS) {
+            Ok(h) => Link::Tcp(h),
+            Err(_) => {
+                note("connection refused or timed out");
+                return None;
+            }
+        },
+        // The certificate is checked inside `ws::Socket::connect`, before the
+        // upgrade is sent. A miner's address and shares going to whoever
+        // answered on port 443 is the thing that check exists to prevent, and
+        // the refusal is said rather than retried quietly.
+        Some(path) => match crate::net::ws::Socket::connect(ip, &host, port, path) {
+            Ok(w) => Link::Ws(w),
+            Err(crate::net::ws::Error::Identity(why)) => {
+                note(why);
+                return None;
+            }
+            Err(_) => {
+                note("the pool's WebSocket would not open");
+                return None;
+            }
+        },
     };
     let mut s = Session {
         proto,
-        h,
+        link,
         buf: Vec::new(),
         e1: Vec::new(),
         e2_size: 4,
@@ -582,8 +940,8 @@ fn connect() -> Option<Session> {
         return greet(s, &user);
     }
 
-    if tcp::send_at(s.h, stratum::subscribe(1).as_bytes(), 5_000).is_err() {
-        tcp::abort_at(s.h);
+    if !s.link.send(stratum::subscribe(1).as_bytes()) {
+        s.link.abort();
         return None;
     }
     if !await_id(&mut s, 1, |s, body| match stratum::subscribe_result(body) {
@@ -595,18 +953,18 @@ fn connect() -> Option<Session> {
         None => false,
     }) {
         note("the pool's subscribe reply could not be read");
-        tcp::abort_at(s.h);
+        s.link.abort();
         return None;
     }
     set_phase(Phase::Subscribed);
 
-    if tcp::send_at(s.h, stratum::authorize(2, &user, &pass).as_bytes(), 5_000).is_err() {
-        tcp::abort_at(s.h);
+    if !s.link.send(stratum::authorize(2, &user, &pass).as_bytes()) {
+        s.link.abort();
         return None;
     }
     if !await_id(&mut s, 2, |_, _| true) {
         note("the pool refused this worker");
-        tcp::abort_at(s.h);
+        s.link.abort();
         return None;
     }
     set_phase(Phase::Authorized);
@@ -622,8 +980,8 @@ fn connect() -> Option<Session> {
 /// is a tenth of the Stratum path above.
 fn greet(mut s: Session, user: &str) -> Option<Session> {
     let hello = super::proto::encode_hello(1, user, concat!("glados/", env!("CARGO_PKG_VERSION")));
-    if tcp::send_at(s.h, hello.as_bytes(), 5_000).is_err() {
-        tcp::abort_at(s.h);
+    if !s.link.send(hello.as_bytes()) {
+        s.link.abort();
         return None;
     }
     set_phase(Phase::Subscribed);
@@ -657,7 +1015,7 @@ fn greet(mut s: Session, user: &str) -> Option<Session> {
         } else {
             "the pool did not answer the greeting"
         });
-        tcp::abort_at(s.h);
+        s.link.abort();
         return None;
     }
     set_phase(Phase::Authorized);
@@ -774,6 +1132,23 @@ fn await_id(
             match stratum::take_line(&mut s.buf) {
                 Ok(Some(line)) => match stratum::classify(&line) {
                     Ok(Message::Response { id: got, ok, body }) if got == id => {
+                        // **The pool's own words, on the miner's screen.** A pool
+                        // refusing a greeting says why -- a payout address short of
+                        // the holding requirement, a worker name that is not an
+                        // address -- and a miner that only reported "closed" left
+                        // the person at the machine with nothing to fix.
+                        if !ok {
+                            let why = match body.get("error") {
+                                Some(crate::json::Json::Str(t)) => Some(t.clone()),
+                                Some(e) => e.idx(1).and_then(|m| m.as_str()).map(String::from),
+                                None => None,
+                            };
+                            if let Some(w) = why {
+                                let mut line = String::from("refused by the pool: ");
+                                line.push_str(&w);
+                                note(&line);
+                            }
+                        }
                         return ok && on_ok(s, &body);
                     }
                     // Dispatched by dialect for the same reason `run` does. A
@@ -807,11 +1182,10 @@ fn await_id(
 /// apart. So `alive` is asked every time round, or a dead pool reads as a quiet
 /// one forever and the miner keeps hashing a job it can never submit.
 fn fill(s: &mut Session) -> bool {
-    let data = tcp::recv_at(s.h, RECV_MS);
-    if data.is_empty() && !tcp::alive(s.h) {
+    let Some(data) = s.link.recv(RECV_MS) else {
         note("the pool closed the connection");
         return false;
-    }
+    };
     s.buf.extend_from_slice(&data);
     true
 }
@@ -925,7 +1299,7 @@ fn drain_shares(s: &mut Session) -> bool {
                 )
             }
         };
-        if tcp::send_at(s.h, msg.as_bytes(), 5_000).is_err() {
+        if !s.link.send(msg.as_bytes()) {
             note("could not send a share; the connection is going");
             return false;
         }
@@ -1025,7 +1399,11 @@ fn handle_notify(s: &mut Session, method: &str, params: &crate::json::Json) {
 fn rebuild(s: &mut Session) {
     let Some(job) = s.job.as_ref() else { return };
     let (m, sc) = difficulty();
-    let Some(target) = super::u256::target_for(m, sc) else { return };
+    let Some(target) = super::u256::target_for(m, sc)
+        .and_then(|t| t.mul_u32(algo_in_force().stratum_factor()))
+    else {
+        return;
+    };
 
     let mut e2 = Vec::with_capacity(s.e2_size);
     // Big-endian, so a hex dump reads in order. Which encoding does not matter
@@ -1258,6 +1636,22 @@ fn mine_task() {
         }
         super::work::count(slot, batch as u64);
         HASHES.fetch_add(batch as u64, Ordering::Relaxed);
+        // Recorded here rather than at the top of the loop, because what the
+        // mask is for is explaining `HASHES`, and every path above this line
+        // reaches `park` without hashing. A core that only ever parked a slice
+        // did not contribute and must not read as though it had.
+        //
+        // `cpu_id` and not `smp::this_cpu`: the second asks the interrupt
+        // controller over memory-mapped I/O, which is a real cost to pay per
+        // batch for a number that is only ever a diagnostic. `armed` is the
+        // condition `cpu_id`'s own safety note names, and before per-core
+        // storage exists there is one core anyway.
+        if crate::cpu::percpu::armed() {
+            let me = crate::cpu::percpu::cpu_id();
+            if me < 32 {
+                SLICE_CORES.fetch_or(1u32 << me, Ordering::Relaxed);
+            }
+        }
     }
 }
 
@@ -1324,14 +1718,40 @@ pub struct SweepState {
 /// objection `work`'s header makes about summing across algorithms does not
 /// apply. That is the reason the sweep clears the table rather than measuring
 /// whatever happens to be in it.
-pub fn sweep_point(n: u32, ms: u64) -> (u32, u64, u64) {
+/// Answers the slices that exist, the cores that hashed, the hashes and the
+/// elapsed time -- in that order, and the second is the one this used to be
+/// missing. See `SLICE_CORES` for what went wrong without it.
+pub fn sweep_point(n: u32, ms: u64) -> (u32, u32, u64, u64) {
     let have = set_slices(n);
+    // **Let the count take effect before starting the clock.**
+    //
+    // A slice checks `slice >= SLICES` at the top of its loop, so one that is
+    // being stood down finishes the batch it is already inside. Coming *down*
+    // from sixteen slices to one, fifteen of them each land a final batch after
+    // the counters are zeroed -- so the one-slice point was credited with
+    // fifteen slices' leftovers, and reported fifteen cores for one slice.
+    //
+    // It inflated the baseline the whole curve is normalised against: 142 H/s
+    // became 193, which makes the scaling that follows look *worse* than it is.
+    // A batch of eight yespower hashes is about 57 ms at these rates, so 150 ms
+    // is generous, and against a window of seconds it costs a few per cent of
+    // the measurement for a baseline that means what it says.
+    rest_ms(150);
     HASHES.store(0, Ordering::Relaxed);
     HASH_SINCE.store(0, Ordering::Relaxed);
+    // Cleared *after* `set_slices`, which spawns: a slice created for this
+    // point may hash before the interval opens, and a mask carrying that batch
+    // would credit a core for work no hash in the count paid for.
+    SLICE_CORES.store(0, Ordering::Relaxed);
     let t0 = now_ms();
     rest_ms(ms);
     let took = now_ms().saturating_sub(t0);
-    (have, HASHES.load(Ordering::Relaxed), took)
+    (
+        have,
+        SLICE_CORES.load(Ordering::Relaxed).count_ones(),
+        HASHES.load(Ordering::Relaxed),
+        took,
+    )
 }
 
 /// Clear the table down to one fixture coin and start the curve.
@@ -1434,7 +1854,7 @@ pub fn probe(host: &str, port: u16, worker: &str, seconds: u64) {
         // our own pool by construction never produces -- so pointing it at the
         // glados dialect would defeat its whole purpose.
         proto: Protocol::StratumV1,
-        h,
+        link: Link::Tcp(h),
         buf: Vec::new(),
         e1: Vec::new(),
         e2_size: 4,
@@ -1443,9 +1863,9 @@ pub fn probe(host: &str, port: u16, worker: &str, seconds: u64) {
         pending: Vec::new(),
     };
 
-    if tcp::send_at(s.h, stratum::subscribe(1).as_bytes(), 5_000).is_err() {
+    if !s.link.send(stratum::subscribe(1).as_bytes()) {
         kprintln!("  could not send subscribe");
-        tcp::abort_at(s.h);
+        s.link.abort();
         return;
     }
     // Authorize as well, because many pools send no work until a worker is
@@ -1453,17 +1873,16 @@ pub fn probe(host: &str, port: u16, worker: &str, seconds: u64) {
     // result is worth having either way, and what the pool says when it says no
     // is itself one of the things nothing here has ever seen.
     if !worker.is_empty() {
-        let _ = tcp::send_at(s.h, stratum::authorize(2, worker, "x").as_bytes(), 5_000);
+        let _ = s.link.send(stratum::authorize(2, worker, "x").as_bytes());
     }
 
     let deadline = now_ms() + seconds * 1000;
     let mut jobs = 0usize;
     while now_ms() < deadline {
-        let data = tcp::recv_at(s.h, 500);
-        if data.is_empty() && !tcp::alive(s.h) {
+        let Some(data) = s.link.recv(500) else {
             kprintln!("  the pool closed the connection");
             break;
-        }
+        };
         s.buf.extend_from_slice(&data);
         loop {
             match stratum::take_line(&mut s.buf) {
@@ -1527,7 +1946,7 @@ pub fn probe(host: &str, port: u16, worker: &str, seconds: u64) {
             }
         }
     }
-    tcp::close_at(s.h, 2_000);
+    s.link.close();
     kprintln!("  done -- {} job(s) seen", jobs);
 }
 

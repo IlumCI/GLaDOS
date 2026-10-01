@@ -45,6 +45,16 @@ pub const SUITES: &[Suite] = &[
         run: crate::crypto::selftest,
     },
     Suite {
+        name: "dns",
+        about: "a lookup ignores other people's answers, and holds the one UDP port",
+        run: crate::net::dns::selftest,
+    },
+    Suite {
+        name: "x509",
+        about: "which certificate chains are anybody's, against a real cross-signed one",
+        run: crate::net::x509::selftest,
+    },
+    Suite {
         name: "radio",
         about: "the channel plan every part shares, and its refusals",
         run: crate::dev::radio::selftest,
@@ -270,6 +280,11 @@ pub const SUITES: &[Suite] = &[
         run: wifi_selftest,
     },
     Suite {
+        name: "iwx",
+        about: "the Intel Wi-Fi 6 revision decode, which no emulator can exercise",
+        run: iwx_selftest,
+    },
+    Suite {
         name: "mine",
         about: "block headers, targets, and the midstate",
         run: mine_selftest,
@@ -435,18 +450,36 @@ fn wifi_selftest() -> bool {
     use crate::kprintln;
     let mut ok = true;
     let mut n = 0usize;
-    // Two drivers, one suite, because they answer the same question from
-    // opposite ends: rtl8188eu is one chip identified by vendor id, and rndis
-    // is an interface class that covers every phone that speaks it. The second
-    // is the one that gets an arbitrary machine onto a network.
-    for (what, good) in crate::dev::rtl8188eu::init::checks() {
+    // **This was two drivers and is now one.** `rtl8188eu` was the other half --
+    // one chip identified by vendor id -- and it went when its test hardware
+    // died, taking the tree's only GPL-2.0 file with it. RNDIS is the half that
+    // matters anyway: an interface class rather than a chip, covering every phone
+    // that speaks it, and so the one that gets an arbitrary machine onto a
+    // network without a cable.
+    for (what, good) in crate::dev::rndis::checks() {
         n += 1;
         if !good {
             kprintln!("    FAIL: {}", what);
             ok = false;
         }
     }
-    for (what, good) in crate::dev::rndis::checks() {
+    kprintln!("    {} claim(s)", n);
+    ok
+}
+
+/// The AX201 probe's arithmetic, with no radio present.
+///
+/// **Everything that needs the hardware is absent from this suite on purpose.**
+/// QEMU models no wireless part, so a check that read a real `CSR_HW_REV` would
+/// fail on every machine this is developed on and pass on exactly one -- which is
+/// the shape `mem::fixed` refuses for its own map. What is left is the decode,
+/// and the decode is where a wrong answer picks the wrong firmware and gets
+/// silence.
+fn iwx_selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    let mut n = 0usize;
+    for (what, good) in crate::dev::iwx::checks() {
         n += 1;
         if !good {
             kprintln!("    FAIL: {}", what);
@@ -579,7 +612,7 @@ fn linux_selftest() -> bool {
 /// says it exists to prevent. A `static` cannot be read in a const context, so
 /// the array cannot be measured directly; naming its length is the next best
 /// thing and it is now the only place the number appears.
-const SLOTS: usize = 68;
+const SLOTS: usize = 71;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.

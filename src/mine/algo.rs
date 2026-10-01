@@ -38,12 +38,35 @@ use super::yespower::{Version, Yespower};
 /// this -- integer units, shared memory, VRAM bandwidth, three levels of CPU
 /// cache -- but an `Algo` cannot know which device it landed on, and the split
 /// that survives that ignorance is whether the work is arithmetic or whether
-/// it is waiting for memory. Anything finer would be a claim about hardware
-/// made in a file that has never seen any.
+/// it is waiting for memory.
+///
+/// **There were two variants and the missing third cost about 1.7x of the hash
+/// rate.** "Waiting for memory" was one word for two opposite prescriptions.
+/// NeoScrypt waits on *capacity*: a 32 KiB working set per slice, and running
+/// more slices than the cache holds makes every one of them slower, so the right
+/// answer is to cap the count. yespower waits on *latency*: a dependent chain of
+/// random reads, where a stalled slice leaves the execution units idle and
+/// another slice fills them, so the right answer is the opposite -- oversubscribe.
+/// Capping it by cache capacity, which is what `Bound::Memory` asks
+/// `work::cache_budget` to do, held a sixteen-core machine to seven slices.
+///
+/// The doc here used to say "anything finer would be a claim about hardware made
+/// in a file that has never seen any", which was the right instinct and is now
+/// answerable. The claim is measured twice over. A cycle model of the pwxform
+/// lane -- `pmuludq` 5 cycles, `paddq` 1, `pxor` 1, then an L1 load of 5 feeding
+/// the next round's gather, so a ~12-cycle chain with four independent gather
+/// lanes filling it -- predicts 3.0 cycles per lane, and the measured figure is
+/// 3.05 against a pure-throughput floor of 1.4. And removing the cap took a
+/// sixteen-core sweep from 693 H/s at seven slices to 1475 at fifteen.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Bound {
     Arithmetic,
+    /// Waiting on how much fits. More slices than the cache holds is slower.
     Memory,
+    /// Waiting on a dependent chain. More slices than cores is *faster*, up to
+    /// the point the execution units are full, because one slice's stall is
+    /// another's turn.
+    Latency,
 }
 
 #[derive(Clone, PartialEq)]
@@ -88,6 +111,10 @@ pub enum Algo {
     /// variant, not this one with a field bolted on, because a key is part of
     /// the parameter block and changes the initial state.
     Blake2s,
+    /// Optical Bitcoin's HeavyHash: SHA3-256, a 64x64 nibble matrix drawn from
+    /// the previous block hash, SHA3-256. See `heavyhash.rs`. No parameters --
+    /// the matrix comes from the header, so there is nothing to carry on the wire.
+    HeavyHash,
 }
 
 impl Algo {
@@ -98,6 +125,7 @@ impl Algo {
             Algo::Yespower { v10: false, .. } => "yespower-0.5",
             Algo::Blake2s => "blake2s",
             Algo::Neoscrypt => "neoscrypt",
+            Algo::HeavyHash => "heavyhash",
         }
     }
 
@@ -113,6 +141,10 @@ impl Algo {
             // therefore a shorter hold on the quantum, which is the direction
             // that is safe to be wrong in.
             Algo::Blake2s => 4096,
+            // Two Keccak-f permutations and 4,096 multiply-adds a nonce, so an
+            // order of magnitude slower than sha256d. Not measured on the CPU:
+            // the device that matters for this one is the GPU.
+            Algo::HeavyHash => 512,
             // Between the two by three orders of magnitude at each end. A
             // NeoScrypt hash is two full SMix passes over 32 KiB, so it lands
             // nearer yespower than sha256d -- measured on the GPU at 190 kH/s
@@ -144,6 +176,8 @@ impl Algo {
             // A midstate, a header and a digest. Register and L1 territory,
             // which is why these two never bound a device on memory.
             Algo::Sha256d | Algo::Blake2s => 256,
+            // The 4 KiB matrix, shared by every nonce of a job.
+            Algo::HeavyHash => 64 * 64 + 256,
             // Upstream's `(N + 3) * r * 2 * BLOCK_SIZE` plus the 608 bytes of
             // FastKDF buffers. Fixed, because the profile is fixed.
             Algo::Neoscrypt => (128 + 3) * 2 * 2 * 64 + 608,
@@ -173,20 +207,71 @@ impl Algo {
     /// do, because the total is fixed and the split only averages the rates
     /// down. Concurrency over *different* bottlenecks is the case where the
     /// machine genuinely does more work.
+    /// What one hash costs relative to plain yescrypt, for choosing between
+    /// members of the yespower family. `None` outside it: comparing a
+    /// memory-hard hash with an arithmetic one on one scale is a statement about
+    /// a particular device, not about the functions.
+    ///
+    /// **Measured, then fitted, and the fit is stated.** `N * r` is the memory
+    /// each hash sweeps; version 1.0 does more per byte than 0.5. On the
+    /// i7-12650H, eight `glados-miner` processes read 3,086 H/s on yescrypt
+    /// (0.5, 2048, 8) and 567 on yespowerR16 (1.0, 4096, 16): a ratio of 5.44,
+    /// against 4.0 from `N * r` alone, so version 1.0 carries 1.36. Other
+    /// parameter sets are extrapolated from that and not measured.
+    pub fn hash_cost(&self) -> Option<f64> {
+        match self {
+            Algo::Yespower { v10, n, r, .. } => {
+                let mem = (*n as f64) * (*r as f64) / (2048.0 * 8.0);
+                Some(if *v10 { mem * 1.36 } else { mem })
+            }
+            _ => None,
+        }
+    }
+
+    /// What a Stratum difficulty is multiplied against for this algorithm.
+    ///
+    /// **Difficulty 1 is not one target across algorithms.** Bitcoin's diff1 is
+    /// `0x00000000ffff...`; the scrypt family, and yespower and neoscrypt with
+    /// it, count difficulty against a target 65,536 times easier, and a pool
+    /// speaking Stratum for them sends *that* number. cpuminer-opt applies the
+    /// same factor for these algorithms.
+    ///
+    /// Reading it on Bitcoin's scale made every target 65,536 times too hard:
+    /// against zpool's yespowerR16 port the pool computed `00000009..`, about
+    /// 477 million hashes per share -- eleven days at 500 H/s -- so it forwarded
+    /// nothing and the CPU half of the rig would have earned exactly zero while
+    /// every local share was accepted and every counter looked healthy.
+    ///
+    /// `Blake2s` stays at 1 unverified: nothing here has mined it at a pool.
+    pub fn stratum_factor(&self) -> u32 {
+        match self {
+            // HeavyHash's factor was not read anywhere: zpool accepting forwarded
+            // shares is what settles it, and a wrong one reads as zero forwards
+            // (too hard) or "low difficulty" refusals (too easy).
+            Algo::Sha256d | Algo::Blake2s | Algo::HeavyHash => 1,
+            Algo::Neoscrypt | Algo::Yespower { .. } => 65_536,
+        }
+    }
+
     pub fn bound(&self) -> Bound {
         match self {
             // ARX and integer addition over a working set that fits in
             // registers.
-            Algo::Sha256d | Algo::Blake2s => Bound::Arithmetic,
+            // The matrix is 4 KiB and stays in L1; Keccak and the multiply-adds
+            // are all ALU.
+            Algo::Sha256d | Algo::Blake2s | Algo::HeavyHash => Bound::Arithmetic,
             // Two SMix passes of 256 dependent random reads each over 32 KiB.
             // Measured on the GPU by removing SMix: it is 78% of a hash, and
             // the FastKDF that remains is the other 22%.
             Algo::Neoscrypt => Bound::Memory,
             // Sequentially dependent random reads over megabytes. The limit is
-            // a cache's latency and nothing about the ALUs -- which is what
-            // `design/mining.md` means by the budget being L3, and what makes
-            // this family CPU-only by construction rather than by convention.
-            Algo::Yespower { .. } => Bound::Memory,
+            // a cache's *latency* and nothing about the ALUs -- which is what
+            // makes this family CPU-only by construction rather than by
+            // convention, and which this arm reported as `Memory` while the
+            // comment said latency. `cache_budget` reads the variant, not the
+            // comment, so it capped the slice count to what the cache holds and
+            // denied the oversubscription that hides the chain. See `Bound`.
+            Algo::Yespower { .. } => Bound::Latency,
         }
     }
 
@@ -197,7 +282,22 @@ impl Algo {
     /// which silicon it landed on. Keeping that out of here is what stops this
     /// predicate quietly becoming a scheduler.
     pub fn contends_with(&self, other: &Algo) -> bool {
-        self.bound() == other.bound()
+        // **Not `==` on the bound, which is what this was.** That read correctly
+        // while `Bound` had two variants and broke silently when it gained a
+        // third: yespower moved to `Latency` and stopped contending with
+        // NeoScrypt's `Memory`, which is false. They wait on *different
+        // properties* of the memory system -- one on how much fits, the other on
+        // how long a dependent read takes -- and they still queue behind each
+        // other in the same caches.
+        //
+        // What the predicate is actually asking is whether two algorithms want
+        // the same part of the machine. There are two parts here: the execution
+        // units and the memory system.
+        fn waits_on_memory(b: Bound) -> bool {
+            matches!(b, Bound::Memory | Bound::Latency)
+        }
+        let (a, b) = (self.bound(), other.bound());
+        (waits_on_memory(a) && waits_on_memory(b)) || a == b
     }
 
     /// A human-readable parameter line for the report.
@@ -206,6 +306,7 @@ impl Algo {
             Algo::Sha256d => String::from("sha256d"),
             Algo::Blake2s => String::from("blake2s (RFC 7693)"),
             Algo::Neoscrypt => String::from("neoscrypt (N=128 r=2, ChaCha+Salsa)"),
+            Algo::HeavyHash => String::from("heavyhash (OBTC: SHA3-256, 64x64 nibble matrix)"),
             Algo::Yespower { v10, n, r, pers } => {
                 let mut s = String::from(if *v10 { "yespower 1.0 N=" } else { "yespower 0.5 N=" });
                 push_u32(&mut s, *n);
@@ -242,6 +343,7 @@ fn push_u32(s: &mut String, mut v: u32) {
 
 /// A prepared hasher, holding whatever working set its algorithm needs.
 pub enum Hasher {
+    HeavyHash(super::heavyhash::Heavy),
     Sha256d(hash::Midstate),
     Blake2s(blake2s::Midstate),
     Yespower(Yespower, Option<Vec<u8>>),
@@ -256,6 +358,7 @@ impl Hasher {
             Algo::Sha256d => Some(Hasher::Sha256d(hash::Midstate::new(header))),
             Algo::Blake2s => Some(Hasher::Blake2s(blake2s::Midstate::new(header))),
             Algo::Neoscrypt => Some(Hasher::Neoscrypt(Neoscrypt::new())),
+            Algo::HeavyHash => Some(Hasher::HeavyHash(super::heavyhash::Heavy::new(header))),
             Algo::Yespower { v10, n, r, pers } => {
                 let v = if *v10 { Version::V1_0 } else { Version::V0_5 };
                 Some(Hasher::Yespower(Yespower::new(v, *n, *r)?, pers.clone()))
@@ -268,6 +371,8 @@ impl Hasher {
     pub fn footprint(&self) -> usize {
         match self {
             Hasher::Sha256d(_) => 0,
+            // The matrix, which is the only thing held between nonces.
+            Hasher::HeavyHash(_) => 64 * 64,
             Hasher::Blake2s(_) => 0,
             Hasher::Yespower(y, _) => y.footprint(),
             Hasher::Neoscrypt(n) => n.footprint(),
@@ -285,6 +390,8 @@ impl Hasher {
         match self {
             Hasher::Sha256d(mid) => *mid = hash::Midstate::new(header),
             Hasher::Blake2s(mid) => *mid = blake2s::Midstate::new(header),
+            // The matrix belongs to the previous block, not to the job.
+            Hasher::HeavyHash(h) => h.retarget(header),
             // Neither depends on the header until `hash` is called, and
             // rebuilding either would throw away its working set -- 8 MiB for
             // yespower, 33 KiB for this one -- every time the pool sends work.
@@ -304,6 +411,7 @@ impl Hasher {
             // never existed while looking perfectly healthy.
             Hasher::Sha256d(mid) => mid.hash_with(nonce),
             Hasher::Blake2s(mid) => mid.hash_with(nonce),
+            Hasher::HeavyHash(h) => h.hash(header, nonce),
             Hasher::Yespower(y, pers) => {
                 let mut h = *header;
                 h[76..80].copy_from_slice(&nonce.to_le_bytes());

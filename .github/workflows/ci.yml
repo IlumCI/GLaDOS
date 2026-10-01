@@ -93,6 +93,8 @@ jobs:
           python3 tools/manifest.py --selftest
           python3 tools/payload.py --selftest
           python3 tools/godel.py --selftest
+          python3 tools/workercheck.py --selftest
+          python3 tools/roots.py --selftest
 
       # On main this reads an empty ledger and answers clean, which is
       # correct; on loop/** it is the invariant check the loop's own jobs
@@ -118,6 +120,18 @@ jobs:
       # exact blobs a real boot filed and refused.
       - name: The verdict verifier, against what the kernel already decided
         run: node supabase/functions/_shared/verdict.test.mjs
+
+      # The origin is a pin like the two keys, and it had no check at all -- which
+      # is why the pinned Supabase project was gone for some time with three
+      # workflows and every shipped image still naming it. `--expect` needs no
+      # network and compares the constant the kernel compiles against the variable
+      # CI publishes to, which were two pins of one fact free to disagree.
+      #
+      # `--resolve` is deliberately not here: a build refused because a DNS server
+      # was slow is a worse failure than the one this catches, and the daily
+      # `loop-night` job is where a liveness question belongs.
+      - name: The kernel's origin and the one CI publishes to agree
+        run: python3 tools/origin.py --selftest && python3 tools/origin.py --expect "${{ vars.SUPABASE_URL }}"
 
       # The JS copy of the verdict anchor against the kernel's pinned point.
       # A hand-copied pin drifts; this one decides which verdicts get

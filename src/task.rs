@@ -17,7 +17,32 @@
 use alloc::alloc::{alloc, Layout};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-pub const MAX_TASKS: usize = 24;
+/// **Forty, and the arithmetic is now visible where it was hidden by a bug.**
+///
+/// Until `COUNT` was fixed to start at one, the application processors' idle
+/// tasks were being overwritten by everything spawned afterwards, so the table
+/// looked as though it held twenty-four slots for work. It does not: on a
+/// sixteen-core machine fifteen of them are idle tasks that exist so a core has
+/// somewhere to stand, and they are permanent.
+///
+/// The worst case this has to fit, counted rather than estimated:
+///
+///     1   the boot thread, slot 0
+///     15  one idle task per application processor, at MAX_CPUS = 16
+///     2   clock and compositor
+///     16  mining slices, at MAX_SLICES = 16
+///     3   the resident mind, the agent and the socket task
+///     --
+///     37
+///
+/// Forty leaves three. `adopt_idle` and `spawn` both refuse past the end and say
+/// so, so overrunning this is a smaller pool or a missing painter rather than a
+/// corrupted table -- which is what it was.
+///
+/// The cost is the static `TASKS` array and nothing else: `adopt_idle` takes a
+/// stack that already exists, and only `spawn` allocates `STACK_SIZE`, so the
+/// sixteen slices are 1 MiB of stacks whether this is 24 or 40.
+pub const MAX_TASKS: usize = 40;
 const STACK_SIZE: usize = 64 * 1024;
 
 // Defined in assembly rather than as a `#[naked]` fn: this must have exactly
@@ -268,7 +293,25 @@ static PENDING: [AtomicUsize; MAX_CPUS] = [IDLE_SLOT; MAX_CPUS];
 /// joined is not given tasks, so bringing one up is a single store rather than
 /// a state machine.
 static JOINED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
-static COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Slot 0 is the boot thread's, always, and that is why this starts at one.
+///
+/// **It started at zero and the task table was being corrupted every boot.**
+/// `init_smp` runs before `task::init`, because `percpu::arm` happens there and
+/// the selftests need per-core landing pads -- so an application processor
+/// calling `adopt_idle` reached `COUNT.fetch_add` while the count was still
+/// zero and **took slot 0**. `task::init` then wrote the shell over it and
+/// called `COUNT.store(1)`, which discarded every slot the cores had claimed:
+/// `clock` and `comp` were handed 1 and 2, the mining slices 3 onward, and each
+/// one overwrote an idle task that a core's `CURRENT[cpu]` still pointed at.
+///
+/// Measured before it was fixed, on a sixteen-core boot: `smp` reported
+/// `16 scheduling (mask 0xffff), 0 idle task(s)`. Every core believed it was
+/// scheduling and not one idle task survived, so several cores had `CURRENT`
+/// naming slots that held the shell, the compositor or a slice -- and
+/// `schedule` writes `t[cur].state` unconditionally, so two cores could claim
+/// one task. It presented as nine tasks reading `running` at once and seven
+/// mining slices stuck `ready` for ever while `tasks` showed them as healthy.
+static COUNT: AtomicUsize = AtomicUsize::new(1);
 static SWITCHES: AtomicU64 = AtomicU64::new(0);
 static ENABLED: AtomicUsize = AtomicUsize::new(0);
 
@@ -295,7 +338,11 @@ pub fn init(name: &'static str) {
             root: 0,
         };
     }
-    COUNT.store(1, Ordering::Release);
+    // **`fetch_max` and not `store`.** By the time this runs the application
+    // processors have already claimed their own slots, and storing 1 here threw
+    // that away -- see `COUNT`. What this function owns is slot 0 and nothing
+    // else, so all it may assert about the count is that it is at least one.
+    COUNT.fetch_max(1, Ordering::AcqRel);
     CURRENT[0].store(0, Ordering::Release);
 }
 
@@ -365,10 +412,10 @@ pub fn migration_selftest() -> bool {
             break;
         }
     }
+    let seen = MIG_SEEN.load(Ordering::Relaxed).max(seen);
     MIG_STOP.store(true, Ordering::Relaxed);
     crate::time::delay_us(50_000);
 
-    let seen = MIG_SEEN.load(Ordering::Relaxed).max(seen);
     let loops = MIG_LOOPS.load(Ordering::Relaxed);
     let cores = seen.count_ones();
     crate::kprintln!("  ran {} times, seen on {} core(s), mask {:#x}", loops, cores, seen);
@@ -381,14 +428,72 @@ pub fn migration_selftest() -> bool {
         cores > 1 || crate::smp::online() == 0,
         "and ran on more than one core, or there was only one",
     );
+
+    // --- placement, which is a different question from permission ----------
+    //
+    // The claims above say the scheduler *can* carry a task. They cannot say
+    // where it went, and `unpin` does not decide: it makes a task eligible
+    // everywhere and leaves the choice to whichever core reaches it first. The
+    // mining sweep read two slices at one slice's rate for a whole four-second
+    // interval on exactly that, twice in four runs, while reporting two. So the
+    // property worth asserting is the one `spawn_on` adds -- that a task placed
+    // on a core runs on that core and on no other.
+    //
+    // A second task rather than repinning the first, because repinning a live
+    // task is the thing `spawn_on`'s doc explains cannot be relied on. This is
+    // the pattern the miner actually uses: placed before it has ever run.
+    // Sequential with the phase above -- the first migrant is stopped and the
+    // mask cleared -- because both write one mask and overlapping them would
+    // credit the placement with the migration's own sightings.
+    //
+    // Refusals first: they need no second core, and a core that never answered
+    // leaves the task unrunnable rather than merely misplaced, since `schedule`
+    // skips anything pinned elsewhere.
+    claim(
+        &mut ok,
+        spawn_on("nowhere", migrant, MAX_CPUS).is_none(),
+        "a task cannot be placed past the core table",
+    );
+    claim(
+        &mut ok,
+        spawn_on("nowhere", migrant, crate::smp::online()).is_none(),
+        "nor on a core that never answered, which would strand it",
+    );
+
+    let cpu = crate::smp::online().saturating_sub(1);
+    if cpu > 0 {
+        MIG_SEEN.store(0, Ordering::Relaxed);
+        MIG_STOP.store(false, Ordering::Relaxed);
+        let placed = spawn_on("placed", migrant, cpu);
+        claim(&mut ok, placed.is_some(), "a task can be placed on a real core");
+        crate::time::delay_us(400_000);
+        let mask = MIG_SEEN.load(Ordering::Relaxed);
+        MIG_STOP.store(true, Ordering::Relaxed);
+        crate::time::delay_us(50_000);
+        crate::kprintln!("  placed on core {}, then seen on mask {:#x}", cpu, mask);
+        // Exactly the one bit. `!= 0` would pass on a task that never ran there
+        // at all, and `& bit != 0` would pass on one running everywhere --
+        // which is the difference this whole pair of functions exists to name.
+        claim(&mut ok, mask == 1 << cpu, "and ran only there");
+    }
+
     ok
 }
 
 /// Let a task run on any core.
 ///
 /// The caller is asserting that everything the task touches is either its own
-/// or behind a real lock. Nothing in this kernel calls it yet, which is the
-/// honest state of the audit rather than an oversight.
+/// or behind a real lock.
+///
+/// **What this does not do is place the task**, and the difference cost a
+/// measurement. `schedule` only ever considers the tasks *this* core can run,
+/// so unpinning makes a task eligible everywhere and moves it nowhere: it
+/// migrates when some other core happens to reach it in a pass, which is the
+/// same "depends on what else is running" `checks` samples twice to work
+/// around. Two unpinned mining slices sat on core 0 for a whole four-second
+/// interval and hashed at one slice's rate while the report said two. Use
+/// `pin_to` where the point is one task per core; use this where the point is
+/// that the scheduler may choose.
 pub fn unpin(index: usize) -> bool {
     let mut t = TASKS.lock_irq();
     if index >= MAX_TASKS || t[index].state == State::Unused || t[index].idle {
@@ -454,6 +559,25 @@ pub fn join(cpu: usize) {
     JOINED.fetch_or(1 << cpu, Ordering::AcqRel);
 }
 
+/// Which cores are actually taking scheduling decisions, as a bitmask.
+///
+/// **Nothing printed this, and it is the one fact that explains a slice which
+/// never hashes.** A core joins only if `adopt_idle` found it a task slot, so a
+/// core can answer at boot, be counted by `smp::online`, and still never run
+/// anything -- and a task pinned to it sits `Ready` forever while `tasks` shows
+/// it as perfectly healthy. `online()` and this are different questions and were
+/// being read as one.
+pub fn joined_mask() -> u32 {
+    JOINED.load(Ordering::Acquire)
+}
+
+/// How many tasks are idle tasks, which is how many cores found a slot.
+pub fn idle_count() -> usize {
+    let t = TASKS.lock_irq();
+    let n = COUNT.load(Ordering::Acquire);
+    t.iter().take(n).filter(|x| x.idle).count()
+}
+
 fn joined(cpu: usize) -> bool {
     JOINED.load(Ordering::Acquire) & (1 << cpu) != 0
 }
@@ -463,8 +587,44 @@ fn cur_of(cpu: usize) -> usize {
     CURRENT[cpu].load(Ordering::Acquire)
 }
 
-/// Create a task. Returns its index.
+/// Create a task on core 0, which is where anything unaudited belongs.
 pub fn spawn(name: &'static str, entry: fn()) -> Option<usize> {
+    spawn_on(name, entry, 0)
+}
+
+/// Create a task already confined to one core. Returns its index.
+///
+/// **The core is chosen here and not afterwards, and that is the whole reason
+/// this exists rather than a `pin_to`.** Two things go wrong with repinning a
+/// task that already exists, and the second is not fixable from outside the
+/// scheduler:
+///
+/// - `spawn` publishes a task as `Ready` before its caller can pin it, so there
+///   is a window in which some core may claim it. It is a narrow window, since
+///   the default pin is core 0 and only core 0 can act on it, but core 0 is
+///   exactly the core running the caller and a timer tick lands inside it.
+/// - `schedule` checks a pin when *selecting* a task and never re-checks the
+///   task it is already running: with no other `Ready` task on that core the
+///   selection loop returns early and the current task stays. Measured -- a
+///   migrant pinned to core 7 went on running on core 2 for 400 ms, because
+///   core 2 had nothing else to stand on. So a pin applied late is honoured
+///   whenever the core happens to be busy and ignored when it is not, which is
+///   the worst of the three possible behaviours.
+///
+/// Pinning is strictly *tighter* than `unpin`, so it makes the same audit claim
+/// and no larger one: a task confined to one core still runs concurrently with
+/// every other core, so everything it touches must be its own or behind a real
+/// lock.
+///
+/// The core has to be one that actually answered at boot. `smp::online` counts
+/// those, and a `cpu` past it names a core that will never take a scheduling
+/// pass -- so the task would simply never run. Refused rather than clamped: a
+/// caller that got the core count wrong wants to hear so, because the
+/// alternative is a task that exists, reports as spawned, and does nothing.
+pub fn spawn_on(name: &'static str, entry: fn(), cpu: usize) -> Option<usize> {
+    if cpu >= MAX_CPUS || cpu >= crate::smp::online() {
+        return None;
+    }
     let slot = COUNT.load(Ordering::Acquire);
     if slot >= MAX_TASKS {
         return None;
@@ -504,8 +664,11 @@ pub fn spawn(name: &'static str, entry: fn()) -> Option<usize> {
             name,
             entry: Some(entry),
             switches: 0,
-            // Core 0 until somebody has audited what this task touches.
-            pin: 0,
+            // Core 0 unless the caller has audited what this task touches
+            // and said where it goes. Written under the same lock that
+            // publishes the task, so there is no moment at which it is
+            // claimable with the wrong pin.
+            pin: cpu as i16,
             idle: false,
             fpu: alloc_fpu_area(),
             ring3: None,

@@ -61,6 +61,8 @@ pub enum Error {
     NoOffer,
     NoAck,
     Refused,
+    /// This task is already mid-exchange on the one UDP port.
+    Busy,
 }
 
 impl Error {
@@ -70,6 +72,7 @@ impl Error {
             Error::NoOffer => "no server offered a lease",
             Error::NoAck => "the server never confirmed",
             Error::Refused => "the server refused the request",
+            Error::Busy => "this task is already using the UDP port",
         }
     }
 }
@@ -217,6 +220,14 @@ pub fn configure_on(n: usize) -> Result<Config, Error> {
     };
     let xid = crate::time::rdtsc() as u32;
 
+    // **The port first, and the address second.** A claim that is refused has
+    // to leave the interface as it found it, so it is taken before the address
+    // is given up rather than after -- the other order would return an error
+    // with the machine unaddressed. See `udp::session`.
+    let Some(udp_session) = udp::session(CLIENT_PORT) else {
+        return Err(Error::Busy);
+    };
+
     // Give up our address for the duration. It is not ours until the server
     // says so, and `addressed_to_us` lets everything through while it is
     // unspecified -- which is exactly what receiving the reply requires.
@@ -224,7 +235,6 @@ pub fn configure_on(n: usize) -> Result<Config, Error> {
     let mut blank = previous;
     blank.ip = UNSPECIFIED;
     super::set_config_of(n, blank);
-    udp::bind(CLIENT_PORT);
 
     let outcome = (|| {
         let discover = message(DISCOVER, xid, mac, None, None);
@@ -258,7 +268,7 @@ pub fn configure_on(n: usize) -> Result<Config, Error> {
         ))
     })();
 
-    udp::unbind();
+    drop(udp_session);
 
     match outcome {
         Ok((cfg, lease)) => {

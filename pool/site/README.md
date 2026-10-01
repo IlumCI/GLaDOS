@@ -32,10 +32,40 @@ copies can be compared, and so a later Merkle distributor has something to be
 checked against. The page says this in its footer rather than letting a green
 tick imply more than it means.
 
+## The `ledger.json` beside this file
+
+**A real ledger from a real run, not a hand-written one.** Two `poolclient.py`
+miners against the musl daemon on loopback, twelve sha256d shares interleaved,
+a 75/25 split -- and `tools/ledgercheck.py` agrees with every figure in it,
+digest included. It is here so the page can be opened and looked at with
+something in it.
+
+It replaced a sample whose window was **2^28 against a single 2^30 share**, so
+the work inside the window was 4.3x the window itself. That is a reachable state
+rather than an impossible one -- PPLNS cannot evict below one share, so a share
+larger than the whole window overshoots it -- and it is the misconfiguration the
+pool warns about *at startup*, in words about paying "the most recent shares and
+nothing else". A published ledger carries no startup log, so a reader had no way
+to learn it. `ledgercheck.py` prints that as a note now; a note and not a claim,
+because refusing the state would call a genuine record invalid.
+
+The old sample also labelled its coin `btc`, which reads as a record of real
+Bitcoin mining. The replacement's coin is `probe` and its workers are
+`probe-a.rig` and `probe-b.rig`, so nothing about it can be mistaken for an
+event.
+
 ## Deploying
 
     cp pool/site/index.html  <pages-repo>/
     cp <state>/ledger.json   <pages-repo>/
+
+**`docs/pool/ledger.json` is deliberately absent**, which is why the published
+page reports `Could not read ledger.json: HTTP 404`. `docs/pool/index.html` is
+live at <https://glados.aperture.institute/pool/> and byte-identical to the file
+beside this one; what is missing is a record worth publishing. Putting the probe
+ledger there would put a document on a public page that reads as a live pool with
+miners on it, and there is no upstream, no chain and nobody mining. The page's
+404 is the honest state and it says so in a sentence rather than looking broken.
 
 The pool writes `ledger.json` through a temporary and renames, so a publisher
 copying it never sees half a document.

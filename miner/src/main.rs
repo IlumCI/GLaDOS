@@ -482,9 +482,23 @@ fn main() {
         }
     };
 
-    if let Err(e) = run(&pool, &worker, backend.as_mut(), &weights) {
-        eprintln!("[miner] {e}");
-        std::process::exit(1);
+    // **Reconnect, as the kernel's miner does.** A pool restarts -- a Cloudflare
+    // Durable Object is reset every time its code is deployed -- and a miner that
+    // exits on the first dropped connection is a machine that stops earning until
+    // somebody notices. Backoff doubles to a minute, and resets once a session has
+    // lasted long enough to count as a working one.
+    let mut backoff = std::time::Duration::from_secs(2);
+    loop {
+        let began = std::time::Instant::now();
+        match run(&pool, &worker, backend.as_mut(), &weights) {
+            Ok(()) => eprintln!("[miner] disconnected; reconnecting in {}s", backoff.as_secs()),
+            Err(e) => eprintln!("[miner] {e}; retrying in {}s", backoff.as_secs()),
+        }
+        if began.elapsed() > std::time::Duration::from_secs(60) {
+            backoff = std::time::Duration::from_secs(2);
+        }
+        std::thread::sleep(backoff);
+        backoff = (backoff * 2).min(std::time::Duration::from_secs(60));
     }
 }
 

@@ -1,0 +1,108 @@
+--- a/contracts/src/GladosDistributor.sol
++++ b/contracts/src/GladosDistributor.sol
+@@ -206,6 +206,9 @@
+     /// in `quote` for nothing.
+     address private _inFlight;
+ 
++    /// AUDIT-2 F2/F3: what the in-flight swap may be paid, exactly once.
++    uint256 private _budget;
++
+     /// The two ends of V3's price range, from the reference `TickMath`.
+     ///
+     /// A `swap` must name a price limit, and these are the values that mean "no
+@@ -258,7 +261,7 @@
+         // distributor cannot open `Market` epochs. Requiring them would make
+         // the contract undeployable on a chain where the pool does not exist
+         // yet, which is a state this project has been in twice.
+-        require((pair_ == address(0)) == (quote_ == address(0)), "pair and quote go together");
++        require(pair_ == address(0) || quote_ != address(0), "a pair needs a quote");
+         // **The pair is checked against the two tokens it is supposed to hold.**
+         // `design/audit.md` finding 1: without this, `quoteIsToken0` below is a
+         // comparison of two addresses that is never reconciled with what the
+@@ -461,6 +464,8 @@
+         // hook was unclaimable, and the fix is this one line.
+         address prev = _inFlight;
+         _inFlight = pool_;
++        uint256 prevBudget = _budget;
++        _budget = amount;
+         IUniswapV3Pool(pool_).swap(
+             msg.sender,
+             zeroForOne,
+@@ -471,7 +476,11 @@
+         // Restored on the way out rather than zeroed: a stale value here is a
+         // standing authorisation to be paid, and an unconditional zero is what
+         // broke a nested claim.
++        // AUDIT-2 F2/F3: the callback spends the budget to zero or refuses,
++        // so reaching here with any left means no callback was paid.
++        if (_budget != 0) revert BadCallback();
+         _inFlight = prev;
++        _budget = prevBudget;
+ 
+         received = IERC20(reward_).balanceOf(msg.sender) - before;
+         if (received < minOut) revert TooLittleOut(received, minOut);
+@@ -493,6 +502,13 @@
+         // this contract started correctly. Refuse rather than send zero and
+         // let the pool decide what that meant.
+         if (owed <= 0) revert BadCallback();
++        // AUDIT-2 F2/F3: exactly the leaf, exactly once. More is another
++        // epoch's quote; less is a partial fill whose remainder the epoch was
++        // charged for and nobody could ever reclaim. The outer frame restores
++        // both fields after the swap.
++        if (uint256(owed) != _budget) revert BadCallback();
++        _budget = 0;
++        _inFlight = address(0);
+         _send(quote, msg.sender, uint256(owed));
+     }
+ 
+@@ -511,7 +527,7 @@
+         // published accounting read, so `received` is the field that exists to
+         // be true.
+         uint256 before = IERC20(token).balanceOf(msg.sender);
+-        _send(token, msg.sender, amount);
++        _sendExact(token, msg.sender, amount);
+         uint256 got = IERC20(token).balanceOf(msg.sender) - before;
+         emit Claimed(epochId, msg.sender, amount, got);
+     }
+@@ -537,7 +553,7 @@
+         uint256 out = _amountOut(amount, rIn, rOut);
+         if (out == 0) revert TooLittleOut(0, minOut);
+ 
+-        _send(quote, pair, amount);
++        _sendExact(quote, pair, amount);
+         uint256 before = IERC20(token).balanceOf(msg.sender);
+         // `swap` takes outputs positionally in the pair's own token order, and
+         // asking for the wrong one asks the pool to pay out what is being paid
+@@ -611,7 +627,7 @@
+         e.reclaimed = true;
+         // The epoch's own asset: a `Market` epoch holds `quote`, and sending it
+         // back as `token` would be sending tokens it does not have.
+-        if (amount > 0) _send(e.mode == Mode.Direct ? token : quote, operator, amount);
++        if (amount > 0) _sendExact(e.mode == Mode.Direct ? token : quote, operator, amount);
+         emit Reclaimed(epochId, amount);
+     }
+ 
+@@ -710,6 +726,15 @@
+         _move(asset, abi.encodeWithSelector(0xa9059cbb, to, amount));
+     }
+ 
++    /// AUDIT-2 F4/F7: a transfer out that must debit this contract by exactly
++    /// `amount` -- not more (a sender-side fee drawing on other epochs), not
++    /// less (a token that reports success and moves nothing).
++    function _sendExact(address asset, address to, uint256 amount) private {
++        uint256 had = IERC20(asset).balanceOf(address(this));
++        _send(asset, to, amount);
++        if (had - IERC20(asset).balanceOf(address(this)) != amount) revert TransferFailed();
++    }
++
+     /// Uniswap V2's constant-product formula with its 0.3% fee, written out.
+     ///
+     /// Written out rather than fetched from the pair, because a pair does not
+@@ -739,7 +764,7 @@
+         // whoever is reading a failed claim at three in the morning. Empty is
+         // still success, because that is the second ERC-20 convention and the
+         // reason this helper exists at all.
+-        if (ret.length != 0 && (ret.length < 32 || !abi.decode(ret, (bool)))) {
++        if (ret.length != 0 && (ret.length < 32 || abi.decode(ret, (uint256)) != 1)) {
+             revert TransferFailed();
+         }
+     }

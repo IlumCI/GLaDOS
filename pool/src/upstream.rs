@@ -18,6 +18,16 @@
 //! inventing a routing layer to undo something nobody asked for; a thread that
 //! blocks in `read` costs a stack and nothing else.
 //!
+//! ### No socket in the protocol
+//!
+//! `Upstream` is the conversation with no I/O in it: bytes in, lines out, and a
+//! tick for the things that happen on a clock. The native daemon drives it from
+//! a thread with a `TcpStream`; the Cloudflare pool drives the *same* state
+//! machine from `connect()` in a Durable Object, compiled to WebAssembly. That
+//! is `session.rs`'s bargain for the miner-facing side, made again here: two
+//! transports, one set of rules, and nothing on either side of the boundary is
+//! allowed to decide anything.
+//!
 //! ### What this is not
 //!
 //! It is a **proxy** and not a full pool: there is no node, no block template,
@@ -27,11 +37,9 @@
 //! gate get to work against an upstream that already produces correct work,
 //! and running nodes is a decision deferred until volume justifies it.
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Mutex;
 
+use crate::clock;
 use crate::json::Json;
 use crate::mine::stratum::{self, Message};
 use crate::mine::u256::{target_for, U256};
@@ -39,221 +47,363 @@ use crate::pool::{Pool, Source, Work};
 
 /// How long to wait for the subscribe and authorize replies.
 const HANDSHAKE_MS: u64 = 15_000;
-/// Reconnect backoff, doubling.
-const BACKOFF_MIN: Duration = Duration::from_secs(2);
-const BACKOFF_MAX: Duration = Duration::from_secs(60);
 /// How long a connection may go silent before it is assumed dead.
 ///
 /// A pool sends a job every so often even when nothing changes, so silence for
 /// this long is a connection that is open at the socket layer and finished in
 /// every way that matters -- the half-dead case, which is invisible to `read`
 /// because `read` is simply blocked.
-const SILENCE_LIMIT: Duration = Duration::from_secs(300);
+const SILENCE_MS: u64 = 300_000;
+/// Longer than this and a line is a desynchronised stream, not a message.
+const MAX_BUF: usize = 131_072;
 
-/// Start a client thread for every coin that has an upstream.
-pub fn start_all(pool: Arc<Mutex<Pool>>) {
-    let coins: Vec<(usize, String, Source)> = {
-        let p = pool.lock().unwrap();
-        p.coins
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (i, c.label.clone(), c.source.clone()))
-            .collect()
-    };
-    for (slot, label, source) in coins {
-        let Source::Upstream {
-            host,
-            port,
-            user,
-            pass,
-        } = source
-        else {
+/// What one step of the conversation produced.
+#[derive(Default)]
+pub struct UpOut {
+    /// Lines for upstream, each already ending in a newline.
+    pub send: Vec<String>,
+    pub log: Vec<String>,
+    /// Work was installed, so connected miners should be handed fresh jobs.
+    pub work: bool,
+    /// The connection is finished, and why. The driver closes and reconnects.
+    pub close: Option<String>,
+}
+
+impl UpOut {
+    fn fail(mut self, why: &str) -> UpOut {
+        self.close = Some(String::from(why));
+        self
+    }
+}
+
+/// One upstream connection's state, from subscribe to the last submit.
+pub struct Upstream {
+    pub slot: usize,
+    pub label: String,
+    pub host: String,
+    pub port: u16,
+    user: String,
+    pass: String,
+    buf: Vec<u8>,
+    e1: Vec<u8>,
+    e2_size: usize,
+    got_sub: bool,
+    authorized: bool,
+    up_target: U256,
+    pending: Option<stratum::Job>,
+    /// Upstream job ids a share may still be submitted against. A `clean`
+    /// notify empties it: upstream has abandoned every earlier job, and a share
+    /// for one is refused as "Invalid job id" -- measured at 20% of forwards on
+    /// zpool's yescryptR16 port before this. Dropped here instead, and counted.
+    live_jobs: Vec<String>,
+    /// Forwards dropped because their job was dead, for the log.
+    dropped_stale: u64,
+    opened_ms: u64,
+    heard_ms: u64,
+    next_id: u64,
+    /// This coin's `Algo::stratum_factor`, applied to every difficulty upstream sends.
+    factor: u32,
+}
+
+impl Upstream {
+    /// The upstream for `slot`, if that coin has one.
+    pub fn for_slot(pool: &Pool, slot: usize) -> Option<Upstream> {
+        let c = pool.coins.get(slot)?;
+        let Source::Upstream { host, port, user, pass } = &c.source else {
+            return None;
+        };
+        Some(Upstream {
+            slot,
+            label: c.label.clone(),
+            host: host.clone(),
+            port: *port,
+            user: user.clone(),
+            pass: pass.clone(),
+            buf: Vec::new(),
+            e1: Vec::new(),
+            e2_size: 4,
+            got_sub: false,
+            authorized: false,
+            up_target: target_for(1, 0).unwrap_or(U256::ZERO),
+            pending: None,
+            live_jobs: Vec::new(),
+            dropped_stale: 0,
+            opened_ms: 0,
+            heard_ms: 0,
+            next_id: 1000,
+            factor: c.algo.stratum_factor(),
+        })
+    }
+
+    pub fn live(&self) -> bool {
+        self.got_sub && self.authorized
+    }
+
+    /// A fresh connection is open: forget the last one and subscribe.
+    ///
+    /// `stratum::subscribe` and `authorize` are the kernel's own, so what goes
+    /// on this wire is byte for byte what the kernel would send.
+    pub fn open(&mut self) -> UpOut {
+        self.buf.clear();
+        self.e1.clear();
+        self.got_sub = false;
+        self.authorized = false;
+        self.pending = None;
+        self.live_jobs.clear();
+        self.opened_ms = clock::now_ms();
+        self.heard_ms = self.opened_ms;
+        let mut out = UpOut::default();
+        out.log.push(format!("[up {}] connected to {}:{}", self.label, self.host, self.port));
+        out.send.push(stratum::subscribe(1));
+        out
+    }
+
+    /// Bytes from upstream, in whatever pieces the transport delivered them.
+    pub fn on_bytes(&mut self, pool: &Mutex<Pool>, bytes: &[u8]) -> UpOut {
+        let mut out = UpOut::default();
+        self.buf.extend_from_slice(bytes);
+        if !bytes.is_empty() {
+            self.heard_ms = clock::now_ms();
+        }
+        loop {
+            let line = match stratum::take_line(&mut self.buf) {
+                Ok(Some(l)) => l,
+                Ok(None) => break,
+                Err(_) => return out.fail("upstream sent a line too long to be a message"),
+            };
+            match stratum::classify(&line) {
+                Ok(Message::Response { id, ok, body }) => match id {
+                    1 => {
+                        let Some((e1, size)) = stratum::subscribe_result(&body) else {
+                            return out.fail("the subscribe reply could not be read");
+                        };
+                        self.e1 = e1;
+                        self.e2_size = size;
+                        self.got_sub = true;
+                        out.send.push(stratum::authorize(2, &self.user, &self.pass));
+                    }
+                    2 => {
+                        if !ok {
+                            // Named rather than retried quietly. A refused worker is
+                            // a wrong address or a wrong password, and a backoff loop
+                            // against that is a machine reconnecting forever for a
+                            // reason nobody is being told.
+                            return out.fail("upstream refused this worker -- check the address and password");
+                        }
+                        self.authorized = true;
+                        out.log.push(format!(
+                            "[up {}] subscribed and authorized, extranonce1 {} bytes, extranonce2 {}",
+                            self.label,
+                            self.e1.len(),
+                            self.e2_size
+                        ));
+                        // `set_difficulty` and the first `notify` routinely arrive
+                        // *before* the authorize reply, so a job may be waiting.
+                        if let Some(job) = self.pending.take() {
+                            self.install(pool, job, &mut out);
+                        }
+                    }
+                    // A submit's answer. Logged either way: a pool that rejects
+                    // everything and a pool that is not there look identical from
+                    // a share counter alone.
+                    // The reason is printed verbatim: "low difficulty" says the
+                    // target arithmetic is wrong, "job not found" says staleness,
+                    // "duplicate" says the nonce space -- folding them into one
+                    // word threw away the only thing that tells them apart.
+                    _ => {
+                        let why = if ok {
+                            String::new()
+                        } else {
+                            let e = body.get("error");
+                            let m = e
+                                .and_then(|e| e.idx(1))
+                                .and_then(|m| m.as_str())
+                                .or_else(|| e.and_then(|e| e.get("message")).and_then(|m| m.as_str()))
+                                .or_else(|| e.and_then(|e| e.as_str()))
+                                .unwrap_or("no reason given");
+                            format!(": {m}")
+                        };
+                        out.log.push(format!(
+                            "[up {}] submit {id} {}{why}",
+                            self.label,
+                            if ok { "accepted" } else { "REJECTED" }
+                        ))
+                    }
+                },
+                Ok(Message::Notify { method, params }) => {
+                    let mut job = None;
+                    take_notification(&method, &params, self.factor, &mut self.up_target, &mut job);
+                    if let Some(j) = job {
+                        if self.live() {
+                            self.install(pool, j, &mut out);
+                        } else {
+                            self.pending = Some(j);
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        if self.buf.len() > MAX_BUF {
+            return out.fail("upstream sent a line too long to be a message");
+        }
+        out
+    }
+
+    /// Time passed, or a miner just submitted: forward what qualifies, and
+    /// notice a handshake that stalled or a connection that went silent.
+    pub fn on_tick(&mut self, pool: &Mutex<Pool>) -> UpOut {
+        let mut out = UpOut::default();
+        let now = clock::now_ms();
+        if !self.live() {
+            if now.saturating_sub(self.opened_ms) > HANDSHAKE_MS {
+                return out.fail("upstream did not finish the handshake in time");
+            }
+            return out;
+        }
+        if now.saturating_sub(self.heard_ms) > SILENCE_MS {
+            return out.fail("upstream went silent; reconnecting");
+        }
+        let forwards = pool.lock().unwrap().take_forwards_for(self.slot);
+        for f in forwards {
+            if !self.live_jobs.iter().any(|j| *j == f.job_id) {
+                self.dropped_stale += 1;
+                if self.dropped_stale.is_power_of_two() {
+                    out.log.push(format!(
+                        "[up {}] {} share(s) dropped for jobs upstream had abandoned",
+                        self.label, self.dropped_stale
+                    ));
+                }
+                continue;
+            }
+            self.next_id += 1;
+            out.log.push(format!("[up {}] forwarding a share for job {}", self.label, f.job_id));
+            out.send.push(stratum::submit(
+                self.next_id,
+                &self.user,
+                &f.job_id,
+                &f.extranonce2,
+                &f.ntime_be,
+                &f.nonce_be,
+            ));
+        }
+        out
+    }
+
+    fn install(&mut self, pool: &Mutex<Pool>, job: stratum::Job, out: &mut UpOut) {
+        if job.clean {
+            self.live_jobs.clear();
+        }
+        self.live_jobs.push(job.id.clone());
+        // Bounded: a pool that never sends `clean` would otherwise grow this
+        // for the life of the connection. Sixteen is far past how many jobs a
+        // miner can be holding shares for.
+        if self.live_jobs.len() > 16 {
+            self.live_jobs.remove(0);
+        }
+        let t = self.up_target.to_be_bytes();
+        out.log.push(format!(
+            "[up {}] job {}, {} merkle level(s), target {:02x}{:02x}{:02x}{:02x}..",
+            self.label,
+            job.id,
+            job.branch.len(),
+            t[0],
+            t[1],
+            t[2],
+            t[3]
+        ));
+        let w = Work {
+            job_id: job.id,
+            prev_wire: job.prev_wire,
+            coinb1: job.coinb1,
+            coinb2: job.coinb2,
+            branch: job.branch,
+            version: job.version,
+            ntime: job.ntime,
+            nbits: job.nbits,
+            extranonce1: self.e1.clone(),
+            extranonce2_size: self.e2_size,
+            up_target: self.up_target,
+        };
+        pool.lock().unwrap().set_work(self.slot, w);
+        out.work = true;
+    }
+}
+
+/// Start a client thread for every coin that has an upstream. Native only.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn start_all(pool: std::sync::Arc<Mutex<Pool>>) {
+    use std::time::Duration;
+    let n = pool.lock().unwrap().coins.len();
+    for slot in 0..n {
+        let Some(mut up) = Upstream::for_slot(&pool.lock().unwrap(), slot) else {
             continue;
         };
-        let pool = Arc::clone(&pool);
+        let pool = std::sync::Arc::clone(&pool);
         std::thread::spawn(move || {
-            let mut backoff = BACKOFF_MIN;
+            let (min, max) = (Duration::from_secs(2), Duration::from_secs(60));
+            let mut backoff = min;
             loop {
-                match session(&pool, slot, &label, &host, port, &user, &pass) {
+                match drive(&pool, &mut up) {
                     Ok(()) => {
-                        println!("[up {label}] upstream closed the connection");
-                        backoff = BACKOFF_MIN;
+                        println!("[up {}] upstream closed the connection", up.label);
+                        backoff = min;
                     }
-                    Err(e) => println!("[up {label}] {e}"),
+                    Err(e) => println!("[up {}] {e}", up.label),
                 }
                 std::thread::sleep(backoff);
-                backoff = (backoff * 2).min(BACKOFF_MAX);
+                backoff = (backoff * 2).min(max);
             }
         });
     }
 }
 
-fn session(
-    pool: &Arc<Mutex<Pool>>,
-    slot: usize,
-    label: &str,
-    host: &str,
-    port: u16,
-    user: &str,
-    pass: &str,
-) -> Result<(), String> {
-    println!("[up {label}] connecting to {host}:{port}");
-    let mut sock = TcpStream::connect((host, port)).map_err(|e| format!("connect: {e}"))?;
-    // Short, so the loop below gets a turn to check for shares to forward and
-    // to notice silence. The read timing out is the ordinary case here rather
-    // than an error.
-    sock.set_read_timeout(Some(Duration::from_millis(250)))
-        .map_err(|e| format!("{e}"))?;
+/// One connection, driven over a `TcpStream` until it ends.
+#[cfg(not(target_arch = "wasm32"))]
+fn drive(pool: &Mutex<Pool>, up: &mut Upstream) -> Result<(), String> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
 
-    let mut buf: Vec<u8> = Vec::new();
+    println!("[up {}] connecting to {}:{}", up.label, up.host, up.port);
+    let mut sock = TcpStream::connect((up.host.as_str(), up.port)).map_err(|e| format!("connect: {e}"))?;
+    // Short, so the loop gets a turn to forward shares and to notice silence.
+    // The read timing out is the ordinary case here rather than an error.
+    sock.set_read_timeout(Some(Duration::from_millis(250))).map_err(|e| format!("{e}"))?;
+
+    let emit = |sock: &mut TcpStream, out: UpOut| -> Result<(), String> {
+        for l in &out.log {
+            println!("{l}");
+        }
+        for m in &out.send {
+            sock.write_all(m.as_bytes()).map_err(|e| format!("write: {e}"))?;
+        }
+        match out.close {
+            Some(why) => Err(why),
+            None => Ok(()),
+        }
+    };
+    let o = up.open();
+    emit(&mut sock, o)?;
     let mut chunk = [0u8; 8192];
-
-    // The handshake. `stratum::subscribe` and `authorize` are the kernel's own,
-    // so what goes on this wire is byte for byte what the kernel would send.
-    sock.write_all(stratum::subscribe(1).as_bytes())
-        .map_err(|e| format!("subscribe: {e}"))?;
-
-    let mut e1: Vec<u8> = Vec::new();
-    let mut e2_size = 4usize;
-    let mut got_sub = false;
-    let mut authorized = false;
-    // `set_difficulty` and the first `notify` routinely arrive *before* the
-    // reply to a call, so notifications are handled throughout rather than
-    // skipped while an id is awaited. `stratum.rs` records the same thing about
-    // the kernel's own `await_id`.
-    let mut up_target = target_for(1, 0).unwrap_or(U256::ZERO);
-    let mut pending_notify: Option<stratum::Job> = None;
-
-    let deadline = Instant::now() + Duration::from_millis(HANDSHAKE_MS);
-    while Instant::now() < deadline && !(got_sub && authorized) {
-        if !pump(&mut sock, &mut buf, &mut chunk)? {
-            return Err(String::from("upstream hung up during the handshake"));
-        }
-        while let Ok(Some(line)) = stratum::take_line(&mut buf) {
-            match stratum::classify(&line) {
-                Ok(Message::Response { id, ok, body }) => {
-                    if id == 1 {
-                        let Some((got_e1, got_size)) = stratum::subscribe_result(&body) else {
-                            return Err(String::from("the subscribe reply could not be read"));
-                        };
-                        e1 = got_e1;
-                        e2_size = got_size;
-                        got_sub = true;
-                        sock.write_all(stratum::authorize(2, user, pass).as_bytes())
-                            .map_err(|e| format!("authorize: {e}"))?;
-                    } else if id == 2 {
-                        if !ok {
-                            // Named rather than retried. A refused worker is a
-                            // wrong address or a wrong password, and a backoff
-                            // loop against that is a machine reconnecting
-                            // forever for a reason nobody is being told.
-                            return Err(String::from(
-                                "upstream refused this worker -- check the address and password",
-                            ));
-                        }
-                        authorized = true;
-                    }
-                }
-                Ok(Message::Notify { method, params }) => {
-                    take_notification(&method, &params, &mut up_target, &mut pending_notify);
-                }
-                Err(_) => {}
-            }
-        }
-    }
-    if !(got_sub && authorized) {
-        return Err(String::from("upstream did not finish the handshake in time"));
-    }
-    println!(
-        "[up {label}] subscribed and authorized, extranonce1 {} bytes, extranonce2 {}",
-        e1.len(),
-        e2_size
-    );
-
-    if let Some(job) = pending_notify.take() {
-        install(pool, slot, label, job, &e1, e2_size, up_target);
-    }
-
-    let mut last_heard = Instant::now();
     loop {
-        if !pump(&mut sock, &mut buf, &mut chunk)? {
-            return Ok(());
-        }
-        let mut heard = false;
-        while let Ok(Some(line)) = stratum::take_line(&mut buf) {
-            heard = true;
-            match stratum::classify(&line) {
-                Ok(Message::Notify { method, params }) => {
-                    let mut job = None;
-                    take_notification(&method, &params, &mut up_target, &mut job);
-                    if let Some(j) = job {
-                        install(pool, slot, label, j, &e1, e2_size, up_target);
-                    }
-                }
-                Ok(Message::Response { id, ok, .. }) => {
-                    // A submit's answer. Logged either way: a pool that
-                    // rejects everything and a pool that is not there look
-                    // identical from a share counter alone.
-                    println!(
-                        "[up {label}] submit {id} {}",
-                        if ok { "accepted" } else { "REJECTED" }
-                    );
-                }
-                Err(_) => {}
-            }
-        }
-        if heard {
-            last_heard = Instant::now();
-        } else if last_heard.elapsed() > SILENCE_LIMIT {
-            return Err(String::from("upstream went silent; reconnecting"));
-        }
-
-        // Anything the miners found that is good enough for upstream.
-        let forwards = {
-            let mut p = pool.lock().unwrap();
-            p.take_forwards()
+        let n = match sock.read(&mut chunk) {
+            Ok(0) => return Ok(()),
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => 0,
+            Err(e) => return Err(format!("read: {e}")),
         };
-        for f in forwards {
-            if f.slot as usize != slot {
-                continue;
-            }
-            let id = 1000 + (Instant::now().elapsed().as_nanos() as u64 & 0xffff);
-            let msg = stratum::submit(
-                id,
-                user,
-                &f.job_id,
-                &f.extranonce2,
-                &f.ntime_be,
-                &f.nonce_be,
-            );
-            println!("[up {label}] forwarding a share for job {}", f.job_id);
-            sock.write_all(msg.as_bytes())
-                .map_err(|e| format!("submit: {e}"))?;
-        }
-    }
-}
-
-/// Read whatever is there. `false` means upstream closed.
-fn pump(sock: &mut TcpStream, buf: &mut Vec<u8>, chunk: &mut [u8]) -> Result<bool, String> {
-    match sock.read(chunk) {
-        Ok(0) => Ok(false),
-        Ok(n) => {
-            buf.extend_from_slice(&chunk[..n]);
-            Ok(true)
-        }
-        Err(e)
-            if e.kind() == std::io::ErrorKind::WouldBlock
-                || e.kind() == std::io::ErrorKind::TimedOut =>
-        {
-            Ok(true)
-        }
-        Err(e) => Err(format!("read: {e}")),
+        let o = up.on_bytes(pool, &chunk[..n]);
+        emit(&mut sock, o)?;
+        let o = up.on_tick(pool);
+        emit(&mut sock, o)?;
     }
 }
 
 fn take_notification(
     method: &str,
     params: &Json,
+    factor: u32,
     up_target: &mut U256,
     job: &mut Option<stratum::Job>,
 ) {
@@ -269,8 +419,11 @@ fn take_notification(
             let Some((m, scale)) = stratum::decimal(&text) else {
                 return;
             };
+            // Saturating rather than refusing: a difficulty easy enough to
+            // overflow after the factor is a target that accepts everything,
+            // which the all-ones maximum states exactly.
             if let Some(t) = target_for(m, scale) {
-                *up_target = t;
+                *up_target = t.mul_u32(factor).unwrap_or(U256::MAX);
             }
         }
         "mining.notify" => {
@@ -296,37 +449,46 @@ fn raw_number(j: &Json) -> Option<String> {
     }
 }
 
-fn install(
-    pool: &Arc<Mutex<Pool>>,
-    slot: usize,
-    label: &str,
-    job: stratum::Job,
-    e1: &[u8],
-    e2_size: usize,
-    up_target: U256,
-) {
-    let t = up_target.to_be_bytes();
-    println!(
-        "[up {label}] job {}, {} merkle level(s), target {:02x}{:02x}{:02x}{:02x}..",
-        job.id,
-        job.branch.len(),
-        t[0],
-        t[1],
-        t[2],
-        t[3]
-    );
-    let w = Work {
-        job_id: job.id,
-        prev_wire: job.prev_wire,
-        coinb1: job.coinb1,
-        coinb2: job.coinb2,
-        branch: job.branch,
-        version: job.version,
-        ntime: job.ntime,
-        nbits: job.nbits,
-        extranonce1: e1.to_vec(),
-        extranonce2_size: e2_size,
-        up_target,
-    };
-    pool.lock().unwrap().set_work(slot, w);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pool::Forward;
+
+    fn notify(id: &str, clean: bool) -> String {
+        format!(
+            "{{\"id\":null,\"method\":\"mining.notify\",\"params\":[\"{id}\",\"{}\",\"01\",\"02\",[],\"20000000\",\"1d00ffff\",\"60000000\",{clean}]}}\n",
+            "00".repeat(32)
+        )
+    }
+
+    fn fwd(job: &str) -> Forward {
+        Forward { slot: 0, job_id: String::from(job), extranonce2: vec![0; 4], ntime_be: vec![0; 4], nonce_be: vec![0; 4] }
+    }
+
+    /// A share for a job upstream abandoned with `clean` is dropped, not sent.
+    #[test]
+    fn a_share_for_an_abandoned_job_is_not_forwarded() {
+        let coin = crate::spec::parse_coin("y:yescrypt:12@h:1,1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa,x").unwrap();
+        let pool = Mutex::new(Pool::new(vec![coin]));
+        let mut up = Upstream::for_slot(&pool.lock().unwrap(), 0).unwrap();
+        up.open();
+        up.on_bytes(&pool, b"{\"id\":1,\"result\":[[],\"01020304\",4],\"error\":null}\n");
+        up.on_bytes(&pool, b"{\"id\":2,\"result\":true,\"error\":null}\n");
+        assert!(up.live(), "the handshake completed");
+        up.on_bytes(&pool, notify("aa", true).as_bytes());
+        up.on_bytes(&pool, notify("bb", false).as_bytes());
+        // Both live: a non-clean job adds, it does not replace.
+        pool.lock().unwrap().push_forward(fwd("aa"));
+        pool.lock().unwrap().push_forward(fwd("bb"));
+        let o = up.on_tick(&pool);
+        assert_eq!(o.send.len(), 2, "shares for both live jobs go upstream");
+        // A clean job abandons both.
+        up.on_bytes(&pool, notify("cc", true).as_bytes());
+        pool.lock().unwrap().push_forward(fwd("aa"));
+        pool.lock().unwrap().push_forward(fwd("cc"));
+        let o = up.on_tick(&pool);
+        assert_eq!(o.send.len(), 1, "only the share for the live job is sent");
+        assert!(o.send[0].contains("\"cc\""), "and it is that one");
+        assert_eq!(up.dropped_stale, 1, "the abandoned one is counted");
+    }
 }

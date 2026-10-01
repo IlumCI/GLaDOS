@@ -299,7 +299,7 @@ Five claims, against digests this kernel did not compute, and two of them are
 about the failure that produces a hash function looking entirely healthy. The
 counter in section 3.2 is the *message length* and not the block index, so a
 short final block that is zero-padded without moving the counter makes `"a"`
-and `"a "` collide; and a message of exactly one block must keep that block
+and `"a\0"` collide; and a message of exactly one block must keep that block
 for the `last` flag rather than compressing it as an interior one. Both are
 asserted, in the kernel and in `tools/algocheck.py`, which holds the same
 digests so they live in two places that have to agree.
@@ -866,3 +866,283 @@ story -- market-rate payouts in the mined coin, plus $GLADOS and RWA on top,
 funded by the operator's fee rather than by passing miner proceeds through --
 is an offer that still needs somebody to hear it. That is not a technical
 problem and nothing in this document addresses it.
+
+## Measured against a live upstream, 2026-09-25 -- and yespower is a dead end
+
+Everything above points at yespower. The figures below were read off zpool's
+own API and off this machine, and they say the algorithm this tree implements
+is worth **three dollars a day across every miner on it**.
+
+None of this was written down before, which is why it was measured twice. An
+earlier session reached "roughly one times underwater" and left it in a
+transcript, so a later one re-derived it from scratch. The numbers are here now
+for that reason rather than because they are pretty.
+
+### What this machine does
+
+`glados-pool --bench`, best of nine, on the i7-12650H (10 cores, 16 threads):
+
+    sha256d            1.643 us/hash      608,642 /s per core
+    blake2s            0.484 us/hash    2,066,115 /s per core
+    yespower 2 MiB  1647 us/hash              607 /s per core
+    yespower 8 MiB  6548 us/hash              153 /s per core
+
+**Settled readings, first discarded.** The first reading after a build is the
+host's page cache and it is roughly double: three consecutive runs of the same
+binary read 2031, 1233 and 1042 us. `CLAUDE.md` records this for `video bench`
+and it was walked into here anyway, so an earlier version of this section quoted
+1804 us / 554 H/s and 7025 us / 142 H/s. Those were contaminated first samples.
+
+**And a per-core figure must not be multiplied by the core count.** yespower is
+memory-hard, so sixteen 8 MiB working sets thrash a 24 MiB L3. cpuminer-opt on
+this CPU measures 862 H/s at sixteen threads against ~285 on one: **three times
+the throughput for sixteen times the threads**, and the per-thread rate collapses
+81%. An earlier version of this section multiplied 554 by 16, called it 8,864 H/s
+and derived revenue from it -- ten times too high, and it made a dead algorithm
+look merely bad.
+
+### What that earns, and the ceiling nobody had noticed
+
+zpool, 2026-09-25, `actual_last24h`, at BTC $83,767:
+
+| algo | network hashrate | pays **all** miners |
+|---|---|---|
+| equihash | 2,692,831 | ~$80,900/day |
+| yescrypt | 1,745,879 | ~$21,600/day |
+| equihash192 | 33,281 | ~$503/day |
+| **yespower** | **49,988** | **$3/day** |
+| yespowerr16 | 58,550 | $6/day |
+
+**862 H/s is 2.0% of zpool's entire yespower network.** One laptop. The
+algorithm pays three dollars a day in total, so a miner taking *all* of it
+earns three dollars a day -- and no amount of hashrate, hardware or free
+electricity moves that number. `glados-pool.service` **was** configured for
+`bitzeny:yespower-10-2048-8`, which is this row.
+
+**It is `yescrypt:yescrypt:12` now**, which is the row four above at about
+$21,600/day. The switch costs nothing to serve: same family, same 2 MiB working
+set, and `--bench` on a 12th-gen i7 reads 3,557 us a share against yespower's
+3,520, so the bits, the CPU budget and the share target are unchanged. Note the
+label moved from a coin to an algorithm, because a zpool algorithm port has no
+single coin behind it -- and `bitzeny` was doubly wrong here, since BitZeny is
+`yescryptr8` and the "Client Key" personalisation makes that a different
+function at the same N and r.
+
+**What this table does not say is what one laptop would earn on it**, and the
+2.0%-of-network figure above does not carry over: that share was measured against
+yespower's 49,988 H/s, and yescrypt's network is 1,745,879 -- thirty-five times
+larger, so the same 862 H/s is about 0.05% of it. A larger pot divided by a much
+larger network is the honest reading, and the dollars per laptop are not pinned
+here. What is pinned is that the *ceiling* is no longer three dollars.
+
+**And the "cross-check" this section used to claim was circular.** Share of
+network times total payout, and per-MH/s times hashrate, are the same two API
+fields rearranged -- they cannot disagree, so their agreeing proved nothing. What
+is actually pinned is the *share*: 862 H/s against a 43,772 H/s network is 2.0%,
+and that is unit-free. The dollars are not pinned, and the plausibility test
+below is the reason to distrust them.
+
+**It is not right for every algo, and that trap is worth stating.** Reading
+`actual_last24h` as BTC per MH/s per day uniformly gives sha256 a total payout
+of $143 *trillion* per day. The field's unit tracks each algorithm's own
+natural hashrate scale, so cross-algo ratios from this API mean nothing until
+each one is pinned separately. The four rows above are ordered by implied
+total, which is the comparison that survives; treat the absolute dollars for
+anything but yespower as unconfirmed.
+
+### Supporting an algorithm means verifying it, not mining it fast
+
+The pool hashes **once per share** -- `--bench` says so in its own output -- so
+the cost of accepting a new algorithm is a correct verifier and nothing else.
+A 1,804 us validation is already fine at any share rate an operator would set.
+Miners bring their own software; cpuminer-opt speaks yescrypt.
+
+That makes yescrypt the cheap move rather than the ambitious one, because
+**yespower is yescrypt's child and `src/mine/yespower.rs` already has the hard
+half**: `salsa20`, `pwxform`, `blockmix_salsa`, `blockmix_pwxform`,
+`integerify`, `p2floor`, `wrap`, `pbkdf2_1`, and sha256/hmac through
+`crate::store`. What is missing is the KDF wrapper around them. Published test
+vectors exist, so it can be checked the way every other primitive here is
+rather than by mining something and hoping.
+
+Equihash is worth four times more and is not the cheap move: a different
+algorithm, a Wagner solver, and the GPU work already deferred once in
+`cuda/`.
+
+### Where the money actually goes, read off the code
+
+`pool/src/upstream.rs` authorises **one** username per coin, from the spec's
+`@host:port,user,pass`, and forwards every miner's share under it. There is no
+per-miner username and **no fee code anywhere in `pool/src`**. So the upstream
+pays the operator for all work by all miners, the operator owes the miners a
+share, and the split is a policy choice in `tools/distribute.py` rather than
+anything the pool enforces. The "non-custodial" claim in `design/runbook.md`
+describes the *distributor* -- once an epoch is open the operator cannot
+withhold a claim -- and not the revenue path.
+
+That is what funds the GLADOS side: the bonus does not come out of the
+operator's savings, it comes out of work the pool was paid for.
+
+### The bridge floor, and the algorithm change that cleared it
+
+zpool pays in a coin on that coin's own chain. An epoch is funded in WETH on
+chain 4663. So real revenue reaches an epoch only as payout -> exchange ->
+bridge, and every hop has a fixed fee. At roughly $0.04/day for yespower it would
+take *years* to accumulate the $30 that is the smallest batch worth bridging,
+which was another way of saying the algorithm had to change before the bridge was
+even a question.
+
+**The algorithm changed, and this is the sentence that was waiting for it.** On
+zpool's own `actual_last24h`, read 2026-09-28: yescrypt **0.16021** against
+yespower **0.00010**, a factor of **1,602**. The same 862 H/s that earned about
+$0.04/day is the same fraction of a pot 1,602 times larger, so the $30 batch goes
+from years to inside a day. The bridge stops being a question deferred until the
+economics change and becomes plumbing to build.
+
+Two cautions on that number, because it is one API field and this file has been
+burned by those. It is a *rate*, so it prices a unit of work rather than this
+machine: the 2.0%-of-network share measured for yespower does **not** carry over,
+since yescrypt's network is 1,745,879 H/s against yespower's 49,988 and the same
+hashrate is about 0.05% of it. And `payrate.py`'s own warning applies -- reading
+this field uniformly across algorithms gives sha256 a total payout of $143
+trillion a day, so the ratio between two rows of the same shape is the comparison
+that survives and the absolute dollars are not pinned.
+
+**The cheapest exchange hop may be no exchange at all.** zpool's "Direct Earn"
+credits 1:1 with a 1% levy when the payout currency is one you are actually
+mining, and **BSTY** (GlobalBoost-Y) is its yescrypt coin on the same port 6233
+the pool already connects to -- 1,597,746 H/s of the 1,589,290 H/s the algorithm
+reports, so it *is* the yescrypt network. Taking payout in BSTY skips the
+auto-exchange spread on the first hop and leaves one conversion instead of two.
+Against that, BSTY has to be sellable somewhere for the second hop, which is a
+liquidity question this file does not answer.
+
+So the honest arrangement separates two things that were being conflated: the
+ledger says *who earned what*, and the treasury says *where the money comes
+from*. Epochs are funded from treasury WETH; upstream revenue accumulates
+off-chain and tops the treasury up in rare large batches. The mining is real
+and the funding is pooled, which is how pools work anyway -- and it means the
+payout contract can be deployed and used before any bridge has ever run.
+
+### One operator's electricity is not every miner's
+
+This operator pays nothing for power, so yespower's 862 H/s is about $0.04/day of
+pure profit and the earlier "underwater" finding does not apply to them. It
+still applies to everybody else: a miner paying $0.30/kWh spends about
+$0.58/day to run sixteen threads. The pool's attractiveness depends on *their*
+arithmetic, not on the operator's, and a pool whose only algorithm pays $3/day
+across the whole network has nothing to offer either of them.
+
+### The two measurement errors this section was written with
+
+Both are corrected in place above rather than left as an appendix, because a
+figure somebody has to read three sections to correct is a figure that will be
+quoted wrong. They are named here because each is a repeat of something this tree
+already had written down.
+
+**The first reading after a build is the page cache**, not the code. Every figure
+here is now the settled reading with the first discarded. `CLAUDE.md` says this
+about `video bench` in as many words.
+
+**A per-core rate times the core count is not a throughput**, for anything
+memory-hard. cpuminer-opt measures it directly on this CPU: 285 H/s on one
+thread, 862 on sixteen. This file warns about small-sample extrapolation in four
+other places and then did it.
+
+### Where this kernel's advantage actually is, and what it is worth
+
+Like-for-like on one core at identical parameters:
+
+    cpuminer-opt, hand-tuned AVX2    ~285 H/s
+    src/mine/yespower.rs, scalar      153 H/s
+    src/mine/yespower.rs, SSE2 lane   248 H/s   <- since the lane was vectorised
+
+`grep -cE 'avx|sse|simd|_mm_|target_feature' src/mine/yespower.rs` answers
+**0**. So the gap is 2.0x and it is entirely the inner loop; 2x is what scalar
+against AVX2 costs on a salsa20/pwxform kernel, which means the implementation
+is sound rather than sloppy.
+
+The advantage is not in the inner loop and never was. It is that **the
+bottleneck at thread scale is cache, and this kernel has levers Linux does
+not**: `work::cache_budget` already sizes slices to the cache instead of running
+N thrashing threads, which cpuminer-opt has no equivalent for; the identity map
+is 2 MiB pages, so an 8 MiB random-access working set costs almost no TLB
+pressure where a Linux process without hugepages pays continuously; nothing else
+on the machine evicts L3; and there are no speculation mitigations and no
+preemption inside a hash.
+
+Sized honestly: three uncontended slices at AVX2 speed is about 855 H/s, and
+TLB plus exclusivity gains put the ceiling near **940-1,110 H/s against
+cpuminer's 862**. That is **tens of per cent, not multiples**, and none of it is
+reachable before the inner loop is vectorised. An order-of-magnitude claim for
+ring 0 alone would be false.
+
+### The three levers, ranked by what they are actually worth
+
+Measured on this CPU at 16 threads, against the per-kH/s rates above:
+
+| lever | worth |
+|---|---|
+| **choosing the algorithm** | **~1,300x** |
+| vectorising the inner loop | 2x |
+| the ring-0 advantages | ~1.2x |
+
+    minotaurx     4,031 H/s    ~$57/day
+    yescrypt      3,740 H/s    ~$46/day
+    yespowerR16     698 H/s    ~$0.07/day
+    yespower        862 H/s    ~$0.04/day   <- what this tree implements
+
+So the order of work is settled by arithmetic rather than by preference:
+implement minotaurx and yescrypt first, vectorise second, and the ring-0 levers
+are the last few tens of per cent on top. `rinhash` is the one candidate with no
+reading -- cpuminer-opt knows the name but produced no rate here -- and it is
+also the highest per-kH/s figure in the table, so it is worth one more attempt
+before the list is called final.
+
+### AVX2 was not the next lever, and the measurement says why
+
+The SSE2 pwxform lane bought 1.58x and closed the gap to cpuminer-opt from 1.87x
+to 1.15x. The obvious next step was to widen it, and the obvious target was the
+bulk XORs, because at the yescrypt settings one hash does **2,097,152 word
+XORs** -- more words than the pwxform lanes touch -- and `objdump` on `smix2`
+found 188 `mov`, 11 scalar `xor` and 37 bounds-check branches with no SIMD
+instruction anywhere in it.
+
+It bought nothing. Interleaved A/B, two binaries alternating on one machine,
+`yespower` 2 MiB:
+
+    lane only        2014   1050   1060   2014   1158   1062 us
+    lane + SIMD XOR  1066   1070   1055   2047   1110   1062 us
+
+The ~2014 readings appear in **both** arms, which is what says they are the host
+and not the change. The medians are 1061 and 1066 us: identical within noise.
+
+**Because those XORs are DRAM-latency bound, not instruction bound.** Each one
+reads a 256-word block from a pseudo-random offset in a 2 MiB or 8 MiB array, so
+the cost is the cache miss and the arithmetic is free. Vectorising the arithmetic
+removes no memory traffic whatsoever. That is yescrypt behaving exactly as
+designed -- it is a *memory*-hard function, and the scalar XOR was already
+keeping up with the memory system.
+
+So the change was reverted rather than kept: it added unsafe pointer arithmetic
+for no measured gain, and the SSE2 lane -- which is compute and L1 bound, and
+where the 1.58x came from -- stays.
+
+**Two failed attempts on the way, both worth keeping because each looked
+right.** `iter_mut().zip()` in an `inline(always)` helper produced no SIMD at all
+and ran ~6% slower: `noalias` is a property of the call boundary, and
+`inline(always)` deletes the boundary, handing LLVM back two slices of one
+structure it cannot separate. The same helper as `inline(never)` did vectorise
+and was slower still, 1147 us against 1042, because `blockmix_pwxform` calls it
+**65,536 times per hash** on 16-word blocks and a real call costs more than the
+four SSE2 operations it wraps.
+
+**What is left for AVX2, stated honestly.** Only the pwxform lane, processing two
+lanes per 256-bit register. It is legal at the 0.5 settings, where lanes are
+independent because there is no S-box writeback, and illegal at 1.0 where the
+writeback couples them. The arithmetic would halve; the two S-box loads would
+not, since the two lanes read different addresses and must be combined with an
+insert or a gather. Against L1-resident 8 KiB S-boxes that is plausibly 1.1-1.25x
+and it costs runtime feature detection in a file shared with the pool, which
+cannot reach the kernel's CPUID. Worth doing *after* the ring-0 levers, which are
+worth more and need no detection at all.

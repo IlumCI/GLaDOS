@@ -13,10 +13,27 @@
 //! One port is bound at a time. Every user of this so far is a
 //! request/response exchange that runs to completion before the next one
 //! starts, and a table of bound ports would be structure without a purpose.
+//!
+//! **That sentence was a premise nobody enforced, and a second task broke it.**
+//! "Runs to completion before the next one starts" is true of one task. A miner
+//! image resolves its pool's name in its own connect loop, and a shell that
+//! resolves anything at the same moment called `bind` over the top of it: each
+//! cleared the other's inbox, the shell received the miner's answer, and the
+//! lookup failed as `malformed answer` -- then the miner's `unbind` took the port
+//! from under the shell and everything after timed out. `BOUND` and `INBOX` are
+//! `Racy`, which is interior mutability and not a lock.
+//!
+//! So the design stays and its precondition is now a claim: `session` holds the
+//! one port for a whole exchange, another task yields until it is free, and the
+//! port is given back when the `Session` drops. A table of ports would also fix
+//! it, and would be the structure this note declined -- serialising costs nothing
+//! for two protocols that are rare and fast, and keeps "one port" true rather
+//! than merely usual.
 
 use super::{send_ipv4, send_ipv4_from, transport_checksum, Ipv4, PROTO_UDP};
 use crate::sync::Racy;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Bound on the queue: these are request/response protocols, so a reply that
 /// arrives while nothing is listening is not worth keeping.
@@ -31,14 +48,63 @@ pub struct Datagram {
 static BOUND: Racy<Option<u16>> = Racy::new(None);
 static INBOX: Racy<Vec<Datagram>> = Racy::new(Vec::new());
 
-pub fn bind(port: u16) {
+/// Which task holds the port, as `task::current() + 1`, so that zero is nobody.
+static HOLDER: AtomicUsize = AtomicUsize::new(0);
+
+/// The one UDP port, held for a whole request/response exchange.
+///
+/// Given back on drop, which is what makes it safe to hold across early
+/// returns: the old pairing of `bind` and `unbind` relied on every path out of
+/// a function reaching the `unbind`, and `?` is a path out.
+pub struct Session {
+    _private: (),
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        unbind();
+        HOLDER.store(0, Ordering::Release);
+    }
+}
+
+/// Take the one UDP port for an exchange, waiting while another task has it.
+///
+/// **It yields and never spins.** A holder can sit in `recv` for seconds
+/// waiting on a resolver, and a `Spin` held that long reaches its patience
+/// limit and panics -- which here would be one slow DNS server halting the
+/// machine.
+///
+/// `None` if *this* task already holds it. Waiting would be waiting on itself
+/// forever, and granting it would be the clobbering this exists to stop, so
+/// nesting is refused and said so. Nothing nests today; the refusal is for the
+/// day something does.
+pub fn session(port: u16) -> Option<Session> {
+    let me = crate::task::current() + 1;
+    loop {
+        match HOLDER.compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed) {
+            Ok(_) => {
+                bind(port);
+                return Some(Session { _private: () });
+            }
+            Err(h) if h == me => return None,
+            Err(_) => crate::task::yield_now(),
+        }
+    }
+}
+
+/// Whether some task holds the port. For the claims in `dns::selftest`.
+pub fn held() -> bool {
+    HOLDER.load(Ordering::Acquire) != 0
+}
+
+fn bind(port: u16) {
     unsafe {
         *BOUND.get() = Some(port);
         (*INBOX.get()).clear();
     }
 }
 
-pub fn unbind() {
+fn unbind() {
     unsafe {
         *BOUND.get() = None;
         (*INBOX.get()).clear();

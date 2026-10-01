@@ -19,6 +19,8 @@ pub struct U256 {
 
 impl U256 {
     pub const ZERO: U256 = U256 { w: [0; 8] };
+    /// The easiest target there is: every hash meets it.
+    pub const MAX: U256 = U256 { w: [u32::MAX; 8] };
 
     pub fn from_be_bytes(b: &[u8; 32]) -> U256 {
         let mut w = [0u32; 8];

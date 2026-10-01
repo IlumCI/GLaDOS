@@ -111,6 +111,16 @@ Deno.serve(async (req) => {
     return json(200, {
       nonce,
       message: siwe(address, nonce, issued, expires),
+      // **`issued_at` travels because the signed text contains it.** Without it a
+      // client cannot rebuild the message it is being asked to sign and has to
+      // trust the `message` string -- which is most of what SIWE is for: the
+      // fields are the thing a caller checks, and text it cannot derive is text
+      // it can only accept. Deriving it from `expires_at` minus the TTL would put
+      // a second copy of `NONCE_TTL_MS` in every client, which is the class of
+      // duplicated constant this tree refuses everywhere else.
+      // Found by `tools/workercheck.py` on its first run against the deployed
+      // function, rebuilding the message and finding one line it could not.
+      issued_at: issued.toISOString(),
       expires_at: expires.toISOString(),
     });
   }

@@ -11,6 +11,9 @@ this file is read out of order.
     commit      66eaa37, 2026-09-23
     before      79 claims, 0 failures, 12,111 bytes deployed
     after       93 claims, 0 failures, source unchanged
+    since       746 lines, 106 claims, 0 failures, 12,543 bytes deployed
+                (2026-09-28, and nothing was watching any of those numbers --
+                 `contracts/README.md` still said 79)
 
 **The fixes have landed.** They were held back on audit day so the artefact
 audited and the artefact deployable were the same bytes; that is no longer the
@@ -255,6 +258,52 @@ and open two. That matters at this scale rather than in principle:
 what it pays out over a 36-hour event, and `Direct` is the mode that is not
 absurd there.
 
+## 9. A reverted call in `fork.mjs` leaves its writes behind
+
+Found while closing dependency 1, and it is a defect in the harness rather than
+in the contract -- which makes it worth more here than a contract finding of the
+same size, because it decides whether anything this file says about a fork can be
+believed.
+
+`call()` runs `vm.evm.runCall` and reports whether it reverted. It does not undo
+it. The journal inside the EVM unwinds nested frames, not the frame the harness
+itself started, so a top-level revert commits everything written up to the point
+it reverted.
+
+What that looked like: probing the real pair with an output its `k` check must
+refuse left the pair's **reentrancy flag cleared**, and the next three probes
+answered `UniswapV2: LOCKED` instead of `UniswapV2: K`.
+
+    999: refused   UniswapV2: K        <- the pair's own arithmetic
+    998: refused   UniswapV2: LOCKED   <- the harness's leftover state
+    997: refused   UniswapV2: LOCKED
+    996: refused   UniswapV2: LOCKED
+
+The first version of the fee sweep read all four as the pair refusing, and
+therefore "measured" a fee floor from three answers that had nothing to do with
+the fee. A sweep whose entire content is which refusals happen cannot tell a real
+refusal from a manufactured one by success or failure alone -- which is
+`differ.rs`'s canary argument arriving on a fork, and it passed until the reasons
+were printed.
+
+**`vm.stateManager.checkpoint()` and `revert()` do not fix it**, tried and
+discarded: `RPCStateManager` does not restore storage it has already fetched and
+written, so the flag stays cleared and the comment claiming a fix would have been
+worse than the bug.
+
+What is done instead is stated as a rule on `call` itself: **never ask for a
+refusal and then carry on.** A check expecting a revert comes last or is the only
+one of its kind, and a check that needs several asserts the *reason*. The fee
+probe is two calls in that order, with a fresh donation each -- a V2 swap consumes
+what was sent to it, so probes sharing one donation measure an empty pair, which
+was the second bug in the same ten lines.
+
+**One consequence beyond this test.** `ok(false, ...)` followed by more checks is
+weaker than it looks everywhere in that file, since the first failure can poison
+what follows. The header already says to read a partial run as no evidence rather
+than as a set of failures; that instruction is now known to be load-bearing
+rather than cautious.
+
 ## What is now enforced, and where
 
 The contract is **still unchanged** -- the argument in the header holds, and the
@@ -325,7 +374,25 @@ more than one nobody wrote down.
 Properties the contract relies on and does not check. None is a defect; all four
 are now written down, which they were not.
 
-- **The pair's fee is 0.3%.** `_amountOut` writes out `997/1000` (line 668) with
+- **The pair's fee is 0.3%, and this is measured now rather than assumed.**
+  `test/fork.mjs` brackets it against the deployed pair on 4663, from both sides,
+  because one side is not enough: the distributor asks the pair for exactly what
+  997/1000 predicts, so the pair pays what it was *asked* and a successful claim
+  only rules out a **higher** fee. A lower one would shortchange every claimant
+  silently. So the harness offers the output a 0.2% fee would give and requires
+  the pair's own `k` check to refuse it:
+
+        ok  the real pair pays 36514171509419843418712 for 1000000000000000 in,
+            which is what a 0.3% fee gives
+        ok  and refuses 36540167233184563248184, which a 0.2% fee would give
+            -- on its own k check
+
+  The refusal is asserted **by its reason**, and that is not fussiness: see
+  finding 9 below, where three of the first version's four answers were
+  manufactured by the harness and were indistinguishable from the pair's.
+
+  The original text of this dependency follows, because the reasoning it gives is
+  still why the constant is there at all. `_amountOut` writes out `997/1000` with
   a correct reason — a V2 pair does not expose its fee, the arithmetic lives in
   the router, and this contract is deliberately doing without one. The V3 path
   reads `fee()` off the pool; the V2 path cannot. A fork of V2 on 4663 with a
@@ -381,11 +448,27 @@ the thing they would protect.
 - **No swap against a real pool has ever happened**, which `contracts/README.md`
   already says. Every swap in the suite is against a mock, and a passing mock is
   not a filled trade.
-- **`fork.mjs` was not run for this audit.** Two items above want it: the real
-  token's behaviour on a contract-to-wallet transfer (finding 4's premise, which
-  is demonstrated here against a configurable mock rather than against GLADOS),
-  and the real pair's fee (dependency 1). It needs no key.
-- **The 93 claims run only when somebody remembers.** There is no
-  `contracts.yml`; `grep -rn contracts .github/workflows/` finds nothing, while
-  `pool.yml` exists precisely to stop a promise from going unenforced. Worth
-  more now that there are fourteen more claims to protect.
+- **`fork.mjs` has now been run, and only part of it is evidence.** Against
+  Robinhood Chain at block 74,770,751 it established the real token's supply and
+  its **1% buy tax**, the real pool's reserves (6.819 WETH against 253.5M
+  GLADOS), that a `Market` epoch opens and both claimants would buy real GLADOS
+  through the real pool, and dependency 1's 0.3% fee from both sides. It then
+  died in `RPCStateManager` at the burner deployment, which the file's own header
+  documents as an RPC failure whose position moves between runs and which is to
+  be read as no evidence rather than as a failure.
+
+  So **finding 4's premise is still not tested against the real token.** That
+  wanted a contract-to-wallet `Direct` transfer, and the leg that would show it
+  is the one the RPC killed. The mock remains the only evidence for it.
+
+  The epoch it was run on is a real one: `pool/site/ledger.json`, a share log
+  from two miners against the musl daemon, through `distribute.py --basis tally`.
+  The first attempt used a total of 1000 WETH against a pool holding 6.8, which
+  is the fixture being unrealistic rather than anything being wrong, and is worth
+  knowing before reading a `TooLittleOut` from this harness as a contract fault.
+- **The claims run on every push now.** `.github/workflows/contracts.yml` builds
+  from the lockfile, runs the 106, turns `pool/site/ledger.json` into an epoch and
+  requires Python, JavaScript and the compiled bytecode to agree on the tree, then
+  runs `tools/loop.py` end to end against an in-process EVM. `fork.mjs` is
+  deliberately excluded: a job resting on that public RPC would fail for reasons
+  that are nobody's, and a red cross nobody believes is worse than no job.

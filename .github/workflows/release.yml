@@ -296,6 +296,7 @@ jobs:
           ls -la "out/glados-$VERSION.efi"
 
       - name: Fetch the payload
+        if: matrix.payload != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -304,6 +305,7 @@ jobs:
           ls -la payload-dir
 
       - name: The payload must be the payload
+        if: matrix.payload != ''
         run: |
           # BEFORE the stamp below, and that order is not cosmetic: stamping
           # changes four bytes of model.bin, so a digest taken afterwards can
@@ -327,9 +329,20 @@ jobs:
           # tools/site.py already knows as qwen35-2b-8k, and site.py refuses
           # to build a download page it cannot describe an image on.
           NAME="glados-$VERSION-${{ matrix.name }}"
+          # **The payload argument is omitted rather than pointed at an empty
+          # directory**, because `mkiso.py` reads the union of `payload/*.txt` as
+          # an allowlist and refuses to place a file outside it -- handed an empty
+          # `payload-dir` it would place nothing and say nothing, which is a
+          # kernel-only image produced by accident rather than on purpose. Absent,
+          # it prints "no payload -- boots to a kernel with no model", which is a
+          # line a release log can be read for.
+          PAYLOAD_ARG=()
+          if [ -n "${{ matrix.payload }}" ]; then
+            PAYLOAD_ARG=(--payload payload-dir)
+          fi
           python3 tools/mkiso.py "out/$NAME.iso" \
             --efi "out/glados-$VERSION.efi" \
-            --payload payload-dir \
+            "${PAYLOAD_ARG[@]}" \
             --label "${{ matrix.label }}"
           ls -la "out/$NAME.iso"
           echo "ISO_NAME=$NAME" >> "$GITHUB_ENV"

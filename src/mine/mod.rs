@@ -17,6 +17,7 @@
 //! `hashlib`, which is the bargain `tokenizer.py --verify` makes: the reader is
 //! deliberately not the writer.
 
+pub mod addr;
 pub mod algo;
 pub mod blake2s;
 pub mod boot;
@@ -27,6 +28,7 @@ pub mod proto;
 pub mod screen;
 pub mod header;
 pub mod neoscrypt;
+pub mod heavyhash;
 pub mod stratum;
 pub mod u256;
 pub mod work;
@@ -290,6 +292,12 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.extend(stratum_checks());
     out.extend(ev_checks());
     out.extend(yespower_checks());
+    // **`work::checks` had no caller anywhere in the tree.** It saves and
+    // restores the coin table so it can run on a mining machine, which is the
+    // care something written to be run takes -- and nothing ran it, so every
+    // claim it makes about slot assignment, `slot_for` and the cache budget was
+    // dead. Found by adding a claim to it and watching `diag mine` not print it.
+    out.extend(work::checks());
     out
 }
 
@@ -802,7 +810,7 @@ fn stratum_checks() -> Vec<(&'static str, bool)> {
     // produces a hash function that looks perfectly healthy.
     out.push((
         "blake2s tells a message from the same message zero-padded",
-        blake2s::hash(b"a") != blake2s::hash(b"a "),
+        blake2s::hash(b"a") != blake2s::hash(b"a\0"),
     ));
     // 64 bytes exactly: the loop must keep its last full block for the `last`
     // flag rather than compressing it as an interior one and then compressing
@@ -826,6 +834,7 @@ fn stratum_checks() -> Vec<(&'static str, bool)> {
     // BLAKE2s underneath them. Extended here rather than duplicated, because a
     // second copy of a vector is a second thing to get wrong.
     out.extend(neoscrypt::checks());
+    out.extend(heavyhash::checks());
     out.extend(work::checks());
 
     out

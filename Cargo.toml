@@ -1,6 +1,6 @@
 [package]
 name = "glados"
-version = "1.3.8"
+version = "1.3.9"
 edition = "2021"
 description = "A from-scratch ring-0 operating system for the MSI MS-16R8"
 
@@ -48,7 +48,30 @@ overflow-checks = true
 
 [profile.release]
 panic = "abort"
-opt-level = 2
+# **Three. Two was costing the miner about a fifth of its speed.**
+#
+# Measured twice over, because the first attempt to measure it said the opposite.
+# On the pool, which compiles `src/mine/yespower.rs` by `#[path]` and is therefore
+# the same code the kernel runs, one yescrypt hash is 1541 us at 2 and 1061 at 3 --
+# 1.45x, settled readings with the first discarded. In the kernel under KVM,
+# `mine bench` on yescrypt over three readings on each of two boots per setting:
+#
+#     opt-level 2   113 116 116 100 114 110   median 113.5 H/s
+#     opt-level 3   133 136 142 143 139 144   median 140   H/s
+#
+# 1.23x, and the gap to the pool's 1.45x is the kernel benching on core 0 beside
+# the clock and the compositor.
+#
+# **A single reading said 167 at opt-level 2 and nearly reverted this.** It was an
+# outlier, and taking it at face value would have kept a setting that costs a fifth
+# of the hash rate. Three readings on each of two boots is what it takes here; one
+# is not a measurement, which this tree says in four other places.
+#
+# `[profile.dev]` above states why it holds 1 rather than 0 -- boot stack frames on
+# the firmware's stack. Nothing ever stated why release held 2. The cost of 3 is
+# 4.2% of image size, 250 KB, against a 2 GB ISO ceiling dominated by weights, and
+# `diag all` reads 68 of 68 with the machine alive afterwards.
+opt-level = 3
 lto = true
 # Keep symbols: the QEMU gdb stub is our only source-level debugger.
 debug = true

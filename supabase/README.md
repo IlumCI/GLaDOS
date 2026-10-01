@@ -3,6 +3,46 @@
 What the in-OS updater talks to. Two channels, one signing key, and a gate that
 is honest about what it is.
 
+## The project this describes no longer exists
+
+On 2026-09-27 the pinned project answered **NXDOMAIN**, authoritative from
+`supabase.co`'s own nameservers while `supabase.co` itself resolved:
+
+    $ python3 tools/origin.py --resolve
+    pinned in src/update/channel.rs:  https://vermcdgpqncfsralpesz.supabase.co
+      vermcdgpqncfsralpesz.supabase.co does NOT resolve -- the project is gone
+
+A free-tier project is deleted after prolonged inactivity and nothing in this
+repository noticed, which is why `tools/origin.py` now exists and why `ci.yml` runs
+it on every push. Everything below is correct and describes a backend that has to
+be recreated before any of it can be true again.
+
+### Bringing it back, in order
+
+    supabase login                              # interactive, once
+    supabase projects create glados --region ... # note the new ref
+
+Then **re-pin and rebuild**, because the ref is compiled in and an old image asks
+the old host:
+
+    # src/update/channel.rs: DEFAULT_SOURCE = "https://<new-ref>.supabase.co"
+    python3 tools/origin.py --resolve           # says yes now
+    cargo build --release                       # the kernel asks the new one
+
+Then the deploy, which is one command and not the hand-typed list further down --
+`tools/supadeploy.sh` derives the project ref from `channel.rs` so it cannot
+deploy somewhere the kernel does not name, refuses before spending anything if the
+project is missing, runs the migrations *before* the functions that read the tables
+they create, and takes `verify_jwt` from `supabase/config.toml` rather than from a
+flag somebody forgets:
+
+    bash tools/supadeploy.sh
+
+Finally set the GitHub variable `SUPABASE_URL` to the same origin, which CI checks
+against the kernel's pin on every push:
+
+    python3 tools/origin.py --expect "$SUPABASE_URL"
+
 | | `stable` | `experimental` |
 | --- | --- | --- |
 | Bucket | public | private |
@@ -144,11 +184,37 @@ Which address a mining worker name's shares are owed to. Run migration
 `0003_workers.sql` first.
 
 ```
-POST /functions/v1/worker/nonce    {address, worker, verb?}    -> {nonce, message, ...}
+POST /functions/v1/worker/nonce    {address, worker, verb?}
+                        -> {nonce, message, issued_at, expires_at}
 POST /functions/v1/worker/claim    {address, signature, worker} -> {worker, address}
 POST /functions/v1/worker/release  {address, signature, worker} -> {released}
 GET  /functions/v1/worker/map                                   -> {workers, updated_at}
 ```
+
+**Driven, by `tools/workercheck.py`.** It signs with a published throwaway key,
+claims a name, checks the map lists it, releases it, checks the map does not, and
+replays the accepted signature to watch it refused -- so the write side of this
+function is exercised rather than described. Its signer is Python and the verifier
+is `_shared/evm.js`, which is the two-reader arrangement this tree uses wherever
+two implementations must agree; `--selftest` needs no server and runs in CI.
+
+**It rebuilds the message instead of signing what it is handed**, and that found
+the reason `issued_at` is in the list above. The reply used to carry `nonce`,
+`message` and `expires_at` only -- while `Issued At` is a line *inside* the text
+being signed, so no caller could derive the message and every one of them had to
+trust the string a server handed it. That is most of what SIWE exists to stop.
+`link/nonce` had it too, having been copied in shape from here, and both return it
+now. Deriving it from `expires_at` minus the TTL was the alternative and it puts a
+second copy of `NONCE_TTL_MS` in every client.
+
+**An abandoned nonce is never collected**, which is worth knowing before reading a
+refusal. `spendNonce` takes the newest *unused* row, and a caller that asks for a
+nonce and then fails before spending it leaves that row outstanding for good. So a
+replayed signature can be refused two ways -- 400 about no unused nonce when the
+table is clean, and 401 about the signature when an older nonce got picked up and
+the message was rebuilt around it. Both are correct refusals of the replay, and
+`workercheck.py` accepts either rather than depending on nothing having gone wrong
+before it ran.
 
 `tools/distribute.py --map` reads what `/worker/map` serves, and also still
 reads a flat `{name: address}` file, because an event with no server at all is

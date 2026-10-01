@@ -82,3 +82,6 @@ tools/mkwad.py
 # The author's compile gate writes this and removes it; ignored so a
 # crash between the two cannot leave it somewhere a `git add` would find.
 /.authorcheck.patch
+pool/edge/target/
+pool/edge/worker/.wrangler/
+pool/edge/worker/node_modules/

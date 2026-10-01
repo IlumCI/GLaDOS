@@ -191,6 +191,12 @@ fn push_algo(s: &mut String, a: &Algo) {
             write_str(s, "blake2s");
             s.push('}');
         }
+        // A bare name for Neoscrypt's reason: the matrix comes from the header,
+        // so there is nothing a pool could vary.
+        Algo::HeavyHash => {
+            write_str(s, "heavyhash");
+            s.push('}');
+        }
         // A bare name, and that is not the shortcut it looks like. N, r and
         // the round count *are* the NeoScrypt profile rather than settings, so
         // there is nothing a pool could vary and nothing a miner could get
@@ -391,6 +397,7 @@ fn take_algo(j: &Json) -> Option<Algo> {
         "sha256d" => Some(Algo::Sha256d),
         "blake2s" => Some(Algo::Blake2s),
         "neoscrypt" => Some(Algo::Neoscrypt),
+        "heavyhash" => Some(Algo::HeavyHash),
         "yespower" => {
             let v10 = j.get("v10").and_then(|x| x.as_bool())?;
             let n = j.get("n").and_then(|x| x.as_i64())?;
