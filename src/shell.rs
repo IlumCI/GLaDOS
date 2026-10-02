@@ -8505,7 +8505,15 @@ fn wifi_cmd(rest: &str) {
                 return;
             }
             let mac = [0x02, 0x47, 0x4C, 0x41, 0x44, 0x53];
-            let r = crate::net::rehearsal::Rehearsal::new(mac);
+            // `offload` plays a part that scans in firmware and must be told
+            // about an access point before it will send to one, which is the
+            // shape the Intel driver has -- so the hooks it will use can be
+            // driven end to end before it can.
+            let r = if a == "offload" {
+                crate::net::rehearsal::Rehearsal::offloading(mac)
+            } else {
+                crate::net::rehearsal::Rehearsal::new(mac)
+            };
             if !crate::net::attach_radio(r) {
                 kprintln!("  refused, which should not happen: a rehearsal radio is SoftMAC");
                 return;

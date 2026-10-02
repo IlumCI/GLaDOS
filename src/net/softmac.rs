@@ -357,6 +357,23 @@ pub struct Loopback {
     /// the one lie the interface cannot catch and the fallback it forces.
     pub refuse_key: bool,
     pub keys_taken: u32,
+    /// Behave as a firmware-assisted part: scan in "firmware", and refuse to
+    /// send any frame until `prepare_join` has named an access point. The
+    /// refusal is what makes the fixture a test of the hooks rather than a
+    /// second copy of the host-driven path -- an MLME that skipped them sends
+    /// its authentication into a part that drops it.
+    pub offload: bool,
+    /// The firmware scan in progress: the channel plan and how far it has got.
+    /// Advanced by whoever plays the air (`mlme::Ap::serve`), one channel per
+    /// turn, which is the same pacing the host-driven scan gets.
+    pub fw_scan: Option<(Vec<u8>, usize)>,
+    /// What `prepare_join` was told, what `associated` was told, and how often
+    /// `left` was called. Recorded so the suite can ask.
+    pub prepared: Option<crate::dev::radio::JoinTarget>,
+    pub assoc_aid: Option<u16>,
+    pub left_count: u32,
+    /// Frames refused because nothing had been prepared. Zero is the claim.
+    pub refused: u32,
 }
 
 impl Loopback {
@@ -371,6 +388,12 @@ impl Loopback {
             softmac: true,
             refuse_key: false,
             keys_taken: 0,
+            offload: false,
+            fw_scan: None,
+            prepared: None,
+            assoc_aid: None,
+            left_count: 0,
+            refused: 0,
         }
     }
 
@@ -421,6 +444,10 @@ impl Radio for Loopback {
         if !self.started {
             return Err("radio is not started");
         }
+        if self.offload && self.prepared.is_none() {
+            self.refused += 1;
+            return Err("the firmware has not been told about an access point");
+        }
         self.sent.push(frame.to_vec());
         Ok(())
     }
@@ -439,6 +466,43 @@ impl Radio for Loopback {
         }
         self.keys_taken += 1;
         self.hw_ccmp
+    }
+
+    fn scan_offload(&mut self, _ssid: &str, chans: &[u8]) -> Option<Result<(), &'static str>> {
+        if !self.offload {
+            return None;
+        }
+        self.fw_scan = Some((chans.to_vec(), 0));
+        Some(Ok(()))
+    }
+
+    fn scan_done(&mut self) -> bool {
+        match &self.fw_scan {
+            Some((plan, at)) if *at >= plan.len() => {
+                self.fw_scan = None;
+                true
+            }
+            Some(_) => false,
+            None => true,
+        }
+    }
+
+    fn prepare_join(&mut self, t: &crate::dev::radio::JoinTarget) -> Result<(), &'static str> {
+        self.set_channel(t.channel)?;
+        if self.offload {
+            self.prepared = Some(*t);
+        }
+        Ok(())
+    }
+
+    fn associated(&mut self, aid: u16, _t: &crate::dev::radio::JoinTarget) {
+        self.assoc_aid = Some(aid);
+    }
+
+    fn left(&mut self) {
+        self.prepared = None;
+        self.assoc_aid = None;
+        self.left_count += 1;
     }
 }
 

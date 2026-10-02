@@ -31,7 +31,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::dev::radio::{self, Radio, Rx};
+use crate::dev::radio::{self, JoinTarget, Radio, Rx};
 use crate::net::iface::{Kind, Nic, Wlan};
 use crate::net::ieee80211 as dot11;
 use crate::net::softmac::{Link, ETHERTYPE_EAPOL};
@@ -51,6 +51,11 @@ pub const ASSOC_MS: u64 = 500;
 /// takes its time about message 3.
 pub const HANDSHAKE_MS: u64 = 4000;
 pub const TRIES: u8 = 3;
+/// How long an offloaded scan may run beyond what the host-driven one would
+/// have taken. A firmware scan that never reports completion must still end,
+/// and it must end as a failure the operator can read rather than as a scan
+/// that is quietly still going.
+pub const OFFLOAD_SLACK_MS: u64 = 2000;
 
 /// Received frames held for the layer above while the MLME is the one draining
 /// the radio. Bounded for the reason the management queue is.
@@ -94,6 +99,14 @@ pub struct Bss {
     pub secured: bool,
     pub rsn: bool,
     pub rssi: i8,
+    pub beacon_int: u16,
+    pub dtim: Option<u8>,
+}
+
+impl Bss {
+    fn join_target(&self) -> JoinTarget {
+        JoinTarget { bssid: self.bssid, channel: self.channel, beacon_int: self.beacon_int, dtim: self.dtim }
+    }
 }
 
 pub struct Station<R: Radio> {
@@ -118,6 +131,11 @@ pub struct Station<R: Radio> {
     pub mgmt_tx: u32,
     pub mgmt_rx: u32,
     pub eapol_rx: u32,
+    /// The radio is scanning on its own, and the plan is only a deadline.
+    offloaded: bool,
+    /// `prepare_join` succeeded and `left` has not been called since, so the
+    /// radio holds state about an access point that has to be taken down.
+    prepared: bool,
 }
 
 impl<R: Radio> Station<R> {
@@ -141,6 +159,8 @@ impl<R: Radio> Station<R> {
             mgmt_tx: 0,
             mgmt_rx: 0,
             eapol_rx: 0,
+            offloaded: false,
+            prepared: false,
         }
     }
 
@@ -175,6 +195,7 @@ impl<R: Radio> Station<R> {
         self.aid = 0;
         self.reason = 0;
         self.link.leave();
+        self.unprepare();
 
         if self.link.radio_mut().start().is_err() {
             self.state = State::Failed("the radio would not start");
@@ -189,7 +210,31 @@ impl<R: Radio> Station<R> {
         self.at = 0;
         self.state = State::Scanning;
         self.tries = 0;
-        self.tune_and_probe(now);
+        self.since = now;
+        // A wildcard here too, for the reason `tune_and_probe` gives.
+        let plan = self.plan.clone();
+        match self.link.radio_mut().scan_offload("", &plan) {
+            None => {
+                self.offloaded = false;
+                self.tune_and_probe(now);
+            }
+            Some(Ok(())) => self.offloaded = true,
+            Some(Err(why)) => {
+                self.offloaded = false;
+                self.state = State::Failed(why);
+            }
+        }
+    }
+
+    /// Tell the radio it no longer has an access point, if it was told it had
+    /// one. Idempotent, because three different paths end an association and
+    /// making each of them remember whether another already did is how one of
+    /// them forgets.
+    fn unprepare(&mut self) {
+        if self.prepared {
+            self.prepared = false;
+            self.link.radio_mut().left();
+        }
     }
 
     /// Say goodbye properly and stand down.
@@ -215,6 +260,7 @@ impl<R: Radio> Station<R> {
             }
         }
         self.link.leave();
+        self.unprepare();
         self.sup = None;
         self.state = State::Idle;
     }
@@ -238,6 +284,15 @@ impl<R: Radio> Station<R> {
         self.feed_eapol();
 
         match self.state {
+            State::Scanning if self.offloaded => {
+                if self.link.radio_mut().scan_done() {
+                    self.offloaded = false;
+                    self.choose(now);
+                } else if now.saturating_sub(self.since) >= self.plan.len() as u64 * DWELL_MS + OFFLOAD_SLACK_MS {
+                    self.offloaded = false;
+                    self.state = State::Failed("the radio's own scan never reported finishing");
+                }
+            }
             State::Scanning => {
                 if now.saturating_sub(self.since) >= DWELL_MS {
                     self.at += 1;
@@ -269,6 +324,12 @@ impl<R: Radio> Station<R> {
                 }
             }
             _ => {}
+        }
+        // However it failed, a radio still holding an access point is told it
+        // does not: a firmware time event left standing pins the part to one
+        // channel until something else happens to clear it.
+        if matches!(self.state, State::Failed(_)) {
+            self.unprepare();
         }
         self.state
     }
@@ -345,7 +406,15 @@ impl<R: Radio> Station<R> {
             self.state = State::Failed("that network is WEP, which is not security");
             return;
         }
-        let _ = self.link.radio_mut().set_channel(b.channel);
+        // The radio's turn: a plain part tunes, a firmware-assisted one sets up
+        // everything it must know before a frame can reach this access point.
+        // A refusal ends here, because an authentication sent without it is a
+        // frame that never leaves the part and times out three times over.
+        if let Err(why) = self.link.radio_mut().prepare_join(&b.join_target()) {
+            self.state = State::Failed(why);
+            return;
+        }
+        self.prepared = true;
         self.target = Some(b);
         self.tries = 0;
         self.state = State::Authenticating;
@@ -506,6 +575,11 @@ impl<R: Radio> Station<R> {
             self.reason = reason;
             self.link.leave();
             self.sup = None;
+            // Disassociation keeps the radio's state, since it re-associates
+            // with the same access point; deauthentication ends it.
+            if sub == 12 {
+                self.unprepare();
+            }
             // Deauthentication undoes everything; disassociation leaves the
             // station authenticated, so the right answer to it is to associate
             // again rather than to start over. Two frames exist because the
@@ -545,6 +619,9 @@ impl<R: Radio> Station<R> {
                 }
                 self.aid = r.aid;
                 self.link.join(bssid);
+                if let Some(t) = self.target.as_ref().map(|b| b.join_target()) {
+                    self.link.radio_mut().associated(r.aid, &t);
+                }
                 let rsn = self.target.as_ref().map(|b| b.rsn).unwrap_or(false);
                 if !rsn {
                     // An open network is usable the moment it is associated,
@@ -579,12 +656,18 @@ impl<R: Radio> Station<R> {
             secured: b.secured,
             rsn: b.rsn,
             rssi,
+            beacon_int: b.beacon_int,
+            dtim: b.dtim,
         };
         // One entry per BSSID: an access point beacons ten times a second and
         // a scan that recorded each one would report a list of duplicates and
         // pick between them by nothing.
         if let Some(old) = self.seen.iter_mut().find(|o| o.bssid == bss.bssid) {
+            // A probe response carries no TIM, so it must not erase the DTIM
+            // period a beacon from the same access point already gave.
+            let dtim = bss.dtim.or(old.dtim);
             *old = bss;
+            old.dtim = dtim;
             return;
         }
         self.seen.push(bss);
@@ -652,8 +735,10 @@ impl<R: Radio> Nic for Station<R> {
     }
 
     fn receive(&mut self) -> Option<Vec<u8>> {
+        // Drained and not acted on: EAPOL waits for `poll`, which handles the
+        // management frames first. Feeding it here dropped message 1 of every
+        // live handshake -- see the claim about the IP stack in `selftest`.
         self.drain();
-        self.feed_eapol();
         if self.rx_q.is_empty() {
             return None;
         }
@@ -742,6 +827,18 @@ impl Ap {
         let on = radio.channel();
         let sent = core::mem::take(&mut radio.sent);
         let mut out: Vec<Vec<u8>> = Vec::new();
+        // A firmware scan probes one channel per turn on its own. The probe is
+        // the radio's and not the host's, so it is answered only when the
+        // firmware is on this access point's channel -- the same rule a host
+        // probe is held to below, which is what keeps the offloaded scan a
+        // scan rather than a list handed over.
+        if let Some((plan, at)) = radio.fw_scan.as_mut() {
+            if let Some(&ch) = plan.get(*at) {
+                *at += 1;
+                let probe = dot11::probe_request(radio.mac(), "", dot11::BASIC_RATES);
+                self.handle(&probe, ch, &mut out);
+            }
+        }
         for f in sent {
             self.handle(&f, on, &mut out);
         }
@@ -1135,6 +1232,140 @@ pub fn selftest() -> bool {
         "and it can join again afterwards, with a key of its own",
         sta.state() == State::Running && sta.secured(),
     );
+
+    // --- with the IP stack reading the interface in between ----------
+    //
+    // On a live machine `receive` is called by the IP stack on its own
+    // schedule, not only `poll`, and it drains the radio too. The association
+    // response and message 1 arrive together, so a `receive` that fed EAPOL
+    // as it drained handed message 1 to a supplicant that did not exist yet --
+    // the ordering `poll` documents, broken from the other entry point. Every
+    // live join of a WPA2 network failed with "the handshake did not finish"
+    // while this suite passed, because nothing here called `receive` mid-join.
+    let mut sta = Station::new(Loopback::new(me));
+    let mut ap = Ap::new(ap_mac, me, "glados", "correct horse", 6);
+    let mut now = 0u64;
+    sta.start("glados", "correct horse", now);
+    for _ in 0..200 {
+        if matches!(sta.state(), State::Running | State::Failed(_)) {
+            break;
+        }
+        ap.serve(sta.link_mut().radio_mut());
+        let _ = Nic::receive(&mut sta);
+        now += DWELL_MS;
+        sta.poll(now);
+    }
+    check(
+        "the handshake survives the IP stack draining the interface between polls",
+        sta.state() == State::Running && sta.secured(),
+    );
+
+    // --- the same path through a firmware-assisted part ---------------
+    //
+    // A radio that scans for itself and refuses every frame until it has been
+    // told which access point it is for. The station has to reach Running
+    // through the hooks alone; a station that ignored them sends its probes and
+    // its authentication into a part that drops them, and `refused` counts each.
+    let mut lb = Loopback::new(me);
+    lb.offload = true;
+    let mut sta = Station::new(lb);
+    let mut ap = Ap::new(ap_mac, me, "glados", "correct horse", 6);
+    let mut now = 0u64;
+    sta.start("glados", "correct horse", now);
+    for _ in 0..200 {
+        if matches!(sta.state(), State::Running | State::Failed(_)) {
+            break;
+        }
+        ap.serve(sta.link_mut().radio_mut());
+        now += DWELL_MS;
+        sta.poll(now);
+    }
+    check(
+        "a part that scans in firmware is asked to, and gets on without a frame refused",
+        sta.state() == State::Running
+            && sta.secured()
+            && sta.seen.iter().any(|b| b.ssid == "glados")
+            && sta.link_mut().radio_mut().refused == 0,
+    );
+    check(
+        "it was told the access point, its channel and its beacon interval before anything was sent",
+        sta.link_mut().radio_mut().prepared
+            == Some(JoinTarget { bssid: ap_mac, channel: 6, beacon_int: 100, dtim: None }),
+    );
+    check(
+        "and the association identifier once there was one",
+        sta.link_mut().radio_mut().assoc_aid == Some(7),
+    );
+    sta.stop();
+    ap.serve(sta.link_mut().radio_mut());
+    check(
+        "stopping takes the radio's state down once, after the goodbye went out",
+        sta.link_mut().radio_mut().left_count == 1
+            && sta.link_mut().radio_mut().prepared.is_none()
+            && !ap.assoced,
+    );
+
+    // A firmware scan that never reports finishing has to end anyway, and end
+    // as a failure that says whose scan it was.
+    let mut lb = Loopback::new(me);
+    lb.offload = true;
+    let mut sta = Station::new(lb);
+    sta.start("glados", "", 0);
+    let mut now = 0u64;
+    for _ in 0..400 {
+        now += DWELL_MS;
+        if matches!(sta.poll(now), State::Failed(_)) {
+            break;
+        }
+    }
+    check(
+        "a firmware scan that never finishes fails, naming the radio's scan",
+        sta.state() == State::Failed("the radio's own scan never reported finishing"),
+    );
+
+    // A join that fails after the radio was prepared must not leave it prepared:
+    // that is a firmware time event pinning the part to one channel.
+    let mut lb = Loopback::new(me);
+    lb.offload = true;
+    let mut sta = Station::new(lb);
+    let mut ap = Ap::new(ap_mac, me, "glados", "correct horse", 6);
+    ap.refuse_assoc = true;
+    sta.start("glados", "correct horse", 0);
+    let mut now = 0u64;
+    for _ in 0..200 {
+        ap.serve(sta.link_mut().radio_mut());
+        now += DWELL_MS;
+        if matches!(sta.poll(now), State::Failed(_)) {
+            break;
+        }
+    }
+    check(
+        "a refused association takes the radio's state down with it",
+        sta.state() == State::Failed("the access point refused the association")
+            && sta.link_mut().radio_mut().prepared.is_none()
+            && sta.link_mut().radio_mut().left_count == 1,
+    );
+
+    // The DTIM period comes from the TIM element, which only a beacon carries,
+    // and a probe response heard afterwards must not erase it.
+    {
+        let mut b = dot11::beacon(&ap_mac, 0, "glados", 6, true);
+        b.extend_from_slice(&[5, 4, 0, 3, 0, 0]);
+        let pr = dot11::probe_response(&me, &ap_mac, 0, "glados", 6, true);
+        let pb = dot11::parse_beacon(&b);
+        let pp = dot11::parse_beacon(&pr);
+        let mut sta = Station::new(Loopback::new(me));
+        sta.note(&b, 6, -40);
+        sta.note(&pr, 6, -41);
+        check(
+            "a beacon's DTIM period is read, and a later probe response does not erase it",
+            pb.as_ref().map(|x| (x.beacon_int, x.dtim)) == Some((100, Some(3)))
+                && pp.as_ref().map(|x| x.dtim) == Some(None)
+                && sta.seen.len() == 1
+                && sta.seen[0].dtim == Some(3)
+                && sta.seen[0].rssi == -41,
+        );
+    }
 
     // --- and through the trait objects the interface layer holds -------
     //

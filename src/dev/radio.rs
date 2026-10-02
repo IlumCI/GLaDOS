@@ -119,7 +119,37 @@ pub struct Rx {
     pub channel: u8,
 }
 
+/// The network a station is about to join, as a part that keeps its own state
+/// about one needs it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct JoinTarget {
+    pub bssid: [u8; 6],
+    pub channel: u8,
+    /// Time units of 1024 us; zero when the beacon did not say.
+    pub beacon_int: u16,
+    /// `None` when only a probe response was heard, which carries no TIM.
+    pub dtim: Option<u8>,
+}
+
 /// A wireless part, at the 802.11 frame.
+///
+/// ### Two kinds of part behind one seam
+///
+/// A plain SoftMAC part does what the required methods say and nothing else:
+/// tune, send, receive. **A firmware-assisted part does not let the host do
+/// that.** Intel's firmware will not transmit a probe request the host built,
+/// and will not let a frame reach an access point until it has been told about
+/// that access point -- a PHY context on its channel, a MAC context, a binding
+/// between them, a station entry, and a time event holding the radio there.
+/// The host still builds the authentication and association frames and still
+/// runs the handshake, which is why such a part is SoftMAC in `Caps` and goes
+/// through `mlme` rather than implementing `Nic` itself.
+///
+/// The hooks below are where the two kinds differ, and **every one has a
+/// default that is exactly what the host-driven path already did**, so a part
+/// that overrides none of them behaves as every part did before they existed.
+/// That is asserted rather than intended: `diag mlme` runs the whole path twice,
+/// once through the defaults and once through a radio that overrides them.
 pub trait Radio {
     fn name(&self) -> &'static str;
     fn caps(&self) -> Caps;
@@ -141,6 +171,34 @@ pub trait Radio {
     fn set_key(&mut self, _key: &Key) -> bool {
         false
     }
+
+    /// Scan in firmware. `None`, the default, means this part cannot and the
+    /// host tunes channel by channel and sends its own probes. `Some(Ok)` means
+    /// the scan has started and what it hears arrives through `rx` like any
+    /// other frame, until `scan_done`. `Some(Err)` is a part that can scan and
+    /// would not, which is a failure and not a reason to fall back: a
+    /// host-driven scan on such a part transmits nothing.
+    fn scan_offload(&mut self, _ssid: &str, _chans: &[u8]) -> Option<Result<(), &'static str>> {
+        None
+    }
+
+    /// Whether an offloaded scan has finished. Never asked otherwise.
+    fn scan_done(&mut self) -> bool {
+        true
+    }
+
+    /// Get ready to talk to one access point. The default tunes to its channel,
+    /// which is all a plain part needs.
+    fn prepare_join(&mut self, t: &JoinTarget) -> Result<(), &'static str> {
+        self.set_channel(t.channel)
+    }
+
+    /// The association succeeded.
+    fn associated(&mut self, _aid: u16, _t: &JoinTarget) {}
+
+    /// The station has stopped talking to the access point it joined, for any
+    /// reason. A part that set up state in `prepare_join` takes it down here.
+    fn left(&mut self) {}
 }
 
 pub fn selftest() -> bool {

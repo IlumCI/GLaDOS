@@ -37,7 +37,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::dev::radio::{Caps, Key, Radio, Rx};
+use crate::dev::radio::{Caps, JoinTarget, Key, Radio, Rx};
 use crate::net::mlme::Ap;
 use crate::net::Mac;
 
@@ -73,7 +73,20 @@ pub struct Rehearsal {
     /// no message, the clock task still printing. A radio that manufactures a
     /// frame on demand is a radio that hangs whatever polls it.
     beaconed: u64,
+    /// Play a firmware-assisted part: scan by itself and refuse every frame
+    /// until it has been told which access point it is for. The shape an Intel
+    /// part has, rehearsed before one can be driven.
+    offload: bool,
+    /// The scan in progress: the plan, how far it has got, and when it last
+    /// moved.
+    scan: Option<(Vec<u8>, usize, u64)>,
+    prepared: bool,
 }
+
+/// How long a firmware scan sits on each channel. Shorter than the host's
+/// dwell, because a part that scans for itself is not waiting on a host to be
+/// scheduled -- and long enough here that a beacon is heard on every one.
+const FW_DWELL_MS: u64 = BEACON_MS + 10;
 
 /// The room, as it is built. Two access points carry `glados` so the strongest
 /// has to be chosen rather than the first heard.
@@ -97,7 +110,24 @@ impl Rehearsal {
                 beacon_seq: 0,
             });
         }
-        Rehearsal { mac, ch: 1, started: false, spots, inbox: Vec::new(), beaconed: 0 }
+        Rehearsal {
+            mac,
+            ch: 1,
+            started: false,
+            spots,
+            inbox: Vec::new(),
+            beaconed: 0,
+            offload: false,
+            scan: None,
+            prepared: false,
+        }
+    }
+
+    /// The same room, heard through a part that scans in firmware.
+    pub fn offloading(mac: Mac) -> Rehearsal {
+        let mut r = Rehearsal::new(mac);
+        r.offload = true;
+        r
     }
 
     /// What is in the room, for anything that wants to say so plainly.
@@ -142,7 +172,7 @@ impl Rehearsal {
 
 impl Radio for Rehearsal {
     fn name(&self) -> &'static str {
-        "rehearsal"
+        if self.offload { "rehearsal (offload)" } else { "rehearsal" }
     }
 
     fn caps(&self) -> Caps {
@@ -187,6 +217,9 @@ impl Radio for Rehearsal {
         if !self.started {
             return Err("radio is not started");
         }
+        if self.offload && !self.prepared {
+            return Err("the firmware has not been told about an access point");
+        }
         // Whoever is transmitting is the station these access points are
         // talking to. Read off the frame rather than configured, because that
         // is what an access point in a real room has to do.
@@ -216,7 +249,17 @@ impl Radio for Rehearsal {
         // sends one -- which is the whole of a passive scan and the only way a
         // radar channel is ever heard. Gated on the clock and not on the queue
         // being empty: see `beaconed`.
-        if self.started && crate::net::now_ms().saturating_sub(self.beaconed) >= BEACON_MS {
+        let now = crate::net::now_ms();
+        let mut stepped = false;
+        if let Some((plan, at, last)) = self.scan.as_mut() {
+            if *at < plan.len() && now.saturating_sub(*last) >= FW_DWELL_MS {
+                self.ch = plan[*at];
+                *at += 1;
+                *last = now;
+                stepped = true;
+            }
+        }
+        if stepped || (self.started && now.saturating_sub(self.beaconed) >= BEACON_MS) {
             self.beacon();
         }
         if self.inbox.is_empty() {
@@ -230,5 +273,43 @@ impl Radio for Rehearsal {
         // No hardware to put it in, so the honest answer, and `softmac` then
         // does CCMP itself -- which is the path worth rehearsing anyway.
         false
+    }
+
+    fn scan_offload(&mut self, _ssid: &str, chans: &[u8]) -> Option<Result<(), &'static str>> {
+        if !self.offload {
+            return None;
+        }
+        self.inbox.clear();
+        // Backdated a dwell, so the first channel is heard on the first poll.
+        let now = crate::net::now_ms();
+        self.scan = Some((chans.to_vec(), 0, now.saturating_sub(FW_DWELL_MS)));
+        Some(Ok(()))
+    }
+
+    fn scan_done(&mut self) -> bool {
+        match &self.scan {
+            // Done once the last channel has had its dwell, not the moment it
+            // was tuned: otherwise the last channel's beacons are never heard.
+            Some((plan, at, last)) if *at >= plan.len() => {
+                if crate::net::now_ms().saturating_sub(*last) >= FW_DWELL_MS {
+                    self.scan = None;
+                    return true;
+                }
+                false
+            }
+            Some(_) => false,
+            None => true,
+        }
+    }
+
+    fn prepare_join(&mut self, t: &JoinTarget) -> Result<(), &'static str> {
+        self.scan = None;
+        self.set_channel(t.channel)?;
+        self.prepared = true;
+        Ok(())
+    }
+
+    fn left(&mut self) {
+        self.prepared = false;
     }
 }

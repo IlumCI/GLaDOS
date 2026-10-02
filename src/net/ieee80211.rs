@@ -154,6 +154,7 @@ pub fn data_addrs(frame: &[u8]) -> Option<([u8; 6], [u8; 6])> {
 const IE_SSID: u8 = 0;
 const IE_RATES: u8 = 1;
 const IE_DS_PARAM: u8 = 3;
+const IE_TIM: u8 = 5;
 const IE_RSN: u8 = 48;
 const IE_VENDOR: u8 = 221;
 
@@ -206,6 +207,12 @@ pub struct Beacon {
     /// True when an RSN element is present: WPA2 or later, as opposed to the
     /// privacy bit alone, which WEP also sets.
     pub rsn: bool,
+    /// In time units of 1024 us; 100 is the ordinary answer.
+    pub beacon_int: u16,
+    /// From the TIM element, which only a beacon carries: a probe response
+    /// answers `None`, and guessing 1 would tell a part's power table to wake
+    /// for every beacon on a network that asked for every third.
+    pub dtim: Option<u8>,
 }
 
 /// True if this is a beacon or a probe response, the two frames a scan reads.
@@ -239,10 +246,12 @@ pub fn parse_beacon(frame: &[u8]) -> Option<Beacon> {
     }
     let mut bssid = [0u8; 6];
     bssid.copy_from_slice(&frame[16..22]);
+    let beacon_int = u16le(&frame[MGMT_HDR + 8..]);
     let cap = u16le(&frame[MGMT_HDR + 10..]);
 
     let mut ssid = String::new();
     let mut channel = None;
+    let mut dtim = None;
     let mut rsn = false;
     for ie in elements(&frame[MGMT_HDR + FIXED..]) {
         match ie.id {
@@ -251,6 +260,8 @@ pub fn parse_beacon(frame: &[u8]) -> Option<Beacon> {
             // whether to show it.
             IE_SSID => ssid = String::from_utf8_lossy(ie.data).into_owned(),
             IE_DS_PARAM if !ie.data.is_empty() => channel = Some(ie.data[0]),
+            // Count, then period. A period of zero is reserved and refused.
+            IE_TIM if ie.data.len() >= 2 && ie.data[1] != 0 => dtim = Some(ie.data[1]),
             IE_RSN => rsn = true,
             // WPA1 lived in a vendor element before RSN existed: OUI 00:50:F2
             // with type 1. Still seen on old access points.
@@ -268,6 +279,8 @@ pub fn parse_beacon(frame: &[u8]) -> Option<Beacon> {
         channel,
         secured: rsn || cap & CAP_PRIVACY != 0,
         rsn,
+        beacon_int,
+        dtim,
     })
 }
 
