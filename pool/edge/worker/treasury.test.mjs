@@ -7,7 +7,7 @@
 // no money: a signer that is wrong here is wrong before any coin moves.
 import * as secp from "@noble/secp256k1";
 import { evmAddress, rvnAddress, rvnSighash, signRvnTx, newKey, decodeBase58check, unhex, signLegacyTx, createdAddress,
-         rvnScript, rvnTxid, encodeBuyAndPay, encodeCtor, amountOut, hex } from "./treasury.js";
+         rvnScript, rvnTxid, encodeBuyAndPay, encodeCtor, encodePayAll, encodeCtor2, amountOut, hex } from "./treasury.js";
 import { ethers } from "../../../contracts/node_modules/ethers/lib.esm/index.js";
 
 // DER back to (r, s), written independently of treasury.js's encoder.
@@ -107,6 +107,18 @@ const W = "0x0bd7d308f8e1639fab988df18a8011f41eacad73", T = "0x3d609ecafc6aa7dba
 ok(encodeCtor(W, T, P) === ethers.AbiCoder.defaultAbiCoder().encode(["address", "address", "address"], [W, T, P]).slice(2),
    "and so are the constructor arguments");
 ok(amountOut(10n ** 15n, 6556353309807986866n, 263_900_000n * 10n ** 18n) > 0n, "the swap quote is computed");
+const pay2 = new ethers.Interface(["function payAll(((address pool,address token,uint256 eth,uint256 minOut)[] legs,address[] to)[] groups)"]);
+const gs = [
+  { legs: [{ pool: P, token: T, eth: 5n, minOut: 6n }], to: rcpts },
+  { legs: [{ pool: "0x" + "11".repeat(20), token: "0x" + "22".repeat(20), eth: 7n, minOut: 8n },
+           { pool: "0x" + "33".repeat(20), token: "0x" + "44".repeat(20), eth: 9n, minOut: 10n }], to: ["0x" + "cc".repeat(20)] },
+  { legs: [{ pool: P, token: T, eth: 1n, minOut: 1n }], to: [] },
+];
+ok(encodePayAll(gs) === pay2.encodeFunctionData("payAll", [gs.map((g) => [g.legs.map((l) => [l.pool, l.token, l.eth, l.minOut]), g.to])]),
+   "payAll calldata (groups of legs and wallets) is byte-identical to ethers' encoding");
+const ctor2 = [W, T, P, "0x5fc5360d0400a0fd4f2af552add042d716f1d168", "0x1f7d7550b1b028f7571e69a784071f0205fd2efa", "0x52e65b17fb6e5ba00ed806f37afcd2daa50271ca"];
+ok(encodeCtor2(...ctor2) === ethers.AbiCoder.defaultAbiCoder().encode(Array(6).fill("address"), ctor2).slice(2),
+   "and so are GladosPayout2's constructor arguments");
 
 // A P2SH output is written as OP_HASH160 <20> OP_EQUAL, and the txid is the
 // reversed double SHA-256 of the raw bytes.

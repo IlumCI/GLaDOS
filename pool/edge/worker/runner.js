@@ -37,12 +37,16 @@
 // posted to ALERT_WEBHOOK when one is configured, so the operator hears about
 // a written-off exchange from the treasury, not from a miner.
 import { decide, FRESH, MAX_RECIPIENTS, backoffMs } from "./flow.js";
-import { signRvnTx, rvnTxid, rvnScript, signLegacyTx, createdAddress, encodeBuyAndPay, encodeCtor, amountOut } from "./treasury.js";
+import { signRvnTx, rvnTxid, rvnScript, signLegacyTx, createdAddress, encodePayAll, encodeCtor2, amountOut } from "./treasury.js";
+import { plan, planGas, legsOf } from "./plan.js";
+import { CHAIN as RWA, TOKENS, MENU, rewardOf, DEFAULT as DEFAULT_REWARD } from "./rewards.js";
 import { parseLedger, workByAddress, build, deltas, floorOf, candidates } from "./epoch.js";
 import { worthPaying } from "./cadence.js";
 import { readerData, readerDecode, READ_MAX } from "./reader.js";
 import { textChunks, loadText } from "./chunks.js";
-import payoutArtifact from "./GladosPayout.json" with { type: "json" };
+// GladosPayout2 pays each miner in what they chose: $GLADOS on its V2 pair, or
+// tokenized stock through Uniswap V3 (contracts/src/GladosPayout2.sol).
+import payoutArtifact from "./GladosPayout2.json" with { type: "json" };
 
 const RPC = "https://rpc.mainnet.chain.robinhood.com";
 const CHAIN_ID = 4663;
@@ -51,6 +55,7 @@ const CHANGENOW = "https://api.changenow.io/v2";
 export const TOKEN = "0x3d609ecafc6aa7dba67dd7ad1d10b49c52d57777";
 export const PAIR = "0x93f777932d98d15b351d1bce8c76b34381eede5b";
 export const WETH = "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
+export const MULTICALL3 = "0xca11bde05977b3631167028862be2a173976ca11";
 
 // Gas figures measured on a fork of the real chain (contracts/test/payout-fork.mjs):
 // ~166,600 for the buy and ~50,850 a recipient, rounded up.
@@ -58,6 +63,13 @@ export const CFG = {
   dropAfterMs: 20 * 60_000, maxFailures: 3,
   exchangeUnsentMs: 2 * 3_600_000, exchangeStuckMs: 48 * 3_600_000, deployGas: 900_000, baseGas: 200_000,
   perRecipientGas: 60_000, maxOverhead: 0.1,
+  // A stock leg is two V3 swaps (WETH->USDG->stock) before its sends; a $GLADOS
+  // leg one V2 swap. And the most gas one payout may plan for, under 4663's
+  // 32M per-transaction cap with room for the estimate to come in high.
+  v2LegGas: 170_000, v3LegGas: 320_000, maxTxGas: 24_000_000,
+  // A stock leg's minimum out: the QuoterV2 quote less this, for movement
+  // between the quote and the block.
+  rwaSlipBps: 300n,
   // An EVM transaction neither mined nor refused in this long is replaced at
   // the same nonce and today's gas price; its bytes alone would wait forever
   // behind a price that moved.
@@ -98,6 +110,16 @@ export const CFG = {
 };
 
 const big = (x) => BigInt(x);
+
+// QuoterV2.quoteExactInput(bytes path, uint256 amountIn) for WETH -> USDG ->
+// the stock, the route GladosPayout2 swaps along.
+function quoteData(sym, amountIn) {
+  const t = TOKENS[sym];
+  const fee = (f) => f.toString(16).padStart(6, "0");
+  const path = WETH.slice(2) + fee(RWA.wethUsdgFee) + RWA.usdg.slice(2) + fee(t.fee) + t.token.slice(2);
+  const w = (v) => BigInt(v).toString(16).padStart(64, "0");
+  return "0xcdca1753" + w(64) + w(amountIn) + w(path.length / 2) + path + "0".repeat((64 - (path.length % 64)) % 64);
+}
 // A shard's /work.json, {"work": {"0xaddr": "123", ...}}, as address -> BigInt.
 export const parseWork = (text) => new Map(Object.entries(JSON.parse(text).work || {}).map(([a, w]) => [a.toLowerCase(), BigInt(w)]));
 const toJSON = (v) => JSON.parse(JSON.stringify(v, (_, x) => (typeof x === "bigint" ? x.toString() : x)));
@@ -466,6 +488,9 @@ export class Treasury {
           this.epochCache = { epochs: state.epochs || 0, at: f.now, epoch: f.epoch };
         }
         f.recipients = f.epoch.recipients;
+        // The gas this epoch's plan really costs: a basket wallet is a send per
+        // token, so a head count would understate it and pay out at a loss.
+        f.payGas = planGas(plan({ recipients: f.recipients, choices: f.epoch.choices, blocked: f.epoch.blocked, value: 1n }), this.cfg);
       }
     }
     return f;
@@ -570,10 +595,17 @@ export class Treasury {
     const names = [...[...Array(n).keys()].map((i) => (i === 0 ? "main" : `shard-${i}`)), ...[...Array(gpu).keys()].map((i) => `gpu-${i}`)];
     const total = new Map();
     const add = (m) => { for (const [a, w] of m) total.set(a, (total.get(a) || 0n) + w); };
+    // Each wallet's reward choice, from the shard its work is on. One address
+    // always routes to one shard, so there is one answer per address.
+    const choices = new Map();
+    const choose = (o) => { for (const [a, c] of Object.entries(o || {})) choices.set(a.toLowerCase(), rewardOf(c)); };
     // A shard that does not answer fails the epoch rather than leaving its
     // miners out of it: they would be refused this epoch's pay for nothing.
     await Promise.all(names.map(async (name) => {
-      if (name === "main") return add(workByAddress(parseLedger(this.pool.core.ledger(1, Math.floor(this.now() / 1000)))));
+      if (name === "main") {
+        if (this.pool.rewards) choose(Object.fromEntries(await this.pool.rewards()));
+        return add(workByAddress(parseLedger(this.pool.core.ledger(1, Math.floor(this.now() / 1000)))));
+      }
       const stub = env.POOL.get(env.POOL.idFromName(name));
       let r = await stub.fetch(new Request("https://pool/work.json"));
       if (r.status === 404) {
@@ -582,8 +614,11 @@ export class Treasury {
         return add(workByAddress(parseLedger(await r.text())));
       }
       if (!r.ok) throw new Transient(`shard ${name} answered ${r.status}`);
-      add(parseWork(await r.text()));
+      const text = await r.text();
+      add(parseWork(text));
+      try { choose(JSON.parse(text).rewards); } catch {}
     }));
+    this.choices = choices;
     return total;
   }
 
@@ -622,7 +657,62 @@ export class Treasury {
         if (v.code !== "contract" && v.balance >= gateMin) eligible += 1;
       }
     }
-    return build({ now, prev, balances, gateMin, ineligible, maxRecipients: MAX_RECIPIENTS, considered });
+    // Weighed by what each wallet chose: a basket wallet costs a send per
+    // token, and the payout plans for every leg the menu has, so whatever the
+    // mix of choices the one transaction stays under the gas cap.
+    const choices = this.choices || new Map();
+    const cfg = this.cfg;
+    const legReserve = Object.values(MENU).reduce((g, m) => g + (m.tokens.length ? m.tokens.length * cfg.v3LegGas : cfg.v2LegGas), 0);
+    const e = build({ now, prev, balances, gateMin, ineligible, maxRecipients: MAX_RECIPIENTS, considered,
+                      weigh: (a) => legsOf(rewardOf(choices.get(a))) * cfg.perRecipientGas,
+                      capacity: cfg.maxTxGas - cfg.baseGas - legReserve });
+    e.choices = new Map(e.recipients.filter((a) => choices.has(a)).map((a) => [a, choices.get(a)]));
+    e.blocked = await this.blocked(e.recipients.filter((a) => rewardOf(e.choices.get(a)) !== DEFAULT_REWARD));
+    return e;
+  }
+
+  // Which wallets the stock tokens' beacon blocklists. A transfer to one would
+  // revert the whole payout, so they are paid in $GLADOS that epoch instead.
+  // **Unreadable counts as blocked**: $GLADOS is the payout that cannot fail
+  // on a blocklist, so not knowing costs a wallet its choice for one epoch and
+  // never costs everybody their payout.
+  async blocked(addrs) {
+    const out = new Set();
+    for (let i = 0; i < addrs.length; i += 100) {
+      const part = addrs.slice(i, i + 100);
+      try {
+        const r = await this.multicall(part.map((a) => ({ to: RWA.stockBeacon, data: "0xfbac3951" + a.slice(2).padStart(64, "0") })));
+        r.forEach((x, j) => { if (!x.ok || x.data.length < 66 || BigInt(x.data.slice(0, 66)) !== 0n) out.add(part[j]); });
+      } catch {
+        for (const a of part) out.add(a);
+      }
+    }
+    return out;
+  }
+
+  // Multicall3.aggregate3 with every call allowed to fail, as one eth_call.
+  async multicall(calls) {
+    const w = (v) => BigInt(v).toString(16).padStart(64, "0");
+    const bodies = calls.map(({ to, data }) => {
+      const d = data.slice(2);
+      const pad = d + "0".repeat((64 - (d.length % 64)) % 64);
+      return w(to) + w(1) + w(96) + w(d.length / 2) + pad;
+    });
+    let off = calls.length * 32;
+    const heads = bodies.map((b) => { const h = w(off); off += b.length / 2; return h; });
+    const data = "0x82ad56cb" + w(32) + w(calls.length) + heads.join("") + bodies.join("");
+    const hex = (await this.rpc("eth_call", [{ to: MULTICALL3, data }, "latest"])).slice(2);
+    const at = (i) => Number(BigInt("0x" + hex.slice(i * 2, i * 2 + 64)));
+    const n = at(32);
+    const res = [];
+    for (let i = 0; i < n; i++) {
+      const o = at(64 + 32 * i) + 64;
+      const ok = at(o) !== 0;
+      const d = at(o + 32) + o;
+      const len = at(d);
+      res.push({ ok, data: "0x" + hex.slice((d + 32) * 2, (d + 32 + len) * 2) });
+    }
+    return res;
   }
 
   // --- writing ---------------------------------------------------------------------------
@@ -675,7 +765,7 @@ export class Treasury {
     if (a.kind === "deploy") {
       const nonce = Number(await this.rpc("eth_getTransactionCount", [keys.evm, "latest"]));
       const gasPrice = (facts.gasPrice * 125n) / 100n;
-      const data = "0x" + payoutArtifact.bytecode + encodeCtor(WETH, TOKEN, PAIR);
+      const data = "0x" + payoutArtifact.bytecode + encodeCtor2(WETH, TOKEN, PAIR, RWA.usdg, RWA.v3Factory, RWA.wethUsdgPool);
       const est = await this.estimate({ from: keys.evm, data }, next);
       if (est === null) return;
       const gasLimit = (est * 12n) / 10n;
@@ -710,34 +800,73 @@ export class Treasury {
         this.log(`payout waits: ${moved}`);
         return;
       }
-      // The quote, less the token's buy tax, less 3% for movement between now
-      // and the block: a sandwich past that reverts the whole payout.
-      const quoteMin = (v) => (amountOut(v, rW, rG) * (10_000n - tax) * 97n) / 1_000_000n;
+      const e = facts.epoch;
+      // $GLADOS: the V2 quote, less the buy tax, less 3% for movement between
+      // now and the block. A sandwich past that reverts the whole payout.
+      const gladosMin = (v) => (amountOut(v, rW, rG) * (10_000n - tax) * 97n) / 1_000_000n;
+      // Stocks: QuoterV2 down WETH->USDG->stock, per leg, all in one eth_call.
+      // A leg with no quote has no safe minimum, so its choice is paid in
+      // $GLADOS this epoch rather than risk reverting everybody's payout.
+      const priced = async (value) => {
+        let fallback = new Set();
+        for (let round = 0; round < 2; round++) {
+          const p = plan({ recipients: a.recipients, choices: e.choices, blocked: e.blocked, fallback, value });
+          const stockLegs = p.groups.flatMap((g) => g.legs.filter((l) => l.sym !== "GLADOS").map((l) => ({ g, l })));
+          let quotes = [];
+          if (stockLegs.length) {
+            try { quotes = await this.multicall(stockLegs.map(({ l }) => ({ to: RWA.quoterV2, data: quoteData(l.sym, l.eth) }))); }
+            catch { quotes = stockLegs.map(() => ({ ok: false, data: "0x" })); }
+          }
+          const failed = new Set();
+          stockLegs.forEach(({ g, l }, i) => {
+            const q = quotes[i];
+            const out = q && q.ok && q.data.length >= 66 ? BigInt(q.data.slice(0, 66)) : 0n;
+            if (out === 0n) failed.add(g.code);
+            else l.minOut = (out * (10_000n - this.cfg.rwaSlipBps)) / 10_000n;
+          });
+          if (failed.size && round === 0) { fallback = failed; for (const c of failed) this.log(`payout: ${c} has no quote this epoch; its wallets are paid in $GLADOS`); continue; }
+          for (const g of p.groups) for (const l of g.legs) if (l.sym === "GLADOS") l.minOut = gladosMin(l.eth);
+          if (p.groups.some((g) => g.legs.some((l) => !l.minOut))) return null;
+          return p;
+        }
+        return null;
+      };
+      const callData = (p) => encodePayAll(p.groups.map((g) => ({ to: g.to, legs: g.legs.map((l) => (l.sym === "GLADOS"
+        ? { pool: PAIR, token: TOKEN, eth: l.eth, minOut: l.minOut }
+        : { pool: TOKENS[l.sym].pool, token: TOKENS[l.sym].token, eth: l.eth, minOut: l.minOut })) })));
+
+      let p = await priced(a.value);
+      if (!p) { this.log("payout waits: no leg could be priced"); return; }
       const nonce = Number(await this.rpc("eth_getTransactionCount", [keys.evm, "latest"]));
       const gasPrice = (facts.gasPrice * 125n) / 100n;
-      const est = await this.estimate({ from: keys.evm, to: next.contract, data: encodeBuyAndPay(a.recipients, quoteMin(a.value)),
-                                        value: "0x" + a.value.toString(16) }, next);
+      const est = await this.estimate({ from: keys.evm, to: next.contract, data: callData(p), value: "0x" + a.value.toString(16) }, next);
       if (est === null) return;
       const gasLimit = (est * 12n) / 10n;
       // **Value plus the most this transaction can burn must fit the balance**,
-      // or the node refuses it as underfunded.
+      // or the node refuses it as underfunded. A smaller value is planned and
+      // priced again from scratch, so every leg's minimum is its own quote.
       let value = a.value;
-      if (value + gasLimit * gasPrice > facts.ethWei) value = facts.ethWei - gasLimit * gasPrice;
-      if (value <= 0n) {
-        this.log(`payout waits: gas ${gasLimit * gasPrice} wei would take the whole balance`);
-        return;
+      if (value + gasLimit * gasPrice > facts.ethWei) {
+        value = facts.ethWei - gasLimit * gasPrice;
+        if (value <= 0n) {
+          this.log(`payout waits: gas ${gasLimit * gasPrice} wei would take the whole balance`);
+          return;
+        }
+        p = await priced(value);
+        if (!p) { this.log("payout waits: no leg could be priced"); return; }
       }
-      const minOut = quoteMin(value);
-      const tx = signLegacyTx(keys.evmKey, { nonce, gasPrice, gas: gasLimit, to: next.contract, value, data: encodeBuyAndPay(a.recipients, minOut), chainId: CHAIN_ID });
-      const e = facts.epoch;
+      const tx = signLegacyTx(keys.evmKey, { nonce, gasPrice, gas: gasLimit, to: next.contract, value, data: callData(p), chainId: CHAIN_ID });
       const id = (next.epochs || 0) + 1;
-      // The whole record -- who, why, and the snapshot it moves the ledger to --
-      // is stored under this transaction's own hash, so an earlier attempt that
-      // is the one mined is recorded as what it was, not as its replacement.
-      // Only the snapshot entries this payout moves: the whole snapshot is one
-      // entry per address that ever mined, megabytes at 100,000 miners.
+      // The whole record -- who, in what, why, and the snapshot it moves the
+      // ledger to -- is stored under this transaction's own hash, so an earlier
+      // attempt that is the one mined is recorded as what it was. Only the
+      // snapshot entries this payout moves: the whole snapshot is one entry per
+      // address that ever mined, megabytes at 100,000 miners.
+      const minOut = p.groups.flatMap((g) => g.legs).filter((l) => l.sym === "GLADOS").reduce((t, l) => t + l.minOut, 0n);
       const record = { id, at: this.now(), value: value.toString(), minOut: minOut.toString(), tax: tax.toString(),
                        recipients: a.recipients, work: e.work, floor: e.floor, excluded: e.excluded, notReached: e.notReached,
+                       groups: p.groups.map((g) => ({ code: g.code, name: MENU[g.code].name, to: g.to,
+                         legs: g.legs.map((l) => ({ sym: l.sym, eth: l.eth.toString(), minOut: l.minOut.toString() })) })),
                        updates: Object.fromEntries([...e.updates].map(([k, v]) => [k, v.toString()])) };
       next.pending = { kind: "pay", chain: "evm", hash: tx.hash, raw: tx.raw, at: this.now(), nonce,
                        epoch: { id, key: `treasury.attempt.${tx.hash}` }, prior: this.prior(next, nonce) };

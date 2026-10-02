@@ -71,6 +71,17 @@ ok([...crowd.keys()].filter((a) => !cap.recipients.includes(a)).every((a) => (ca
 const grown = new Map([...crowd].map(([a, w]) => [a, w + 10n]));
 const nextCap = build({ now: grown, prev: cap.snapshot, balances: bal, gateMin: 0n, minFrac: 0, maxRecipients: 4 });
 ok(nextCap.recipients.every((a) => !cap.recipients.includes(a)), "next epoch the ones left out are at the front");
+// Weighed: a basket wallet costs its legs, and the gas budget, not a head count, decides who fits.
+const heavy = new Set([...crowd.keys()].slice(0, 3));
+const weighed = build({ now: crowd, prev: new Map(), balances: bal, gateMin: 0n, minFrac: 0, weigh: (a) => (heavy.has(a) ? 10 : 1), capacity: 12 });
+const used = weighed.recipients.reduce((s, a) => s + (heavy.has(a) ? 10 : 1), 0);
+ok(used <= 12 && weighed.recipients.length >= 2, `a gas budget of 12 admits ${weighed.recipients.length} wallet(s) costing ${used}, never more than the budget`);
+ok([...crowd.keys()].filter((a) => !weighed.recipients.includes(a)).every((a) => (weighed.snapshot.get(a) ?? 0n) === 0n && /carries/.test(weighed.excluded[a])),
+   "everybody who did not fit carries their work, untouched");
+const byWork = [...crowd.keys()].sort((a, b) => (crowd.get(b) > crowd.get(a) ? 1 : -1));
+ok(weighed.recipients.every((a) => byWork.indexOf(a) < byWork.indexOf(byWork.find((x) => !weighed.recipients.includes(x)))),
+   "and the ones admitted are a prefix of most-work-first, so nobody jumps the queue by choosing cheaply");
+
 
 // Bounded reads: only `considered` addresses are judged; the rest are counted,
 // carried, and never listed -- at 100,000 miners the list is the problem.

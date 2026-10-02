@@ -1,6 +1,8 @@
-Your spare PC can mine $GLaDOS tonight. Boot the miner, give it your wallet,
-and walk away. The pool turns everything it earns into $GLaDOS and sends it
-straight to your wallet. Nothing to claim, nothing to install.
+Your spare PC can mine $GLaDOS tonight, and now it can mine real-world assets
+too. Boot the miner, give it your wallet, pick what you want to be paid in,
+and walk away: $GLaDOS, NVIDIA, SpaceX, a basket of chip makers, or gold,
+silver and oil. It all lands straight in your wallet. Nothing to claim,
+nothing to install.
 
 **Download:** `glados-{{VERSION}}-miner.iso` (33 MB), plus `SHA256SUMS` to
 check it:
@@ -60,6 +62,35 @@ What the PC needs:
 - **Ethernet** (Intel e1000-family or Realtek RTL8168/8111, which covers most
   desktops and laptops), or a phone sharing its connection over USB.
 
+## Choose what you're paid in
+
+Every miner gets the same share of each payout. You pick what that share is
+paid in:
+
+| Code | Paid in |
+|---|---|
+| `glados` | $GLaDOS (the default) |
+| `nvda` | NVIDIA |
+| `spcx` | SpaceX |
+| `googl` | Alphabet |
+| `amzn` | Amazon |
+| `gme` | GameStop |
+| `spy` | S&P 500 |
+| `chips` | Chip makers: NVIDIA, AMD, Intel, Micron, Broadcom, TSMC, ASML, Marvell, SK hynix, Dell |
+| `os` | Operating systems: Microsoft, Apple, Alphabet, IBM, BlackBerry |
+| `index` | S&P 500 and Nasdaq-100 |
+| `metals` | Gold, silver and oil |
+
+- **On the mining screen:** type a code, like `nvda`, and press Enter. The
+  miner restarts and the screen says **YOU ARE MINING NVDA**.
+- **On a USB stick:** set the `reward` line in `GLADOS/MINER.TXT`, like
+  `reward metals`.
+- **It's remembered** on that PC, like your wallet. A code typed on the screen
+  stays until you type another, or until you change the `reward` line in
+  MINER.TXT.
+
+The same 1,000,000 $GLaDOS rule applies whatever you're paid in.
+
 ## Your wallet
 
 - **Hold at least 1,000,000 $GLaDOS** to mine on the pool, and keep holding
@@ -77,7 +108,7 @@ signature.
 ## How you get paid
 
 - **Everyone gets the same.** Each payout is split equally between every
-  eligible wallet.
+  eligible wallet, and each share is paid in what that wallet chose.
 - **Who is eligible:** wallets holding at least 1,000,000 $GLaDOS that did at
   least a quarter of the typical miner's work in that round. Miss a round and
   your work carries over to the next.
@@ -87,6 +118,15 @@ signature.
 - **Every payout is public,** with its transaction:
   <https://pool.aperture.institute/payouts.json>, or on
   <https://glados.aperture.institute/pool/>.
+
+## Also new in 1.3.10
+
+- **It tells you what's wrong, in plain words.** No network card, no cable,
+  no address from the router, no internet: each one is its own message on the
+  screen, and the miner keeps retrying by itself until it's fixed.
+- **Clear wallet messages.** If your wallet holds less than 1,000,000
+  $GLaDOS, the pool says exactly how much it holds and what it needs. A
+  mistyped address or a contract address gets its own message too.
 
 ## Also in this release
 

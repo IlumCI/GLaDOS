@@ -48,7 +48,7 @@
 <div id="sidebar">
 <div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.3.9</td></tr><tr><td>Released</td><td>2026-09-30</td></tr><tr><td>Images</td><td>3</td></tr></table><ul><li><a href="../download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.3.9">Release notes</a></li></ul></div></div>
 <div class="box"><div class="t">Project information</div><div class="bd"><table class="facts"><tr><td>Development status</td><td>3 - Alpha</td></tr><tr><td>Environment</td><td>Console, framebuffer</td></tr><tr><td>Intended audience</td><td>Developers, science/research</td></tr><tr><td>Licence</td><td>Other/proprietary, all rights reserved</td></tr><tr><td>Natural language</td><td>English</td></tr><tr><td>Operating system</td><td>x86-64 UEFI, bare metal</td></tr><tr><td>Programming language</td><td>Rust, Python</td></tr><tr><td>Topic</td><td>Operating systems, kernels, artificial intelligence</td></tr></table></div></div>
-<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>20</td></tr><tr><td>Downloads</td><td>830</td></tr><tr><td>Source</td><td>198 files, ~132,000 lines</td></tr></table></div></div>
+<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>20</td></tr><tr><td>Downloads</td><td>859</td></tr><tr><td>Source</td><td>198 files, ~132,000 lines</td></tr></table></div></div>
 <div class="box"><div class="t">Developers</div><div class="bd"><table class="facts"><tr><td>IlumCI</td><td>project admin, developer</td></tr></table></div></div>
 <div class="box"><div class="t">Documentation</div><div class="bd"><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/kernel.html">The kernel</a></li><li><a href="../wiki/model.html">The model</a></li><li><a href="../wiki/agent.html">The agent</a></li><li><a href="../wiki/rsi.html">Self-improvement</a></li><li><a href="../wiki/aiksi.html">Aiksi, the language</a></li><li><a href="../wiki/">All 18 articles</a></li></ul></div></div>
 </div>
@@ -59,9 +59,10 @@
 <h1>Mine $GLaDOS</h1>
 
 <div class="panel">
-<p><strong>Your spare PC can mine $GLaDOS tonight.</strong> Boot the miner,
-give it your wallet, and walk away. The pool turns everything it earns into
-$GLaDOS and sends it straight to your wallet.</p>
+<p><strong>Your spare PC can mine $GLaDOS tonight, and now real-world assets
+too.</strong> Boot the miner, give it your wallet, pick what you want to be
+paid in, and walk away: $GLaDOS, NVIDIA, SpaceX, a basket of chip makers, or
+gold, silver and oil. It lands straight in your wallet.</p>
 
 <table class="data" id="live">
 <tr><th>Miners connected now</th><td id="live-miners">&hellip;</td></tr>
@@ -69,8 +70,8 @@ $GLaDOS and sends it straight to your wallet.</p>
 <tr><th>Last payout</th><td id="live-last">&hellip;</td></tr>
 </table>
 
-<p><a href="https://github.com/IlumCI/GLaDOS/releases/tag/mining-v1.3.9"><strong>Download the miner (33 MB)</strong></a>
-&nbsp;&middot;&nbsp; <a href="https://github.com/IlumCI/GLaDOS/releases/tag/mining-v1.3.9">Setup guide</a></p>
+<p><a href="https://github.com/IlumCI/GLaDOS/releases/tag/mining-v1.3.10"><strong>Download the miner (33 MB)</strong></a>
+&nbsp;&middot;&nbsp; <a href="https://github.com/IlumCI/GLaDOS/releases/tag/mining-v1.3.10">Setup guide</a></p>
 </div>
 
 <div class="shot"><img src="../img/pool/mining.webp" alt="The GLaDOS miner's mining screen: the aperture mark on the left, and on the right $GLaDOS with the hashrate, a hashrate graph, shares, uptime, status LIVE and the wallet it pays" width="1280" height="720" loading="lazy" decoding="async"><div class="cap"><b>The miner, mining.</b> Hashrate, shares, uptime, and the wallet it pays. Captured from the real ISO running in QEMU.</div></div>
@@ -80,7 +81,7 @@ $GLaDOS and sends it straight to your wallet.</p>
 <ol>
 <li><strong>Hold 1,000,000 $GLaDOS</strong> in a wallet on Robinhood Chain.
 The contract address is on <a href="../token/">the token page</a>.</li>
-<li><strong>Download</strong> <code>glados-1.3.9-miner.iso</code> and check it
+<li><strong>Download</strong> <code>glados-1.3.10-miner.iso</code> and check it
 against <code>SHA256SUMS</code>.</li>
 <li><strong>Run it</strong> in QEMU, or boot a real PC from a USB stick.</li>
 <li><strong>Give it your wallet.</strong> Type it at first boot, or put it in
@@ -95,11 +96,30 @@ against <code>SHA256SUMS</code>.</li>
 <p>Any x86-64 PC with UEFI works, roughly 2011 and newer. Turn Secure Boot off
 and plug in Ethernet, or share your phone's connection over USB.</p>
 
+<h2 class="sect">Choose what you're paid in</h2>
+
+<p>Type a code on the mining screen and press Enter. The miner restarts and
+mines for what you picked. Or set the <code>reward</code> line in
+<code>GLADOS/MINER.TXT</code>, like <code>reward metals</code>. Either way it's
+remembered on that PC.</p>
+
+<table class="data">
+<tr><th><code>glados</code></th><td>$GLaDOS (the default)</td></tr>
+<tr><th><code>nvda</code> <code>spcx</code> <code>googl</code> <code>amzn</code> <code>gme</code> <code>spy</code></th><td>NVIDIA, SpaceX, Alphabet, Amazon, GameStop, the S&amp;P 500</td></tr>
+<tr><th><code>chips</code></th><td>Chip makers: NVIDIA, AMD, Intel, Micron, Broadcom, TSMC, ASML, Marvell, SK hynix, Dell</td></tr>
+<tr><th><code>os</code></th><td>Operating systems: Microsoft, Apple, Alphabet, IBM, BlackBerry</td></tr>
+<tr><th><code>index</code></th><td>The S&amp;P 500 and Nasdaq-100</td></tr>
+<tr><th><code>metals</code></th><td>Gold, silver and oil</td></tr>
+</table>
+
+<div class="shot"><img src="../img/pool/mining-nvda.webp" alt="The miner's mining screen after choosing NVIDIA: YOU ARE MINING NVDA, with the hashrate, shares, uptime, status LIVE and paid to the wallet in NVIDIA" width="1280" height="720" loading="lazy" decoding="async"><div class="cap"><b>Paid in NVIDIA.</b> After typing <code>nvda</code>, the screen says what you're mining. Captured from the real ISO running in QEMU.</div></div>
+
 <h2 class="sect">How you get paid</h2>
 
 <ul>
 <li><strong>Everyone gets the same.</strong> Each payout is split equally
-between every eligible wallet.</li>
+between every eligible wallet, and each share is paid in what that wallet
+chose.</li>
 <li><strong>Who is eligible:</strong> wallets holding at least 1,000,000
 $GLaDOS that did at least a quarter of the typical miner's work in that
 round. Miss a round and your work carries over to the next.</li>

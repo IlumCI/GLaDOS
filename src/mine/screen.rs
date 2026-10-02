@@ -155,6 +155,18 @@ fn hms(secs: u64) -> String {
 
 /// Characters, not bytes. `&s[..n]` on a multi-byte string panics rather than
 /// shortening, which is the trap `theme::head_chars` exists for one layer up.
+/// The first line of `s` that fits `n` columns, broken at a space, and the rest.
+fn split_line(s: &str, n: usize) -> (String, String) {
+    if s.chars().count() <= n {
+        return (String::from(s), String::new());
+    }
+    let head: String = s.chars().take(n).collect();
+    match head.rfind(' ') {
+        Some(i) if i > n / 3 => (String::from(&s[..i]), String::from(s[i + 1..].trim_start())),
+        _ => (head.clone(), s.chars().skip(n).collect()),
+    }
+}
+
 fn trunc(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         return String::from(s);
@@ -362,10 +374,15 @@ fn mine_frame(fb: &Framebuffer, n: &Now) {
     let k = unit(fb);
     sky(fb);
     let refused = n.last.as_deref().is_some_and(|l| l.starts_with("refused by the pool"));
+    // The machine's own network down is not the pool refusing anybody, and the
+    // pill says which, because the fix is a cable rather than a wallet.
+    let offline = !n.live && n.phase == super::client::Phase::Network.name();
     let status = if n.live {
         ("MINING", GREEN)
     } else if refused {
         ("REFUSED", RED)
+    } else if offline {
+        ("NO NETWORK", RED)
     } else {
         ("CONNECTING", AMBER)
     };
@@ -400,9 +417,18 @@ fn mine_frame(fb: &Framebuffer, n: &Now) {
 
     say(fb, x0, y, if n.live { "YOU ARE MINING" } else { "GETTING READY TO MINE" }, TEAL, k);
     y += 8 * k + 6 * k;
-    let hs_scale = fit("$GLaDOS", rw, 12);
-    say(fb, x0, y, "$", GOLD, hs_scale);
-    say(fb, x0 + text_w("$", hs_scale), y, "GLaDOS", WHITE, hs_scale);
+    // What this PC is mining for: $GLaDOS, or the stock or basket chosen.
+    // Fitted to the column as "$GLaDOS" always was, so a short ticker grows
+    // no larger than the default does.
+    let head = super::reward::headline(super::reward::current());
+    let hs_scale = fit(head, rw, 12).min(fit("$GLaDOS", rw, 12));
+    match head.strip_prefix('$') {
+        Some(rest) => {
+            say(fb, x0, y, "$", GOLD, hs_scale);
+            say(fb, x0 + text_w("$", hs_scale), y, rest, WHITE, hs_scale);
+        }
+        None => say(fb, x0, y, head, WHITE, hs_scale),
+    }
     y += 8 * hs_scale + 10 * k;
 
     // The number, large enough to read across a room.
@@ -444,7 +470,7 @@ fn mine_frame(fb: &Framebuffer, n: &Now) {
     let cards: [(&str, String, Color); 3] = [
         ("SHARES", grouped(n.acc), if n.rej == 0 { WHITE } else { AMBER }),
         ("UPTIME", hms(n.up), WHITE),
-        ("STATUS", String::from(if n.live { "LIVE" } else if refused { "REFUSED" } else { "WAIT" }), status.1),
+        ("STATUS", String::from(if n.live { "LIVE" } else if refused { "REFUSED" } else if offline { "OFFLINE" } else { "WAIT" }), status.1),
     ];
     for (i, (label, value, c)) in cards.iter().enumerate() {
         let cxp = x0 + i as u32 * (cw + gap);
@@ -456,13 +482,26 @@ fn mine_frame(fb: &Framebuffer, n: &Now) {
     y += ch + 10 * k;
 
     // Where it goes, and the last thing that happened.
+    let room = (rw / (8 * k)) as usize;
     let paid = format!("paid to {}", short_addr(&n.worker));
     say(fb, x0, y, &paid, INK, k);
+    // What the wallet is paid in, in the accent, beside where it goes.
+    let what = format!(" in {}", super::reward::name(super::reward::current()));
+    let used = paid.chars().count();
+    if used < room {
+        say(fb, x0 + used as u32 * 8 * k, y, &trunc(&what, room - used), GOLD, k);
+    }
     y += 8 * k + 6 * k;
-    let room = (rw / (8 * k)) as usize;
     if let Some(last) = &n.last {
-        let c = if refused { RED } else { DIM };
-        say(fb, x0, y, &trunc(last, room), c, k);
+        // Two lines when it needs them: these messages say what to do, and the
+        // second half of a sentence is the half with the fix in it.
+        let c = if refused || offline { RED } else { DIM };
+        let (a, b) = split_line(last, room);
+        say(fb, x0, y, &a, c, k);
+        if !b.is_empty() {
+            y += 8 * k + 4 * k;
+            say(fb, x0, y, &trunc(&b, room), c, k);
+        }
     } else {
         say(fb, x0, y, &format!("{}...", n.phase), DIM, k);
     }
@@ -471,10 +510,18 @@ fn mine_frame(fb: &Framebuffer, n: &Now) {
     // Switching wallets: typed straight at this screen, shown as it is typed.
     let typing = TYPED.lock_irq().clone();
     if typing.is_empty() {
-        say(fb, x0, y, &trunc("to switch wallet, type a new", room), DIM, k);
-        say(fb, x0, y + 8 * k + 6 * k, &trunc("0x address and press Enter", room), DIM, k);
+        say(fb, x0, y, &trunc("new wallet: type a 0x address", room), DIM, k);
+        say(fb, x0, y + 8 * k + 6 * k, &trunc("new reward: glados, nvda, chips, os...", room), DIM, k);
     } else {
-        say(fb, x0, y, &trunc(&format!("new wallet: {typing}"), room), WHITE, k);
+        let label = if typing.starts_with("0x") || typing.starts_with("0X") {
+            format!("new wallet: {typing}")
+        } else {
+            match super::reward::code(&typing) {
+                Some(c) => format!("new reward: {}", super::reward::name(c)),
+                None => format!("new reward: {typing}"),
+            }
+        };
+        say(fb, x0, y, &trunc(&label, room), WHITE, k);
         say(fb, x0, y + 8 * k + 6 * k, "press Enter to switch and restart", GOLD, k);
     }
 

@@ -27,6 +27,7 @@
 // balance. Nothing may ever be left halted waiting for a person, and every
 // incident the treasury records must have reached the operator's webhook.
 import * as secp from "@noble/secp256k1";
+import { TOKENS, CHAIN as RWA, MENU } from "./rewards.js";
 import { keccak_256 } from "@noble/hashes/sha3";
 import { Treasury, TOKEN, PAIR, WETH, getBig, CFG } from "./runner.js";
 import { newKey, rvnAddress, evmAddress, rvnScript, rvnTxid, rlp, int, createdAddress, amountOut, hex, unhex } from "./treasury.js";
@@ -110,6 +111,29 @@ function decodeRvnTx(rawHex) {
   return { ins, outs, bytes: b.length };
 }
 
+// payAll(((address,address,uint256,uint256)[],address[])[]), read the way the
+// EVM's ABI decoder reads it: by following offsets, not by assuming a layout.
+// Written independently of treasury.js's encoder, so the two check each other.
+function decodePayAll(data) {
+  const d = data.slice(10);
+  const at = (byte) => BigInt("0x" + d.slice(byte * 2, byte * 2 + 64));
+  const addrAt = (byte) => "0x" + d.slice(byte * 2 + 24, byte * 2 + 64);
+  const arr = Number(at(0));
+  const n = Number(at(arr));
+  const groups = [];
+  for (let i = 0; i < n; i++) {
+    const g = arr + 32 + Number(at(arr + 32 + 32 * i));
+    const legsAt = g + Number(at(g)), toAt = g + Number(at(g + 32));
+    const legs = [...Array(Number(at(legsAt))).keys()].map((j) => {
+      const b = legsAt + 32 + 128 * j;
+      return { pool: addrAt(b), token: addrAt(b + 32), eth: at(b + 64), minOut: at(b + 96) };
+    });
+    const to = [...Array(Number(at(toAt))).keys()].map((j) => addrAt(toAt + 32 + 32 * j));
+    groups.push({ legs, to });
+  }
+  return groups;
+}
+
 function decodeBuyAndPay(data) {
   const d = data.slice(10);
   const w = (i) => BigInt("0x" + d.slice(i * 64, i * 64 + 64));
@@ -183,6 +207,20 @@ class World {
     const safe = addrLike(this.r); special(safe, "0x6080604052", 1_200_000n * G); // a contract wallet
     const d7702 = addrLike(this.r); special(d7702, "0xef0100" + addrLike(this.r).slice(2), 1_200_000n * G); // 7702: an ordinary account
     this.eligible7702 = d7702;
+    // Reward choices: some miners want stocks or baskets, and some of those
+    // are on the stock beacon's blocklist (a payout to them would revert).
+    this.choices = new Map();
+    this.blockedSet = new Set();
+    this.stockBal = new Map(); // `${token}:${addr}` -> amount
+    if (faults.choices) {
+      const codes = ["glados", "nvda", "spcx", "chips", "os", "index", "metals"];
+      for (const m of this.miners) {
+        if (m.special || !this.r.chance(faults.choices)) continue;
+        const c = codes[this.r.int(codes.length)];
+        if (c !== "glados") this.choices.set(m.addr, c);
+        if (c !== "glados" && this.r.chance(faults.blocked || 0)) this.blockedSet.add(m.addr);
+      }
+    }
     this.work = new Map(this.miners.map((m) => [m.addr, 0n]));
     this.minerSet = new Set(this.miners.map((m) => m.addr));
     this.calls = 0; // outbound requests this tick
@@ -389,6 +427,34 @@ class World {
           }
           return { result: out };
         }
+        // Multicall3.aggregate3, every call allowed to fail: the quoter and
+        // the stock beacon's blocklist are the only things the treasury asks.
+        if (to === "0xca11bde05977b3631167028862be2a173976ca11" && data.startsWith("0x82ad56cb")) {
+          const d = data.slice(10);
+          const at = (byte) => BigInt("0x" + d.slice(byte * 2, byte * 2 + 64));
+          const n = Number(at(32));
+          const outs = [];
+          for (let i = 0; i < n; i++) {
+            const c = 32 + 32 + Number(at(64 + 32 * i));
+            const target = "0x" + d.slice(c * 2 + 24, c * 2 + 64);
+            const dOff = c + Number(at(c + 64));
+            const len = Number(at(dOff));
+            const cd = d.slice((dOff + 32) * 2, (dOff + 32 + len) * 2);
+            if (target === RWA.stockBeacon && cd.startsWith("fbac3951")) {
+              const a = "0x" + cd.slice(8 + 24, 8 + 64);
+              outs.push([true, (this.blockedSet.has(a) ? 1n : 0n).toString(16).padStart(64, "0")]);
+            } else if (target === RWA.quoterV2 && cd.startsWith("cdca1753")) {
+              const amountIn = BigInt("0x" + cd.slice(8 + 64, 8 + 128));
+              const fail = this.r.chance(this.f.quoteFail || 0);
+              outs.push(fail ? [false, ""] : [true, (amountIn * 1000n).toString(16).padStart(64, "0") + "0".repeat(192)]);
+            } else outs.push([false, ""]);
+          }
+          const w = (v) => BigInt(v).toString(16).padStart(64, "0");
+          const bodies = outs.map(([ok, h]) => w(ok ? 1 : 0) + w(64) + w(h.length / 2) + h + "0".repeat((64 - (h.length % 64)) % 64));
+          let off = n * 32;
+          const heads = bodies.map((bd) => { const h = w(off); off += bd.length / 2; return h; });
+          return { result: "0x" + w(32) + w(n) + heads.join("") + bodies.join("") };
+        }
         if (to === PAIR && data === "0x0902f1ac") return { result: "0x" + this.rW.toString(16).padStart(64, "0") + this.rG.toString(16).padStart(64, "0") + "0".repeat(64) };
         if (to === TOKEN && data === "0x691f224f") return { result: "0x" + this.tax.toString(16).padStart(64, "0") };
         if (to === TOKEN && data.startsWith("0x70a08231")) return { result: "0x" + (this.tok.get("0x" + data.slice(-40)) || 0n).toString(16).padStart(64, "0") };
@@ -437,22 +503,43 @@ class World {
     }
     if (!this.contracts.includes(tx.to)) return { ok: true, gas: 21_000n };
     if (bal < tx.value) return { ok: false, gas: 30_000n, why: "insufficient balance" };
-    const { recipients, minOut } = decodeBuyAndPay(tx.data);
-    const gas = 166_600n + 50_850n * BigInt(recipients.length);
-    if (!recipients.length) return { ok: false, gas: 30_000n, why: "NoRecipients" };
-    if (minOut === 0n) return { ok: false, gas: 30_000n, why: "NoSlippageBound" };
+    const groups = decodePayAll(tx.data);
+    const legs = groups.flatMap((g) => g.legs.map((l) => ({ ...l, to: g.to })));
+    const recipients = groups.flatMap((g) => g.to);
+    const gas = 166_600n * BigInt(Math.max(1, legs.length)) + 50_850n * BigInt(legs.reduce((t, l) => t + l.to.length, 0));
+    if (!groups.length || !legs.length) return { ok: false, gas: 30_000n, why: "NoGroups" };
+    if (groups.some((g) => !g.to.length)) return { ok: false, gas: 30_000n, why: "NoRecipients" };
+    if (legs.some((l) => l.minOut === 0n)) return { ok: false, gas: 30_000n, why: "NoSlippageBound" };
+    if (legs.reduce((t, l) => t + l.eth, 0n) !== tx.value) return { ok: false, gas: 30_000n, why: "ValueMismatch" };
     if (tx.gas < gas) return { ok: false, gas: tx.gas, why: "out of gas" };
-    const out = amountOut(tx.value, this.rW, this.rG);
-    const got = (out * (10_000n - this.tax)) / 10_000n;
-    if (got < minOut) return { ok: false, gas: 120_000n, why: "Slippage" };
-    const each = got / BigInt(recipients.length);
-    for (const [i, a] of recipients.entries()) {
-      if (a === PAIR) return { ok: false, gas, why: `ShortPaid(${i})` };
+    let rW = this.rW, rG = this.rG;
+    const credit = [];
+    for (const l of legs) {
+      if (l.token !== TOKEN) {
+        const sym = Object.keys(TOKENS).find((k) => TOKENS[k].token === l.token);
+        if (!sym || TOKENS[sym].pool !== l.pool) return { ok: false, gas: 120_000n, why: "BadPool" };
+        const got = l.eth * 1000n; // the quoter's price, filled exactly
+        if (got < l.minOut) return { ok: false, gas: 120_000n, why: "Slippage" };
+        for (const a of l.to) if (this.blockedSet.has(a)) return { ok: false, gas, why: `blocked: a stock sent to ${a}` };
+        credit.push([l.to, got / BigInt(l.to.length), l.token]);
+        continue;
+      }
+      const out = amountOut(l.eth, rW, rG);
+      const got = (out * (10_000n - this.tax)) / 10_000n;
+      if (got < l.minOut) return { ok: false, gas: 120_000n, why: "Slippage" };
+      rW += l.eth; rG -= out;
+      const each = got / BigInt(l.to.length);
+      for (const [i, a] of l.to.entries()) if (a === PAIR) return { ok: false, gas, why: `ShortPaid(${i})` };
+      credit.push([l.to, each]);
     }
     if (!dry) {
-      this.rW += tx.value; this.rG -= out;
-      for (const a of recipients) this.tok.set(a, (this.tok.get(a) || 0n) + each);
+      this.rW = rW; this.rG = rG;
+      for (const [to, each, token] of credit) for (const a of to) {
+        if (token) this.stockBal.set(`${token}:${a}`, (this.stockBal.get(`${token}:${a}`) || 0n) + each);
+        else this.tok.set(a, (this.tok.get(a) || 0n) + each);
+      }
     }
+    const each = credit.length ? credit[0][1] : 0n;
     return { ok: true, gas, each, recipients };
   }
 
@@ -470,7 +557,7 @@ class World {
       if (r.ok && tx.to && tx.value > 0n) this.valueTo.set(tx.to, (this.valueTo.get(tx.to) || 0n) + tx.value);
       this.nonce.set(me, n + 1);
       this.receipts.set(tx.hash, { status: r.ok, block: this.block });
-      if (r.ok && r.recipients) this.payouts.push({ hash: tx.hash, recipients: r.recipients, each: r.each });
+      if (r.ok && r.recipients) this.payouts.push({ hash: tx.hash, recipients: r.recipients, each: r.each, gas: r.gas });
       this.mempool.delete(n);
     }
     for (const k of [...this.mempool.keys()]) if (k < (this.nonce.get(me) || 0)) this.mempool.delete(k);
@@ -523,8 +610,12 @@ class World {
   // What /work.json answers for a shard.
   workDoc(shard) {
     const work = {};
-    for (const m of this.miners) if (this.onShard(m, shard)) work[m.addr] = this.part(m, shard).toString();
-    return JSON.stringify({ work });
+    const rewards = {};
+    for (const m of this.miners) if (this.onShard(m, shard)) {
+      work[m.addr] = this.part(m, shard).toString();
+      if (this.choices.has(m.addr)) rewards[m.addr] = this.choices.get(m.addr);
+    }
+    return JSON.stringify({ work, rewards });
   }
   ledgerDoc(shard) {
     const part = (m) => this.part(m, shard);
@@ -578,6 +669,7 @@ async function run({ seed, faults, ticks, calm = 600, mode = "live", env = {} })
            } }) } },
     ctx: { storage },
     core: { ledger: () => w.ledgerDoc(0) },
+    rewards: async () => new Map(w.miners.filter((m) => w.onShard(m, 0) && w.choices.has(m.addr)).map((m) => [m.addr, w.choices.get(m.addr)])),
     log: (l) => logs.push(`${w.now} ${l}`),
     treasury: async () => w.keys,
   };
@@ -608,7 +700,8 @@ async function run({ seed, faults, ticks, calm = 600, mode = "live", env = {} })
       if (!rec) { w.violations.push(`tick ${tickNo}: an epoch record is missing`); continue; }
       const m = mined.find((x) => x.hash === rec.tx);
       if (!m) w.violations.push(`tick ${tickNo}: epoch ${rec.id} names ${rec.tx}, which paid nothing`);
-      else if (m.recipients.join() !== rec.recipients.join()) w.violations.push(`tick ${tickNo}: epoch ${rec.id} records recipients the chain did not pay`);
+      // As sets: the transaction lists wallets group by group, the record sorted.
+      else if ([...m.recipients].sort().join() !== [...rec.recipients].sort().join()) w.violations.push(`tick ${tickNo}: epoch ${rec.id} records recipients the chain did not pay`);
     }
     if (new Set(recorded.map((r) => r && r.tx)).size !== recorded.length) w.violations.push(`tick ${tickNo}: one transaction recorded as two epochs`);
     // Nobody who must not be paid ever is.
@@ -698,7 +791,7 @@ function stormFaults(s) {
 if (process.env.LOAD) {
   process.env.MINERS = process.env.LOAD;
   const t0 = performance.now();
-  const res = await run({ seed: 1, faults: {}, ticks: Number(process.env.DAYS || 3) * 288, calm: 0 });
+  const res = await run({ seed: 1, faults: process.env.CHOICES ? { choices: Number(process.env.CHOICES) } : {}, ticks: Number(process.env.DAYS || 3) * 288, calm: 0 });
   const ms = performance.now() - t0;
   const sizes = [...res.storage.m.entries()].map(([k, v]) => [k, JSON.stringify(v).length]).sort((a, b) => b[1] - a[1]);
   const epochs = [];
@@ -706,7 +799,7 @@ if (process.env.LOAD) {
   console.log(`${process.env.LOAD} miners: ${summary(res)}; ${(ms / 1000).toFixed(1)} s wall`);
   console.log(`recipients per epoch: ${epochs.map((e) => e.recipients.length).join(", ") || "none"}`);
   console.log(`largest stored value: ${sizes[0][0]} ${sizes[0][1]} B; ${res.storage.m.size} keys`);
-  const gasList = res.w.payouts.map((p) => 166_600 + 50_850 * p.recipients.length);
+  const gasList = res.w.payouts.map((p) => Number(p.gas || 166_600 + 50_850 * p.recipients.length));
   console.log(`gas per payout: max ${Math.max(0, ...gasList).toLocaleString()} of 4663's 32,000,000 per-transaction cap`);
   console.log(`peak outbound requests in one tick: ${res.w.maxCalls} (budget 500); peak keys in one write: ${res.storage.maxKeys} of 128; largest value ${res.storage.maxValue} B of 131,072`);
   console.log(`paid at least once: ${new Set(res.w.payouts.flatMap((p) => p.recipients)).size} distinct addresses of ${res.w.miners.length}; shards ${res.w.shards}; heap ${(process.memoryUsage().heapUsed / 1e6).toFixed(0)} MB`);
@@ -853,6 +946,30 @@ if (process.env.STORM) {
   clean(res, "an object evicted at every turn");
   ok((res.st.epochs || 0) >= 1, `eviction mid-step never sends twice and still pays: ${summary(res)}`);
 }
+// Reward choices: miners paid in what they chose, a blocklisted wallet never
+// sent a stock, and a stock whose quote fails falling back to $GLADOS, never
+// to a reverted payout.
+async function choiceScenario(name, faults, ticks = 3 * DAY) {
+  const res = await run({ seed: 61, faults, ticks });
+  clean(res, name);
+  const recs = [];
+  for (let i = 1; i <= (res.st.epochs || 0); i++) recs.push(await getBig(res.storage, `treasury.epoch.${i}`));
+  let stockPaid = 0, wrong = 0, blockedStock = 0;
+  for (const r of recs) for (const g of r.groups || []) for (const a of g.to) {
+    const want = res.w.blockedSet.has(a) ? "glados" : res.w.choices.get(a) || "glados";
+    if (g.code !== "glados") stockPaid += 1;
+    if (g.code !== "glados" && res.w.blockedSet.has(a)) blockedStock += 1;
+    if (faults.quoteFail ? !(g.code === want || g.code === "glados") : g.code !== want) wrong += 1;
+  }
+  ok(recs.length > 0 && stockPaid > 0, `${name}: ${recs.length} epoch(s) paid, ${stockPaid} wallet-payout(s) in stocks or baskets`);
+  ok(wrong === 0, `${name}: every wallet paid in its choice${faults.quoteFail ? ", or $GLaDOS when its quote failed" : ""} (${wrong} wrong)`);
+  ok(blockedStock === 0, `${name}: no blocklisted wallet was ever sent a stock`);
+  return res;
+}
+await choiceScenario("choices, calm", { choices: 0.7 });
+await choiceScenario("choices, blocklisted wallets, harsh world", { choices: 0.7, blocked: 0.3, ...Object.fromEntries(Object.entries(HARSH).map(([k, v]) => [k, typeof v === "number" && k !== "receiptLag" ? v / 2 : v])) });
+await choiceScenario("choices, quotes failing at random", { choices: 0.8, quoteFail: 0.3 });
+
 {
   // Many seeds, every fault at a random strength.
   const seeds = Number(process.argv[2] || 24);
