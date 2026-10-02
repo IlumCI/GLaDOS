@@ -7,8 +7,8 @@
 //!
 //! ### This sequence is incomplete, and says so rather than pretending
 //!
-//! Six of the twelve are here, in upstream's relative order, and they are the six
-//! whose payload is small and exactly known. **Five are deliberately absent** and
+//! Seven of the twelve are here, in upstream's relative order, and they are the
+//! seven whose payload is small and exactly known. **Five are absent** and
 //! naming them is the point, because a table that silently skipped them would read
 //! as a part that had been fully configured:
 //!
@@ -24,8 +24,10 @@
 //! - `MCC_UPDATE_CMD`, which has a response to parse.
 //! - the scan configuration, which is the largest command in the driver.
 //!
-//! So `configure` leaves the part able to be told things and not yet able to
-//! scan, and the shell says that in those words.
+//! Two of the five are not owed at initialisation, so **three** are the gap:
+//! temperature thresholds, `MCC_UPDATE` and the scan configuration. So
+//! `configure` leaves the part able to be told things and not yet able to scan,
+//! and the shell says that in those words.
 //!
 //! ### What the capability bitmap actually said, measured
 //!
@@ -255,7 +257,7 @@ pub struct Done {
 impl Done {
     pub fn say(&self) -> String {
         alloc::format!(
-            "{} configuration command(s) sent, {} skipped; five more are not written, so it cannot scan yet",
+            "{} configuration command(s) sent, {} skipped; three more are owed and not written, so it cannot scan yet",
             self.sent, self.skipped
         )
     }
@@ -454,7 +456,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 
     // --- what is missing, asserted as missing -------------------------------
 
-    // The sequence is six of twelve and the count is the claim: a table that grew
+    // The sequence is seven of twelve and the count is the claim: a table that grew
     // silently to twelve would pass every ordering claim above and still be a
     // different sequence, so the shortfall is named where somebody will see it.
     ok(

@@ -31,18 +31,19 @@
 //! shape of the answers:
 //!
 //!   * **Firmware.** Intel's AX-series will not initialise without a signed
-//!     blob -- roughly a megabyte, loaded over a bootstrap protocol before the
-//!     part does anything. Not redistributable, not documented, and the
-//!     sequence differs between families. It is the single largest obstacle
-//!     and no amount of writing code avoids it.
+//!     blob -- a megabyte and a half, loaded over a bootstrap protocol before
+//!     the part does anything. Redistributable in binary form and not
+//!     modifiable, and the sequence differs between families; `dev::iwx`
+//!     takes the AX210 family's to ALIVE.
 //!   * **A host command interface.** For a FullMAC part, not descriptor rings
 //!     and registers but an asynchronous command and response protocol with
 //!     the firmware, in its own versioned message formats. Such a part
 //!     implements `Nic` directly and skips `softmac` entirely, which is what
 //!     `Caps::softmac` exists to say.
-//!   * **An undocumented bus.** This machine's own is CNVi: the MAC lives in
-//!     the chipset and the M.2 module is a radio on an interface Intel has not
-//!     published. That one is not a driver-sized problem.
+//!   * **Not an undocumented bus**, which this said about CNVi for a while.
+//!     The link between the chipset and the radio module is unpublished and
+//!     the host never speaks it: from here a CNVi part is an ordinary PCIe
+//!     function, and this machine's own is one.
 //!
 //! `ath9k`-class Atheros parts are the tractable case and the registry says so
 //! on the row: no blob at all, and SoftMAC, so everything above them is
@@ -305,14 +306,11 @@ pub fn scan() -> Result<alloc::vec::Vec<Network>, &'static str> {
         return Ok(w.networks());
     }
     match adapter() {
-        // The driver powers this chip on and loads its MAC registers, and the
-        // PHY, AGC and radio tables are transcribed. What is missing is the
-        // rest: the radio tables are not applied yet, no channel is set, and
-        // there is no transmit or receive path at all -- not one frame goes
-        // out or comes in. Scanning is sending probe requests and reading
-        // beacons, so it needs exactly the part that is absent.
+        // The RTL8188EU driver that made this arm say "its MAC can be brought
+        // up" was removed with its hardware, so a recognised USB adapter is
+        // now exactly as drivable as a recognised PCI one.
         Adapter::Usb { .. } => Err(
-            "This adapter is recognised and its MAC can be brought up, but there is no transmit or receive path yet, so no probe request can be sent and no beacon can be read.",
+            "This USB adapter is recognised and nothing here drives it.",
         ),
         Adapter::Pci { .. } => Err(
             "The wireless part in this machine cannot be driven. A supported USB adapter is the way on to a wireless network here.",

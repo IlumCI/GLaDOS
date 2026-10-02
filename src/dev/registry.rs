@@ -219,19 +219,41 @@ const E1000_IDS: &[u16] = &[0x100E, 0x1533, 0x10D3, 0x153A];
 /// not the model name is what matches. This is the GF63's wired port.
 const RTL8168_IDS: &[u16] = &[0x8168, 0x8161, 0x8167, 0x8136];
 
-/// Intel wireless that lives in the chipset rather than on the card.
+/// Intel wireless that `dev::iwx` is written for, split by the family the
+/// *controller* belongs to.
 ///
-/// CNVi splits a wireless NIC in half: the MAC and baseband are in the PCH and
-/// the M.2 module carries only the radio. There is no self-contained card to
-/// drive, the host-to-chipset interface is undocumented, and a signed firmware
-/// blob is required on top of that. Naming these separately from Intel's
-/// discrete parts is the difference between "hard" and "not possible from
-/// public information".
-const INTEL_CNVI_IDS: &[u16] = &[0x51f0, 0x54f0, 0x02f0, 0x4df0, 0xa0f0, 0x7af0, 0x7e40];
+/// **These lists came from `pcidevs` and `iwx_attach` in OpenBSD, not from
+/// memory, and the memory was wrong in three places.** The previous two lists
+/// sorted by "CNVi or discrete", which is a fact about packaging and decides
+/// nothing about the driver; what decides the bring-up is the generation, and
+/// the old discrete list held two AC 9560 parts (`9df0`, `31dc`) and the 8265
+/// (`24fd`), which are the generation *before* this one and are `iwm(4)`'s, plus
+/// `272b`, which is a Bz part `iwx` refuses. A row claiming `iwx` for any of
+/// those would have sent the driver at silicon it has no path for.
+///
+/// The family is still read off `CSR_HW_REV` at probe time rather than trusted
+/// from this table -- `51f0` is an AX211 in `pcidevs` and an AX201 on the GF63,
+/// because the name follows the radio module and the family follows the
+/// controller -- so these lists say which *driver* to try, and the register says
+/// which path inside it.
+///
+/// Family 22000: the AX200 and the AX201 as fitted to Ice, Comet, Tiger and
+/// Jasper Lake. `02f0`, `06f0`, `34f0`, `3df0`, `43f0`, `4df0` and `a0f0` are
+/// CNVi; `2723` is the discrete AX200.
+const IWX_22000_IDS: &[u16] = &[0x2723, 0x02f0, 0x06f0, 0x34f0, 0x3df0, 0x43f0, 0x4df0, 0xa0f0];
 
-/// Intel's discrete M.2 wireless cards, which are whole NICs on the PCIe bus.
-/// Still a signed blob, but at least the part is documented as a device.
-const INTEL_WIFI_IDS: &[u16] = &[0x2723, 0x2725, 0x2726, 0x272b, 0x24fd, 0x9df0, 0x31dc];
+/// The AX210 family: Typhoon Peak and Snow Owl. `2725` and `2726` are discrete;
+/// `51f0` (the GF63's), `51f1`, `54f0`, `7a70`, `7af0`, `7e40` and `7f70` are
+/// CNVi on Alder, Raptor, Meteor and Arrow Lake.
+const IWX_AX210_IDS: &[u16] = &[0x2725, 0x2726, 0x51f0, 0x51f1, 0x54f0, 0x7a70, 0x7af0, 0x7e40, 0x7f70];
+
+/// Bz and later. `iwx` names them only to refuse: the reset and the clock
+/// handshake differ again, and nothing here has that path.
+const INTEL_BZ_IDS: &[u16] = &[0x7740, 0x272b];
+
+/// The generation before: 8265, 9260 and the AC 9560 in both its CNVi spins.
+/// A different firmware API and `iwm(4)`'s parts, not `iwx(4)`'s.
+const INTEL_MVM_IDS: &[u16] = &[0x24fd, 0x2526, 0x9df0, 0x31dc, 0xa370];
 
 /// RTL8188EU dongles, by every badge they ship under. There is no class code
 /// to key off -- the interface is vendor-specific -- so the id list is the
@@ -304,39 +326,49 @@ pub static TABLE: &[Entry] = &[
     // ------------------------------------------------------------ wireless
     Entry {
         bus: Bus::Pci,
-        rule: Match::Ids(0x8086, INTEL_CNVI_IDS),
+        rule: Match::Ids(0x8086, IWX_AX210_IDS),
         role: Role::Wireless,
-        what: "Intel Wi-Fi 6/6E AX2xx, CNVi -- the MAC is a PCH function",
-        // **This said "the radio is in the PCH over an undocumented
-        // interface", and that named the wrong obstacle.** CNVi does put the
-        // MAC and baseband in the chipset with only the radio on the M.2
-        // module, joined by CNVio, and CNVio is undocumented -- but *the host
-        // never speaks it*. From here the part is an ordinary PCIe function
-        // (00:14.3 on this laptop, 8086:51f0) with BARs and MSI-X, driven the
-        // way `iwlwifi` drives a discrete card; the link to the radio module
-        // is the hardware's own business.
+        what: "Intel Wi-Fi 6/6E, AX210 family",
+        // **"The radio is in the PCH over an undocumented interface" named the
+        // wrong obstacle.** CNVi does put the MAC in the chipset and the radio
+        // on the M.2 module, joined by CNVio, and CNVio is undocumented -- but
+        // *the host never speaks it*. From here the part is an ordinary PCIe
+        // function (00:14.3 on this laptop) with BARs and MSI-X, driven the way
+        // a discrete card is. The cost is a firmware image in Intel's TLV
+        // container and a host command protocol, which is big and not
+        // impossible.
         //
-        // So the cost is `iwlwifi`'s cost and not a reverse-engineering
-        // project: a firmware image in Intel's TLV container, the context-info
-        // structure that bootstraps it, and then a host command protocol --
-        // PHY and MAC contexts, bindings, stations, time events -- before one
-        // frame moves. Large, and every step is match-it-exactly-or-silence
-        // with no emulator anywhere. Written down as what it is, because
-        // "undocumented" reads as impossible and this is merely big.
-        support: Support::Known("iwlwifi: a firmware image and a host command protocol, not an undocumented bus"),
+        // Partial and not Known, because `dev::iwx` boots this family's
+        // firmware to ALIVE and reads the NVM. The gap is everything after.
+        support: Support::Partial("iwx", "boots firmware and reads the NVM; scanning, joining and data are not written"),
     },
     Entry {
         bus: Bus::Pci,
-        rule: Match::Ids(0x8086, INTEL_WIFI_IDS),
+        rule: Match::Ids(0x8086, IWX_22000_IDS),
         role: Role::Wireless,
-        what: "Intel discrete Wi-Fi card",
+        what: "Intel Wi-Fi 6, 22000 family",
+        // The descriptor this family boots out of is written and asserted
+        // (`iwx::ctxt`); the boot path does not take it yet, and nobody here has
+        // the part to try it on.
+        support: Support::Partial("iwx", "the boot descriptor is written and never driven; no part here to test it"),
+    },
+    Entry {
+        bus: Bus::Pci,
+        rule: Match::Ids(0x8086, INTEL_BZ_IDS),
+        role: Role::Wireless,
+        what: "Intel Wi-Fi 7, Bz family",
+        support: Support::Known("iwlwifi-class, but the reset and clock handshake differ from the AX210's and are not written"),
+    },
+    Entry {
+        bus: Bus::Pci,
+        rule: Match::Ids(0x8086, INTEL_MVM_IDS),
+        role: Role::Wireless,
+        what: "Intel Wireless-AC 8265/9260/9560",
         // "not redistributable" was simply wrong. `LICENCE.iwlwifi_firmware`
         // permits redistribution and use in binary form without modification,
-        // which is why Debian ships it at all -- in `non-free-firmware`,
-        // which is precisely the label for redistributable-and-not-free. It
-        // cannot be modified and it is not open source, and those are
-        // different objections from the one that was recorded here.
-        support: Support::Known("iwlwifi: a firmware image, redistributable in binary but not open"),
+        // which is why Debian ships it at all -- in `non-free-firmware`, the
+        // label for redistributable-and-not-free.
+        support: Support::Known("the generation before iwx: an older firmware API and no driver for it here"),
     },
     Entry {
         bus: Bus::Pci,
@@ -1062,15 +1094,21 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             && lookup(&nameless).map(|e| e.role) == Some(Role::Wireless)
             && lookup(&cnvi).map(|e| e.what) != lookup(&nameless).map(|e| e.what),
     ));
-    // And the reason it carries is its own. A part whose obstacle is a
-    // firmware image should not inherit "recognised as wireless, but not this
-    // model", which is what falling through would have said.
+    // And it names the driver that will try it, which falling through to the
+    // generic row ("recognised as wireless, but not this model") would not.
     out.push((
-        "and it carries its own reason rather than the generic one",
-        match (lookup(&cnvi).map(|e| &e.support), lookup(&nameless).map(|e| &e.support)) {
-            (Some(Support::Known(a)), Some(Support::Known(b))) => a != b,
-            _ => false,
-        },
+        "and it names iwx as the driver, where the generic row names none",
+        lookup(&cnvi).and_then(|e| e.support.driver()) == Some("iwx")
+            && lookup(&nameless).and_then(|e| e.support.driver()).is_none(),
+    ));
+    // The split the lists were rebuilt for: an AC 9560 is Intel wireless and is
+    // *not* iwx's, and claiming it would send the driver at a generation it has
+    // no path for.
+    let ac9560 = Ident { bus: Bus::Pci, vendor: 0x8086, device: 0x9df0, class: 0x02, subclass: 0x80, prog_if: 0x00 };
+    out.push((
+        "an AC 9560 is recognised as Intel wireless and not claimed by iwx",
+        lookup(&ac9560).map(|e| e.role) == Some(Role::Wireless)
+            && lookup(&ac9560).and_then(|e| e.support.driver()).is_none(),
     ));
 
     out.push((

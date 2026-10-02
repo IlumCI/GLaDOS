@@ -46,8 +46,9 @@ use alloc::vec::Vec;
 
 /// Intel, and the CNVi/PCIe wireless functions this kernel knows by id.
 ///
-/// The list is `dev::registry`'s `INTEL_CNVI_IDS`, not a second copy: a private
-/// id list per driver is the arrangement the registry exists to replace.
+/// The ids themselves are `dev::registry`'s rows that name `iwx`, not a second
+/// copy: a private id list per driver is the arrangement the registry exists to
+/// replace.
 pub const VENDOR_INTEL: u16 = 0x8086;
 
 /// Hardware revision, valid from reset and before any firmware runs.
@@ -441,10 +442,12 @@ fn enable_memory_space(ecam: u64, d: &Device) {
     }
 }
 
-/// Every Intel wireless function on the bus, with its aperture.
+/// Every function on the bus that `dev::registry` hands to this driver.
 ///
-/// Asks `dev::registry` which ids are wireless rather than carrying a list, so
-/// adding a part is a row there and not a second table here.
+/// Asks for the rows naming `iwx` rather than for Intel wireless in general,
+/// which is what this asked until the id lists were rebuilt: an AC 9560 is Intel
+/// wireless of the generation before, and collecting it here would send the
+/// power-up at a part with a different firmware API.
 pub fn find(ecam: u64) -> Vec<Radio> {
     use crate::dev::registry::{lookup, Ident, Role};
     let mut out: Vec<Radio> = Vec::new();
@@ -455,7 +458,8 @@ pub fn find(ecam: u64) -> Vec<Radio> {
         if dev.vendor != VENDOR_INTEL {
             return;
         }
-        if lookup(&Ident::of_pci(&dev)).map(|e| e.role) != Some(Role::Wireless) {
+        let row = lookup(&Ident::of_pci(&dev));
+        if row.map(|e| e.role) != Some(Role::Wireless) || row.and_then(|e| e.support.driver()) != Some("iwx") {
             return;
         }
         out.push(Radio { dev, bar0: pci::bar(ecam, &dev, 0) });
@@ -1320,7 +1324,7 @@ impl Radio {
     /// call and not folded into `nvm`.
     ///
     /// Answers what it sent and what it skipped. **A success here does not mean the
-    /// part can scan**: six of upstream's twelve are written and `config.rs` names
+    /// part can scan**: seven of upstream's twelve are written and `config.rs` names
     /// the five that are not.
     pub fn configure(
         &self,
