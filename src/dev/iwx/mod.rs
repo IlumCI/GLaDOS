@@ -365,7 +365,7 @@ impl Refusal {
         match self {
             Refusal::NoAperture => "no register aperture assigned; firmware left this function unused",
             Refusal::NotMapped => "the register aperture could not be mapped",
-            Refusal::Asleep => "reads as all ones: parked in D3cold, or memory-space decoding is off",
+            Refusal::Asleep => "reads as all ones after waking it to D0: parked in D3cold, or memory-space decoding is off",
             Refusal::Silent => "reads as all zeroes, which no live function reports",
             Refusal::Faulted => "the read faulted and was caught: the aperture is mapped and the device does not decode it",
         }
@@ -387,6 +387,10 @@ impl Radio {
     /// `pci::enable_bus_master`.
     pub fn hw_rev(&self, ecam: u64) -> Result<(Rev, u32), Refusal> {
         let bar0 = self.bar0.filter(|&b| b != 0).ok_or(Refusal::NoAperture)?;
+        // Woken first: a part the firmware left in D3hot answers config space
+        // and not its BARs, and its all-ones read is otherwise reported as
+        // `Asleep` with nothing done about it. D3cold is out of reach from here.
+        let _ = pci::set_d0(ecam, &self.dev);
         enable_memory_space(ecam, &self.dev);
         if !crate::mem::paging::map_range(bar0, APERTURE, true) {
             return Err(Refusal::NotMapped);

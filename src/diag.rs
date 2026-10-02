@@ -440,7 +440,7 @@ fn devices_selftest() -> bool {
     use crate::kprintln;
     let mut ok = true;
     let mut n = 0usize;
-    for (what, good) in crate::dev::registry::checks() {
+    for (what, good) in crate::dev::registry::checks().into_iter().chain(crate::dev::pci::checks()) {
         n += 1;
         if !good {
             kprintln!("    FAIL: {}", what);

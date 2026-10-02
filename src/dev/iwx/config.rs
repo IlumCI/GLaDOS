@@ -304,24 +304,10 @@ pub unsafe fn configure(
 /// driver that sent the command anyway would be configuring a feature the link
 /// does not have.
 pub fn ltr_enabled(ecam: u64, d: &crate::dev::pci::Device) -> bool {
-    const CAP_PTR: u64 = 0x34;
-    const CAP_ID_PCIE: u8 = 0x10;
+    use crate::dev::pci;
     const DCSR2: u64 = 0x28;
     const LTREN: u32 = 1 << 10;
-    let mut off = (crate::dev::pci::cfg_read32(ecam, d, CAP_PTR) & 0xfc) as u64;
-    // Bounded, because a malformed list can point at itself: config space is 256
-    // bytes of standard capabilities, so no honest walk is longer than that.
-    for _ in 0..48 {
-        if off < 0x40 || off > 0xfc {
-            return false;
-        }
-        let hdr = crate::dev::pci::cfg_read32(ecam, d, off);
-        if (hdr & 0xff) as u8 == CAP_ID_PCIE {
-            return crate::dev::pci::cfg_read32(ecam, d, off + DCSR2) & LTREN != 0;
-        }
-        off = ((hdr >> 8) & 0xfc) as u64;
-    }
-    false
+    pci::find_cap(ecam, d, pci::CAP_PCIE).is_some_and(|at| pci::cfg_read32(ecam, d, at + DCSR2) & LTREN != 0)
 }
 
 /// Claims. No radio, and no register touched.
