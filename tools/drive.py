@@ -681,6 +681,23 @@ def main():
                 target.unlink()
             print(f"[drive] no {dst} -- TLS will encrypt and authenticate nothing")
 
+    # Device firmware is mirrored whole, as deploy copies it: `dev::firmware`
+    # reads every file under \GLADOS\FW and a stale one left here would be
+    # an image the kernel picks up that the deploy tree no longer has.
+    fw_src = ROOT / "esp/GLADOS/FW"
+    fw_dst = esp / "GLADOS/FW"
+    want = {p.name: p for p in fw_src.iterdir() if p.is_file()} if fw_src.is_dir() else {}
+    if want:
+        fw_dst.mkdir(exist_ok=True)
+    if fw_dst.is_dir():
+        for old in fw_dst.iterdir():
+            if old.name not in want:
+                old.unlink()
+    for name, src in want.items():
+        target = fw_dst / name
+        if not target.exists() or differs(src, target):
+            target.write_bytes(src.read_bytes())
+
     for src, dst in staged:
         # **Refused rather than skipped, unless somebody said so.** A run that
         # quietly booted without the checkpoint would look like a run where the

@@ -5396,6 +5396,48 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             }
         }
 
+        "fw" | "firmware" => {
+            // What the boot volume provided, and what a driver would be handed.
+            // `fw <name>` answers the second question for one name, because the
+            // staged copy wins and a listing of the boot volume cannot show that.
+            console::set_color(YELLOW);
+            kprintln!("[firmware]");
+            console::set_color(WHITE);
+            let name = rest.trim();
+            if !name.is_empty() {
+                match crate::dev::firmware::get(name) {
+                    Some(img) => {
+                        let h = crate::store::sha256::hash(img.bytes());
+                        kprintln!(
+                            "  {}  {} bytes from the {}  sha256 {:02x}{:02x}{:02x}{:02x}",
+                            name,
+                            img.bytes().len(),
+                            img.source(),
+                            h[0], h[1], h[2], h[3]
+                        );
+                    }
+                    None => kprintln!(
+                        "  {} is neither in {}/ nor in {} on the boot volume",
+                        name,
+                        crate::dev::firmware::NS_DIR,
+                        crate::dev::firmware::DIR
+                    ),
+                }
+                return;
+            }
+            let all = crate::dev::firmware::list();
+            if all.is_empty() {
+                kprintln!("  nothing in {} on the boot volume", crate::dev::firmware::DIR);
+            }
+            for (n, len) in &all {
+                kprintln!("  {:<40} {:>9} bytes", n, len);
+            }
+            let skipped = crate::dev::firmware::skipped();
+            if skipped > 0 {
+                kprintln!("  {} file(s) there were refused: too many, too large, or unreadable", skipped);
+            }
+            kprintln!("  a copy staged at {}/<name> is used in preference to these", crate::dev::firmware::NS_DIR);
+        }
         "devices" => {
             console::set_color(YELLOW);
             kprintln!("[devices]");

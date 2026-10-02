@@ -338,6 +338,9 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // The root bundle comes off the same volume for the same reason: this is
     // the only moment there is a filesystem to read it from.
     let roots = uefi::read_file(bs, image, net::trust::ROOTS_PATH);
+    // Device firmware, every file of it, for the same reason: which image a part
+    // wants is read off its registers, and that is MMIO this path does not do.
+    dev::firmware::load(bs, image);
     match &roots {
         Some(b) => serial_println!("glados: roots {} bytes from {}", b.len, net::trust::ROOTS_PATH),
         None => serial_println!("glados: no roots at {}", net::trust::ROOTS_PATH),
