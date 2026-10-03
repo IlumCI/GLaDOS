@@ -529,7 +529,7 @@ fn sockets_selftest() -> bool {
     use crate::kprintln;
     let mut ok = true;
     let mut n = 0usize;
-    for (what, good) in crate::net::tcp::checks() {
+    for (what, good) in crate::net::tcp::checks().into_iter().chain(crate::net::link_checks()) {
         n += 1;
         if !good {
             kprintln!("    FAIL: {}", what);

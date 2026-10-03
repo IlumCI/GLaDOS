@@ -5538,6 +5538,16 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                     // is already this driver is already the new part.
                                     let on = crate::net::wlan_name();
                                     if scannable && on == Some("iwx") {
+                                        // The station above it still remembers the
+                                        // part it replaced: a scan in flight, a
+                                        // prepared access point. Stood down, so the
+                                        // new part starts from nothing.
+                                        {
+                                            let _c = crate::net::claim_wifi();
+                                            if let Some(w) = crate::net::wlan() {
+                                                w.leave_net();
+                                            }
+                                        }
                                         kprintln!("  wlan0 is this part again: `wifi scan` asks it what is in the air");
                                     } else if scannable && crate::net::ifaces()[crate::net::WLAN0].nic.is_none() {
                                         if crate::net::attach_radio(crate::dev::iwx::wlan::Air) {

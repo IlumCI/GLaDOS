@@ -215,9 +215,16 @@ pub fn attach_radio<R: crate::dev::radio::Radio + 'static>(radio: R) -> bool {
         return false;
     }
     let _claim = claim_wifi();
+    let mac = radio.mac();
     let sta = mlme::Station::new(radio);
     let w = &mut ifaces()[WLAN0];
+    w.forget();
     w.nic = Some(alloc::boxed::Box::new(sta));
+    w.wireless = true;
+    w.mac_cached = mac;
+    w.link_cached = false;
+    w.joins_seen = 0;
+    w.dhcp_wanted = false;
     // Administratively up, and `usable()` still reads the link -- an
     // unassociated station is a driver that is present and a network that is
     // not, which are different facts and reported separately.
@@ -230,11 +237,79 @@ pub fn attach_radio<R: crate::dev::radio::Radio + 'static>(radio: R) -> bool {
 /// object somebody holds a `&mut` to.
 pub fn detach_radio() -> bool {
     let _claim = claim_wifi();
+    let had = ifaces()[WLAN0].nic.is_some();
+    link_changed(WLAN0, false);
     let w = &mut ifaces()[WLAN0];
-    let had = w.nic.is_some();
     w.nic = None;
     w.up = false;
+    w.wireless = false;
     had
+}
+
+/// The link under interface `n` came up or went down, or became a different
+/// association. **Everything learnt on the old one goes**: the address and the
+/// gateway (another network's are wrong here, and `fetch::online` read a stale
+/// gateway as "online"), the ARP table (a new access point with the same
+/// gateway address is a different machine, and the cached MAC addresses
+/// nobody), the cached DNS answer, and every TCP connection opened from the old
+/// address, which the peer knows by an address this machine no longer has. A
+/// link that came up asks for a new address, from the shell's idle loop.
+pub fn link_changed(n: usize, up: bool) {
+    let old = ifaces()[n].ip;
+    if old != UNSPECIFIED {
+        tcp::abort_from(old);
+    }
+    dns::forget();
+    let i = &mut ifaces()[n];
+    i.forget();
+    i.link_cached = up;
+    i.dhcp_wanted = up;
+}
+
+/// Read the station's state into the interface, under the claim the caller
+/// holds, and act on a change.
+fn note_wlan_link() {
+    let Some(w) = wlan() else { return };
+    let up = w.status().0 == "running";
+    let joins = w.joins();
+    let i = &mut ifaces()[WLAN0];
+    if up != i.link_cached || joins != i.joins_seen {
+        i.joins_seen = joins;
+        link_changed(WLAN0, up);
+    }
+}
+
+/// Whether wlan0's station is recovering a dropped link, and how many tries in.
+pub fn wlan_rejoining() -> Option<u32> {
+    let _claim = claim_wifi();
+    wlan()?.rejoining()
+}
+
+/// The resolver of the interface the default route leaves by.
+pub fn dns_server() -> Ipv4 {
+    let n = route([8, 8, 8, 8]).unwrap_or_else(primary);
+    ifaces()[n].dns
+}
+
+/// Ask for an address on any interface whose link came up and has none. From
+/// the shell's idle loop, because DHCP blocks for seconds and the clock task,
+/// which notices the link, must not.
+fn dhcp_where_wanted() {
+    for n in [ETH0, WLAN0] {
+        let i = &mut ifaces()[n];
+        if !i.dhcp_wanted || !i.usable() {
+            continue;
+        }
+        i.dhcp_wanted = false;
+        match dhcp::configure_on(n) {
+            Ok(c) => kprintln!(
+                "\n  [{}] {}.{}.{}.{} via {}.{}.{}.{}, from DHCP",
+                ifaces()[n].name, c.ip[0], c.ip[1], c.ip[2], c.ip[3],
+                c.gateway[0], c.gateway[1], c.gateway[2], c.gateway[3]
+            ),
+            Err(e) => kprintln!("\n  [{}] no address from DHCP: {} -- 'if {} dhcp' to ask again", ifaces()[n].name, e.name(), ifaces()[n].name),
+        }
+    }
 }
 
 /// The wireless half of `wlan0`, if there is one.
@@ -358,6 +433,7 @@ pub fn wifi_poll() {
     if let Some(w) = wlan() {
         w.poll_mlme(now);
     }
+    note_wlan_link();
 }
 
 /// The same, plus a repaint when what is in the air has changed.
@@ -374,6 +450,7 @@ pub fn wifi_poll() {
 /// pointer is comparing the state.
 pub fn wifi_service() {
     wifi_poll();
+    dhcp_where_wanted();
     let Some(_claim) = try_claim_wifi() else { return };
     let Some(w) = wlan() else { return };
     let (state, secure) = w.status();
@@ -388,6 +465,9 @@ pub fn wifi_service() {
 
 /// What the last `wifi_service` saw, so a repaint happens on change only.
 static WIFI_SEEN: Racy<(usize, usize, usize)> = Racy::new((0, 0, 0));
+/// Which interface `poll` reads first next time.
+static POLL_START: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
 /// Held across a poll, because the shell and the clock both reach for it.
 static WIFI_BUSY: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
@@ -423,17 +503,79 @@ pub fn route(dst: Ipv4) -> Option<usize> {
             return Some(n);
         }
     }
-    for (n, i) in ifs.iter_mut().enumerate() {
-        if n != LO && i.usable() && i.gateway != UNSPECIFIED {
+    let c: Vec<(bool, bool, bool)> = ifs
+        .iter_mut()
+        .enumerate()
+        .map(|(n, i)| (n != LO && i.usable(), i.gateway != UNSPECIFIED, i.configured))
+        .collect();
+    pick_default(&c)
+}
+
+/// The default route among `(usable, has a gateway, configured)` per interface:
+/// **a configured one first**, then any. eth0 used to win by index with QEMU's
+/// 10.0.2.2 still in it on hardware, and everything off-subnet went to a
+/// gateway that does not exist while wlan0 held a real lease. Pure, so it is
+/// asserted rather than hoped.
+pub fn pick_default(c: &[(bool, bool, bool)]) -> Option<usize> {
+    for want in [true, false] {
+        if let Some(n) = c.iter().position(|&(u, g, conf)| u && g && conf == want) {
             return Some(n);
         }
     }
     None
 }
 
+/// Claims about the link layer's bookkeeping. No packet leaves.
+pub fn link_checks() -> Vec<(&'static str, bool)> {
+    let mut out = Vec::new();
+    out.push((
+        "the default route prefers a configured interface over a lower index",
+        pick_default(&[(false, false, false), (true, true, false), (true, true, true)]) == Some(2),
+    ));
+    out.push((
+        "and takes an unconfigured one when nothing else has a way out",
+        pick_default(&[(false, false, false), (true, true, false), (false, true, true)]) == Some(1)
+            && pick_default(&[(true, false, true)]).is_none(),
+    ));
+    let mut i = iface::Interface::empty("test");
+    i.ip = [192, 168, 1, 7];
+    i.gateway = [192, 168, 1, 1];
+    i.configured = true;
+    i.arp_insert([192, 168, 1, 1], [2, 0, 0, 0, 0, 1]);
+    let gen = i.link_gen;
+    i.forget();
+    out.push((
+        "a changed link forgets its address, its gateway and its neighbours, and says it changed",
+        i.ip == UNSPECIFIED && i.gateway == UNSPECIFIED && !i.configured
+            && i.arp_lookup([192, 168, 1, 1]).is_none() && i.link_gen == gen.wrapping_add(1),
+    ));
+    let mut w = iface::Interface::empty("w");
+    w.nic = Some(Box::new(iface::Loopback::new()));
+    w.wireless = true;
+    w.up = true;
+    w.mac_cached = [2, 1, 2, 3, 4, 5];
+    let down = !w.usable();
+    w.link_cached = true;
+    out.push((
+        "a wireless interface answers its link and address from what the last claimed poll saw",
+        down && w.usable() && w.mac() == Some([2, 1, 2, 3, 4, 5]),
+    ));
+    out.push((
+        "a segment from an address no interface holds is not sent from another",
+        !send_ipv4_pinned([203, 0, 113, 9], [93, 184, 216, 34], PROTO_TCP, &[0u8; 20]),
+    ));
+    out.extend(dhcp::checks());
+    out
+}
+
 /// The interface commands act on when none is named.
 pub fn primary() -> usize {
     let ifs = ifaces();
+    for n in [ETH0, WLAN0] {
+        if ifs[n].usable() && ifs[n].configured {
+            return n;
+        }
+    }
     for n in [ETH0, WLAN0] {
         if ifs[n].usable() {
             return n;
@@ -473,10 +615,21 @@ pub fn config_of(n: usize) -> Config {
 
 pub fn set_config_of(n: usize, c: Config) {
     let i = &mut ifaces()[n];
+    // From one address to a different one. Not to or from unspecified: DHCP
+    // blanks the address while it asks and puts it back if nobody answers, and
+    // a renewal that changed nothing must not end every connection.
+    let moved = i.ip != c.ip && i.ip != UNSPECIFIED && c.ip != UNSPECIFIED;
+    let old = i.ip;
     i.ip = c.ip;
     i.gateway = c.gateway;
     i.netmask = c.netmask;
     i.dns = c.dns;
+    i.configured = c.ip != UNSPECIFIED;
+    if moved {
+        // A connection the peer knows by the old address cannot continue.
+        i.link_gen = i.link_gen.wrapping_add(1);
+        tcp::abort_from(old);
+    }
 }
 
 // --- bring-up ------------------------------------------------------------
@@ -599,18 +752,31 @@ pub fn init(ecam: u64, roots: Option<&[u8]>) {
             // gateway at 10.0.2.2 and its resolver at 10.0.2.3. Defaulting to
             // that makes the first test work without configuring anything, and
             // `dhcp` replaces all of it with whatever the network says.
-            eth.ip = [10, 0, 2, 15];
-            eth.gateway = [10, 0, 2, 2];
-            eth.netmask = [255, 255, 255, 0];
-            eth.dns = [10, 0, 2, 3];
+            // **Under emulation only.** On hardware those addresses are a
+            // network that is not there, and routing used to send everything
+            // off-subnet to 10.0.2.2 even with wlan0 holding a real lease.
+            let qemu = crate::dev::power::virtualised();
+            if qemu {
+                eth.ip = [10, 0, 2, 15];
+                eth.gateway = [10, 0, 2, 2];
+                eth.netmask = [255, 255, 255, 0];
+                eth.dns = [10, 0, 2, 3];
+                eth.configured = true;
+            }
             eth.up = true;
             let up = eth.usable();
+            // With a link and no address, the idle loop asks for one.
+            eth.dhcp_wanted = !qemu && up;
             kprintln!(
                 "  eth0   {} {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}  link {}",
                 name, m[0], m[1], m[2], m[3], m[4], m[5],
                 if up { "up" } else { "down" }
             );
-            kprintln!("         10.0.2.15 via 10.0.2.2  ('dhcp' to ask, 'if' to see)");
+            if qemu {
+                kprintln!("         10.0.2.15 via 10.0.2.2  ('dhcp' to ask, 'if' to see)");
+            } else {
+                kprintln!("         no address yet{}", if up { "; asking DHCP once the shell is up" } else { "" });
+            }
         }
     }
 
@@ -703,9 +869,9 @@ fn transmit_on(n: usize, frame: &[u8]) -> bool {
 fn send_arp_request(n: usize, target: Ipv4) {
     let (mac, src_ip) = {
         let i = &ifaces()[n];
-        match i.nic.as_ref() {
+        match i.mac() {
             None => return,
-            Some(d) => (d.mac(), i.ip),
+            Some(m) => (m, i.ip),
         }
     };
 
@@ -739,9 +905,9 @@ fn handle_arp(n: usize, payload: &[u8]) {
 
     let (mac, our_ip) = {
         let i = &ifaces()[n];
-        match i.nic.as_ref() {
+        match i.mac() {
             None => return,
-            Some(d) => (d.mac(), i.ip),
+            Some(m) => (m, i.ip),
         }
     };
     if op == ARP_REQUEST && target_ip == our_ip {
@@ -801,13 +967,29 @@ pub fn poll() -> Event {
     let Some(_guard) = StackGuard::take() else {
         return Event::None;
     };
-    for n in 0..ifaces().len() {
+    // Starting somewhere different each time, so a busy wired link cannot keep
+    // the wireless one waiting behind it on every call.
+    let count = ifaces().len();
+    let first = POLL_START.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % count;
+    for k in 0..count {
+        let n = (first + k) % count;
         let frame = {
             // The station is the clock task's too; skipped this round if it is
             // in there, which every caller already reads as "nothing waiting".
             let _claim = if n == WLAN0 {
                 match try_claim_wifi() {
-                    Some(c) => Some(c),
+                    Some(c) => {
+                        // A turn of the station's own state machine while the
+                        // claim is here: a deauthentication or a rekey arriving
+                        // during a blocking fetch was otherwise only acted on at
+                        // the clock task's next tick, and frames went on being
+                        // sent into an association that had ended.
+                        if let Some(w) = wlan() {
+                            w.poll_mlme(now_ms());
+                        }
+                        note_wlan_link();
+                        Some(c)
+                    }
                     None => continue,
                 }
             } else {
@@ -870,7 +1052,7 @@ fn dispatch(n: usize, frame: &[u8]) -> Event {
                 return Event::Tcp;
             }
             if payload[9] == PROTO_UDP {
-                udp::deliver(src, dst, &payload[ihl..]);
+                udp::deliver(n, src, dst, &payload[ihl..]);
                 return Event::Udp;
             }
             if payload[9] != PROTO_ICMP {
@@ -949,8 +1131,17 @@ fn resolve(n: usize, target: Ipv4) -> Option<Mac> {
     }
 
     send_arp_request(n, want);
-    let deadline = crate::dev::lapic::ticks() + crate::TIMER_HZ as u64;
+    let start = crate::dev::lapic::ticks();
+    let deadline = start + crate::TIMER_HZ as u64;
+    let mut again = true;
     while crate::dev::lapic::ticks() < deadline {
+        // Asked twice in the second. A broadcast over the air is sent once, at
+        // the lowest rate and unacknowledged, so a lost request was the whole
+        // second spent and the packet behind it dropped.
+        if again && crate::dev::lapic::ticks() >= start + crate::TIMER_HZ as u64 / 2 {
+            again = false;
+            send_arp_request(n, want);
+        }
         poll();
         if let Some(mac) = ifaces()[n].arp_lookup(want) {
             return Some(mac);
@@ -976,8 +1167,29 @@ pub(crate) fn send_ipv4_from(src: Ipv4, dst: Ipv4, proto: u8, payload: &[u8]) ->
     send_on(n, src, dst, proto, payload)
 }
 
+/// Send from `src`, out of the interface that holds it, or not at all. For
+/// TCP, whose connections are known to the peer by the address they opened on.
+pub(crate) fn send_ipv4_pinned(src: Ipv4, dst: Ipv4, proto: u8, payload: &[u8]) -> bool {
+    if is_loopback(dst) || is_local(dst) {
+        return send_on(LO, src, dst, proto, payload);
+    }
+    let n = (0..ifaces().len()).find(|&n| n != LO && ifaces()[n].ip == src && ifaces()[n].usable());
+    match n {
+        Some(n) => send_on(n, src, dst, proto, payload),
+        None => false,
+    }
+}
+
+/// Send out of one named interface, whatever routing would say. For DHCP,
+/// which asks for an address on a particular link and must not have the
+/// question leave by another -- with a cable plugged in, a DISCOVER for wlan0
+/// went out of eth0 and eth0's network's answer was written into wlan0.
+pub(crate) fn send_ipv4_on(n: usize, src: Ipv4, dst: Ipv4, proto: u8, payload: &[u8]) -> bool {
+    send_on(n, src, dst, proto, payload)
+}
+
 fn send_on(n: usize, src: Ipv4, dst: Ipv4, proto: u8, payload: &[u8]) -> bool {
-    let Some(mac) = ifaces()[n].nic.as_ref().map(|d| d.mac()) else { return false };
+    let Some(mac) = ifaces()[n].mac() else { return false };
     let Some(dst_mac) = resolve(n, dst) else { return false };
     let packet = ipv4_packet(src, dst, proto, payload, 0x1234);
     let frame = eth_frame(dst_mac, mac, ETHERTYPE_IPV4, &packet);
@@ -1072,12 +1284,20 @@ pub fn report() {
             "  {:<6} {}  {}{}",
             i.name,
             kind.name(),
-            if i.up { "up" } else { "down" },
+            // A station that is up and on no network is not "up" in the sense
+            // anybody reading this means.
+            if !i.up {
+                "down"
+            } else if i.wireless && !i.link_cached {
+                "up, not on a network"
+            } else {
+                "up"
+            },
             if def == Some(n) { "  (default route)" } else { "" }
         );
         console::set_color(LTGRAY);
         if kind != Kind::Loopback {
-            let m = i.nic.as_ref().map(|d| d.mac()).unwrap_or([0; 6]);
+            let m = i.mac().unwrap_or([0; 6]);
             kprintln!(
                 "         mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 m[0], m[1], m[2], m[3], m[4], m[5]

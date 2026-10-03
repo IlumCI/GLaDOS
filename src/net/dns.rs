@@ -223,7 +223,10 @@ pub fn resolve(name: &str) -> Result<Ipv4, Error> {
         return Err(Error::Busy);
     };
 
-    let server = super::config().dns;
+    // The resolver of the interface the default route uses, which is the
+    // network a query actually leaves on -- not whichever interface `primary`
+    // prefers by index.
+    let server = super::dns_server();
     let mut result = Err(Error::Timeout);
     // Two attempts: UDP has no retransmission of its own, and a lost query is
     // indistinguishable from a slow one.
@@ -278,6 +281,12 @@ pub fn lookup(host: &str) -> Result<Ipv4, Error> {
     }
 }
 
+/// Drop the cached answer. A name resolved on one network may be another
+/// address -- a captive portal's, or a private one -- on the next.
+pub fn forget() {
+    unsafe { *CACHE.get() = None };
+}
+
 pub fn cached() -> Option<(String, Ipv4)> {
     unsafe { (*CACHE.get()).clone() }
 }
@@ -312,7 +321,7 @@ pub fn selftest() -> bool {
         m.extend_from_slice(&[0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 10, 0, 2, 99]);
         m
     };
-    let from = |src: Ipv4, src_port: u16, data: Vec<u8>| udp::Datagram { src, src_port, data };
+    let from = |src: Ipv4, src_port: u16, data: Vec<u8>| udp::Datagram { src, src_port, data, iface: 0 };
 
     let mut ok = true;
     check(

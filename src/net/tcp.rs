@@ -375,9 +375,20 @@ impl Tcb {
 /// in `net` on re-entrancy.
 type Outbox = Vec<Vec<u8>>;
 
-fn flush(remote: Ipv4, out: Outbox) {
+/// The two ends a segment goes between: the address the connection was opened
+/// from, and the peer.
+type Ends = (Ipv4, Ipv4);
+
+/// **From the address the connection was opened on, not the one routing would
+/// pick now.** The checksum covers the local address and the peer knows the
+/// connection by it, so a segment re-sourced after the route moved -- eth0
+/// unplugged and wlan0 taking over, or a new lease -- is one the peer discards,
+/// and the connection stalls to its timeout with nothing said. Sent pinned, it
+/// either leaves from the interface that still holds that address or does not
+/// leave at all, and `net::link_changed` ends the connection outright.
+fn flush(ends: Ends, out: Outbox) {
     for seg in out {
-        send_ipv4(remote, PROTO_TCP, &seg);
+        super::send_ipv4_pinned(ends.0, ends.1, PROTO_TCP, &seg);
     }
 }
 
@@ -494,18 +505,18 @@ pub fn pump() {
             reject(src, &seg);
             continue;
         };
-        let Some((remote, out)) = at(h, |t| (t.remote, on_segment(t, src, &seg))) else {
+        let Some((ends, out)) = at(h, |t| ((t.local_ip, t.remote), on_segment(t, src, &seg))) else {
             continue;
         };
-        flush(remote, out);
+        flush(ends, out);
     }
 
     // Timers run for every connection, not just the one somebody is watching.
     // A retransmission missed because its connection was not the current one
     // is a stall that looks like the peer went quiet.
     for h in 0..MAX_CONNS {
-        if let Some((remote, out)) = at(h, on_tick_pair) {
-            flush(remote, out);
+        if let Some((ends, out)) = at(h, on_tick_pair) {
+            flush(ends, out);
         }
     }
 
@@ -536,8 +547,8 @@ pub fn pump() {
 }
 
 /// `on_tick` with the remote address, so the borrow ends before the send.
-fn on_tick_pair(t: &mut Tcb) -> (Ipv4, Outbox) {
-    (t.remote, on_tick(t))
+fn on_tick_pair(t: &mut Tcb) -> (Ends, Outbox) {
+    ((t.local_ip, t.remote), on_tick(t))
 }
 
 /// Carried across the drop of a control block so `recv` and the shell can
@@ -934,12 +945,12 @@ pub fn open(dst: Ipv4, port: u16, timeout_ms: u64) -> Result<Handle, Error> {
     };
     table()[h] = Some(tcb);
 
-    let (remote, syn) = at(h, |t| {
+    let (ends, syn) = at(h, |t| {
         t.arm_retx();
-        (t.remote, t.segment(SYN, t.iss, &[], true))
+        ((t.local_ip, t.remote), t.segment(SYN, t.iss, &[], true))
     })
     .ok_or(Error::NotConnected)?;
-    send_ipv4(remote, PROTO_TCP, &syn);
+    super::send_ipv4_pinned(ends.0, ends.1, PROTO_TCP, &syn);
 
     let ok = wait_until(timeout_ms, || !matches!(state_of(h), State::SynSent));
 
@@ -966,14 +977,14 @@ pub fn send_at(h: Handle, data: &[u8], timeout_ms: u64) -> Result<(), Error> {
     if !matches!(state_of(h), State::Established | State::CloseWait) {
         return Err(Error::NotConnected);
     }
-    let (remote, out) = at(h, |t| {
+    let (ends, out) = at(h, |t| {
         t.send_buf.extend_from_slice(data);
         let mut out = Outbox::new();
         queue_pending(t, &mut out);
-        (t.remote, out)
+        ((t.local_ip, t.remote), out)
     })
     .ok_or(Error::NotConnected)?;
-    flush(remote, out);
+    flush(ends, out);
     let done = wait_until(timeout_ms, || {
         at(h, |t| t.send_buf.is_empty()).unwrap_or(true)
     });
@@ -1011,14 +1022,14 @@ pub fn send(data: &[u8], timeout_ms: u64) -> Result<(), Error> {
     if !matches!(state(), State::Established | State::CloseWait) {
         return Err(Error::NotConnected);
     }
-    let (remote, out) = with_tcb(|t| {
+    let (ends, out) = with_tcb(|t| {
         t.send_buf.extend_from_slice(data);
         let mut out = Outbox::new();
         queue_pending(t, &mut out);
-        (t.remote, out)
+        ((t.local_ip, t.remote), out)
     })
     .ok_or(Error::NotConnected)?;
-    flush(remote, out);
+    flush(ends, out);
 
     // Wait for it to be acknowledged, so that a caller which sends then closes
     // does not close over data the peer never confirmed.
@@ -1109,10 +1120,10 @@ pub fn close_at(h: Handle, timeout_ms: u64) {
         t.state = closing_state(t.state);
         let mut out = Outbox::new();
         queue_pending(t, &mut out);
-        (t.remote, out)
+        ((t.local_ip, t.remote), out)
     });
-    if let Some((remote, out)) = out {
-        flush(remote, out);
+    if let Some((ends, out)) = out {
+        flush(ends, out);
     }
     wait_until(timeout_ms, || !alive(h));
     abort_at(h);
@@ -1147,6 +1158,21 @@ fn abort() {
 }
 
 /// Drop one connection by handle, whichever it is.
+/// End every connection opened from `local`, without a word on the wire: the
+/// address is gone from this machine, so a reset sent from it would be a
+/// packet from nobody. The peers find out by their own timeouts, which is what
+/// they would have done anyway; the callers here find out at once.
+pub fn abort_from(local: Ipv4) {
+    let mut ended = 0;
+    for h in 0..MAX_CONNS {
+        if at(h, |t| t.local_ip == local).unwrap_or(false) {
+            abort_at(h);
+            ended += 1;
+        }
+    }
+    let _ = ended;
+}
+
 pub fn abort_at(h: Handle) {
     if h < MAX_CONNS {
         table()[h] = None;
@@ -1212,6 +1238,19 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         "and the local address is part of it, since two interfaces can carry one pair",
         route([93, 184, 216, 34], [192, 168, 1, 2], &seg(80, 50000)).is_none(),
     ));
+
+    // An address that left this machine takes its connections with it, and
+    // only its own: the other interface's go on.
+    {
+        let mut other = mk([93, 184, 216, 34], 8080, 50003);
+        other.local_ip = [192, 168, 1, 7];
+        table()[2] = Some(other);
+        abort_from([192, 168, 1, 7]);
+        out.push((
+            "an address that went ends the connections opened from it, and no others",
+            table()[2].is_none() && table()[0].is_some() && table()[1].is_some(),
+        ));
+    }
 
     // The slot a closed connection leaves must not answer for it.
     table()[0] = None;

@@ -89,7 +89,7 @@ struct Reply {
 }
 
 /// Build a BOOTP/DHCP message. The fixed part is 236 bytes whatever is in it.
-fn message(kind: u8, xid: u32, mac: [u8; 6], requested: Option<Ipv4>, server: Option<Ipv4>) -> Vec<u8> {
+fn message(kind: u8, xid: u32, mac: [u8; 6], requested: Option<Ipv4>, server: Option<Ipv4>, broadcast: bool) -> Vec<u8> {
     let mut m = Vec::with_capacity(300);
     m.push(OP_REQUEST);
     m.push(HTYPE_ETHERNET);
@@ -97,9 +97,13 @@ fn message(kind: u8, xid: u32, mac: [u8; 6], requested: Option<Ipv4>, server: Op
     m.push(0); // hops
     m.extend_from_slice(&xid.to_be_bytes());
     m.extend_from_slice(&0u16.to_be_bytes()); // seconds elapsed
-    // Broadcast flag: we cannot receive a unicast reply until we have the
-    // address the reply is carrying.
-    m.extend_from_slice(&0x8000u16.to_be_bytes());
+    // Broadcast flag: a client that cannot take a unicast reply before it has
+    // the address in it asks for broadcast. This stack can -- `addressed_to_us`
+    // admits anything while the address is unspecified -- so it asks only on a
+    // wired link. Over the air a broadcast goes at the lowest basic rate, under
+    // the group key, and unacknowledged, so one lost is an offer lost; unicast
+    // is retried by the access point until the station has it.
+    m.extend_from_slice(&(if broadcast { 0x8000u16 } else { 0 }).to_be_bytes());
     m.extend_from_slice(&UNSPECIFIED); // ciaddr
     m.extend_from_slice(&UNSPECIFIED); // yiaddr
     m.extend_from_slice(&UNSPECIFIED); // siaddr
@@ -190,7 +194,7 @@ fn parse(msg: &[u8], xid: u32) -> Option<Reply> {
 }
 
 /// Wait for a reply of the wanted type, ignoring anything else on the port.
-fn await_reply(xid: u32, want: u8, ms: u64) -> Option<Reply> {
+fn await_reply(iface: usize, xid: u32, want: u8, ms: u64) -> Option<Reply> {
     let deadline = crate::dev::lapic::ticks() + (ms * crate::TIMER_HZ as u64) / 1000 + 1;
     loop {
         let remaining = deadline.saturating_sub(crate::dev::lapic::ticks());
@@ -198,7 +202,9 @@ fn await_reply(xid: u32, want: u8, ms: u64) -> Option<Reply> {
             return None;
         }
         let d = udp::recv(remaining * 1000 / crate::TIMER_HZ as u64)?;
-        if d.src_port != SERVER_PORT {
+        // Another link's server answering another link's client is not an
+        // answer to this one, whatever its transaction id says.
+        if d.src_port != SERVER_PORT || d.iface != iface {
             continue;
         }
         if let Some(r) = parse(&d.data, xid) {
@@ -214,10 +220,11 @@ fn await_reply(xid: u32, want: u8, ms: u64) -> Option<Reply> {
 
 /// Run the exchange and adopt whatever comes back.
 pub fn configure_on(n: usize) -> Result<Config, Error> {
-    let mac = match super::ifaces()[n].nic.as_ref() {
-        Some(d) => d.mac(),
+    let mac = match super::ifaces()[n].mac() {
+        Some(m) => m,
         None => return Err(Error::NoNic),
     };
+    let broadcast = !super::ifaces()[n].wireless;
     let xid = crate::time::rdtsc() as u32;
 
     // **The port first, and the address second.** A claim that is refused has
@@ -237,20 +244,20 @@ pub fn configure_on(n: usize) -> Result<Config, Error> {
     super::set_config_of(n, blank);
 
     let outcome = (|| {
-        let discover = message(DISCOVER, xid, mac, None, None);
-        if !udp::send_from(UNSPECIFIED, BROADCAST_IP, SERVER_PORT, CLIENT_PORT, &discover) {
+        let discover = message(DISCOVER, xid, mac, None, None, broadcast);
+        if !udp::send_on(n, UNSPECIFIED, BROADCAST_IP, SERVER_PORT, CLIENT_PORT, &discover) {
             return Err(Error::NoOffer);
         }
-        let offer = await_reply(xid, OFFER, 4000).ok_or(Error::NoOffer)?;
+        let offer = await_reply(n, xid, OFFER, 4000).ok_or(Error::NoOffer)?;
         if offer.kind == NAK {
             return Err(Error::Refused);
         }
 
-        let request = message(REQUEST, xid, mac, Some(offer.yiaddr), offer.server_id);
-        if !udp::send_from(UNSPECIFIED, BROADCAST_IP, SERVER_PORT, CLIENT_PORT, &request) {
+        let request = message(REQUEST, xid, mac, Some(offer.yiaddr), offer.server_id, broadcast);
+        if !udp::send_on(n, UNSPECIFIED, BROADCAST_IP, SERVER_PORT, CLIENT_PORT, &request) {
             return Err(Error::NoAck);
         }
-        let ack = await_reply(xid, ACK, 4000).ok_or(Error::NoAck)?;
+        let ack = await_reply(n, xid, ACK, 4000).ok_or(Error::NoAck)?;
         if ack.kind == NAK {
             return Err(Error::Refused);
         }
@@ -273,6 +280,13 @@ pub fn configure_on(n: usize) -> Result<Config, Error> {
     match outcome {
         Ok((cfg, lease)) => {
             super::set_config_of(n, cfg);
+            // The address was blanked for the exchange, so the setter cannot see
+            // a move from the one held before; this can.
+            if previous.ip != UNSPECIFIED && previous.ip != cfg.ip {
+                super::tcp::abort_from(previous.ip);
+                let i = &mut super::ifaces()[n];
+                i.link_gen = i.link_gen.wrapping_add(1);
+            }
             unsafe { LAST_LEASE = lease };
             Ok(cfg)
         }
@@ -286,6 +300,16 @@ pub fn configure_on(n: usize) -> Result<Config, Error> {
 }
 
 static mut LAST_LEASE: Option<u32> = None;
+
+/// The broadcast flag, which is the one field that differs by link.
+pub fn checks() -> Vec<(&'static str, bool)> {
+    let wired = message(DISCOVER, 1, [2; 6], None, None, true);
+    let air = message(DISCOVER, 1, [2; 6], None, None, false);
+    alloc::vec![(
+        "DHCP asks for a broadcast reply on a wire and a unicast one over the air",
+        wired[10..12] == [0x80, 0] && air[10..12] == [0, 0] && wired[..10] == air[..10],
+    )]
+}
 
 pub fn report() {
     report_on(super::primary())

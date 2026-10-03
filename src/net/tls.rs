@@ -467,7 +467,16 @@ impl Session {
         let mut rec = Vec::with_capacity(5 + sealed.len());
         rec.extend_from_slice(&aad);
         rec.extend_from_slice(&sealed);
-        tcp::send(&rec, 5000).map_err(|_| Error::Tcp)
+        // **Unacknowledged is not failed.** By the time `send` times out the
+        // record is in the send buffer and TCP goes on retransmitting it; a
+        // connection that is really gone reports itself as closed on the next
+        // call. Failing here turned a few seconds of wireless reassociation
+        // into a dead session -- and a pong that took too long into a closed
+        // WebSocket -- over data that was still going to arrive.
+        match tcp::send(&rec, 5000) {
+            Ok(()) | Err(tcp::Error::Timeout) => Ok(()),
+            Err(_) => Err(Error::Tcp),
+        }
     }
 }
 

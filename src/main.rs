@@ -533,6 +533,14 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     let headless = miner_plan.is_some();
     if headless {
         kprintln!("  no clock and no compositor -- this image mines, and draws its own screen");
+        // But the radio still needs its turn. The clock task is what runs the
+        // wireless state machine while the shell is busy, and without it a miner
+        // on Wi-Fi handled a deauthentication, a rekey or a handshake only when
+        // the idle loop came round -- so a long command was a link dropped.
+        match task::spawn("radio", radio_task) {
+            Some(i) => kprintln!("  spawned '{}' as task {}", "radio", i),
+            None => kprintln!("  could not spawn the radio task"),
+        }
     } else {
         match task::spawn("clock", clock_task) {
             Some(i) => kprintln!("  spawned '{}' as task {}", "clock", i),
@@ -976,6 +984,21 @@ fn comp_task() {
         // clock task owned this and could only repaint on its own schedule.
         gfx::render::beat(gfx::render::Phase::Tray);
         gfx::desk::paint_tray(composed);
+    }
+}
+
+/// The wireless state machine at ten a second and nothing else, for an image
+/// with no clock task. Yields between turns rather than spinning, because on
+/// a miner every cycle this does not spend is hashed.
+fn radio_task() {
+    let mut last = 0u64;
+    loop {
+        let now = dev::lapic::ticks();
+        if now.wrapping_sub(last) >= (TIMER_HZ as u64 / 10).max(1) {
+            last = now;
+            net::wifi_poll();
+        }
+        task::yield_now();
     }
 }
 

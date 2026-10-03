@@ -64,7 +64,11 @@ impl Radio for Air {
     }
 
     fn rx(&mut self) -> Option<Rx> {
-        super::service();
+        // The ring is drained into the inbox once the inbox is empty, not once
+        // per frame: a burst of sixty-four was sixty-four ring reads.
+        if super::with_held(|h| h.inbox.frames.is_empty()).unwrap_or(true) {
+            super::service();
+        }
         super::with_held(|h| h.inbox.frames.pop_front())
             .flatten()
             .map(|f| Rx { frame: f.frame, rssi: f.rssi, channel: f.channel })
