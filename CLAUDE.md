@@ -5603,7 +5603,7 @@ one that uses the laptop's own radio.
 `dev::registry` down to the network parts, so the naming lives in one table
 rather than two, and boot prints it.
 
-### Wireless: a seam, a shared layer, and no drivers
+### Wireless: a seam, a shared layer, and one driver
 
 **`net::iface::Nic` is Ethernet-shaped, and that was the finding that decided
 the architecture.** `transmit(&[u8])` takes an Ethernet frame, which suits a
@@ -5683,6 +5683,43 @@ FIFO boundary that gates the MAC TX/RX enables, read the efuse, upload the
 firmware, select a channel) and then `impl Radio` over the descriptors. None of
 the chip-facing half can be exercised here, since QEMU models no wireless part
 at all.
+
+### The Intel driver, from detection to a scan
+
+`src/dev/iwx/` drives the AX210 family (Snow Owl, Typhoon Peak, Ma) and names
+the 22000 family; the GF63's "AX201" is Snow Owl with a Harrier radio. What a
+boot does and what is still owed, in order:
+
+- **Detection is automatic, bring-up is not.** `net::wireless` asks each driver
+  the registry names (`iwx` today) to look at its part: a guarded register read,
+  the product, the family, and the firmware image it wants. Boot prints it and
+  `wifi` repeats it. Booting firmware grants bus-master DMA, so it stays a verb.
+- **Firmware comes from `\GLADOS\FW\`**, read whole before ExitBootServices by
+  `dev::firmware`; a copy at `/fw/<name>` in the namespace wins. `tools/wifi_fw.py
+  stage` fills `esp/GLADOS/FW` from `/lib/firmware` at the highest API at or
+  below `iwx::MAX_API` (89), `record` writes `payload/firmware.txt`, and
+  `mkiso.py` carries it with `LICENCE.iwlwifi_firmware` beside it.
+  `release.yml` fetches it from the release `payload-wifi-fw-v1`, **which has to
+  be published by hand before the next ISO build passes.**
+- **`iwx boot`** powers up, boots firmware to ALIVE, reads the NVM, sends all ten
+  initialisation commands (MCC_UPDATE's reply is the regulatory channel map), and
+  holds the part. `iwx::Held` stops it before freeing anything; `iwx down` does
+  that. It then attaches as `wlan0`.
+- **`wifi scan`** goes through `Radio::scan_offload` to a SCAN_REQ_UMAC v17, the
+  version the image declares; beacons come back through the receive ring as
+  `RX_MPDU`. `iwx rx` shows what the inbox holds.
+- **Joining is not written**: PHY/MAC contexts, binding, station, time event,
+  then a TX queue and key install. `prepare_join` refuses by name until then.
+
+`Radio` grew hooks for parts like this (`scan_offload`, `prepare_join`,
+`associated`, `left`), every default being the host-driven behaviour; `diag mlme`
+runs the whole path through both, and `wifi rehearse offload` drives it live.
+
+**None of the part-facing half has run on the part yet.** The trip order is the
+checklist: `iwx`, `iwx probe`, `fw`, `iwx boot`, `iwx rx`, `wifi scan`. There is
+no serial line, so `log send <ipv4> [port]` sends the transcript over the wired
+port to a listener (`nc -l 4444 > trip.log`) -- which needs a second machine,
+since the GF63 is also the development host.
 
 ### Crypto (`src/crypto/`)
 
