@@ -77,6 +77,11 @@ pub enum Dropped {
 fn header_len(f: &[u8]) -> usize {
     let fc0 = f[0];
     let fc1 = f[1];
+    // The Order bit means a four-byte HT-Control field closes the header, on a
+    // QoS data frame or a management frame. Leaving it out strips the pad four
+    // bytes early on every frame from an access point using +HTC, which an HE
+    // one may -- a frame corrupted after association and fine before it.
+    let htc = if fc1 & 0x80 != 0 { 4 } else { 0 };
     match (fc0 >> 2) & 3 {
         2 => {
             let mut n = 24;
@@ -84,12 +89,16 @@ fn header_len(f: &[u8]) -> usize {
                 n += 6;
             }
             if fc0 & 0x80 != 0 {
-                n += 2;
+                n += 2 + htc;
             }
             n
         }
-        1 => 10,
-        _ => 24,
+        // CTS and ACK carry one address; every other control frame two.
+        1 => match fc0 >> 4 {
+            12 | 13 => 10,
+            _ => 16,
+        },
+        _ => 24 + htc,
     }
 }
 
@@ -164,8 +173,15 @@ pub struct Notif {
 pub struct Inbox {
     pub frames: VecDeque<Frame>,
     pub notifs: VecDeque<Notif>,
+    /// Frames pushed out for room. Counted apart from notifications, because
+    /// nothing consumes most notifications and their count only ever climbs --
+    /// one counter for both hid every lost beacon behind it.
     pub dropped: u32,
+    pub dropped_notifs: u32,
     pub bad: u32,
+    /// The latest end-of-scan the part sent, kept out of `notifs` so that no
+    /// burst of other notifications can push it out before `Held` reads it.
+    pub scan_done: Option<super::scan::Done>,
 }
 
 const MAX_FRAMES: usize = 64;
@@ -173,7 +189,14 @@ const MAX_NOTIFS: usize = 32;
 
 impl Inbox {
     pub fn new() -> Inbox {
-        Inbox { frames: VecDeque::new(), notifs: VecDeque::new(), dropped: 0, bad: 0 }
+        Inbox {
+            frames: VecDeque::new(),
+            notifs: VecDeque::new(),
+            dropped: 0,
+            dropped_notifs: 0,
+            bad: 0,
+            scan_done: None,
+        }
     }
 
     /// File one packet.
@@ -191,9 +214,13 @@ impl Inbox {
             }
             return;
         }
+        if let Some(d) = super::scan::done(p.group, p.code, p.payload) {
+            self.scan_done = Some(d);
+            return;
+        }
         if self.notifs.len() >= MAX_NOTIFS {
             self.notifs.pop_front();
-            self.dropped += 1;
+            self.dropped_notifs += 1;
         }
         self.notifs.push_back(Notif { group: p.group, code: p.code, payload: p.payload.to_vec() });
     }
@@ -291,6 +318,14 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         "a four-address QoS header is thirty-two bytes",
         header_len(&[0x88, 0x03]) == 32 && header_len(&[0x08, 0x01]) == 24 && header_len(&[0x80, 0]) == 24,
     ));
+    out.push((
+        "HT-Control counts on QoS data and management with Order set, and not on plain data",
+        header_len(&[0x88, 0x81]) == 30 && header_len(&[0x80, 0x80]) == 28 && header_len(&[0x08, 0x81]) == 24,
+    ));
+    out.push((
+        "a control frame is ten bytes for CTS and ACK and sixteen otherwise",
+        header_len(&[0xc4, 0]) == 10 && header_len(&[0xd4, 0]) == 10 && header_len(&[0xb4, 0]) == 16,
+    ));
     // The inbox: frames and notifications apart, and bounded.
     let mut ib = Inbox::new();
     let raw = build(DESC_V3, &beacon, ok, 0, 40, 0, 6);
@@ -305,6 +340,23 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push((
         "and hands a notification back by kind, once",
         ib.notif(0x0c, 0x0d).map(|n| n.payload) == Some(alloc::vec![1, 2]) && ib.notif(0x0c, 0x0d).is_none(),
+    ));
+    // The end of a scan is kept apart, so a burst of notifications cannot evict
+    // it, and the latest of the two codes is the one kept.
+    let mut end = [0u8; 16];
+    end[6] = 1;
+    for _ in 0..MAX_NOTIFS + 5 {
+        ib.take(&Packet { group: 0x0c, code: 0x0e, idx: 0, qid: 0, payload: &[0] }, DESC_V3);
+    }
+    let notifs_before = ib.notifs.len();
+    ib.take(&Packet { group: 1, code: super::scan::SCAN_COMPLETE_UMAC, idx: 0, qid: 0, payload: &end }, DESC_V3);
+    out.push((
+        "the end of a scan is held apart from the notifications, which a burst cannot push it out of",
+        ib.scan_done.map(|d| d.status) == Some(1) && ib.notifs.len() == notifs_before,
+    ));
+    out.push((
+        "and notifications pushed out are counted apart from frames",
+        ib.dropped == 3 && ib.dropped_notifs == 5,
     ));
     out
 }

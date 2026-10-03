@@ -93,6 +93,15 @@ pub const BT_COEX_WIFI: u32 = 0x3;
 /// than corrected: the alternative is guessing that a field named `integrated`
 /// means what the English word means, against a table written by people with the
 /// part in front of them.
+///
+/// **The two references disagree here, and this is the first suspect if the
+/// part goes quiet after SOC_CONFIGURATION.** OpenBSD files `0x51f0` as
+/// `WL_22500_11` -- discrete, no LTR delay, crystal latency 0 -- while Linux
+/// gives the same id its long-latency transport configuration: integrated, a
+/// 2500 us LTR delay, low-latency crystal, latency 12000. Not verified against
+/// Linux's source in this tree, so OpenBSD's answer stands as the one with a
+/// citation; the alternative is the row OpenBSD uses for `0x51f1`, which is
+/// exactly Linux's figures.
 pub const SOC_CONFIG_DISCRETE: u32 = 1 << 0;
 
 /// Turn the latency-tolerance feature on. The rest of that command's thirty-two

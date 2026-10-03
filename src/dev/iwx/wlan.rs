@@ -72,18 +72,18 @@ impl Radio for Air {
 
     fn scan_offload(&mut self, ssid: &str, chans: &[u8]) -> Option<Result<(), &'static str>> {
         Some(
-            super::with_held(|h| {
-                // Frames left over from before are not this scan's.
-                h.inbox.frames.clear();
-                h.scan(ssid.as_bytes(), chans)
-            })
+            super::with_held(|h| h.scan(ssid.as_bytes(), chans))
             .unwrap_or(Err("no part is held")),
         )
     }
 
+    /// Done once the part says so **and** every frame it delivered is read.
+    /// The beacons from a scan's last channel arrive in the same ring batch as
+    /// its end, and answering on the end alone had the station choose before
+    /// reading them -- the only access point on the last channel, never seen.
     fn scan_done(&mut self) -> bool {
         super::service();
-        super::with_held(|h| !h.scanning).unwrap_or(true)
+        super::with_held(|h| !h.scanning && h.inbox.frames.is_empty()).unwrap_or(true)
     }
 
     fn prepare_join(&mut self, _t: &crate::dev::radio::JoinTarget) -> Result<(), &'static str> {

@@ -290,10 +290,16 @@ pub fn set_d0(ecam: u64, d: &Device) -> Option<u8> {
 /// The half of `enable_bus_master` a driver needs on the way out: freeing memory
 /// a device was told it could write is the bug, and this is the step that makes
 /// freeing it safe.
-pub fn disable_bus_master(ecam: u64, d: &Device) {
+/// Answers whether the bit reads back clear. A configuration write may be
+/// posted, so the read is what orders it ahead of whatever the caller does next
+/// -- freeing the memory the device was mastering, usually -- and a device that
+/// has gone (all ones) answers `false`, which is the honest answer about it.
+pub fn disable_bus_master(ecam: u64, d: &Device) -> bool {
     let cmd = cfg_read32(ecam, d, 0x04);
     // Only the low half: the high half is status, write-one-to-clear.
     cfg_write32(ecam, d, 0x04, cmd & 0xffff & !(1 << 2));
+    let back = cfg_read32(ecam, d, 0x04);
+    back != 0xffff_ffff && back & (1 << 2) == 0
 }
 
 /// The capability walk, against synthetic config spaces.

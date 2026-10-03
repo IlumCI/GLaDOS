@@ -99,6 +99,27 @@ pub enum CmdError {
     /// A reply came for a different command. Carries both, because a reply
     /// arriving out of order is a thing to know rather than a failure to hide.
     Mismatched { want: (u8, u8), got: (u8, u8) },
+    /// The part answered and said it refused: `CMD_FAILED` in the reply's group
+    /// byte. Read as its own answer, because matching the byte whole made a
+    /// refusal look like silence -- two seconds of `NoReply` for a command the
+    /// part had rejected at once.
+    Refused { group: u8, code: u8 },
+}
+
+/// The bit a reply's group byte carries when the command failed.
+pub const CMD_FAILED: u8 = 0x40;
+
+/// Whether `pkt` answers (`group`, `code`), and whether it says it failed.
+/// Group zero is answered as the long group, which is `send`'s rewrite seen
+/// from the other side.
+pub fn answers(pkt_group: u8, pkt_code: u8, group: u8, code: u8) -> Option<bool> {
+    let want = if group == 0 { LONG_GROUP } else { group };
+    let g = pkt_group & !CMD_FAILED;
+    if pkt_code == code && (g == want || (group == 0 && g == 0)) {
+        Some(pkt_group & CMD_FAILED != 0)
+    } else {
+        None
+    }
 }
 
 impl CmdError {
@@ -111,6 +132,10 @@ impl CmdError {
             CmdError::NoQueue => String::from("the command ring was not allocated"),
             CmdError::NoReply => String::from("the part did not answer"),
             CmdError::BadReply(e) => e.why(),
+            CmdError::Refused { group, code } => alloc::format!(
+                "the part refused group {:#04x} code {:#04x}",
+                group, code
+            ),
             CmdError::Mismatched { want, got } => alloc::format!(
                 "asked group {:#04x} code {:#04x} and was answered group {:#04x} code {:#04x}",
                 want.0, want.1, got.0, got.1
@@ -317,16 +342,15 @@ pub unsafe fn ask_with<'a>(
     ms: u32,
     aside: &mut dyn FnMut(&Packet),
 ) -> Result<Packet<'a>, CmdError> {
-    let want_group = if group == 0 { LONG_GROUP } else { group };
     q.send(bar0, rings, group, opcode, version, payload)?;
 
     let mut waited = 0u32;
     loop {
         while let Some(got) = rx.next(rings, bufs) {
             let pkt = got.map_err(CmdError::BadReply)?;
-            if pkt.group == want_group && pkt.code == opcode {
+            if let Some(failed) = answers(pkt.group, pkt.code, group, opcode) {
                 rx.ack(bar0, rings);
-                return Ok(pkt);
+                return if failed { Err(CmdError::Refused { group, code: opcode }) } else { Ok(pkt) };
             }
             // Something else. Handed aside, acknowledged and stepped over:
             // leaving it would have the next reader see it again, and refusing
@@ -389,11 +413,12 @@ pub unsafe fn expect_with<'a>(
     loop {
         while let Some(got) = rx.next(rings, bufs) {
             let pkt = got.map_err(CmdError::BadReply)?;
-            let matched = pkt.code == code
-                && (pkt.group == group || (group == 0 && pkt.group == LONG_GROUP));
+            let matched = answers(pkt.group, pkt.code, group, code);
             rx.ack(bar0, rings);
-            if matched {
-                return Ok(pkt);
+            match matched {
+                Some(false) => return Ok(pkt),
+                Some(true) => return Err(CmdError::Refused { group, code }),
+                None => {}
             }
             aside(&pkt);
             // Anything else is stepped over. Firmware sends statistics,
@@ -487,6 +512,10 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let _ = q.frame(&mut rings, 0, 0x05, 0, &[]);
         let e = &q.buf.as_slice()[2 * ENTRY..3 * ENTRY];
         ok(e[1] == LONG_GROUP, "a group-zero command is sent as the long group");
+        ok(answers(LONG_GROUP, 0xc8, LONG_GROUP, 0xc8) == Some(false), "a reply in the group asked is an answer");
+        ok(answers(LONG_GROUP | CMD_FAILED, 0xc8, LONG_GROUP, 0xc8) == Some(true), "and one carrying CMD_FAILED is a refusal, not silence");
+        ok(answers(LONG_GROUP, 0x02, 0, 0x02) == Some(false) && answers(0, 0x02, 0, 0x02) == Some(false), "group zero is answered as either");
+        ok(answers(2, 0xc8, LONG_GROUP, 0xc8).is_none() && answers(LONG_GROUP, 0xc9, LONG_GROUP, 0xc8).is_none(), "another group or code is not the answer");
 
         // A slot is cleared before it is reused, or a shorter command leaves the
         // tail of a longer one for firmware to read as payload.

@@ -549,11 +549,19 @@ impl Rx {
     /// derived from anything, so both are copied exactly; inventing a tidier value
     /// here is inventing one the part was not asked about.
     ///
+    /// **From the cursor, not from the producer.** Upstream writes its snapshot
+    /// of the producer, but only after walking its cursor all the way to it, so
+    /// the two are the same number there. Here a command waiter acks after each
+    /// packet with more still unread, and the producer read fresh would hand the
+    /// part every buffer between the cursor and it -- unread packets, overwritten
+    /// with no counter anywhere. The cursor is what the driver has actually read,
+    /// and one behind it is the packet a caller may still be parsing.
+    ///
     /// # Safety
     /// `bar0` must be a mapped aperture for this part.
-    pub unsafe fn ack(&self, bar0: u64, rings: &Rings) {
-        let hw = producer(rings);
-        let one_behind = if hw == 0 { RX_RING as u16 - 1 } else { hw - 1 };
+    pub unsafe fn ack(&self, bar0: u64, _rings: &Rings) {
+        let cur = self.cur as u16;
+        let one_behind = if cur == 0 { RX_RING as u16 - 1 } else { cur - 1 };
         core::ptr::write_volatile(
             (bar0 + RFH_Q0_FRBDCB_WIDX_TRG) as *mut u32,
             (one_behind & !7) as u32,

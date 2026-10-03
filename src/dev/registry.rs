@@ -340,7 +340,7 @@ pub static TABLE: &[Entry] = &[
         //
         // Partial and not Known, because `dev::iwx` boots this family's
         // firmware to ALIVE and reads the NVM. The gap is everything after.
-        support: Support::Partial("iwx", "boots firmware and reads the NVM; scanning, joining and data are not written"),
+        support: Support::Partial("iwx", "boots firmware, reads the NVM and scans; joining and data are not written"),
     },
     Entry {
         bus: Bus::Pci,

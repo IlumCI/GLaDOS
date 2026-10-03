@@ -136,7 +136,12 @@ fn on_boot_volume(name: &str) -> Option<&'static [u8]> {
 /// The rule, pure: a staged copy wins.
 fn pick(staged: Option<Vec<u8>>, boot: Option<&'static [u8]>) -> Option<Image> {
     match (staged, boot) {
-        (Some(v), _) => Some(Image::Staged(v)),
+        // An empty blob is not an image: the boot volume refuses a zero-length
+        // file for that reason, and a stray `write /fw/x ""` must not shadow a
+        // real one with nothing.
+        (Some(v), _) if !v.is_empty() => Some(Image::Staged(v)),
+        (Some(_), Some(b)) => Some(Image::Boot(b)),
+        (Some(_), None) => None,
         (None, Some(b)) => Some(Image::Boot(b)),
         (None, None) => None,
     }
@@ -176,6 +181,11 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         matches!(pick(None, Some(&BOOT)), Some(Image::Boot(b)) if b == &BOOT[..]),
     ));
     out.push(("and an image nobody provided is absent rather than empty", pick(None, None).is_none()));
+    out.push((
+        "an empty staged blob shadows nothing",
+        matches!(pick(Some(alloc::vec![]), Some(&BOOT)), Some(Image::Boot(_)))
+            && pick(Some(alloc::vec![]), None).is_none(),
+    ));
     out.push((
         "a name that is not on the boot volume is not found there",
         on_boot_volume("glados-no-such-firmware.bin").is_none(),

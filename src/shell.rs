@@ -3312,8 +3312,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // host, `nc -l 4444 > trip.log`, then `log send <host> 4444`.
                 "send" => {
                     let host = words.next().and_then(crate::net::parse_ip);
-                    let port = words.next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(4444);
-                    let Some(host) = host else {
+                    // A port that does not parse is refused rather than quietly
+                    // becoming 4444, which would send a transcript to whatever
+                    // listens there.
+                    let port = match words.next() {
+                        None => Some(4444),
+                        Some(p) => p.parse::<u16>().ok().filter(|&p| p != 0),
+                    };
+                    let (Some(host), Some(port)) = (host, port) else {
                         kprintln!("  usage: log send <ipv4> [port]  -- on the host: nc -l <port> > trip.log");
                         return;
                     };
@@ -5069,7 +5075,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             if step.starts_with("ctxt") {
                 let path = step.trim_start_matches("ctxt").trim();
                 if path.is_empty() {
-                    kprintln!("  usage: iwx ctxt <path to a .ucode in the namespace>");
+                    kprintln!("  usage: iwx ctxt <a .ucode in the namespace, or a name `fw` lists>");
                     kprintln!("  builds the AX210 boot structures and prints them. Touches no");
                     kprintln!("  register, so it works under emulation and needs no radio.");
                     return;
@@ -5218,6 +5224,61 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
                 return;
             }
+            // `rx` and `down` are about the part already held, not the bus,
+            // so they answer before the sweep: a part that has dropped off the
+            // bus -- all ones, or gone into D3 -- is exactly the one somebody
+            // needs to be able to stop.
+            if step == "rx" || step == "down" {
+                match step {
+                    // What the held part has said that nobody asked for. The first
+                    // thing to read on the laptop after `iwx boot`: a part that is
+                    // alive and silent and one that is talking into a full ring look
+                    // the same from every other command.
+                    "rx" => {
+                        crate::dev::iwx::service();
+                        let shown = crate::dev::iwx::with_held(|h| {
+                            let ib = &h.inbox;
+                            kprintln!(
+                                "  {} frame(s), {} notification(s) waiting; {} frame(s) and {} notification(s) dropped for room, {} unreadable",
+                                ib.frames.len(), ib.notifs.len(), ib.dropped, ib.dropped_notifs, ib.bad
+                            );
+                            kprintln!(
+                                "  scan {}, {} abandoned for never saying it ended",
+                                if h.scanning { "running" } else { "idle" },
+                                h.scans_abandoned
+                            );
+                            for f in ib.frames.iter().rev().take(8) {
+                                let ty = (f.frame[0] >> 2) & 3;
+                                let sub = f.frame[0] >> 4;
+                                let ssid = crate::net::ieee80211::parse_beacon(&f.frame)
+                                    .map(|b| b.ssid)
+                                    .unwrap_or_default();
+                                kprintln!(
+                                    "    type {} sub {:2}  ch {:3}  {:4} dBm  {} bytes  {}",
+                                    ty, sub, f.channel, f.rssi, f.frame.len(), ssid
+                                );
+                            }
+                            for n in ib.notifs.iter().rev().take(8) {
+                                kprintln!("    notification group {:#04x} code {:#04x}, {} bytes", n.group, n.code, n.payload.len());
+                            }
+                        });
+                        if shown.is_none() {
+                            kprintln!("  nothing is held: `iwx boot` brings a part up");
+                        }
+                    }
+                    "down" => match crate::dev::iwx::release() {
+                        // wlan0 goes with the part, or it is a handle to nothing.
+                        Some(st) if crate::net::wlan_name() == Some("iwx") => {
+                            crate::net::detach_radio();
+                            kprintln!("  {}; wlan0 is empty again", st.say());
+                        }
+                        Some(st) => kprintln!("  {}", st.say()),
+                        None => kprintln!("  nothing is held: `iwx boot` brings a part up"),
+                    },
+                    _ => {}
+                }
+                return;
+            }
             let Some(ecam) = acpi.as_ref().and_then(|a| a.mcfg) else {
                 kprintln!("  no ECAM: configuration space is unreachable, so nothing can be asked");
                 return;
@@ -5330,48 +5391,6 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // radio up reads registers and writes a handful, where this lets it
                 // fetch a megabyte and a half out of host memory on its own
                 // initiative. Somebody should have to ask for that by name.
-                // What the held part has said that nobody asked for. The first
-                // thing to read on the laptop after `iwx boot`: a part that is
-                // alive and silent and one that is talking into a full ring look
-                // the same from every other command.
-                "rx" => {
-                    crate::dev::iwx::service();
-                    let shown = crate::dev::iwx::with_held(|h| {
-                        let ib = &h.inbox;
-                        kprintln!(
-                            "  {} frame(s), {} notification(s) waiting; {} dropped for room, {} unreadable",
-                            ib.frames.len(), ib.notifs.len(), ib.dropped, ib.bad
-                        );
-                        for f in ib.frames.iter().rev().take(8) {
-                            let ty = (f.frame[0] >> 2) & 3;
-                            let sub = f.frame[0] >> 4;
-                            let ssid = crate::net::ieee80211::parse_beacon(&f.frame)
-                                .map(|b| b.ssid)
-                                .unwrap_or_default();
-                            kprintln!(
-                                "    type {} sub {:2}  ch {:3}  {:4} dBm  {} bytes  {}",
-                                ty, sub, f.channel, f.rssi, f.frame.len(), ssid
-                            );
-                        }
-                        for n in ib.notifs.iter().rev().take(8) {
-                            kprintln!("    notification group {:#04x} code {:#04x}, {} bytes", n.group, n.code, n.payload.len());
-                        }
-                    });
-                    if shown.is_none() {
-                        kprintln!("  nothing is held: `iwx boot` brings a part up");
-                    }
-                }
-                "down" => match crate::dev::iwx::release() {
-                    // wlan0 goes with the part, or it is a handle to nothing.
-                    Some(st) if crate::net::wlan().map(|w| w.radio_name()) == Some("iwx") => {
-                        let w = &mut crate::net::ifaces()[crate::net::WLAN0];
-                        w.nic = None;
-                        w.up = false;
-                        kprintln!("  {}; wlan0 is empty again", st.say());
-                    }
-                    Some(st) => kprintln!("  {}", st.say()),
-                    None => kprintln!("  nothing is held: `iwx boot` brings a part up"),
-                },
                 b if b.starts_with("boot") => {
                     // One part held at a time, and the old one is stopped before
                     // the new power-up touches the same registers.
@@ -5515,7 +5534,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                     // wlan0, if nothing else is: a part that can
                                     // scan is worth a `wifi scan`, and the stack
                                     // above it has been waiting for one.
-                                    if scannable && crate::net::ifaces()[crate::net::WLAN0].nic.is_none() {
+                                    // `Air` holds no state of its own, so a wlan0 that
+                                    // is already this driver is already the new part.
+                                    let on = crate::net::wlan_name();
+                                    if scannable && on == Some("iwx") {
+                                        kprintln!("  wlan0 is this part again: `wifi scan` asks it what is in the air");
+                                    } else if scannable && crate::net::ifaces()[crate::net::WLAN0].nic.is_none() {
                                         if crate::net::attach_radio(crate::dev::iwx::wlan::Air) {
                                             kprintln!("  attached as wlan0: `wifi scan` asks it what is in the air");
                                         }
@@ -8563,6 +8587,9 @@ fn push_num(s: &mut String, mut v: u64) {
 /// purpose -- writing one means writing a passphrase into a content-addressed
 /// store where every past root hash still names it.
 fn wifi_cmd(rest: &str) {
+    // The whole verb under one claim: the clock task polls the same station,
+    // and every arm below takes a `&mut` to it.
+    let _claim = crate::net::claim_wifi();
     let mut it = rest.splitn(3, ' ');
     let sub = it.next().unwrap_or("").trim();
     let a = it.next().unwrap_or("").trim();
@@ -8635,10 +8662,7 @@ fn wifi_cmd(rest: &str) {
         // this must not do.
         "rehearse" | "rehearsal" => {
             if a == "off" {
-                let w = &mut crate::net::ifaces()[crate::net::WLAN0];
-                let had = w.nic.is_some();
-                w.nic = None;
-                w.up = false;
+                let had = crate::net::detach_radio();
                 kprintln!(
                     "  {}",
                     if had { "wlan0 is empty again" } else { "wlan0 was already empty" }

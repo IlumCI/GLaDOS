@@ -117,7 +117,7 @@ fn detect_iwx(ecam: u64) -> Vec<Seen> {
             }),
         };
         let reach = match family {
-            Some(Family::Ax210) => "boots firmware and reads its address; cannot scan yet",
+            Some(Family::Ax210) => "boots firmware and scans with `iwx boot`; cannot join yet",
             Some(Family::F22000) => "recognised; this family's boot path is written and not taken",
             Some(Family::Bz) => "recognised and refused: this family's reset is not written",
             None => "a controller type this kernel cannot name",

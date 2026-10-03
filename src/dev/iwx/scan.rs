@@ -136,9 +136,11 @@ const RATES_24: [u8; 12] = [0x82, 0x84, 0x8b, 0x96, 12, 18, 24, 36, 48, 72, 96, 
 /// 802.11a's, with 6, 12 and 24 basic.
 const RATES_5: [u8; 8] = [0x8c, 18, 0x98, 36, 0xb0, 72, 96, 108];
 
-/// The probe template and where its parts are, as `(mac header, 2.4, 5,
-/// common)` segments of `(offset, length)`.
-fn template(r: &Request) -> (Vec<u8>, [(u16, u16); 4]) {
+/// The probe template and where its parts are, as `(mac header, 2.4, 5, 6,
+/// common)` segments of `(offset, length)` -- five, because the structure is
+/// `mac_header, band_data[3], common_data`. Four put "common" in the 6 GHz band's
+/// slot, harmless only while common is empty.
+fn template(r: &Request) -> (Vec<u8>, [(u16, u16); 5]) {
     let mut f = Vec::with_capacity(64);
     f.extend_from_slice(&[0x40, 0x00, 0, 0]); // probe request, no DS bits, duration
     f.extend_from_slice(&[0xff; 6]);
@@ -170,7 +172,7 @@ fn template(r: &Request) -> (Vec<u8>, [(u16, u16); 4]) {
     // No HT or VHT capabilities: legacy rates only, which is what this station
     // can then receive. The common segment is empty and points at the end.
     let common = (f.len() as u16, 0u16);
-    (f, [hdr, seg24, seg5, common])
+    (f, [hdr, seg24, seg5, (0, 0), common])
 }
 
 /// Build the request.
@@ -346,6 +348,10 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             seg(1) == (26, 2 + 8 + 2 + 4 + 3) && t[26] == 1 && t[27] == 8 && t[36] == 50 && t[42] == 3,
         ));
         out.push(("and the 5 GHz one follows it", seg(2) == (26 + 19, 10) && t[45] == 1));
+        out.push((
+            "the 6 GHz slot is empty and common is the fifth, pointing at the template's end",
+            seg(3) == (0, 0) && seg(4) == (26 + 19 + 10, 0),
+        ));
     }
     let named = Request { mac: me, channels: &[6], ssid: b"glados", band_5: false, ds_param: false };
     if let Ok(v) = request(Some(17), &named) {

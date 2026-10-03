@@ -941,7 +941,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     );
     claim(
         "a stop with nothing confirmed still says so rather than reporting success",
-        Stopped::default().say() != Stopped { rx_idle: true, master_off: true }.say(),
+        Stopped::default().say() != Stopped { rx_idle: true, master_off: true, host_off: true }.say(),
     );
 
     // L1 must survive: upstream disables L0s alone, and disabling both would
@@ -1087,10 +1087,18 @@ pub struct Stopped {
     pub rx_idle: bool,
     /// The part said it had stopped mastering the bus.
     pub master_off: bool,
+    /// And the host's bus-master enable read back clear. **This is the one that
+    /// decides whether memory is freed**: the part's own word is about its
+    /// firmware, the command register is about whether it can reach memory at
+    /// all, and without it the regions are leaked rather than handed back.
+    pub host_off: bool,
 }
 
 impl Stopped {
     pub fn say(&self) -> &'static str {
+        if !self.host_off {
+            return "reset, but bus mastering would not read back off -- its memory is kept, not freed";
+        }
         match (self.rx_idle, self.master_off) {
             (true, true) => "stopped: receive DMA idle, bus master released, firmware reset",
             (false, true) => "stopped, though the receive engine never reported idle",
@@ -1143,7 +1151,7 @@ unsafe fn stop_part(ecam: u64, dev: &Device, bar0: u64) -> Stopped {
     // The reset re-arms nothing, but upstream masks again here because the
     // power-management transition can raise an interrupt on its own.
     alive::arm(bar0);
-    crate::dev::pci::disable_bus_master(ecam, dev);
+    out.host_off = crate::dev::pci::disable_bus_master(ecam, dev);
     out
 }
 
@@ -1157,7 +1165,10 @@ unsafe fn stop_part(ecam: u64, dev: &Device, bar0: u64) -> Stopped {
 /// the part together and its `Drop` runs the stop before either is released.
 pub struct Held {
     pub radio: Radio,
-    pub booted: Booted,
+    /// `ManuallyDrop` so that `Drop` decides: freed after a stop the host can
+    /// confirm, leaked after one it cannot. A leak is a few megabytes; freeing
+    /// memory a device can still write is corruption somewhere unrelated.
+    pub booted: core::mem::ManuallyDrop<Booted>,
     bar0: u64,
     ecam: u64,
     stopped: Option<Stopped>,
@@ -1174,7 +1185,15 @@ pub struct Held {
     /// A scan is running, and how the last one ended.
     pub scanning: bool,
     pub scan_ended: Option<scan::Done>,
+    scan_began: u64,
+    /// Scans that never said they ended and were given up on.
+    pub scans_abandoned: u32,
 }
+
+/// How long a scan may run before the part is taken not to be scanning. Sixty-
+/// odd channels at the longest passive dwell is under eight seconds; this is
+/// well past that and well short of an operator giving up.
+const SCAN_LIMIT_MS: u64 = 20_000;
 
 /// What `Held` keeps from the firmware image and the NVM.
 #[derive(Clone, Copy, Debug, Default)]
@@ -1202,7 +1221,7 @@ impl Held {
         let desc = if family == Family::F22000 { rx::DESC_V1 } else { rx::DESC_V3 };
         Some(Held {
             radio,
-            booted,
+            booted: core::mem::ManuallyDrop::new(booted),
             bar0,
             ecam,
             stopped: None,
@@ -1212,6 +1231,8 @@ impl Held {
             facts: Facts::default(),
             scanning: false,
             scan_ended: None,
+            scan_began: 0,
+            scans_abandoned: 0,
         })
     }
 
@@ -1227,7 +1248,7 @@ impl Held {
             return 0;
         }
         let mut n = 0;
-        let b = &mut self.booted;
+        let b: &mut Booted = &mut self.booted;
         while let Some(got) = b.rx.next(&b.boot.rings, &b.buffers) {
             n += 1;
             match got {
@@ -1240,22 +1261,23 @@ impl Held {
             unsafe { b.rx.ack(self.bar0, &b.boot.rings) };
         }
         // A scan ends by notification, in whichever group and by whichever of
-        // the two codes it arrives as. Taken out of the inbox here so the end
-        // of a scan cannot be lost behind thirty-two other notifications.
+        // the two codes it arrives as; `Inbox::take` keeps the latest apart so
+        // it cannot be lost behind other notifications. **Taken whether or not a
+        // scan is running**: firmware sends the iteration's end and then the
+        // scan's, the first ends it, and a second left lying would end the
+        // *next* scan the moment it began -- every other scan empty. Upstream
+        // throws a late one away for the same reason.
+        let ended = self.inbox.scan_done.take();
         if self.scanning {
-            let mut ended = None;
-            self.inbox.notifs.retain(|m| {
-                if ended.is_none() {
-                    if let Some(d) = scan::done(m.group, m.code, &m.payload) {
-                        ended = Some(d);
-                        return false;
-                    }
-                }
-                true
-            });
             if ended.is_some() {
                 self.scanning = false;
                 self.scan_ended = ended;
+            } else if crate::net::now_ms().saturating_sub(self.scan_began) > SCAN_LIMIT_MS {
+                // A request the part refused never says it ended. Given up on
+                // rather than held forever, which would refuse every later scan.
+                self.scanning = false;
+                self.scan_ended = None;
+                self.scans_abandoned += 1;
             }
         }
         n
@@ -1270,6 +1292,12 @@ impl Held {
     pub fn scan(&mut self, ssid: &[u8], plan: &[u8]) -> Result<(), &'static str> {
         if self.stopped.is_some() {
             return Err("the part is stopped");
+        }
+        // One at a time: a second request while one runs is a firmware error
+        // nothing would read, and its completion would end the wrong scan.
+        self.poll();
+        if self.scanning {
+            return Err("a scan is already running on the part");
         }
         let allowed: Vec<u8> = match &self.regulatory {
             Some(r) => {
@@ -1286,11 +1314,15 @@ impl Held {
             ds_param: self.facts.ds_param,
         };
         let body = scan::request(self.facts.scan_ver, &req).map_err(|e| e.why())?;
-        let b = &mut self.booted;
+        let b: &mut Booted = &mut self.booted;
         // Safety: this part's aperture, alive, and not stopped.
         unsafe { b.cmds.send(self.bar0, &mut b.boot.rings, config::LONG_GROUP, scan::SCAN_REQ_UMAC, 0, &body) }
             .map_err(|_| "the scan request could not be queued")?;
+        // Frames left over from before are not this scan's.
+        self.inbox.frames.clear();
+        self.inbox.scan_done = None;
         self.scanning = true;
+        self.scan_began = crate::net::now_ms();
         self.scan_ended = None;
         Ok(())
     }
@@ -1317,7 +1349,10 @@ impl Held {
 
 impl Drop for Held {
     fn drop(&mut self) {
-        self.stop();
+        if self.stop().host_off {
+            // Safety: dropped once, here, and the part can no longer reach it.
+            unsafe { core::mem::ManuallyDrop::drop(&mut self.booted) };
+        }
     }
 }
 
@@ -1750,13 +1785,32 @@ impl Radio {
 
         crate::dev::pci::enable_bus_master(ecam, &self.dev);
 
+        // **From here every failure stops the part before its memory goes.** A
+        // firmware that missed the ALIVE deadline may be slow rather than dead,
+        // and the first thing a slow one does is write its ALIVE into the receive
+        // ring -- which an early return would have just handed back to the heap.
+        let give_up = |boot: gen3::Boot, buffers: alive::Buffers, e: BootFault| {
+            // Safety: this part's aperture, mapped by `power_up`.
+            let s = unsafe { stop_part(ecam, &self.dev, bar0) };
+            if !s.host_off {
+                core::mem::forget(boot);
+                core::mem::forget(buffers);
+            }
+            Err(e)
+        };
         // Safety: an AX210 part whose power-up completed, with every address in
         // `boot` pointing at memory this driver owns.
-        unsafe { gen3::kick(bar0, &boot) }.map_err(BootFault::Kick)?;
+        if let Err(e) = unsafe { gen3::kick(bar0, &boot) } {
+            return give_up(boot, buffers, BootFault::Kick(e));
+        }
         let mut rx = alive::Rx::new();
-        let a = unsafe { alive::wait(bar0, &mut boot.rings, &buffers, &mut rx, ms) }
-            .map_err(BootFault::NotAlive)?;
-        let cmds = cmd::Queue::new().ok_or(BootFault::NoMemory)?;
+        let a = match unsafe { alive::wait(bar0, &mut boot.rings, &buffers, &mut rx, ms) } {
+            Ok(a) => a,
+            Err(e) => return give_up(boot, buffers, BootFault::NotAlive(e)),
+        };
+        let Some(cmds) = cmd::Queue::new() else {
+            return give_up(boot, buffers, BootFault::NoMemory);
+        };
         Ok(Booted { alive: a, boot, buffers, rx, cmds, configured: false })
     }
 }
