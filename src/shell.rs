@@ -5290,7 +5290,16 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // radio up reads registers and writes a handful, where this lets it
                 // fetch a megabyte and a half out of host memory on its own
                 // initiative. Somebody should have to ask for that by name.
+                "down" => match crate::dev::iwx::release() {
+                    Some(st) => kprintln!("  {}", st.say()),
+                    None => kprintln!("  nothing is held: `iwx boot` brings a part up"),
+                },
                 b if b.starts_with("boot") => {
+                    // One part held at a time, and the old one is stopped before
+                    // the new power-up touches the same registers.
+                    if let Some(st) = crate::dev::iwx::release() {
+                        kprintln!("  the part already up: {}", st.say());
+                    }
                     let path = b.trim_start_matches("boot").trim();
                     // With no path the part names its own image: its registers
                     // give the base, and `dev::firmware` has whatever the boot
@@ -5401,12 +5410,20 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                     console::set_color(LTGRAY);
                                 }
                             }
-                            // **Dropped here, and on purpose.** Keeping it would
-                            // mean a static holding two megabytes and a live DMA
-                            // target with nothing to service it; the part goes back
-                            // to quiet when its regions go away, which is the
-                            // honest state until there is something to do next.
-                            drop(b);
+                            // **Kept, and that reverses a decision.** This dropped
+                            // the regions on the argument that the part "goes back
+                            // to quiet when its regions go away" -- and nothing
+                            // told it to, so firmware went on writing its receive
+                            // ring into freed heap. `Held` owns both and stops the
+                            // part before releasing either; `iwx down` does that
+                            // on request, and the next `iwx boot` does it first.
+                            match crate::dev::iwx::Held::new(*r, b, ecam) {
+                                Some(h) => {
+                                    crate::dev::iwx::hold(h);
+                                    kprintln!("  held, running. `iwx down` stops it.");
+                                }
+                                None => kprintln!("  no aperture to stop it through; dropped"),
+                            }
                         }
                         Err(f) => {
                             crate::dev::iwx::note_alive(Err(f.why()));
@@ -5417,7 +5434,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                 }
                 other => kprintln!(
-                    "  no such step '{}' -- try `iwx`, `iwx probe`, `iwx up`, `iwx ctxt <fw>` or `iwx boot [fw]`",
+                    "  no such step '{}' -- try `iwx`, `iwx probe`, `iwx up`, `iwx ctxt <fw>`, `iwx boot [fw]` or `iwx down`",
                     other
                 ),
             }

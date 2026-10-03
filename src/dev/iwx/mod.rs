@@ -894,7 +894,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     claim(
         "every register is inside the mapped aperture",
         POWER_UP.iter().all(|s| match s {
-            Step::SetBit(r, _) | Step::Write(r, _) => *r < APERTURE,
+            Step::SetBit(r, _) | Step::ClearBit(r, _) | Step::Write(r, _) => *r < APERTURE,
             Step::Poll { reg, .. } => *reg < APERTURE,
             Step::Settle(_) => true,
             // Every register `acquire` touches, listed here rather than trusted,
@@ -905,6 +905,41 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             }
         }),
     );
+    // The stop sequence, by the same rules as the power-up.
+    let at = |pred: &dyn Fn(&Step) -> bool| STOP.iter().position(|s| pred(s));
+    let stop_master = at(&|s| matches!(s, Step::SetBit(CSR_RESET, b) if *b == CSR_RESET_REG_FLAG_STOP_MASTER));
+    let master_poll = at(&|s| matches!(s, Step::Poll { reg: CSR_RESET, mask, .. } if *mask == CSR_RESET_REG_FLAG_MASTER_DISABLED));
+    let sw_reset = at(&|s| matches!(s, Step::SetBit(CSR_RESET, b) if *b == CSR_RESET_REG_FLAG_SW_RESET));
+    claim(
+        "the part is asked to stop mastering, and waited on, before its processor is reset",
+        matches!((stop_master, master_poll, sw_reset), (Some(a), Some(b), Some(c)) if a < b && b < c),
+    );
+    claim(
+        "and the reset is followed by a settle, as in the power-up",
+        sw_reset.and_then(|i| STOP.get(i + 1)).map(|s| matches!(s, Step::Settle(_))) == Some(true),
+    );
+    claim(
+        "the link is held out of power management only across the prepare, then released",
+        {
+            let hold = at(&|s| matches!(s, Step::SetBit(CSR_DBG_LINK_PWR_MGMT_REG, _)));
+            let free = at(&|s| matches!(s, Step::ClearBit(CSR_DBG_LINK_PWR_MGMT_REG, _)));
+            matches!((hold, free), (Some(a), Some(b)) if a < b)
+        },
+    );
+    claim(
+        "every stop register is inside the mapped aperture, and nothing in it acquires",
+        STOP.iter().all(|s| match s {
+            Step::SetBit(r, _) | Step::ClearBit(r, _) | Step::Write(r, _) => *r < APERTURE,
+            Step::Poll { reg, us, .. } => *reg < APERTURE && *us > 0,
+            Step::Settle(_) => true,
+            Step::Acquire { .. } => false,
+        }),
+    );
+    claim(
+        "a stop with nothing confirmed still says so rather than reporting success",
+        Stopped::default().say() != Stopped { rx_idle: true, master_off: true }.say(),
+    );
+
     // L1 must survive: upstream disables L0s alone, and disabling both would
     // cost the link's power management for no reason this driver needs.
     claim(
@@ -991,6 +1026,186 @@ const CSR_GIO_CHICKEN_BITS_REG_BIT_L1A_NO_L0S_RX: u32 = 0x0080_0000;
 const CSR_DBG_HPET_MEM_REG_VAL: u32 = 0xFFFF_0000;
 const CSR_MBOX_SET_REG_OS_ALIVE: u32 = 0x20;
 const CSR_RESET_LINK_PWR_MGMT_DISABLED: u32 = 0x8000_0000;
+const CSR_HW_IF_CONFIG_REG_ENABLE_PME: u32 = 0x1000_0000;
+const CSR_RESET_REG_FLAG_MASTER_DISABLED: u32 = 0x0000_0100;
+const CSR_RESET_REG_FLAG_STOP_MASTER: u32 = 0x0000_0200;
+const CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ: u32 = 0x0000_0008;
+
+/// Taking a running part down: `iwx_apm_stop` then `iwx_sw_reset`, for the
+/// families below Bz.
+///
+/// **The bus master is stopped by the part before the host takes the grant
+/// away**, and the order is the point of the table. Clearing bus mastering in
+/// the PCI command register first would refuse a transfer the part is halfway
+/// through, which is the kind of thing a PCIe completer reports as an error and
+/// a laptop's firmware is entitled to escalate. Asking the part to stop
+/// mastering and waiting for it to say it has stopped is upstream's order and
+/// the polite one; the PCI bit goes afterwards, in `Held::stop`, as the
+/// guarantee rather than the request.
+pub const STOP: &[Step] = &[
+    Step::ClearBit(CSR_GP_CNTRL, CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ),
+    // Hold the link out of power management while the part is told to prepare
+    // for sleep, then let it go.
+    Step::SetBit(CSR_DBG_LINK_PWR_MGMT_REG, CSR_RESET_LINK_PWR_MGMT_DISABLED),
+    Step::SetBit(CSR_HW_IF_CONFIG_REG, CSR_HW_IF_CONFIG_REG_PREPARE | CSR_HW_IF_CONFIG_REG_ENABLE_PME),
+    Step::Settle(1_000),
+    Step::ClearBit(CSR_DBG_LINK_PWR_MGMT_REG, CSR_RESET_LINK_PWR_MGMT_DISABLED),
+    Step::Settle(5_000),
+    // Stop mastering, and wait for the part to say it has.
+    Step::SetBit(CSR_RESET, CSR_RESET_REG_FLAG_STOP_MASTER),
+    Step::Poll {
+        reg: CSR_RESET,
+        mask: CSR_RESET_REG_FLAG_MASTER_DISABLED,
+        want: CSR_RESET_REG_FLAG_MASTER_DISABLED,
+        us: 100,
+    },
+    // Back from powered-up-active to uninitialised.
+    Step::ClearBit(CSR_GP_CNTRL, CSR_GP_CNTRL_REG_FLAG_INIT_DONE),
+    // And reset the on-board processor, so the firmware is not running at all.
+    Step::SetBit(CSR_RESET, CSR_RESET_REG_FLAG_SW_RESET),
+    Step::Settle(5_000),
+];
+
+/// Upper-MAC peripheral registers for the receive DMA engine, gen3.
+const RFH_RXF_DMA_CFG_GEN3: u32 = 0xA0_7880;
+const RFH_GEN_STATUS_GEN3: u32 = 0xA0_7824;
+const RXF_DMA_IDLE: u32 = 1 << 31;
+
+/// How a stop went. Every step is attempted whatever an earlier one said: a
+/// stop that gave up halfway leaves a part half running, which is the one
+/// state worse than either.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Stopped {
+    /// The receive DMA engine reported idle before anything else was touched.
+    pub rx_idle: bool,
+    /// The part said it had stopped mastering the bus.
+    pub master_off: bool,
+}
+
+impl Stopped {
+    pub fn say(&self) -> &'static str {
+        match (self.rx_idle, self.master_off) {
+            (true, true) => "stopped: receive DMA idle, bus master released, firmware reset",
+            (false, true) => "stopped, though the receive engine never reported idle",
+            (true, false) => "reset, though the part never confirmed it stopped mastering",
+            (false, false) => "reset with neither the receive engine nor the bus master confirming",
+        }
+    }
+}
+
+/// Take a booted part down. Interrupts masked, receive DMA quiesced, the bus
+/// master stopped by the part and then by the host, the firmware reset.
+///
+/// # Safety
+/// `bar0` must be the mapped aperture of the part `dev` names.
+unsafe fn stop_part(ecam: u64, dev: &Device, bar0: u64) -> Stopped {
+    let mut out = Stopped::default();
+    alive::arm(bar0);
+    if gen3::lock(bar0) {
+        gen3::prph_write(bar0, gen3::umac_prph(RFH_RXF_DMA_CFG_GEN3), 0);
+        for _ in 0..1000 {
+            if gen3::prph_read(bar0, gen3::umac_prph(RFH_GEN_STATUS_GEN3)) & RXF_DMA_IDLE != 0 {
+                out.rx_idle = true;
+                break;
+            }
+            crate::time::delay_us(10);
+        }
+        gen3::unlock(bar0);
+    }
+    for step in STOP {
+        match *step {
+            Step::SetBit(reg, bit) => {
+                let p = (bar0 + reg) as *mut u32;
+                core::ptr::write_volatile(p, core::ptr::read_volatile(p) | bit);
+            }
+            Step::ClearBit(reg, bit) => {
+                let p = (bar0 + reg) as *mut u32;
+                core::ptr::write_volatile(p, core::ptr::read_volatile(p) & !bit);
+            }
+            Step::Write(reg, val) => core::ptr::write_volatile((bar0 + reg) as *mut u32, val),
+            Step::Settle(us) => crate::time::delay_us(us as u64),
+            Step::Poll { reg, mask, want, us } => {
+                let got = poll_bit(bar0, reg, mask, want, us);
+                if reg == CSR_RESET && mask == CSR_RESET_REG_FLAG_MASTER_DISABLED {
+                    out.master_off = got;
+                }
+            }
+            Step::Acquire { .. } => {}
+        }
+    }
+    // The reset re-arms nothing, but upstream masks again here because the
+    // power-management transition can raise an interrupt on its own.
+    alive::arm(bar0);
+    crate::dev::pci::disable_bus_master(ecam, dev);
+    out
+}
+
+/// A booted part, owned. **The only way to hold one**, so that letting go of it
+/// takes the part down first.
+///
+/// `Booted` alone could be dropped while firmware went on writing into its
+/// receive ring -- freed heap, written by a device -- and `iwx boot` did exactly
+/// that, on purpose, with a comment saying the part "goes back to quiet when its
+/// regions go away". It does not: nothing tells it to. This holds the regions and
+/// the part together and its `Drop` runs the stop before either is released.
+pub struct Held {
+    pub radio: Radio,
+    pub booted: Booted,
+    bar0: u64,
+    ecam: u64,
+    stopped: Option<Stopped>,
+}
+
+impl Held {
+    pub fn new(radio: Radio, booted: Booted, ecam: u64) -> Option<Held> {
+        let bar0 = radio.bar0.filter(|&b| b != 0)?;
+        Some(Held { radio, booted, bar0, ecam, stopped: None })
+    }
+
+    pub fn bar0(&self) -> u64 {
+        self.bar0
+    }
+
+    /// Take the part down. Idempotent: the second call answers the first's result.
+    pub fn stop(&mut self) -> Stopped {
+        if let Some(s) = self.stopped {
+            return s;
+        }
+        // Safety: `bar0` is this part's aperture, mapped by `boot`.
+        let s = unsafe { stop_part(self.ecam, &self.radio.dev, self.bar0) };
+        self.stopped = Some(s);
+        s
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// The one held part, if `iwx boot` brought one up and nothing has stopped it.
+static HELD: crate::sync::Racy<Option<Held>> = crate::sync::Racy::new(None);
+
+/// Keep a booted part, stopping whatever was held before.
+pub fn hold(d: Held) {
+    let slot = unsafe { &mut *HELD.get() };
+    // Replaced rather than swapped in place, so the old one's Drop -- the stop --
+    // runs before the new one is reachable.
+    *slot = None;
+    *slot = Some(d);
+}
+
+/// Stop and release the held part, answering how the stop went.
+pub fn release() -> Option<Stopped> {
+    let slot = unsafe { &mut *HELD.get() };
+    let mut d = slot.take()?;
+    Some(d.stop())
+}
+
+pub fn held() -> bool {
+    unsafe { (*HELD.get()).is_some() }
+}
 /// Upstream's own figure, and it is **microseconds**: fifty, not fifty
 /// milliseconds. The semaphore is granted immediately or the part needs the
 /// prepare dance, so a generous timeout here buys nothing and hides which of the
@@ -1012,6 +1227,8 @@ pub enum Step {
     /// been told about, which matters because several of these hold state set by
     /// firmware that has already run.
     SetBit(u64, u32),
+    /// Read, mask out, write back. The stop sequence's half of `SetBit`.
+    ClearBit(u64, u32),
     /// Write a whole word, for the registers that are thresholds rather than
     /// flag sets.
     Write(u64, u32),
@@ -1174,6 +1391,10 @@ impl Radio {
                 Step::SetBit(reg, bit) => unsafe {
                     let p = (bar0 + reg) as *mut u32;
                     core::ptr::write_volatile(p, core::ptr::read_volatile(p) | bit);
+                },
+                Step::ClearBit(reg, bit) => unsafe {
+                    let p = (bar0 + reg) as *mut u32;
+                    core::ptr::write_volatile(p, core::ptr::read_volatile(p) & !bit);
                 },
                 Step::Write(reg, val) => unsafe {
                     core::ptr::write_volatile((bar0 + reg) as *mut u32, val);
