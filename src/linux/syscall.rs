@@ -1106,6 +1106,9 @@ const PAGE: u64 = 4096;
 pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
     let brk = r.brk;
     teardown();
+    // A display server is listening before the guest's first instruction, so
+    // a client that connects first thing finds one. See `sky::server`.
+    crate::sky::server::serve();
     unsafe {
         *guest_slot() = Some(Space {
             image: r.image,
@@ -1146,6 +1149,9 @@ pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
 /// `exit_group` is how programs end -- so the teardown is where mappings are
 /// actually reclaimed and `munmap` is only the early return of one.
 pub fn teardown() -> usize {
+    // Every display connection ends with the guest that held it, and its
+    // windows with it: nothing else would take them down.
+    crate::sky::server::reap();
     // **Before anything else, and unconditionally.** A guest that took the
     // display and then faulted is exactly the case this has to cover, and a
     // release conditional on a tidy exit would leave the desktop stood down
@@ -2263,6 +2269,8 @@ fn sys_epoll_wait(epfd: u64, evs: u64, maxevents: u64, timeout: u64) -> u64 {
         if overran(crate::dev::lapic::ticks()) {
             unsafe { kill_blocked() }
         }
+        // The display server answers while its client waits.
+        crate::sky::server::pump();
         crate::task::yield_now();
     }
 }
@@ -2763,6 +2771,8 @@ fn sys_recvmsg(fd: u64, hdr: u64, flags: u64) -> u64 {
         if overran(crate::dev::lapic::ticks()) {
             unsafe { kill_blocked() }
         }
+        // The display server answers while its client waits.
+        crate::sky::server::pump();
         crate::task::yield_now();
     };
     if let Err(e) = scatter(iov, cnt, &buf[..got]) {
@@ -3616,6 +3626,8 @@ fn do_poll(fds: u64, nfds: u64, limit: Option<u64>) -> u64 {
         if overran(crate::dev::lapic::ticks()) {
             unsafe { kill_blocked() }
         }
+        // The display server answers while its client waits.
+        crate::sky::server::pump();
         crate::task::yield_now();
     }
 }
@@ -3769,6 +3781,8 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
             // against, so a wait is this kernel's wait, and a busy loop here
             // starves the resident mind and the clock for as long as nobody
             // touches the keyboard.
+            // The display server answers while its client waits.
+            crate::sky::server::pump();
             crate::task::yield_now();
         }
     }
@@ -3795,6 +3809,8 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
             if overran(crate::dev::lapic::ticks()) {
                 unsafe { kill_blocked() }
             }
+            // The display server answers while its client waits.
+            crate::sky::server::pump();
             crate::task::yield_now();
         }
     }
@@ -3834,6 +3850,8 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
             if overran(crate::dev::lapic::ticks()) {
                 unsafe { kill_blocked() }
             }
+            // The display server answers while its client waits.
+            crate::sky::server::pump();
             crate::task::yield_now();
         }
     }
@@ -5140,6 +5158,10 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         _ => (ENOSYS, false),
     };
     record(Call { nr, args, ret, served, path: [0; PATH_SNIP], path_len: 0 });
+    // The display server's turn, on the guest's own task -- see `sky::server`
+    // for why it runs here and nowhere else. A request just written is
+    // answered before the client next looks.
+    crate::sky::server::pump();
     f.rax = ret;
     // **On the way out, and this is the only place it can be.** The guest's
     // whole register state is in this frame, its stack pointer is parked in
@@ -6263,8 +6285,19 @@ const AT_RANDOM: u64 = 25;
 /// `TERM=dumb` because there is no terminal here at all and `ioctl` says so,
 /// `PWD=/` because there is no `chdir`, and `PATH` naming directories that may
 /// well be empty, which is what a search path is for.
-const ENVIRON: [&str; 5] =
-    ["PATH=/bin:/usr/bin:/tmp", "HOME=/", "PWD=/", "TERM=dumb", "USER=root"];
+///
+/// And where the display server is, which is a fact now that there is one:
+/// `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` together name `sky::server::PATH`.
+/// A Wayland client with neither set gives up before it tries to connect.
+const ENVIRON: [&str; 7] = [
+    "PATH=/bin:/usr/bin:/tmp",
+    "HOME=/",
+    "PWD=/",
+    "TERM=dumb",
+    "USER=root",
+    "XDG_RUNTIME_DIR=/run/glados",
+    "WAYLAND_DISPLAY=wayland-0",
+];
 
 /// Extra variables, on top of the five above.
 ///

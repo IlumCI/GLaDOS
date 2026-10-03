@@ -2782,6 +2782,38 @@ fn act_on(step: ui::Step) {
 /// the dialog open, one place further back. The same control has to mean the
 /// same thing however it is pressed; that rule is why the pointer and the paint
 /// pass share their layout functions, and it applies to the keyboard too.
+/// Close every window whose program carries this tag. Answers how many.
+pub fn close_tagged(tag: u64) -> usize {
+    if tag == 0 {
+        return 0;
+    }
+    let n = with(|d| {
+        let before = d.windows.len();
+        d.windows.retain(|w| !matches!(&w.content, Content::App(a) if a.tag() == tag));
+        before - d.windows.len()
+    })
+    .unwrap_or(0);
+    if n > 0 {
+        super::render::invalidate();
+    }
+    n
+}
+
+/// Retitle the window whose program carries this tag.
+pub fn retitle_tagged(tag: u64, title: &str) {
+    if tag == 0 {
+        return;
+    }
+    with(|d| {
+        for w in d.windows.iter_mut() {
+            if matches!(&w.content, Content::App(a) if a.tag() == tag) {
+                w.title = String::from(title);
+            }
+        }
+    });
+    super::render::invalidate();
+}
+
 pub fn close_focused() {
     with(|d| {
         if let Some(f) = d.focus() {

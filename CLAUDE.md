@@ -5727,6 +5727,35 @@ no serial line, so `log send <ipv4> [port]` sends the transcript over the wired
 port to a listener (`nc -l 4444 > trip.log`) -- which needs a second machine,
 since the GF63 is also the development host.
 
+### Skywalker: the Wayland server (`src/sky/`)
+
+A Linux program that draws asks a display server, so this is one. It is the
+kernel, bound at `/run/glados/wayland-0` in `linux::unix`'s table, and the
+guest environment carries `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` to find it.
+**It runs inside the client's own syscalls** -- after every one and inside
+every wait (`sky::server::pump`) -- because a guest's descriptors are
+`Rc<RefCell<..>>` on the guest's task and a server task would be a second task
+in them. Buffers are memfds, whose pages are identity-mapped heap, so a commit
+copies the client's pixels straight into a desktop window (`surface::Frame`)
+and releases the buffer.
+
+Served: the bootstrap, `wl_compositor`, `wl_surface`, `wl_region`, `wl_shm`
+(pools, buffers, ARGB8888/XRGB8888), frame callbacks paced at 60 Hz,
+`xdg_wm_base`/`xdg_surface`/`xdg_toplevel`; popups are dismissed at once.
+Closing the window from its title bar sends `xdg_toplevel.close`. Not yet:
+`wl_seat` (no input reaches a client), `wl_output`, and a client running
+beside the shell -- a guest still holds the shell until it exits.
+
+```bash
+python3 tools/sky.py build && python3 tools/sky.py stage
+mapfile -t C < <(python3 tools/sky.py commands)
+python3 tools/drive.py --no-payload "${C[@]}" "linux run /tmp/wl/skytest 90"
+```
+
+`skytest` is a real libwayland-client program run under the host's own glibc;
+it prints each step. To photograph its window, give it thousands of frames,
+`linux deadline 120`, and let `drive.py --timeout` take the screenshot.
+
 ### Crypto (`src/crypto/`)
 
 Written from scratch, and this is the one place where that is a liability

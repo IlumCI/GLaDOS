@@ -66,15 +66,19 @@ pub struct Global {
 
 /// One connection, and everything alive inside it.
 pub struct Client {
-    objects: Table,
-    globals: Vec<Global>,
+    pub(super) objects: Table,
+    pub(super) globals: Vec<Global>,
     /// Events waiting to be written to the socket.
-    out: Vec<u8>,
+    pub(super) out: Vec<u8>,
     next_name: u32,
-    serial: u32,
+    pub(super) serial: u32,
     /// Whether an error has already been reported, after which there is
     /// nothing more to say on this connection.
-    gone: bool,
+    pub(super) gone: bool,
+    /// Descriptors that arrived with the bytes, in order, for `fd` arguments.
+    pub fds: alloc::collections::VecDeque<crate::linux::fs::Fd>,
+    /// Pools, buffers, surfaces and windows. See `surface`.
+    pub(super) scene: super::surface::Scene,
 }
 
 impl Default for Client {
@@ -92,6 +96,8 @@ impl Client {
             next_name: 1,
             serial: 0,
             gone: false,
+            fds: alloc::collections::VecDeque::new(),
+            scene: super::surface::Scene::default(),
         }
     }
 
@@ -124,7 +130,7 @@ impl Client {
     /// the object space is wrong from this moment on, and a compositor
     /// carrying on from there is one arguing with a client about whether an
     /// object exists.
-    fn post(&mut self, w: Writer) {
+    pub(super) fn post(&mut self, w: Writer) {
         match w.finish() {
             Ok(bytes) => self.out.extend_from_slice(&bytes),
             Err(_) => self.gone = true,
@@ -176,6 +182,7 @@ impl Client {
         match entry.iface {
             WL_DISPLAY => self.display(msg),
             WL_REGISTRY => self.registry(msg),
+            iface if super::surface::handles(iface) => self.surface_request(entry.iface, entry.version, msg),
             // An object of an interface nothing answers for yet. Refusing is
             // the honest response and it is also the useful one: the trace
             // says which interface to write next, the way `-ENOSYS` does for
@@ -194,6 +201,14 @@ impl Client {
             self.fail(msg.object, e);
         }
         !self.gone
+    }
+
+    /// A stream that would not frame: reported against the display, since
+    /// no object can be named, and the connection is over.
+    pub fn malformed(&mut self, e: Error) {
+        if !self.gone {
+            self.fail(DISPLAY, e);
+        }
     }
 
     /// `wl_display.error`, and then there is nothing more to say.
@@ -274,6 +289,7 @@ impl Client {
                     return Err(Error::BadVersion);
                 }
                 self.objects.create(id, g.iface, version)?;
+                self.bound(id, g.iface);
                 Ok(())
             }
             _ => Err(Error::NoMethod),
@@ -288,7 +304,7 @@ impl Client {
 /// interface is, and every argument read after that point is read at the wrong
 /// offset. Stopping here makes that a refusal instead of a rendering bug an
 /// hour later.
-fn done(r: &wire::Reader<'_>) -> Result<(), Error> {
+pub(super) fn done(r: &wire::Reader<'_>) -> Result<(), Error> {
     if r.at_end() {
         Ok(())
     } else {
@@ -322,6 +338,11 @@ pub fn reason(e: Error) -> &'static str {
         Error::NoGlobal => "a bind naming a global that was never published",
         Error::WrongInterface => "a bind naming an interface the global does not speak",
         Error::BadVersion => "a bind above the version advertised",
+        Error::BadBuffer => "a buffer that does not fit inside its pool, or a stride too small for its width",
+        Error::BadFormat => "a pixel format this server did not offer",
+        Error::BadFd => "a descriptor that is not shared memory",
+        Error::Role => "a surface given a second role, or a shell object for a surface already holding one",
+        Error::NotConfigured => "a buffer attached to a window before its first configure was acknowledged",
     }
 }
 
@@ -330,7 +351,7 @@ pub fn reason(e: Error) -> &'static str {
 /// Here rather than in the claims because the checks below are about the
 /// server and a request builder written inline in each of them would be six
 /// copies of the same encoding, agreeing by hand.
-fn req(object: u32, opcode: u16, build: impl FnOnce(&mut Writer)) -> Vec<u8> {
+pub(super) fn req(object: u32, opcode: u16, build: impl FnOnce(&mut Writer)) -> Vec<u8> {
     let mut w = Writer::new(object, opcode);
     build(&mut w);
     w.finish().unwrap_or_default()
@@ -503,8 +524,14 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         try_send(&mut c, &bind(comp, "wl_compositor", 1, 40)) == Err(Error::IdInUse),
     ));
     out.push((
-        "and an object bound from a global answers nothing yet, rather than accepting requests silently",
-        try_send(&mut c, &req(40, 0, |_| {})) == Err(Error::NoMethod),
+        "and an object of an interface nothing answers for yet is refused, rather than accepting requests silently",
+        {
+            // wl_seat: published, bound, and not yet served. wl_compositor was
+            // this claim's subject until it was served.
+            let seat = c.publish("wl_seat", 7);
+            let _ = try_send(&mut c, &bind(seat, "wl_seat", 1, 47));
+            try_send(&mut c, &req(47, 0, |w| { w.new_id(48); })) == Err(Error::NoMethod)
+        },
     ));
 
     // ---- sync ----

@@ -30,20 +30,25 @@
 //!
 //! ### What is here so far
 //!
-//! The wire format, the object space, and the two interfaces a connection
-//! bootstraps through: `wl_display` and `wl_registry`. That is everything a
-//! client does before it has asked for anything, and it is worth having on its
-//! own because it can be checked completely with no display, no client and no
-//! socket -- the same bargain `unix.rs` took, transport first and protocol
-//! after.
+//! The wire format, the object space, and the bootstrap (`wl_display`,
+//! `wl_registry`); then `wl_compositor`, `wl_surface`, `wl_region`, `wl_shm`
+//! with its pools and buffers, frame callbacks, and `xdg_wm_base` with
+//! `xdg_surface` and `xdg_toplevel` (`surface`). `server` listens at
+//! `/run/glados/wayland-0` and takes its turns inside the client's own
+//! syscalls. A committed buffer is copied into a desktop window.
 //!
-//! Nothing draws yet. `wl_compositor`, `wl_surface` and `wl_shm` come next,
-//! which is where `gfx::compose` gets reached and there is a picture, and
-//! after those `xdg_shell`, which is what gives a window a title and a place
-//! to sit.
+//! **A real client draws.** `tools/sky.py` builds an ordinary
+//! libwayland-client program and stages it with the host's own glibc; it
+//! connects, makes a window, and animates ninety frames on the desktop.
+//!
+//! Next: `wl_seat`, so the window takes the pointer and the keyboard (the
+//! keyboard wants an xkb keymap passed as a descriptor), `wl_output`, and a
+//! client that keeps running beside the shell rather than holding it.
 
 pub mod client;
 pub mod object;
+pub mod server;
+pub mod surface;
 pub mod wire;
 
 /// What `diag sky` asks of everything here.
@@ -51,5 +56,7 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     let mut out = wire::checks();
     out.extend(object::checks());
     out.extend(client::checks());
+    out.extend(surface::checks());
+    out.extend(server::checks());
     out
 }

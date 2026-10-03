@@ -98,6 +98,16 @@ pub enum Error {
     WrongInterface,
     /// A bind above the version advertised, or at nothing.
     BadVersion,
+    /// A buffer outside its pool, or a stride that cannot hold its width.
+    BadBuffer,
+    /// A pixel format nobody offered.
+    BadFormat,
+    /// A pool made from a descriptor that is not shared memory.
+    BadFd,
+    /// A surface asked to take a role it cannot.
+    Role,
+    /// Content attached before the window's first configure was answered.
+    NotConfigured,
 }
 
 /// `wl_display.error` codes, from the core protocol.

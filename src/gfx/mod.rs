@@ -72,6 +72,14 @@ pub trait DeskApp {
     fn min_size(&self) -> (u32, u32) {
         (240, 120)
     }
+
+    /// A number naming this window to whatever opened it, so it can be found
+    /// again to retitle or close. Zero for the built-in programs, which are
+    /// opened and closed by the desktop alone; a Wayland client's windows are
+    /// opened and closed by the client.
+    fn tag(&self) -> u64 {
+        0
+    }
 }
 
 use crate::sync::Racy;
