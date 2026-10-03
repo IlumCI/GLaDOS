@@ -3305,7 +3305,32 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     let bytes = crate::log::contents();
                     console::with(|c| c.write_bytes(&bytes));
                 }
-                _ => kprintln!("  usage: log [status|all|save [path]]"),
+                // Off the machine, over the network. The GF63 has no serial line
+                // and boots from a USB disk no driver here can write, so a
+                // bare-metal trip's transcript otherwise leaves only as a
+                // photograph of the screen. Its wired port is driven: on the
+                // host, `nc -l 4444 > trip.log`, then `log send <host> 4444`.
+                "send" => {
+                    let host = words.next().and_then(crate::net::parse_ip);
+                    let port = words.next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(4444);
+                    let Some(host) = host else {
+                        kprintln!("  usage: log send <ipv4> [port]  -- on the host: nc -l <port> > trip.log");
+                        return;
+                    };
+                    let bytes = crate::log::contents();
+                    match crate::net::tcp::open(host, port, 5000) {
+                        Err(e) => kprintln!("  could not connect: {:?}", e),
+                        Ok(h) => {
+                            let sent = bytes.chunks(1024).try_for_each(|c| crate::net::tcp::send_at(h, c, 5000));
+                            crate::net::tcp::close_at(h, 2000);
+                            match sent {
+                                Ok(()) => kprintln!("  {} bytes sent", bytes.len()),
+                                Err(e) => kprintln!("  the send stopped partway: {:?}", e),
+                            }
+                        }
+                    }
+                }
+                _ => kprintln!("  usage: log [status|all|save [path]|send <ipv4> [port]]"),
             }
         }
         // A council core the machine wrote, and the judges that let one in.
