@@ -149,6 +149,7 @@ pub mod ws;
 pub mod trust;
 pub mod udp;
 pub mod wifi;
+pub mod wireless;
 pub mod wpa2;
 pub mod x509;
 
@@ -544,6 +545,14 @@ pub fn init(ecam: u64, roots: Option<&[u8]>) {
     // actually got claimed rather than what might have been.
     report_hardware(false);
 
+    // A part some driver claims is looked at by that driver, which can say far
+    // more than the registry row: what the silicon says it is, which firmware
+    // it wants, and whether that is on the boot volume.
+    let seen = wireless::detect(ecam);
+    if !seen.is_empty() {
+        wireless::report(&seen);
+        return;
+    }
     match wifi::probe(ecam) {
         wifi::Probe::None => {}
         wifi::Probe::Unsupported { vendor, device, what } => {

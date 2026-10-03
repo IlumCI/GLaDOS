@@ -108,6 +108,11 @@ pub enum Family {
     Ax210,
     /// Bz and later. Differs again at the reset and the clock handshake, so it is
     /// named in order to be refused rather than driven by this table.
+    ///
+    /// **Ma is not one, and this said it was.** Both references file Ma under the
+    /// AX210 family -- OpenBSD's `iwx_attach` sets `IWX_DEVICE_FAMILY_AX210` for
+    /// `7e40`, and it boots out of the same gen3 context info -- so the refusal
+    /// was a guess from the type number being above Snow Owl's.
     Bz,
 }
 
@@ -218,8 +223,8 @@ impl Mac {
     pub fn family(&self) -> Option<Family> {
         Some(match self {
             Mac::Qu | Mac::Quz | Mac::Qnj => Family::F22000,
-            Mac::So | Mac::Snj | Mac::Sof => Family::Ax210,
-            Mac::Bz | Mac::Gl | Mac::BzW | Mac::Ma => Family::Bz,
+            Mac::So | Mac::Snj | Mac::Sof | Mac::Ma => Family::Ax210,
+            Mac::Bz | Mac::Gl | Mac::BzW => Family::Bz,
             Mac::Unknown(_) => return None,
         })
     }
@@ -329,6 +334,76 @@ pub fn product_name(mac: Mac, rf: Rf) -> Option<&'static str> {
         (Mac::Qu, Rf::Hr1) | (Mac::Quz, Rf::Hr1) => "AX101",
         (Mac::Qu, Rf::Jf2) | (Mac::Quz, Rf::Jf2) => "9560",
         _ => return None,
+    })
+}
+
+/// The highest firmware API this driver understands.
+///
+/// An image's API is the version of its command layouts, and a newer one moves
+/// fields this driver writes at fixed offsets -- so the newest file on a disk is
+/// not the right one, the newest at or below this is. `tools/wifi_fw.py` stages
+/// by the same ceiling and its selftest reads this line out of the source, so
+/// the two cannot drift apart silently. 89 because that is the image every
+/// layout here was measured against.
+pub const MAX_API: u32 = 89;
+
+/// The oldest API worth looking for. Below this the container predates the
+/// TLVs `fw::parse` relies on, so a file that old is not a candidate.
+pub const MIN_API: u32 = 50;
+
+/// The firmware *base* a part wants: everything in `iwlwifi-<base>-<api>.ucode`
+/// but the API.
+///
+/// **Mostly a function of the registers, and the PCI id only where they are
+/// ambiguous.** The controller type and step give the first half and the radio
+/// type and step the second, which is how `so-a0-hr-b0` falls out of the GF63's
+/// `0x370` and `0x10a100`. Two cases need the id and both are upstream's:
+/// the AX200 (`2723`) carries its radio in the controller name, `cc-a0`; and
+/// type `0x42` is both SnJ and Typhoon Peak, which `iwx_attach` separates by
+/// product -- `2725` is the discrete AX210 and wants `ty-a0-gf-a0`.
+///
+/// `None` rather than a guess for anything else. A wrong base is the wrong
+/// firmware, and the symptom of the wrong firmware is a part that never says it
+/// is alive -- which is the most expensive thing to debug on hardware with no
+/// emulator.
+///
+/// Not covered, deliberately: the Killer 1690 parts, which want a `gf4` image
+/// and are told apart only by PCI subsystem id. They get the `gf` base, which is
+/// the documented fallback upstream takes when the subsystem is not listed.
+pub fn firmware_base(device: u16, rev: Rev, rf: RfId) -> Option<String> {
+    let step = |n: u8| -> Option<char> {
+        match n {
+            0 => Some('a'),
+            1 => Some('b'),
+            2 => Some('c'),
+            _ => None,
+        }
+    };
+    if device == 0x2723 {
+        return Some(String::from("cc-a0"));
+    }
+    let radio = match rf.rf {
+        Rf::Hr1 | Rf::Hr2 => alloc::format!("hr-{}0", step(rf.step)?),
+        Rf::Gf => alloc::format!("gf-{}0", step(rf.step)?),
+        Rf::Jf1 | Rf::Jf2 => alloc::format!("jf-{}0", step(rf.step)?),
+        _ => return None,
+    };
+    let mac = match rev.mac {
+        Mac::Snj if device == 0x2725 => return Some(alloc::format!("ty-a0-{}", radio)),
+        Mac::So | Mac::Sof | Mac::Snj => String::from("so-a0"),
+        Mac::Ma => String::from("ma-b0"),
+        Mac::Qu => alloc::format!("Qu-{}0", step(rev.step)?),
+        Mac::Quz => String::from("QuZ-a0"),
+        _ => return None,
+    };
+    Some(alloc::format!("{}-{}", mac, radio))
+}
+
+/// The image for a base, newest API first, wherever `dev::firmware` finds it.
+pub fn firmware_for(base: &str) -> Option<(String, crate::dev::firmware::Image)> {
+    (MIN_API..=MAX_API).rev().find_map(|api| {
+        let name = alloc::format!("iwlwifi-{}-{}.ucode", base, api);
+        crate::dev::firmware::get(&name).map(|img| (name, img))
     })
 }
 
@@ -596,6 +671,41 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     claim("Qu is family 22000", rev_of(0x33 << 4).mac.family() == Some(Family::F22000));
     claim("QuZ too", rev_of(0x35 << 4).mac.family() == Some(Family::F22000));
     claim("Bz is its own family, named so it can be refused", rev_of(0x46 << 4).mac.family() == Some(Family::Bz));
+    claim("Ma is AX210 family, as both references file it", rev_of(0x44 << 4).mac.family() == Some(Family::Ax210));
+
+    // --- which image, from the registers -----------------------------------
+    //
+    // The GF63's own words, read off the machine: `51f0`, `rev=0x370`,
+    // `rfid=0x10a100`. The image it loaded under Linux was so-a0-hr-b0-89.
+    let gf63 = firmware_base(0x51f0, rev_of(0x370), rf_of(0x0010_a100));
+    claim("the GF63's registers name the image it is known to load", gf63.as_deref() == Some("so-a0-hr-b0"));
+    claim(
+        "a Gale Force radio on the same controller names a different image",
+        firmware_base(0x51f0, rev_of(0x370), rf_of(0x0010_d000)).as_deref() == Some("so-a0-gf-a0"),
+    );
+    claim(
+        "type 0x42 is Typhoon Peak on a discrete 2725 and Snow Owl elsewhere",
+        firmware_base(0x2725, rev_of(0x420), rf_of(0x0010_d000)).as_deref() == Some("ty-a0-gf-a0")
+            && firmware_base(0x2726, rev_of(0x420), rf_of(0x0010_d000)).as_deref() == Some("so-a0-gf-a0"),
+    );
+    claim(
+        "a Qu takes its step into the name, which is what tells b0 from c0",
+        // The register, not upstream's constants: `IWX_CSR_HW_REV_TYPE_QU_B0` is
+        // 0x334 *after* `iwx_attach` re-packs the step two bits up, so the word
+        // the part actually reads for B0 is 0x331 and for C0 0x332.
+        firmware_base(0xa0f0, rev_of(0x331), rf_of(0x0010_a100)).as_deref() == Some("Qu-b0-hr-b0")
+            && firmware_base(0xa0f0, rev_of(0x332), rf_of(0x0010_a100)).as_deref() == Some("Qu-c0-hr-b0"),
+    );
+    claim(
+        "the AX200 is named by its id, its radio being part of the controller name",
+        firmware_base(0x2723, rev_of(0x340), rf_of(0)).as_deref() == Some("cc-a0"),
+    );
+    claim(
+        "and a radio nobody has named gets no image rather than a neighbour's",
+        firmware_base(0x51f0, rev_of(0x370), rf_of(0x0011_0000)).is_none()
+            && firmware_base(0x51f0, rev_of(0x460), rf_of(0x0010_a100)).is_none(),
+    );
+    claim("the API window is not empty", MIN_API <= MAX_API);
     claim(
         "and a type nobody has named has no family rather than a default",
         rev_of(0x99 << 4).mac.family().is_none(),

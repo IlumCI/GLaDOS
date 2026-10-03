@@ -5292,17 +5292,44 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // initiative. Somebody should have to ask for that by name.
                 b if b.starts_with("boot") => {
                     let path = b.trim_start_matches("boot").trim();
-                    if path.is_empty() {
-                        kprintln!("  usage: iwx boot <path to a .ucode in the namespace>");
-                        kprintln!("  powers the part up, loads its firmware and waits for it to");
-                        kprintln!("  report alive. This grants the radio bus-master DMA.");
-                        return;
-                    }
-                    let bytes = match crate::sysbox::read_blob(path) {
-                        Some(b) => b,
-                        None => {
-                            kprintln!("  no such blob: {}", path);
+                    // With no path the part names its own image: its registers
+                    // give the base, and `dev::firmware` has whatever the boot
+                    // volume or `/fw` provided. A path still wins, for trying a
+                    // file under a name the rule would not pick.
+                    let bytes = if path.is_empty() {
+                        let chosen = r.hw_rev(ecam).ok().and_then(|(rev, rf)| {
+                            crate::dev::iwx::firmware_base(r.dev.device, rev, crate::dev::iwx::rf_of(rf))
+                        });
+                        let Some(base) = chosen else {
+                            kprintln!("  usage: iwx boot [path to a .ucode in the namespace]");
+                            kprintln!("  this part did not name an image: read it with `iwx probe`.");
+                            kprintln!("  Booting grants the radio bus-master DMA.");
                             return;
+                        };
+                        match crate::dev::iwx::firmware_for(&base) {
+                            Some((name, img)) => {
+                                kprintln!("  {} from the {}", name, img.source());
+                                img.bytes().to_vec()
+                            }
+                            None => {
+                                kprintln!(
+                                    "  this part wants iwlwifi-{}-<api>.ucode, API {} to {}, and none is in {} or {}/",
+                                    base,
+                                    crate::dev::iwx::MIN_API,
+                                    crate::dev::iwx::MAX_API,
+                                    crate::dev::firmware::DIR,
+                                    crate::dev::firmware::NS_DIR
+                                );
+                                return;
+                            }
+                        }
+                    } else {
+                        match crate::sysbox::read_blob(path) {
+                            Some(b) => b,
+                            None => {
+                                kprintln!("  no such blob: {}", path);
+                                return;
+                            }
                         }
                     };
                     let image = match crate::dev::iwx::fw::parse(&bytes) {
@@ -5390,7 +5417,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                 }
                 other => kprintln!(
-                    "  no such step '{}' -- try `iwx`, `iwx probe`, `iwx up`, `iwx ctxt <fw>` or `iwx boot <fw>`",
+                    "  no such step '{}' -- try `iwx`, `iwx probe`, `iwx up`, `iwx ctxt <fw>` or `iwx boot [fw]`",
                     other
                 ),
             }

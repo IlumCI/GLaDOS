@@ -182,6 +182,26 @@ fn hybrid() -> Status {
     }
 }
 
+/// Whether the image the part names is on the boot volume, as the boot's
+/// detection pass found it. Answered from the boot rather than re-read: the
+/// question is what the next `iwx boot` will load, and that is what was found.
+fn firmware_present() -> Status {
+    let seen = crate::net::wireless::last();
+    if seen.is_empty() {
+        return match crate::dev::iwx::seen() {
+            Some(0) if crate::dev::power::virtualised() => {
+                Status::NotHere("no hypervisor models an Intel wireless part")
+            }
+            _ => Status::Todo,
+        };
+    }
+    match seen.iter().find_map(|s| s.firmware.as_ref().ok()) {
+        Some((name, true)) => ok(name.clone()),
+        Some((name, false)) => Status::Failed(alloc::format!("{} is not on the boot volume", name)),
+        None => Status::Failed(String::from("the part did not name an image")),
+    }
+}
+
 fn radio_present() -> Status {
     match crate::dev::iwx::seen() {
         None => Status::Todo,
@@ -332,8 +352,9 @@ pub const ITEMS: &[Item] = &[
     Item { what: "the radio is on the bus", how: "iwx", probe: radio_present },
     Item { what: "its revision reads", how: "iwx probe", probe: radio_answers },
     Item { what: "it resets and its clock starts", how: "iwx up", probe: radio_up },
+    Item { what: "the image it names is on the boot volume", how: "fw", probe: firmware_present },
     Item { what: "its firmware builds a boot descriptor", how: "iwx ctxt <fw>", probe: firmware_ready },
-    Item { what: "the firmware boots and says it is alive", how: "iwx boot <fw>", probe: radio_alive },
+    Item { what: "the firmware boots and says it is alive", how: "iwx boot", probe: radio_alive },
     Item { what: "it answers with its address and bands", how: "(same command)", probe: radio_nvm },
     Item { what: "the payout address checks out", how: "(automatic)", probe: payout_checks },
     Item { what: "yescrypt hashes", how: "mine algo yescrypt / mine bench 8000", probe: hashes },

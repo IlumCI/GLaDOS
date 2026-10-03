@@ -333,6 +333,14 @@ pub fn report() {
     kprintln!("[wlan0]");
     console::set_color(LTGRAY);
 
+    // What the boot's driver pass found, if a driver claimed anything. It has
+    // read the part's own registers, which the registry row cannot have.
+    let seen = crate::net::wireless::last();
+    if !seen.is_empty() {
+        crate::net::wireless::report(&seen);
+        return;
+    }
+
     match super::ecam().map(probe) {
         None => kprintln!("  no ECAM window, so the bus cannot be enumerated"),
         Some(Probe::None) => {
