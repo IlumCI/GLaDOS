@@ -5337,6 +5337,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                 }
                 "down" => match crate::dev::iwx::release() {
+                    // wlan0 goes with the part, or it is a handle to nothing.
+                    Some(st) if crate::net::wlan().map(|w| w.radio_name()) == Some("iwx") => {
+                        let w = &mut crate::net::ifaces()[crate::net::WLAN0];
+                        w.nic = None;
+                        w.up = false;
+                        kprintln!("  {}; wlan0 is empty again", st.say());
+                    }
                     Some(st) => kprintln!("  {}", st.say()),
                     None => kprintln!("  nothing is held: `iwx boot` brings a part up"),
                 },
@@ -5424,8 +5431,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             // half is reported separately.
                             let mut b = b;
                             let mut regulatory = None;
+                            let mut facts = None;
                             match r.nvm(&mut b, 2000) {
                                 Ok(n) => {
+                                    facts = Some(crate::dev::iwx::Facts::of(&image, &n));
                                     crate::dev::iwx::note_nvm(Ok(n));
                                     console::set_color(LTGREEN);
                                     kprintln!(
@@ -5472,8 +5481,22 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             match crate::dev::iwx::Held::new(*r, b, ecam, crate::dev::iwx::Family::Ax210) {
                                 Some(mut h) => {
                                     h.regulatory = regulatory;
+                                    let scannable = facts.is_some();
+                                    if let Some(f) = facts {
+                                        h.facts = f;
+                                    }
                                     crate::dev::iwx::hold(h);
                                     kprintln!("  held, running. `iwx down` stops it.");
+                                    // wlan0, if nothing else is: a part that can
+                                    // scan is worth a `wifi scan`, and the stack
+                                    // above it has been waiting for one.
+                                    if scannable && crate::net::ifaces()[crate::net::WLAN0].nic.is_none() {
+                                        if crate::net::attach_radio(crate::dev::iwx::wlan::Air) {
+                                            kprintln!("  attached as wlan0: `wifi scan` asks it what is in the air");
+                                        }
+                                    } else if scannable {
+                                        kprintln!("  wlan0 already has a driver; `wifi rehearse off` frees it");
+                                    }
                                 }
                                 None => kprintln!("  no aperture to stop it through; dropped"),
                             }

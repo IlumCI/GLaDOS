@@ -40,6 +40,8 @@ pub mod nvm;
 pub mod power;
 pub mod reg;
 pub mod rx;
+pub mod scan;
+pub mod wlan;
 pub mod fw;
 
 use crate::dev::pci::{self, Device};
@@ -976,6 +978,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.extend(power::checks());
     out.extend(rx::checks());
     out.extend(reg::checks());
+    out.extend(scan::checks());
     out
 }
 
@@ -1165,13 +1168,51 @@ pub struct Held {
     /// The channel map the firmware put in force, which is what a scan plan is
     /// drawn from. `None` when the firmware does not own regulatory.
     pub regulatory: Option<reg::Regulatory>,
+    /// What a scan request needs from the image and the NVM, kept so a scan
+    /// can be built without either in hand.
+    pub facts: Facts,
+    /// A scan is running, and how the last one ended.
+    pub scanning: bool,
+    pub scan_ended: Option<scan::Done>,
+}
+
+/// What `Held` keeps from the firmware image and the NVM.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Facts {
+    pub mac: [u8; 6],
+    pub band_5: bool,
+    pub scan_ver: Option<u8>,
+    pub ds_param: bool,
+}
+
+impl Facts {
+    pub fn of(image: &fw::Image, n: &nvm::Nvm) -> Facts {
+        Facts {
+            mac: n.mac,
+            band_5: n.band_52,
+            scan_ver: image.cmd_ver(config::LONG_GROUP, scan::SCAN_REQ_UMAC),
+            ds_param: image.has_capa(scan::CAPA_DS_PARAM_SET_IE),
+        }
+    }
 }
 
 impl Held {
     pub fn new(radio: Radio, booted: Booted, ecam: u64, family: Family) -> Option<Held> {
         let bar0 = radio.bar0.filter(|&b| b != 0)?;
         let desc = if family == Family::F22000 { rx::DESC_V1 } else { rx::DESC_V3 };
-        Some(Held { radio, booted, bar0, ecam, stopped: None, inbox: rx::Inbox::new(), desc, regulatory: None })
+        Some(Held {
+            radio,
+            booted,
+            bar0,
+            ecam,
+            stopped: None,
+            inbox: rx::Inbox::new(),
+            desc,
+            regulatory: None,
+            facts: Facts::default(),
+            scanning: false,
+            scan_ended: None,
+        })
     }
 
     /// Drain the receive ring into the inbox. Cheap, and safe to call as often
@@ -1198,7 +1239,60 @@ impl Held {
             // Safety: this part's aperture, and it has not been stopped.
             unsafe { b.rx.ack(self.bar0, &b.boot.rings) };
         }
+        // A scan ends by notification, in whichever group and by whichever of
+        // the two codes it arrives as. Taken out of the inbox here so the end
+        // of a scan cannot be lost behind thirty-two other notifications.
+        if self.scanning {
+            let mut ended = None;
+            self.inbox.notifs.retain(|m| {
+                if ended.is_none() {
+                    if let Some(d) = scan::done(m.group, m.code, &m.payload) {
+                        ended = Some(d);
+                        return false;
+                    }
+                }
+                true
+            });
+            if ended.is_some() {
+                self.scanning = false;
+                self.scan_ended = ended;
+            }
+        }
         n
+    }
+
+    /// Ask the part to scan. Frames it hears arrive in the inbox as they come;
+    /// `scanning` clears when it says it has finished.
+    ///
+    /// The plan is narrowed to what regulatory allows when the firmware gave a
+    /// map: asking a part to visit a channel its own regulatory refuses is a
+    /// command error at best, and on a DFS channel a transmission at worst.
+    pub fn scan(&mut self, ssid: &[u8], plan: &[u8]) -> Result<(), &'static str> {
+        if self.stopped.is_some() {
+            return Err("the part is stopped");
+        }
+        let allowed: Vec<u8> = match &self.regulatory {
+            Some(r) => {
+                let ok = r.numbers();
+                plan.iter().copied().filter(|c| ok.contains(c)).collect()
+            }
+            None => plan.to_vec(),
+        };
+        let req = scan::Request {
+            mac: self.facts.mac,
+            channels: &allowed,
+            ssid,
+            band_5: self.facts.band_5,
+            ds_param: self.facts.ds_param,
+        };
+        let body = scan::request(self.facts.scan_ver, &req).map_err(|e| e.why())?;
+        let b = &mut self.booted;
+        // Safety: this part's aperture, alive, and not stopped.
+        unsafe { b.cmds.send(self.bar0, &mut b.boot.rings, config::LONG_GROUP, scan::SCAN_REQ_UMAC, 0, &body) }
+            .map_err(|_| "the scan request could not be queued")?;
+        self.scanning = true;
+        self.scan_ended = None;
+        Ok(())
     }
 
     pub fn bar0(&self) -> u64 {

@@ -72,13 +72,23 @@ pub struct Queue {
     pub cur: usize,
     /// What the doorbell will be told. A different modulus from `cur`.
     pub cur_hw: u32,
+    /// A command too large for its entry, in a buffer of its own, by slot.
+    ///
+    /// **Freed when the slot comes round again, not when the command is
+    /// answered.** Upstream frees it on completion, which needs a completion
+    /// path to read; the slot's next use is later than any completion and needs
+    /// nothing, and a ring of 256 means at most 256 of these are alive at once,
+    /// which in practice is one -- the scan request.
+    big: Vec<Option<Dma>>,
 }
+
+/// The largest payload a command may carry, upstream's figure: a page, less the
+/// header.
+pub const MAX_PAYLOAD: usize = 4096 - HDR_WIDE;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CmdError {
-    /// The payload does not fit a pre-allocated entry. Upstream allocates a
-    /// larger buffer for this case; nothing here needs one yet, so it is refused
-    /// by name rather than silently truncated.
+    /// The payload is larger than any command may be, entry or not.
     TooLong(usize),
     /// The command ring is not there.
     NoQueue,
@@ -95,9 +105,8 @@ impl CmdError {
     pub fn why(&self) -> String {
         match self {
             CmdError::TooLong(n) => alloc::format!(
-                "a {}-byte payload does not fit a command entry, which holds {}",
-                n,
-                DEF_PAYLOAD - HDR_WIDE + 4
+                "a {}-byte payload is larger than the {} a command may carry",
+                n, MAX_PAYLOAD
             ),
             CmdError::NoQueue => String::from("the command ring was not allocated"),
             CmdError::NoReply => String::from("the part did not answer"),
@@ -116,7 +125,9 @@ impl Queue {
         // `FIRST_TB_SIZE_ALIGN`. Note it aligns the *region* and strides entries
         // by 324, so individual entries are not aligned -- copied as it is rather
         // than tidied, since the requirement is the part's and not this driver's.
-        Some(Queue { buf: Dma::new(ENTRY * TX_RING as usize, 64)?, cur: 0, cur_hw: 0 })
+        let mut big = Vec::new();
+        big.resize_with(TX_RING as usize, || None);
+        Some(Queue { buf: Dma::new(ENTRY * TX_RING as usize, 64)?, cur: 0, cur_hw: 0, big })
     }
 
     /// The bus address of one command entry.
@@ -147,11 +158,22 @@ impl Queue {
         version: u8,
         payload: &[u8],
     ) -> Result<u8, CmdError> {
-        if HDR_WIDE + payload.len() > ENTRY {
+        if payload.len() > MAX_PAYLOAD {
             return Err(CmdError::TooLong(payload.len()));
         }
         let idx = self.cur;
-        let pa = self.entry_pa(idx).ok_or(CmdError::NoQueue)?;
+        // The slot's previous large buffer, if any, is done with by now.
+        self.big[idx] = None;
+        let large = HDR_WIDE + payload.len() > ENTRY;
+        if large {
+            // Aligned as the entries' region is, and one contiguous buffer, so
+            // the second transmit buffer is simply the tail of it.
+            self.big[idx] = Some(Dma::new(HDR_WIDE + payload.len(), 64).ok_or(CmdError::NoQueue)?);
+        }
+        let pa = match &self.big[idx] {
+            Some(d) => d.pa(),
+            None => self.entry_pa(idx).ok_or(CmdError::NoQueue)?,
+        };
 
         // **A group of zero is rewritten to one**, which is upstream's own
         // workaround and its comment calls it "Intel inside (tm)": firmware past
@@ -164,8 +186,10 @@ impl Queue {
 
         {
             let at = idx * ENTRY;
-            let b = self.buf.as_mut_slice();
-            let e = &mut b[at..at + ENTRY];
+            let e: &mut [u8] = match self.big[idx].as_mut() {
+                Some(d) => d.as_mut_slice(),
+                None => &mut self.buf.as_mut_slice()[at..at + ENTRY],
+            };
             // Zeroed, because firmware reads the whole entry and the slot may
             // hold a previous command.
             for x in e.iter_mut() {
@@ -469,9 +493,28 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let before = q.buf.as_slice()[2 * ENTRY + HDR_WIDE + 30];
         ok(before == 0, "and an entry is zeroed before it is written");
 
+        // A payload past the entry goes in a buffer of its own, under the same
+        // two-buffer descriptor: the first twenty bytes, then the rest, both
+        // addressing that buffer and not the entry.
+        let big: Vec<u8> = (0..1940u32).map(|i| i as u8).collect();
+        let slot = q.cur;
+        let framed = q.frame(&mut rings, LONG_GROUP, 0x0d, 0, &big);
+        let t = &rings.cmd.as_slice()[slot * TFD_SIZE..slot * TFD_SIZE + 22];
+        let first_pa = u64::from_le_bytes(t[4..12].try_into().unwrap());
+        let second_len = u16::from_le_bytes([t[12], t[13]]) as usize;
+        let second_pa = u64::from_le_bytes(t[14..22].try_into().unwrap());
+        let own = q.big[slot].as_ref().map(|d| (d.pa(), d.as_slice()[HDR_WIDE..].to_vec()));
         ok(
-            q.frame(&mut rings, 1, 1, 0, &[0u8; 400]) == Err(CmdError::TooLong(400)),
-            "a payload too large for an entry is refused by name",
+            framed.is_ok()
+                && own.as_ref().map(|(pa, body)| *pa == first_pa && body[..] == big[..]) == Some(true)
+                && second_pa == first_pa + FIRST_TB as u64
+                && second_len == HDR_WIDE + big.len() - FIRST_TB
+                && first_pa != q.entry_pa(slot).unwrap_or(0),
+            "a payload past the entry is framed from a buffer of its own, split across both descriptors",
+        );
+        ok(
+            q.frame(&mut rings, 1, 1, 0, &[0u8; MAX_PAYLOAD + 1]) == Err(CmdError::TooLong(MAX_PAYLOAD + 1)),
+            "and one past a page is refused by name",
         );
     } else {
         ok(false, "the command queue allocates");
