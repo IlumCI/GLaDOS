@@ -338,7 +338,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p payload-dir/FW
-          gh release download payload-wifi-fw-v1 --dir payload-dir/FW --clobber
+          # By name, from the manifest: an extra asset on the release -- a
+          # README, a note -- would otherwise be downloaded, refused by verify
+          # as EXTRA, and fail every ISO for something nobody would ship.
+          for f in $(grep -v '^#' payload/firmware.txt | awk 'NF >= 3 {print $3}'); do
+            gh release download payload-wifi-fw-v1 --dir payload-dir/FW --clobber --pattern "$f"
+          done
           python3 tools/wifi_fw.py --selftest
           python3 tools/payload.py verify payload-dir/FW payload/firmware.txt
 

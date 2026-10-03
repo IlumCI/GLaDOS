@@ -376,6 +376,8 @@ pub struct Loopback {
     pub left_count: u32,
     /// Frames refused because nothing had been prepared. Zero is the claim.
     pub refused: u32,
+    /// Firmware scans called off.
+    pub aborts: u32,
 }
 
 impl Loopback {
@@ -396,6 +398,7 @@ impl Loopback {
             assoc_aid: None,
             left_count: 0,
             refused: 0,
+            aborts: 0,
         }
     }
 
@@ -486,6 +489,12 @@ impl Radio for Loopback {
             }
             Some(_) => false,
             None => true,
+        }
+    }
+
+    fn scan_abort(&mut self) {
+        if self.fw_scan.take().is_some() {
+            self.aborts += 1;
         }
     }
 

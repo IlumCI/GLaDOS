@@ -624,16 +624,13 @@ pub fn init(ecam: u64, roots: Option<&[u8]>) {
     let seen = wireless::detect(ecam);
     if !seen.is_empty() {
         wireless::report(&seen);
-        return;
     }
-    match wifi::probe(ecam) {
-        wifi::Probe::None => {}
-        wifi::Probe::Unsupported { vendor, device, what } => {
-            // Naming it is the point: the driver that is missing cannot be
-            // written until the card is identified, and this is the only place
-            // that identification happens.
-            kprintln!("  wlan0  {} ({:04x}:{:04x}) -- no driver", what, vendor, device);
-        }
+    // And every part no driver claims, whether or not one was claimed: a
+    // machine with an Intel radio and a second card had the second go unnamed.
+    // Naming it is the point: the driver that is missing cannot be written
+    // until the card is identified, and this is the only place that happens.
+    for (vendor, device, what) in wifi::undriven(ecam) {
+        kprintln!("  wlan0  {} ({:04x}:{:04x}) -- no driver", what, vendor, device);
     }
 }
 

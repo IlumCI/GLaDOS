@@ -13,6 +13,8 @@ Usage:
     drive.py [--timeout N] [--memory 2048M] [cmd ...]
     drive.py --stage-iso MODEL.BIN [--tokenizer TOK.BIN] [--memory 3072M] [cmd ...]
     drive.py --no-payload "diag all"      # no checkpoint, tokenizer or roots
+                                          # (device firmware is still mirrored:
+                                          # it is small, and `fw` needs it)
 
 Each positional argument is one shell line. With none, it just captures the
 boot log and exits at the first prompt.
@@ -760,6 +762,16 @@ def main():
         # which is precisely the two-boot flow the image exists to test.
         if esp_image.exists() and not esp_force:
             print(f"[drive] reusing {esp_image} (--esp-rebuild to start clean)")
+            # A reused image is a disk, so nothing staged since reaches it --
+            # which is the point for what the guest wrote and a trap for
+            # firmware changed on the host.
+            built_at = esp_image.stat().st_mtime
+            fw_dir = ROOT / "esp/GLADOS/FW"
+            newer = [p.name for p in fw_dir.iterdir()
+                     if p.is_file() and p.stat().st_mtime > built_at] if fw_dir.is_dir() else []
+            if newer:
+                print(f"[drive] {len(newer)} firmware file(s) changed since {esp_image} was built "
+                      f"and are NOT on it: --esp-rebuild to carry them")
         else:
             fat, tot = mkesp.build(esp, esp_image)
             print(f"[drive] built {esp_image} ({tot / 1024 / 1024:.0f} MB, writable)")

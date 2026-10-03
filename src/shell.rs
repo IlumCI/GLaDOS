@@ -8602,14 +8602,19 @@ fn wifi_cmd(rest: &str) {
                 Some(w) => {
                     let (state, secure) = w.status();
                     kprintln!("  wlan0  {}", state);
-                    kprintln!(
-                        "         {}",
-                        if secure {
-                            "encrypted with a key from the handshake"
-                        } else {
-                            "NOT encrypted -- anything sent is readable in the room"
-                        }
-                    );
+                    // Only about a link that carries traffic. "NOT encrypted"
+                    // under "idle" or a failure read as a warning about a
+                    // connection there was none of.
+                    if state == "running" {
+                        kprintln!(
+                            "         {}",
+                            if secure {
+                                "encrypted with a key from the handshake"
+                            } else {
+                                "NOT encrypted -- anything sent is readable in the room"
+                            }
+                        );
+                    }
                     let seen = w.networks();
                     if !seen.is_empty() {
                         kprintln!("  {} network(s) heard in the last scan:", seen.len());

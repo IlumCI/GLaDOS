@@ -60,6 +60,12 @@ pub fn load(bs: &BootServices, image: Handle) {
     // progress is legal and is also exactly the kind of thing a firmware FAT
     // driver gets wrong.
     uefi::for_each_file(bs, image, DIR, |name, size| {
+        // A name this cannot spell is a file it cannot open, and it is counted
+        // with the rest of what was refused rather than vanishing.
+        let Some(name) = name else {
+            skipped += 1;
+            return;
+        };
         if found == MAX_FILES || name.len() > MAX_NAME || size == 0 || size > MAX_FILE {
             skipped += 1;
             return;

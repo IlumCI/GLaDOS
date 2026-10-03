@@ -63,7 +63,9 @@ pub struct Rehearsal {
     started: bool,
     spots: Vec<Spot>,
     /// Frames waiting for the station, with the signal each arrived at.
-    inbox: Vec<(Vec<u8>, i8)>,
+    /// Frames waiting, with the channel each was heard on -- which is not the
+    /// channel tuned now once a firmware scan has moved past it.
+    inbox: Vec<(Vec<u8>, i8, u8)>,
     /// When this room last beaconed.
     ///
     /// **Frames come from time passing, never from being asked for one.** The
@@ -165,7 +167,7 @@ impl Rehearsal {
                 s.ap.channel,
                 s.ap.rsn,
             );
-            self.inbox.push((f, s.rssi));
+            self.inbox.push((f, s.rssi, ch));
         }
     }
 }
@@ -238,8 +240,9 @@ impl Radio for Rehearsal {
                 rssi.push(s.rssi);
             }
         }
+        let ch = self.ch;
         for (f, r) in out.into_iter().zip(rssi) {
-            self.inbox.push((f, r));
+            self.inbox.push((f, r, ch));
         }
         Ok(())
     }
@@ -249,24 +252,35 @@ impl Radio for Rehearsal {
         // sends one -- which is the whole of a passive scan and the only way a
         // radar channel is ever heard. Gated on the clock and not on the queue
         // being empty: see `beaconed`.
+        //
+        // A firmware scan keeps its own time: every dwell that has passed is a
+        // channel visited and heard, however long it was since anybody asked.
+        // It stepped once per call, so a station polled at the clock task's ten
+        // a second took twice as long as a real part and ran out its deadline.
         let now = crate::net::now_ms();
         let mut stepped = false;
-        if let Some((plan, at, last)) = self.scan.as_mut() {
-            if *at < plan.len() && now.saturating_sub(*last) >= FW_DWELL_MS {
-                self.ch = plan[*at];
-                *at += 1;
-                *last = now;
-                stepped = true;
-            }
+        loop {
+            let next = match self.scan.as_mut() {
+                Some((plan, at, last)) if *at < plan.len() && now.saturating_sub(*last) >= FW_DWELL_MS => {
+                    let c = plan[*at];
+                    *at += 1;
+                    *last += FW_DWELL_MS;
+                    c
+                }
+                _ => break,
+            };
+            self.ch = next;
+            self.beacon();
+            stepped = true;
         }
-        if stepped || (self.started && now.saturating_sub(self.beaconed) >= BEACON_MS) {
+        if !stepped && self.started && now.saturating_sub(self.beaconed) >= BEACON_MS {
             self.beacon();
         }
         if self.inbox.is_empty() {
             return None;
         }
-        let (frame, rssi) = self.inbox.remove(0);
-        Some(Rx { frame, rssi, channel: self.ch })
+        let (frame, rssi, channel) = self.inbox.remove(0);
+        Some(Rx { frame, rssi, channel })
     }
 
     fn set_key(&mut self, _key: &Key) -> bool {
@@ -300,6 +314,10 @@ impl Radio for Rehearsal {
             Some(_) => false,
             None => true,
         }
+    }
+
+    fn scan_abort(&mut self) {
+        self.scan = None;
     }
 
     fn prepare_join(&mut self, t: &JoinTarget) -> Result<(), &'static str> {

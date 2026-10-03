@@ -187,6 +187,11 @@ pub trait Radio {
         true
     }
 
+    /// Stop an offloaded scan the station has given up on, or is leaving. A
+    /// part left scanning refuses the next scan and goes on hopping channels
+    /// under whatever the station does next. Never asked of a host-driven scan.
+    fn scan_abort(&mut self) {}
+
     /// Get ready to talk to one access point. The default tunes to its channel,
     /// which is all a plain part needs.
     ///

@@ -185,6 +185,7 @@ impl<R: Radio> Station<R> {
     /// advertises no encryption and is joined by a station that expected some
     /// is a station about to send its traffic in the clear.
     pub fn start(&mut self, ssid: &str, pass: &str, now: u64) {
+        self.abort_scan();
         self.ssid = ssid.to_string();
         self.pass = pass.to_string();
         self.seen.clear();
@@ -244,7 +245,16 @@ impl<R: Radio> Station<R> {
     /// buffered frames, and one of its finite association identifiers -- until
     /// it is told or times out. Leaving silently is how a network fills up with
     /// stations that are not there.
+    /// Call off a firmware scan still running. Idempotent.
+    fn abort_scan(&mut self) {
+        if self.offloaded && self.state == State::Scanning {
+            self.link.radio_mut().scan_abort();
+        }
+        self.offloaded = false;
+    }
+
     pub fn stop(&mut self) {
+        self.abort_scan();
         self.goodbye();
         self.sup = None;
         self.state = State::Idle;
@@ -298,7 +308,7 @@ impl<R: Radio> Station<R> {
                     self.offloaded = false;
                     self.choose(now);
                 } else if now.saturating_sub(self.since) >= self.plan.len() as u64 * DWELL_MS + OFFLOAD_SLACK_MS {
-                    self.offloaded = false;
+                    self.abort_scan();
                     self.state = State::Failed("the radio's own scan never reported finishing");
                 }
             }
@@ -1341,11 +1351,29 @@ pub fn selftest() -> bool {
             }
         }
         check(
-            "a firmware scan that never finishes fails, naming the radio's scan",
-            sta.state() == State::Failed("the radio's own scan never reported finishing"),
+            "a firmware scan that never finishes fails, naming the radio's scan, and is called off",
+            sta.state() == State::Failed("the radio's own scan never reported finishing")
+            && sta.link_mut().radio_mut().aborts == 1
+            && sta.link_mut().radio_mut().fw_scan.is_none(),
         );
 
-        // A join that fails after the radio was prepared must not leave it prepared:
+        // Leaving while the firmware scans calls the scan off: a part left hopping
+    // channels refuses the next scan and drifts under whatever comes after.
+    {
+        let mut lb = Loopback::new(me);
+        lb.offload = true;
+        let mut sta = Station::new(lb);
+        sta.start("glados", "", 0);
+        sta.poll(DWELL_MS);
+        sta.stop();
+        sta.stop();
+        check(
+            "stopping during a firmware scan calls it off, once",
+            sta.link_mut().radio_mut().aborts == 1 && sta.link_mut().radio_mut().fw_scan.is_none(),
+        );
+    }
+
+    // A join that fails after the radio was prepared must not leave it prepared:
         // that is a firmware time event pinning the part to one channel.
         let mut lb = Loopback::new(me);
         lb.offload = true;

@@ -85,6 +85,23 @@ pub fn probe(ecam: u64) -> Probe {
     Probe::None
 }
 
+/// Every wireless part on the bus that no driver here claims, as `(vendor,
+/// device, what)`. The parts a driver does claim are that driver's to describe
+/// (`net::wireless`), and they say far more than a registry row can.
+pub fn undriven(ecam: u64) -> alloc::vec::Vec<(u16, u16, &'static str)> {
+    use crate::dev::registry::{self, Role};
+    if !registry::scanned() {
+        registry::scan_pci(ecam);
+    }
+    registry::nodes()
+        .iter()
+        .filter_map(|n| {
+            let e = n.entry?;
+            (e.role == Role::Wireless && e.support.driver().is_none()).then_some((n.id.vendor, n.id.device, e.what))
+        })
+        .collect()
+}
+
 /// Every piece of networking hardware on the machine, and what drives it.
 ///
 /// The probe below answers one question -- is there a wireless part -- and
@@ -341,6 +358,19 @@ pub fn report() {
     let seen = crate::net::wireless::last();
     if !seen.is_empty() {
         crate::net::wireless::report(&seen);
+        // That was the boot's look. What has happened since is said too, or a
+        // part brought up and taken down again reads the same as one never
+        // touched.
+        if crate::dev::iwx::held() {
+            kprintln!("  now: a part is held and running; `iwx down` stops it, `iwx rx` shows what it hears");
+        } else if matches!(crate::dev::iwx::last_alive(), Some(Ok(_))) {
+            kprintln!("  now: brought up once this boot and since stopped; `iwx boot` again");
+        }
+        if let Some(e) = super::ecam() {
+            for (vendor, device, what) in undriven(e) {
+                kprintln!("  wlan0  {} ({:04x}:{:04x}) -- no driver", what, vendor, device);
+            }
+        }
         return;
     }
 
