@@ -302,8 +302,11 @@ pub fn scan() -> Result<alloc::vec::Vec<Network>, &'static str> {
     // difference matters because the two need opposite next steps, and a page
     // that showed one empty list for both is what this module opens by
     // refusing to do.
-    if let Some(w) = crate::net::wlan() {
-        return Ok(w.networks());
+    {
+        let _claim = crate::net::claim_wifi();
+        if let Some(w) = crate::net::wlan() {
+            return Ok(w.networks());
+        }
     }
     match adapter() {
         // The RTL8188EU driver that made this arm say "its MAC can be brought

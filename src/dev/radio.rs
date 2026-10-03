@@ -189,6 +189,10 @@ pub trait Radio {
 
     /// Get ready to talk to one access point. The default tunes to its channel,
     /// which is all a plain part needs.
+    ///
+    /// **An `Err` must leave nothing behind.** `left` is called only after an
+    /// `Ok`, so a part that sets up several contexts and fails at the third
+    /// undoes the first two itself before answering.
     fn prepare_join(&mut self, t: &JoinTarget) -> Result<(), &'static str> {
         self.set_channel(t.channel)
     }

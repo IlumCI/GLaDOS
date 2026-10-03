@@ -53,7 +53,9 @@ pub const ETHERTYPE_EAPOL: u16 = 0x888E;
 /// forever, and an unattended one would grow this queue until the heap gave
 /// out. Small because the MLME drains it every poll and anything older than a
 /// poll is stale by definition.
-const MGMT_QUEUE: usize = 24;
+// As many as one `receive` can take, so a burst of beacons -- which is what a
+// firmware scan delivers -- cannot evict its own head before the MLME reads it.
+pub const MGMT_QUEUE: usize = 64;
 
 pub struct Link<R: Radio> {
     radio: R,

@@ -214,6 +214,7 @@ pub fn attach_radio<R: crate::dev::radio::Radio + 'static>(radio: R) -> bool {
     if !radio.caps().softmac {
         return false;
     }
+    let _claim = claim_wifi();
     let sta = mlme::Station::new(radio);
     let w = &mut ifaces()[WLAN0];
     w.nic = Some(alloc::boxed::Box::new(sta));
@@ -224,24 +225,89 @@ pub fn attach_radio<R: crate::dev::radio::Radio + 'static>(radio: R) -> bool {
     true
 }
 
+/// Empty `wlan0`, waiting for whoever is inside it to leave first. Dropping the
+/// station while the clock task's poll is halfway through it is freeing an
+/// object somebody holds a `&mut` to.
+pub fn detach_radio() -> bool {
+    let _claim = claim_wifi();
+    let w = &mut ifaces()[WLAN0];
+    let had = w.nic.is_some();
+    w.nic = None;
+    w.up = false;
+    had
+}
+
 /// The wireless half of `wlan0`, if there is one.
+///
+/// **Only under a `WifiClaim`.** It hands out `&mut dyn Wlan`, and the shell,
+/// the desktop and the clock task all reach for it; two of those at once is
+/// undefined behaviour whatever they then do, and a station dropped under a
+/// poll is a use after free. Every caller in the tree takes a claim first --
+/// `claim_wifi` from the shell's side, `try_claim_wifi` from the clock's.
 pub fn wlan() -> Option<&'static mut dyn Wlan> {
     ifaces()[WLAN0].nic.as_mut()?.wireless()
 }
 
 /// What the wireless part calls itself, for anything that shows an adapter.
 pub fn wlan_name() -> Option<&'static str> {
+    let _claim = claim_wifi();
     Some(wlan()?.radio_name())
 }
 
 /// The network `wlan0` is on, by name.
 pub fn wlan_ssid() -> Option<alloc::string::String> {
+    let _claim = claim_wifi();
     wlan()?.ssid()
 }
 
 /// The access point `wlan0` is on.
 pub fn wlan_ap() -> Option<Mac> {
+    let _claim = claim_wifi();
     wlan()?.joined_ap()
+}
+
+/// The right to touch `wlan0`'s station. Released on drop.
+///
+/// **Reentrant within a task, deliberately**: a claim taken around a whole shell
+/// verb reaches `attach_radio` or `wlan_name`, which claim again, and a claim
+/// that refused its own holder would be a hang in exactly those places. What it
+/// excludes is the *other* task, which is the whole hazard.
+pub struct WifiClaim {
+    owned: bool,
+}
+
+impl Drop for WifiClaim {
+    fn drop(&mut self) {
+        if self.owned {
+            WIFI_HOLDER.store(usize::MAX, core::sync::atomic::Ordering::Relaxed);
+            WIFI_BUSY.store(false, core::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
+/// A claim if nobody else holds one, from a task that must not wait.
+pub fn try_claim_wifi() -> Option<WifiClaim> {
+    use core::sync::atomic::Ordering;
+    let me = crate::task::current();
+    if WIFI_BUSY.load(Ordering::Acquire) && WIFI_HOLDER.load(Ordering::Relaxed) == me {
+        return Some(WifiClaim { owned: false });
+    }
+    if WIFI_BUSY.swap(true, Ordering::Acquire) {
+        return None;
+    }
+    WIFI_HOLDER.store(me, Ordering::Relaxed);
+    Some(WifiClaim { owned: true })
+}
+
+/// A claim, yielding until the other task's poll finishes. A poll is short and
+/// never waits on the shell, so this always ends.
+pub fn claim_wifi() -> WifiClaim {
+    loop {
+        if let Some(c) = try_claim_wifi() {
+            return c;
+        }
+        crate::task::yield_now();
+    }
 }
 
 /// Milliseconds since boot, for the state machine that takes a clock.
@@ -281,9 +347,9 @@ pub fn now_ms() -> u64 {
 /// `&mut` and runs on the shell's task, and calling it from the clock task
 /// would be the second writer that `paint_clock` takes a claim to avoid.
 pub fn wifi_poll() {
-    if WIFI_BUSY.swap(true, core::sync::atomic::Ordering::Acquire) {
+    let Some(_claim) = try_claim_wifi() else {
         return;
-    }
+    };
     let now = now_ms();
     // A part held up by `iwx boot` has its ring drained here whether or not it
     // is attached as wlan0 yet: firmware that is talking and not being heard
@@ -292,7 +358,6 @@ pub fn wifi_poll() {
     if let Some(w) = wlan() {
         w.poll_mlme(now);
     }
-    WIFI_BUSY.store(false, core::sync::atomic::Ordering::Release);
 }
 
 /// The same, plus a repaint when what is in the air has changed.
@@ -309,6 +374,7 @@ pub fn wifi_poll() {
 /// pointer is comparing the state.
 pub fn wifi_service() {
     wifi_poll();
+    let Some(_claim) = try_claim_wifi() else { return };
     let Some(w) = wlan() else { return };
     let (state, secure) = w.status();
     let seen = w.networks().len();
@@ -325,6 +391,9 @@ static WIFI_SEEN: Racy<(usize, usize, usize)> = Racy::new((0, 0, 0));
 /// Held across a poll, because the shell and the clock both reach for it.
 static WIFI_BUSY: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
+/// Which task holds `WIFI_BUSY`, for reentrancy.
+static WIFI_HOLDER: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(usize::MAX);
 
 // --- routing -------------------------------------------------------------
 
@@ -622,6 +691,7 @@ fn eth_frame(dst: Mac, src: Mac, ethertype: u16, payload: &[u8]) -> Vec<u8> {
 }
 
 fn transmit_on(n: usize, frame: &[u8]) -> bool {
+    let _claim = if n == WLAN0 { Some(claim_wifi()) } else { None };
     let i = &mut ifaces()[n];
     let ok = i.nic.as_mut().map(|d| d.transmit(frame)).unwrap_or(false);
     if ok {
@@ -736,6 +806,16 @@ pub fn poll() -> Event {
     };
     for n in 0..ifaces().len() {
         let frame = {
+            // The station is the clock task's too; skipped this round if it is
+            // in there, which every caller already reads as "nothing waiting".
+            let _claim = if n == WLAN0 {
+                match try_claim_wifi() {
+                    Some(c) => Some(c),
+                    None => continue,
+                }
+            } else {
+                None
+            };
             let i = &mut ifaces()[n];
             if !i.up {
                 continue;

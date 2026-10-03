@@ -245,10 +245,21 @@ impl<R: Radio> Station<R> {
     /// it is told or times out. Leaving silently is how a network fills up with
     /// stations that are not there.
     pub fn stop(&mut self) {
-        // The trigger is whether the *access point* has state about us, not
-        // whether we succeeded: a handshake that timed out leaves an
-        // association held at the other end exactly as a working one does, and
-        // that is the case where going quiet is worst.
+        self.goodbye();
+        self.sup = None;
+        self.state = State::Idle;
+    }
+
+    /// The deauthentication, if the access point holds state about us, then
+    /// the link and the radio let go -- **in that order**, because a part told
+    /// it has no access point refuses to send to one, and the goodbye went out
+    /// after that told it nothing.
+    ///
+    /// The trigger is whether the *access point* has state about us, not
+    /// whether we succeeded: a handshake that timed out leaves an association
+    /// held at the other end exactly as a working one does, and that is the
+    /// case where going quiet is worst.
+    fn goodbye(&mut self) {
         if self.link.bssid() != [0u8; 6] {
             if let Some(b) = self.target.clone() {
                 let me = self.link.mac();
@@ -261,8 +272,6 @@ impl<R: Radio> Station<R> {
         }
         self.link.leave();
         self.unprepare();
-        self.sup = None;
-        self.state = State::Idle;
     }
 
     // --- the loop ---------------------------------------------------------
@@ -329,7 +338,7 @@ impl<R: Radio> Station<R> {
         // does not: a firmware time event left standing pins the part to one
         // channel until something else happens to clear it.
         if matches!(self.state, State::Failed(_)) {
-            self.unprepare();
+            self.goodbye();
         }
         self.state
     }
@@ -572,6 +581,16 @@ impl<R: Radio> Station<R> {
         }
 
         if let Some((sub, reason)) = dot11::parse_reason(frame) {
+            // Only about a conversation still going. After `leave` or a failure
+            // the target is remembered for the status line, and a stale
+            // disassociation from it must not start associating again behind
+            // the operator's back -- on a radio that has already let go.
+            if !matches!(
+                self.state,
+                State::Authenticating | State::Associating | State::Handshaking | State::Running
+            ) {
+                return;
+            }
             self.reason = reason;
             self.link.leave();
             self.sup = None;
@@ -1266,85 +1285,120 @@ pub fn selftest() -> bool {
     // told which access point it is for. The station has to reach Running
     // through the hooks alone; a station that ignored them sends its probes and
     // its authentication into a part that drops them, and `refused` counts each.
-    let mut lb = Loopback::new(me);
-    lb.offload = true;
-    let mut sta = Station::new(lb);
-    let mut ap = Ap::new(ap_mac, me, "glados", "correct horse", 6);
-    let mut now = 0u64;
-    sta.start("glados", "correct horse", now);
-    for _ in 0..200 {
-        if matches!(sta.state(), State::Running | State::Failed(_)) {
-            break;
+    // Scoped, so the stations below are not these: a claim further down
+    // reused `sta` and tested a failed one for a long time without saying so.
+    {
+        let mut lb = Loopback::new(me);
+        lb.offload = true;
+        let mut sta = Station::new(lb);
+        let mut ap = Ap::new(ap_mac, me, "glados", "correct horse", 6);
+        let mut now = 0u64;
+        sta.start("glados", "correct horse", now);
+        for _ in 0..200 {
+            if matches!(sta.state(), State::Running | State::Failed(_)) {
+                break;
+            }
+            ap.serve(sta.link_mut().radio_mut());
+            now += DWELL_MS;
+            sta.poll(now);
+        }
+        check(
+            "a part that scans in firmware is asked to, and gets on without a frame refused",
+            sta.state() == State::Running
+                && sta.secured()
+                && sta.seen.iter().any(|b| b.ssid == "glados")
+                && sta.link_mut().radio_mut().refused == 0,
+        );
+        check(
+            "it was told the access point, its channel and its beacon interval before anything was sent",
+            sta.link_mut().radio_mut().prepared
+                == Some(JoinTarget { bssid: ap_mac, channel: 6, beacon_int: 100, dtim: None }),
+        );
+        check(
+            "and the association identifier once there was one",
+            sta.link_mut().radio_mut().assoc_aid == Some(7),
+        );
+        sta.stop();
+        ap.serve(sta.link_mut().radio_mut());
+        check(
+            "stopping takes the radio's state down once, after the goodbye went out",
+            sta.link_mut().radio_mut().left_count == 1
+                && sta.link_mut().radio_mut().prepared.is_none()
+                && !ap.assoced,
+        );
+
+        // A firmware scan that never reports finishing has to end anyway, and end
+        // as a failure that says whose scan it was.
+        let mut lb = Loopback::new(me);
+        lb.offload = true;
+        let mut sta = Station::new(lb);
+        sta.start("glados", "", 0);
+        let mut now = 0u64;
+        for _ in 0..400 {
+            now += DWELL_MS;
+            if matches!(sta.poll(now), State::Failed(_)) {
+                break;
+            }
+        }
+        check(
+            "a firmware scan that never finishes fails, naming the radio's scan",
+            sta.state() == State::Failed("the radio's own scan never reported finishing"),
+        );
+
+        // A join that fails after the radio was prepared must not leave it prepared:
+        // that is a firmware time event pinning the part to one channel.
+        let mut lb = Loopback::new(me);
+        lb.offload = true;
+        let mut sta = Station::new(lb);
+        let mut ap = Ap::new(ap_mac, me, "glados", "correct horse", 6);
+        ap.refuse_assoc = true;
+        sta.start("glados", "correct horse", 0);
+        let mut now = 0u64;
+        for _ in 0..200 {
+            ap.serve(sta.link_mut().radio_mut());
+            now += DWELL_MS;
+            if matches!(sta.poll(now), State::Failed(_)) {
+                break;
+            }
+        }
+        check(
+            "a refused association takes the radio's state down with it",
+            sta.state() == State::Failed("the access point refused the association")
+                && sta.link_mut().radio_mut().prepared.is_none()
+                && sta.link_mut().radio_mut().left_count == 1,
+        );
+    }
+
+    // A wrong passphrase on a part that keeps station state: the handshake times
+    // out with the access point still holding an association, and the goodbye
+    // has to leave *before* the radio is told it has no access point -- a part
+    // told that refuses to send to one, and the deauthentication was sent after.
+    {
+        let mut lb = Loopback::new(me);
+        lb.offload = true;
+        let mut sta = Station::new(lb);
+        let mut ap = Ap::new(ap_mac, me, "glados", "correct horse", 6);
+        sta.start("glados", "wrong horse", 0);
+        let mut now = 0u64;
+        let mut held = false;
+        for _ in 0..400 {
+            ap.serve(sta.link_mut().radio_mut());
+            held |= ap.assoced;
+            now += DWELL_MS;
+            if matches!(sta.poll(now), State::Failed(_)) {
+                break;
+            }
         }
         ap.serve(sta.link_mut().radio_mut());
-        now += DWELL_MS;
-        sta.poll(now);
+        check(
+            "a handshake that fails on such a part still says goodbye, then lets the radio go",
+            held
+                && sta.state() == State::Failed("the handshake did not finish")
+                && !ap.assoced
+                && sta.link_mut().radio_mut().prepared.is_none()
+                && sta.link_mut().radio_mut().left_count == 1,
+        );
     }
-    check(
-        "a part that scans in firmware is asked to, and gets on without a frame refused",
-        sta.state() == State::Running
-            && sta.secured()
-            && sta.seen.iter().any(|b| b.ssid == "glados")
-            && sta.link_mut().radio_mut().refused == 0,
-    );
-    check(
-        "it was told the access point, its channel and its beacon interval before anything was sent",
-        sta.link_mut().radio_mut().prepared
-            == Some(JoinTarget { bssid: ap_mac, channel: 6, beacon_int: 100, dtim: None }),
-    );
-    check(
-        "and the association identifier once there was one",
-        sta.link_mut().radio_mut().assoc_aid == Some(7),
-    );
-    sta.stop();
-    ap.serve(sta.link_mut().radio_mut());
-    check(
-        "stopping takes the radio's state down once, after the goodbye went out",
-        sta.link_mut().radio_mut().left_count == 1
-            && sta.link_mut().radio_mut().prepared.is_none()
-            && !ap.assoced,
-    );
-
-    // A firmware scan that never reports finishing has to end anyway, and end
-    // as a failure that says whose scan it was.
-    let mut lb = Loopback::new(me);
-    lb.offload = true;
-    let mut sta = Station::new(lb);
-    sta.start("glados", "", 0);
-    let mut now = 0u64;
-    for _ in 0..400 {
-        now += DWELL_MS;
-        if matches!(sta.poll(now), State::Failed(_)) {
-            break;
-        }
-    }
-    check(
-        "a firmware scan that never finishes fails, naming the radio's scan",
-        sta.state() == State::Failed("the radio's own scan never reported finishing"),
-    );
-
-    // A join that fails after the radio was prepared must not leave it prepared:
-    // that is a firmware time event pinning the part to one channel.
-    let mut lb = Loopback::new(me);
-    lb.offload = true;
-    let mut sta = Station::new(lb);
-    let mut ap = Ap::new(ap_mac, me, "glados", "correct horse", 6);
-    ap.refuse_assoc = true;
-    sta.start("glados", "correct horse", 0);
-    let mut now = 0u64;
-    for _ in 0..200 {
-        ap.serve(sta.link_mut().radio_mut());
-        now += DWELL_MS;
-        if matches!(sta.poll(now), State::Failed(_)) {
-            break;
-        }
-    }
-    check(
-        "a refused association takes the radio's state down with it",
-        sta.state() == State::Failed("the access point refused the association")
-            && sta.link_mut().radio_mut().prepared.is_none()
-            && sta.link_mut().radio_mut().left_count == 1,
-    );
 
     // The DTIM period comes from the TIM element, which only a beacon carries,
     // and a probe response heard afterwards must not erase it.

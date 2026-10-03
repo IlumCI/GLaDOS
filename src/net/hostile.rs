@@ -541,7 +541,7 @@ pub fn selftest() -> bool {
     let _ = flood.receive();
     check(
         "a flood of beacons is bounded rather than growing without limit",
-        flood.take_mgmt().len() <= 24,
+        flood.take_mgmt().len() <= crate::net::softmac::MGMT_QUEUE,
     );
 
     ok

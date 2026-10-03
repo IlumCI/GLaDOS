@@ -139,6 +139,7 @@ impl NetMan {
     }
 
     fn act(&mut self, which: &str) {
+        let _claim = crate::net::claim_wifi();
         let now = crate::net::now_ms();
         match which {
             "Rescan" => match crate::net::wlan() {
@@ -206,6 +207,8 @@ impl DeskApp for NetMan {
         let lh = theme::text_h_at(1);
         let rh = Self::row_h();
 
+        // The station is the clock task's too; held for the whole paint.
+        let _claim = crate::net::claim_wifi();
         // --- what we are, and what we are on --------------------------
         let (adapter, state, secure) = match crate::net::wlan() {
             Some(w) => {
