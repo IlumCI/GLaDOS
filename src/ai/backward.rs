@@ -352,7 +352,6 @@ fn check_grads(
 ///    same treatment, using the live `apply()` as the forward so the test
 ///    exercises the code that will actually train, not a copy of it.
 pub fn selftest() -> bool {
-    use crate::kprintln;
 
     let mut rng = Rng(0x5EED_1234_ABCD_0001);
     let (rows, cols) = (24usize, 16usize);
