@@ -65,6 +65,8 @@ pub enum Kind {
     Capa,
     /// Paged memory, for images larger than the device's own RAM.
     Paging,
+    /// Which version of each command and notification this firmware speaks.
+    CmdVersions,
     /// Everything else, by number. **Most of a real image is this**, and that is
     /// not a gap: the AX201's own `iwlwifi-QuZ-a0-hr-b0-77.ucode` carries 181
     /// records of which 98 are `IWL_UCODE_TLV_DEBUG_BASE` and up -- 0x1000005
@@ -86,6 +88,7 @@ impl Kind {
             29 => Kind::Api,
             30 => Kind::Capa,
             32 => Kind::Paging,
+            48 => Kind::CmdVersions,
             other => Kind::Other(other),
         }
     }
@@ -99,6 +102,7 @@ impl Kind {
             Kind::Api => 29,
             Kind::Capa => 30,
             Kind::Paging => 32,
+            Kind::CmdVersions => 48,
             Kind::Other(t) => *t,
         }
     }
@@ -158,6 +162,9 @@ pub enum Error {
     NoSections,
     /// A bitmap word claimed an index the declared width does not have.
     BadBitmapIndex { at: usize, index: usize, words: usize },
+    /// A second command-version table, which upstream refuses: which one
+    /// governs has no answer.
+    TwoVersionTables(usize),
 }
 
 impl Error {
@@ -166,6 +173,9 @@ impl Error {
             Error::TooShort(n) => alloc::format!("{} bytes is shorter than the {}-byte header", n, HEADER),
             Error::NotTlv(v) => alloc::format!("leading word {:#010x} is not zero, so this is a v1 image", v),
             Error::BadMagic(m) => alloc::format!("magic {:#010x} is not {:#010x}", m, MAGIC),
+            Error::TwoVersionTables(at) => {
+                alloc::format!("record {} is a second command-version table", at)
+            }
             Error::Overrun { at, want, left } => {
                 alloc::format!("record {} declares {} bytes with {} left", at, want, left)
             }
@@ -210,9 +220,28 @@ pub struct Image {
     /// Every record type seen, in order, including the ignored ones. Kept so a
     /// transcript can say what an image contained rather than what was used.
     pub records: Vec<(Kind, usize)>,
+    /// `(group, command, command version, notification version)`, as declared.
+    ///
+    /// **A capability bit says a feature exists; this says what shape its
+    /// command has**, and the scan request alone has had a dozen. A driver that
+    /// sends the layout it was written for to firmware expecting another gets a
+    /// command error at best and a scan configured from misread fields at worst.
+    pub cmd_versions: Vec<(u8, u8, u8, u8)>,
 }
 
 impl Image {
+    /// The version of a command this firmware declares, if it declares one.
+    /// `None` is upstream's `IWX_FW_CMD_VER_UNKNOWN`, and callers treat it as
+    /// the oldest layout, which is what firmware old enough not to say speaks.
+    pub fn cmd_ver(&self, group: u8, cmd: u8) -> Option<u8> {
+        self.cmd_versions.iter().find(|v| v.0 == group && v.1 == cmd).map(|v| v.2)
+    }
+
+    /// The version of the notification or response that command produces.
+    pub fn notif_ver(&self, group: u8, cmd: u8) -> Option<u8> {
+        self.cmd_versions.iter().find(|v| v.0 == group && v.1 == cmd).map(|v| v.3)
+    }
+
     /// The sections that are really destinations, with the separators removed.
     pub fn loadable(&self) -> Vec<Section> {
         self.sections.iter().copied().filter(|s| !s.is_separator()).collect()
@@ -303,6 +332,7 @@ pub fn parse(b: &[u8]) -> Result<Image, Error> {
     let mut iml = None;
     let mut capa = [0u32; CAPA_WORDS];
     let mut api = [0u32; API_WORDS];
+    let mut cmd_versions: Vec<(u8, u8, u8, u8)> = Vec::new();
     let mut at = HEADER;
     let mut n = 0usize;
 
@@ -354,6 +384,20 @@ pub fn parse(b: &[u8]) -> Result<Image, Error> {
                 }
                 capa[i] = le32(b, body + 4);
             }
+            // Four bytes an entry: command, group, command version, notification
+            // version -- command *before* group, which is the order the struct
+            // has and the opposite of how every lookup is spelt. A trailing
+            // partial entry is dropped, as upstream drops it. Two such records
+            // is refused, as upstream refuses it: which one governs is not a
+            // question with an answer.
+            Kind::CmdVersions => {
+                if !cmd_versions.is_empty() {
+                    return Err(Error::TwoVersionTables(n));
+                }
+                for e in b[body..body + len].chunks_exact(4) {
+                    cmd_versions.push((e[1], e[0], e[2], e[3]));
+                }
+            }
             Kind::Api if len == 8 => {
                 let i = le32(b, body) as usize;
                 if i >= API_WORDS {
@@ -383,7 +427,7 @@ pub fn parse(b: &[u8]) -> Result<Image, Error> {
     if sections.is_empty() {
         return Err(Error::NoSections);
     }
-    Ok(Image { human, ver, build, sections, cpus, capa, api, iml, records })
+    Ok(Image { human, ver, build, sections, cpus, capa, api, iml, records, cmd_versions })
 }
 
 /// Build a container, for the suite and for nothing else.
@@ -461,12 +505,39 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     let p = p.unwrap_or_else(|_| Image {
         human: String::new(), ver: 0, build: 0,
         sections: Vec::new(), cpus: None, capa: [0; CAPA_WORDS], api: [0; API_WORDS],
-        iml: None, records: Vec::new(),
+        iml: None, records: Vec::new(), cmd_versions: Vec::new(),
     });
     claim("the version string is read and NUL-trimmed", p.human == "77.1a2b3c4d.0 QuZ-a0-hr-b0-77");
     claim("the build number survives", p.build == 4242);
     claim("the cpu count is taken from its own record", p.cpus == Some(2));
     claim("every record is remembered, including the ignored one", p.records.len() == 5);
+
+    // --- the command versions ----------------------------------------------
+    // Command before group in each entry: the struct's order, and the opposite
+    // of how every lookup is spelt, so a reader that took them the other way
+    // would answer for the wrong command and still look right.
+    let with_versions = build("v", 1, 1, &[
+        (19, alloc::vec![0; 8]),
+        (48, alloc::vec![0x0c, 0x01, 5, 0, 0x0d, 0x01, 16, 2, 0xc8, 0x01, 1, 7, 0xff]),
+    ]);
+    let v = parse(&with_versions);
+    claim(
+        "a command-version table is read command-first, and a trailing partial entry dropped",
+        v.as_ref().map(|i| {
+            (i.cmd_ver(0x01, 0x0c), i.cmd_ver(0x01, 0x0d), i.notif_ver(0x01, 0xc8), i.cmd_versions.len())
+        }) == Ok((Some(5), Some(16), Some(7), 3)),
+    );
+    claim(
+        "and a command it does not list has no version rather than zero",
+        v.as_ref().map(|i| i.cmd_ver(0x01, 0x0e)) == Ok(None),
+    );
+    claim(
+        "a second table is refused, as upstream refuses it",
+        matches!(
+            parse(&build("v", 1, 1, &[(19, alloc::vec![0; 8]), (48, alloc::vec![0; 4]), (48, alloc::vec![0; 4])])),
+            Err(Error::TwoVersionTables(2))
+        ),
+    );
 
     // --- the two bitmaps ----------------------------------------------------
 

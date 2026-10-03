@@ -5049,10 +5049,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     kprintln!("  register, so it works under emulation and needs no radio.");
                     return;
                 }
-                let bytes = match crate::sysbox::read_blob(path) {
+                // A namespace path, or the name of an image `dev::firmware` holds,
+                // so the boot volume's copy can be checked without staging it.
+                let bytes = match crate::sysbox::read_blob(path)
+                    .or_else(|| crate::dev::firmware::get(path).map(|i| i.bytes().to_vec()))
+                {
                     Some(b) => b,
                     None => {
-                        kprintln!("  no such blob: {}", path);
+                        kprintln!("  no such blob or firmware image: {}", path);
                         return;
                     }
                 };
@@ -5099,6 +5103,17 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         image.has_capa(capa::MLD_API_SUPPORT),
                         image.has_api(api::REGULATORY_NVM_INFO),
                         image.has_api(api::REDUCED_SCAN_CONFIG),
+                    );
+                    // The layouts this driver has to match, by the image's own say.
+                    use crate::dev::iwx::config::{LONG_GROUP, SCAN_CFG_CMD};
+                    let v = |g: u8, c: u8| image.cmd_ver(g, c).map(|n| n as i32).unwrap_or(-1);
+                    kprintln!(
+                        "  {} command versions: scan {} scan-config {} mcc {} (reply {})",
+                        image.cmd_versions.len(),
+                        v(LONG_GROUP, 0x0d),
+                        v(LONG_GROUP, SCAN_CFG_CMD),
+                        v(LONG_GROUP, crate::dev::iwx::reg::MCC_UPDATE_CMD),
+                        image.notif_ver(LONG_GROUP, crate::dev::iwx::reg::MCC_UPDATE_CMD).map(|n| n as i32).unwrap_or(-1),
                     );
                 }
                 match crate::dev::iwx::ctxt::group(&image.sections) {
@@ -5408,6 +5423,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             // thrown away. So one verb does both and the second
                             // half is reported separately.
                             let mut b = b;
+                            let mut regulatory = None;
                             match r.nvm(&mut b, 2000) {
                                 Ok(n) => {
                                     crate::dev::iwx::note_nvm(Ok(n));
@@ -5426,6 +5442,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                             console::set_color(LTGREEN);
                                             kprintln!("  {}", d.say());
                                             console::set_color(LTGRAY);
+                                            match &d.regulatory {
+                                                Some(reg) => kprintln!("  {}", reg.say()),
+                                                None => kprintln!("  the firmware does not own regulatory; the NVM's map stands"),
+                                            }
+                                            regulatory = d.regulatory;
                                         }
                                         Err(e) => {
                                             console::set_color(LTRED);
@@ -5449,7 +5470,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             // part before releasing either; `iwx down` does that
                             // on request, and the next `iwx boot` does it first.
                             match crate::dev::iwx::Held::new(*r, b, ecam, crate::dev::iwx::Family::Ax210) {
-                                Some(h) => {
+                                Some(mut h) => {
+                                    h.regulatory = regulatory;
                                     crate::dev::iwx::hold(h);
                                     kprintln!("  held, running. `iwx down` stops it.");
                                 }

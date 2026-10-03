@@ -38,6 +38,7 @@ pub mod gen3;
 pub mod init;
 pub mod nvm;
 pub mod power;
+pub mod reg;
 pub mod rx;
 pub mod fw;
 
@@ -974,6 +975,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.extend(config::checks());
     out.extend(power::checks());
     out.extend(rx::checks());
+    out.extend(reg::checks());
     out
 }
 
@@ -1160,13 +1162,16 @@ pub struct Held {
     pub inbox: rx::Inbox,
     /// The receive descriptor this family puts in front of a frame.
     desc: usize,
+    /// The channel map the firmware put in force, which is what a scan plan is
+    /// drawn from. `None` when the firmware does not own regulatory.
+    pub regulatory: Option<reg::Regulatory>,
 }
 
 impl Held {
     pub fn new(radio: Radio, booted: Booted, ecam: u64, family: Family) -> Option<Held> {
         let bar0 = radio.bar0.filter(|&b| b != 0)?;
         let desc = if family == Family::F22000 { rx::DESC_V1 } else { rx::DESC_V3 };
-        Some(Held { radio, booted, bar0, ecam, stopped: None, inbox: rx::Inbox::new(), desc })
+        Some(Held { radio, booted, bar0, ecam, stopped: None, inbox: rx::Inbox::new(), desc, regulatory: None })
     }
 
     /// Drain the receive ring into the inbox. Cheap, and safe to call as often
@@ -1747,7 +1752,12 @@ impl Radio {
             Some(a) => a,
             None => return Err(config::Fault::At(0, cmd::CmdError::NoQueue)),
         };
+        let (mcc_multi, scan_cfg_ver) = config::Facts::from_image(image);
         let f = config::Facts {
+            rx_ant: n.rx_chains,
+            lar: n.lar,
+            mcc_multi,
+            scan_cfg_ver,
             tx_ant: n.tx_chains,
             // Upstream's flag for this product id, followed rather than reasoned
             // about -- see the constant's own note on why it reads oddly.
@@ -1761,7 +1771,22 @@ impl Radio {
         };
         // Safety: a part whose firmware is alive and which has been through the
         // handshake, on an aperture `boot` mapped.
-        unsafe { config::configure(bar0, &mut b.boot.rings, &mut b.cmds, image, &f) }
+        // Packets stepped over while waiting for the regulatory reply are
+        // dropped here: nothing is held yet to keep them for, and at
+        // initialisation nothing but notifications nobody needs can arrive.
+        unsafe {
+            config::configure(
+                bar0,
+                &mut b.boot.rings,
+                &b.buffers,
+                &mut b.rx,
+                &mut b.cmds,
+                image,
+                &f,
+                n.band_52,
+                &mut |_| {},
+            )
+        }
     }
 }
 

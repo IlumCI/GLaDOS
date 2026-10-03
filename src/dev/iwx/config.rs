@@ -5,29 +5,25 @@
 //! access lock, each one small, most of them unconditional, and several gated on
 //! what the firmware file said it could do.
 //!
-//! ### This sequence is incomplete, and says so rather than pretending
+//! ### Ten of the twelve, and the two absent are not owed
 //!
-//! Seven of the twelve are here, in upstream's relative order, and they are the
-//! seven whose payload is small and exactly known. **Five are absent** and
-//! naming them is the point, because a table that silently skipped them would read
-//! as a part that had been fully configured:
+//! Every command `iwx_init_hw` sends on this part is here, in upstream's
+//! relative order. The two that are not are not sent there either, and naming
+//! them is the point, because a reader comparing the count with upstream's would
+//! otherwise conclude something was missing:
 //!
-//! - `PHY_CONFIGURATION_CMD`, which upstream sends only when the part wants
-//!   single-stream diversity. This one is genuinely not owed: `8086:51f0` sets
-//!   `tx_with_siso_diversity` to zero, so the command is skipped on the real part
-//!   and its absence here is upstream's behaviour rather than a gap.
-//! - `TEMP_REPORTING_THRESHOLDS_CMD`, which carries a threshold table.
-//! - `MAC_PM_POWER_TABLE`, which needs a station. Upstream does not send it at
-//!   initialisation either: `iwx_set_pslevel` returns after the *device* policy
-//!   when no MAC context is active, which it is not here -- so the command in this
-//!   table is the four-byte one and `power.rs` says why.
-//! - `MCC_UPDATE_CMD`, which has a response to parse.
-//! - the scan configuration, which is the largest command in the driver.
+//! - `PHY_CONFIGURATION_CMD`, sent only when the part wants single-stream
+//!   diversity. `8086:51f0` sets `tx_with_siso_diversity` to zero, so the command
+//!   is skipped on the real part.
+//! - `MAC_PM_POWER_TABLE`, which needs a station. `iwx_set_pslevel` returns after
+//!   the *device* policy when no MAC context is active, which it is not here --
+//!   so the command in this table is the four-byte one and `power.rs` says why.
 //!
-//! Two of the five are not owed at initialisation, so **three** are the gap:
-//! temperature thresholds, `MCC_UPDATE` and the scan configuration. So
-//! `configure` leaves the part able to be told things and not yet able to scan,
-//! and the shell says that in those words.
+//! **One step is answered rather than acted on**: `MCC_UPDATE`, whose reply is
+//! the channel map in force. It is the only one `configure` waits for, and
+//! `reg.rs` reads the reply. Three were absent until the receive side could hand
+//! a waiting command the packets it stepped over; a command that waits during
+//! initialisation drops nothing, but the same path runs mid-scan later.
 //!
 //! ### What the capability bitmap actually said, measured
 //!
@@ -76,6 +72,13 @@ pub const SOC_CONFIGURATION_CMD: u8 = 0x01;
 pub const DQA_ENABLE_CMD: u8 = 0x00;
 pub const LTR_CONFIG: u8 = 0xee;
 pub const REPLY_BEACON_FILTERING_CMD: u8 = 0xd2;
+pub const PHY_OPS_GROUP: u8 = 0x4;
+pub const TEMP_REPORTING_THRESHOLDS_CMD: u8 = 0x04;
+pub const LONG_GROUP: u8 = 0x1;
+pub const SCAN_CFG_CMD: u8 = 0x0c;
+/// The API bit and the capability that each mean "the newer MCC source scheme".
+const API_WIFI_MCC_UPDATE: usize = 9;
+const CAPA_LAR_MULTI_MCC: usize = 29;
 
 /// Bluetooth coexistence: let Wi-Fi win. The only mode this driver ever asks for,
 /// because arbitration needs a Bluetooth stack to arbitrate with and there is none.
@@ -121,6 +124,10 @@ pub enum Gate {
     /// property at all, which is why it is its own gate rather than a capability
     /// bit -- the answer is in config space.
     LtrEnabled,
+    /// Only when the firmware declares an API revision.
+    Api(usize),
+    /// Only when the NVM says the firmware owns regulatory.
+    Lar,
 }
 
 /// What a step's payload is.
@@ -145,6 +152,14 @@ pub enum Body {
     BeaconFilterOff,
     /// Two words: whether the device may sleep, and a reserved half.
     DevicePower,
+    /// Twenty zero bytes: no thresholds, which hands critical-temperature
+    /// shutdown and transmit backoff to the firmware.
+    TempThresholds,
+    /// Twenty-eight bytes: the world domain and how to ask. **Answered**, the one
+    /// step here that is: the reply is the channel map in force.
+    Mcc,
+    /// Twelve bytes: which chains scans may use, and the broadcast station.
+    ScanConfig,
 }
 
 impl Body {
@@ -154,6 +169,9 @@ impl Body {
             Body::BtCoex | Body::Soc => 8,
             Body::Ltr => 32,
             Body::BeaconFilterOff => 60,
+            Body::TempThresholds => 20,
+            Body::Mcc => 28,
+            Body::ScanConfig => 12,
         }
     }
 }
@@ -178,9 +196,26 @@ pub const CONFIG: &[Step] = &[
     // not assumed.
     Step { group: DATA_PATH_GROUP, code: DQA_ENABLE_CMD, body: Body::Dqa, gate: Gate::Capa(capa::DQA_SUPPORT) },
     Step { group: 0, code: LTR_CONFIG, body: Body::Ltr, gate: Gate::LtrEnabled },
+    // Empty, deliberately: thresholds the host does not set are thresholds the
+    // firmware manages, and it can only manage them once it has been told to.
+    Step {
+        group: PHY_OPS_GROUP,
+        code: TEMP_REPORTING_THRESHOLDS_CMD,
+        body: Body::TempThresholds,
+        gate: Gate::Capa(capa::CT_KILL_BY_FW),
+    },
     // The device's sleep policy, after the latency configuration and before the
     // beacon filter, which is where `init_hw` puts it.
     Step { group: 0, code: power::POWER_TABLE_CMD, body: Body::DevicePower, gate: Gate::Always },
+    // Regulatory, before the scan configuration: what may be scanned is what
+    // this answers.
+    Step { group: 0, code: super::reg::MCC_UPDATE_CMD, body: Body::Mcc, gate: Gate::Lar },
+    Step {
+        group: LONG_GROUP,
+        code: SCAN_CFG_CMD,
+        body: Body::ScanConfig,
+        gate: Gate::Api(super::fw::api::REDUCED_SCAN_CONFIG),
+    },
     // Last, as upstream has it.
     Step { group: 0, code: REPLY_BEACON_FILTERING_CMD, body: Body::BeaconFilterOff, gate: Gate::Always },
 ];
@@ -200,6 +235,27 @@ pub struct Facts {
     /// machine that mines or serves should not have its radio asleep between
     /// beacons.
     pub power_level: u8,
+    /// Which receive chains, out of the NVM.
+    pub rx_ant: u8,
+    /// Whether the NVM says the firmware owns regulatory.
+    pub lar: bool,
+    /// The newer MCC source scheme, from the image.
+    pub mcc_multi: bool,
+    /// The scan configuration's declared version. Below five, the broadcast
+    /// station id is a field the firmware reads and must be 0xff; from five it is
+    /// deprecated and stays zero.
+    pub scan_cfg_ver: Option<u8>,
+}
+
+impl Facts {
+    /// What the image itself decides, so a caller fills these from the file
+    /// rather than from a reading of it.
+    pub fn from_image(image: &Image) -> (bool, Option<u8>) {
+        (
+            image.has_api(API_WIFI_MCC_UPDATE) || image.has_capa(CAPA_LAR_MULTI_MCC),
+            image.cmd_ver(LONG_GROUP, SCAN_CFG_CMD),
+        )
+    }
 }
 
 /// Build one step's payload.
@@ -223,6 +279,15 @@ pub fn body(b: Body, f: &Facts) -> Vec<u8> {
         // with the enable word clear is what "do not filter beacons" is spelt as.
         Body::BeaconFilterOff => {}
         Body::DevicePower => v.copy_from_slice(&power::device_body(f.power_level)),
+        Body::TempThresholds => {}
+        Body::Mcc => v.copy_from_slice(&super::reg::request(super::reg::WORLD, f.mcc_multi)),
+        Body::ScanConfig => {
+            if f.scan_cfg_ver.map_or(true, |n| n < 5) {
+                v[2] = 0xff;
+            }
+            v[4..8].copy_from_slice(&(f.tx_ant as u32).to_le_bytes());
+            v[8..12].copy_from_slice(&(f.rx_ant as u32).to_le_bytes());
+        }
     }
     v
 }
@@ -231,6 +296,9 @@ pub fn body(b: Body, f: &Facts) -> Vec<u8> {
 pub enum Fault {
     /// A step was refused. Carries the index, so the transcript names which.
     At(usize, cmd::CmdError),
+    /// The regulatory reply did not parse: its count and its length disagreed,
+    /// or it was too short to hold a header.
+    BadRegulatory(usize),
 }
 
 impl Fault {
@@ -243,21 +311,27 @@ impl Fault {
                 ),
                 None => alloc::format!("configuration step {}: {}", i, e.why()),
             },
+            Fault::BadRegulatory(n) => alloc::format!(
+                "the regulatory reply was {} bytes and did not parse, so no channel is known to be usable",
+                n
+            ),
         }
     }
 }
 
 /// What a run of the sequence did.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Done {
     pub sent: usize,
     pub skipped: usize,
+    /// The channel map the firmware put in force, when it owns regulatory.
+    pub regulatory: Option<super::reg::Regulatory>,
 }
 
 impl Done {
     pub fn say(&self) -> String {
         alloc::format!(
-            "{} configuration command(s) sent, {} skipped; three more are owed and not written, so it cannot scan yet",
+            "{} configuration command(s) sent, {} skipped -- every command initialisation owes",
             self.sent, self.skipped
         )
     }
@@ -275,22 +349,40 @@ impl Done {
 pub unsafe fn configure(
     bar0: u64,
     rings: &mut Rings,
+    bufs: &Buffers,
+    rx: &mut Rx,
     q: &mut Queue,
     image: &Image,
     f: &Facts,
+    band_5: bool,
+    aside: &mut dyn FnMut(&super::alive::Packet),
 ) -> Result<Done, Fault> {
-    let mut d = Done { sent: 0, skipped: 0 };
+    let mut d = Done { sent: 0, skipped: 0, regulatory: None };
     for (i, s) in CONFIG.iter().enumerate() {
         let allowed = match s.gate {
             Gate::Always => true,
             Gate::Capa(n) => image.has_capa(n),
+            Gate::Api(n) => image.has_api(n),
             Gate::LtrEnabled => f.ltr_enabled,
+            Gate::Lar => f.lar,
         };
         if !allowed {
             d.skipped += 1;
             continue;
         }
-        q.send(bar0, rings, s.group, s.code, 0, &body(s.body, f)).map_err(|e| Fault::At(i, e))?;
+        let payload = body(s.body, f);
+        if s.body == Body::Mcc {
+            // The one step answered rather than acted on, so the one step that
+            // waits. Two seconds, which is generous for a command firmware
+            // answers out of a table it already holds.
+            let reply = cmd::ask_with(bar0, rings, bufs, rx, q, s.group, s.code, 0, &payload, 2000, aside)
+                .map_err(|e| Fault::At(i, e))?;
+            d.regulatory = Some(
+                super::reg::response(reply.payload, band_5).ok_or(Fault::BadRegulatory(reply.payload.len()))?,
+            );
+        } else {
+            q.send(bar0, rings, s.group, s.code, 0, &payload).map_err(|e| Fault::At(i, e))?;
+        }
         d.sent += 1;
     }
     Ok(d)
@@ -318,7 +410,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // --- the order ----------------------------------------------------------
 
     let idx = |c: u8| CONFIG.iter().position(|s| s.code == c);
-    ok(CONFIG.len() == 7, "seven of the twelve configuration commands are written");
+    ok(CONFIG.len() == 10, "ten of upstream's twelve, the two absent being ones it does not send here");
     ok(
         idx(TX_ANT_CONFIGURATION_CMD) == Some(0),
         "the antenna configuration goes first, since rates are expressed in chains",
@@ -356,7 +448,17 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 
     // --- the payloads -------------------------------------------------------
 
-    let f = Facts { tx_ant: 0b11, discrete: true, xtal_latency: 0, ltr_enabled: true, power_level: 0 };
+    let f = Facts {
+        tx_ant: 0b11,
+        discrete: true,
+        xtal_latency: 0,
+        ltr_enabled: true,
+        power_level: 0,
+        rx_ant: 0b11,
+        lar: true,
+        mcc_multi: true,
+        scan_cfg_ver: Some(5),
+    };
     let v = body(Body::TxAnt, &f);
     ok(u32::from_le_bytes([v[0], v[1], v[2], v[3]]) == 3, "the antenna mask is the NVM's, widened to a word");
     let v = body(Body::BtCoex, &f);
@@ -388,13 +490,17 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     let bare = super::fw::Image {
         human: String::new(), ver: 0, build: 0, sections: Vec::new(), cpus: None,
         capa: [0; super::fw::CAPA_WORDS], api: [0; super::fw::API_WORDS],
-        iml: None, records: Vec::new(),
+        iml: None, records: Vec::new(), cmd_versions: Vec::new(),
     };
     let unconditional = CONFIG.iter().filter(|s| s.gate == Gate::Always).count();
-    ok(unconditional == 5, "five of the seven are unconditional");
+    ok(unconditional == 5, "five of the ten are unconditional");
     ok(
-        CONFIG.iter().filter(|s| matches!(s.gate, Gate::Capa(_))).count() == 1,
-        "one is gated on a firmware capability",
+        CONFIG.iter().filter(|s| matches!(s.gate, Gate::Capa(_))).count() == 2,
+        "two are gated on a firmware capability",
+    );
+    ok(
+        CONFIG.iter().filter(|s| matches!(s.gate, Gate::Api(_) | Gate::Lar)).count() == 2,
+        "and two on an API revision and on the NVM's regulatory bit",
     );
     // The sleep policy is four zero bytes by default, and the zeroes are the
     // decision rather than an unfilled buffer.
@@ -442,16 +548,38 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 
     // --- what is missing, asserted as missing -------------------------------
 
-    // The sequence is seven of twelve and the count is the claim: a table that grew
-    // silently to twelve would pass every ordering claim above and still be a
-    // different sequence, so the shortfall is named where somebody will see it.
+    // The two that are not sent, asserted as not sent: a table that grew to
+    // twelve would be sending a command upstream skips on this part.
     ok(
-        CONFIG.len() < 12,
-        "the sequence is deliberately short of upstream's twelve, and the report says so",
+        !CONFIG.iter().any(|s| s.code == power::MAC_PM_POWER_TABLE),
+        "the per-station power table is not in the initialisation sequence",
     );
     ok(
-        Done { sent: 4, skipped: 2 }.say().contains("cannot scan yet"),
-        "and a successful run says the part still cannot scan",
+        CONFIG.iter().filter(|s| s.body == Body::Mcc).count() == 1
+            && idx(super::reg::MCC_UPDATE_CMD) < idx(SCAN_CFG_CMD),
+        "regulatory is asked once, and before the scan configuration that depends on it",
+    );
+    ok(
+        idx(TEMP_REPORTING_THRESHOLDS_CMD) > idx(LTR_CONFIG) && idx(TEMP_REPORTING_THRESHOLDS_CMD) < idx(power::POWER_TABLE_CMD),
+        "temperature thresholds sit between latency and the sleep policy, as init_hw has them",
+    );
+    ok(
+        Body::TempThresholds.len() == 20 && body(Body::TempThresholds, &f).iter().all(|&b| b == 0),
+        "the thresholds are twenty zero bytes, which hands thermal shutdown to the firmware",
+    );
+    let sc = body(Body::ScanConfig, &f);
+    ok(
+        sc.len() == 12 && sc[2] == 0 && sc[4] == 0b11 && sc[8] == 0b11,
+        "the scan configuration names the chains, and from version five no broadcast station",
+    );
+    ok(
+        body(Body::ScanConfig, &Facts { scan_cfg_ver: Some(4), ..f })[2] == 0xff
+            && body(Body::ScanConfig, &Facts { scan_cfg_ver: None, ..f })[2] == 0xff,
+        "below five, or undeclared, the broadcast station is 0xff",
+    );
+    ok(
+        body(Body::Mcc, &f)[0..3] == [0x5a, 0x5a, 0x10],
+        "regulatory asks for the world domain, by the newer source scheme where it is declared",
     );
 
     out
