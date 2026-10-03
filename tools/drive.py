@@ -692,7 +692,10 @@ def main():
     if fw_dst.is_dir():
         for old in fw_dst.iterdir():
             if old.name not in want:
-                old.unlink()
+                if old.is_dir():
+                    shutil.rmtree(old)
+                else:
+                    old.unlink()
     for name, src in want.items():
         target = fw_dst / name
         if not target.exists() or differs(src, target):
@@ -806,6 +809,14 @@ def main():
         for f in sorted((esp / 'GLADOS').iterdir()):
             if f.is_file():
                 g.children.append(mkiso.Entry(f.name, f.stat().st_size, f))
+            elif f.name == 'FW':
+                # The firmware directory too, or a guest booted this way has
+                # none while a VVFAT guest from the same tree does.
+                fw = mkiso.Entry('FW', 0)
+                for x in sorted(f.iterdir()):
+                    if x.is_file():
+                        fw.children.append(mkiso.Entry(x.name, x.stat().st_size, x))
+                g.children.append(fw)
         root.children.append(g)
 
         cluster = 512

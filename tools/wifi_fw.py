@@ -56,9 +56,23 @@ LICENCE_SOURCES = [
     SOURCE / LICENCE_NAME,
 ]
 
-# The highest firmware API the driver understands. Must equal `MAX_API` in
+# The API window the driver searches. Must equal `MIN_API`/`MAX_API` in
 # src/dev/iwx/mod.rs; the selftest checks.
 MAX_API = 89
+MIN_API = 50
+
+# What `dev::firmware` will read: past these it skips files in directory order,
+# which on the ISO is sorted order -- so an oversized set does not fail, it
+# quietly drops whichever images sort last, the GF63's among them. Must equal
+# the constants in src/dev/firmware.rs; the selftest checks.
+MAX_FILES = 24
+MAX_FILE = 8 << 20
+MAX_TOTAL = 32 << 20
+MAX_NAME = 64
+
+# What `stage` may delete from its destination. Anything else there was not put
+# there by this tool, and a `--dest` one directory too high is the model.
+OURS = re.compile(r"^(iwlwifi-[A-Za-z0-9-]+\.(ucode|pnvm)|" + re.escape("LICENCE.iwlwifi_firmware") + r")$")
 
 # Every base `iwx::firmware_base` can answer. Bz is absent because the driver
 # refuses that family; the 22000 bases are present because the driver names
@@ -101,7 +115,7 @@ def pick(base: str, names) -> str | None:
         if not m:
             continue
         api = int(m.group(1))
-        if api > MAX_API:
+        if api > MAX_API or api < MIN_API:
             continue
         if best is None or api > best[0] or (api == best[0] and m.group(2) is None):
             best = (api, n)
@@ -113,13 +127,37 @@ def plain_name(n: str) -> str:
 
 
 def decompress(src: Path, dst: Path):
-    if src.suffix == ".zst":
-        subprocess.run(["zstd", "-dqf", str(src), "-o", str(dst)], check=True)
-    elif src.suffix == ".xz":
-        with open(dst, "wb") as out:
-            subprocess.run(["xz", "-dc", str(src)], check=True, stdout=out)
-    else:
-        shutil.copyfile(src, dst)
+    """Into a temporary beside `dst`, then renamed: a corrupt input must not
+    destroy the good image already there."""
+    tmp = dst.with_name(dst.name + ".part")
+    try:
+        if src.suffix == ".zst":
+            subprocess.run(["zstd", "-dqf", str(src), "-o", str(tmp)], check=True)
+        elif src.suffix == ".xz":
+            with open(tmp, "wb") as out:
+                subprocess.run(["xz", "-dc", str(src)], check=True, stdout=out)
+        else:
+            shutil.copyfile(src, tmp)
+        tmp.replace(dst)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def over_limits(sizes: dict) -> list:
+    """What the kernel would refuse or skip, as sentences. Pure, for the selftest."""
+    out = []
+    if len(sizes) > MAX_FILES:
+        out.append(f"{len(sizes)} files, and the kernel reads {MAX_FILES}")
+    for n, sz in sizes.items():
+        if sz > MAX_FILE:
+            out.append(f"{n} is {sz:,} B, over the kernel's {MAX_FILE:,} per file")
+        if len(n) > MAX_NAME:
+            out.append(f"{n} is a longer name than the kernel's {MAX_NAME}")
+    total = sum(sizes.values())
+    if total > MAX_TOTAL:
+        out.append(f"{total:,} B in all, over the kernel's {MAX_TOTAL:,}")
+    return out
 
 
 def plan(source: Path, only=None):
@@ -144,32 +182,60 @@ def plan(source: Path, only=None):
 
 def cmd_stage(args) -> int:
     only = set(args.only) if args.only else None
-    files, missing = plan(Path(args.source), only)
+    if only:
+        unknown = sorted(only - set(BASES))
+        if unknown:
+            print(f"  not a base the driver names: {', '.join(unknown)}", file=sys.stderr)
+            return 1
+    source = Path(args.source)
+    if not source.is_dir():
+        print(f"  {source} is not a directory", file=sys.stderr)
+        return 1
     dest = Path(args.dest)
-    dest.mkdir(parents=True, exist_ok=True)
-    keep = set()
-    for src, name in files:
-        decompress(src, dest / name)
-        keep.add(name)
-        print(f"  {name:36} {(dest / name).stat().st_size:>10,} B")
+    # The destination is a firmware directory and nothing else: the prune below
+    # would otherwise take whatever lives beside the images.
+    if dest.is_symlink() or dest.name != "FW":
+        print(f"  refusing {dest}: the destination is a real directory named FW", file=sys.stderr)
+        return 1
     lic = next((p for p in LICENCE_SOURCES if p.is_file()), None)
     if lic is None:
         print(f"  no {LICENCE_NAME} on this host; refusing to stage images without it",
               file=sys.stderr)
         return 1
+    files, missing = plan(source, only)
+    if not files:
+        print(f"  no image for any base in {source}; nothing staged, nothing removed",
+              file=sys.stderr)
+        return 1
+    dest.mkdir(parents=True, exist_ok=True)
+    keep = set()
+    for src, name in files:
+        try:
+            decompress(src, dest / name)
+        except (subprocess.CalledProcessError, OSError) as e:
+            print(f"  {src} would not decompress ({e}); {dest / name} left as it was",
+                  file=sys.stderr)
+            return 1
+        keep.add(name)
+        print(f"  {name:36} {(dest / name).stat().st_size:>10,} B")
     shutil.copyfile(lic, dest / LICENCE_NAME)
     keep.add(LICENCE_NAME)
-    # Anything else in the directory goes: the kernel loads all of it, and an
-    # image this run did not choose is an image nobody chose.
-    for p in dest.iterdir():
-        if p.is_file() and p.name not in keep:
-            p.unlink()
-            print(f"  removed {p.name}, which this run did not choose")
+    # Anything else of ours in the directory goes: the kernel loads all of it,
+    # and an image this run did not choose is an image nobody chose. Not with
+    # `--for`, which adds one base to a set rather than replacing the set.
+    if not only:
+        for p in dest.iterdir():
+            if p.is_file() and p.name not in keep and OURS.match(p.name):
+                p.unlink()
+                print(f"  removed {p.name}, which this run did not choose")
     for b in missing:
-        print(f"  no image for {b} at API <= {MAX_API} in {args.source}")
-    total = sum((dest / n).stat().st_size for n in keep)
-    print(f"  {len(keep)} file(s), {total / 1e6:.1f} MB in {dest}")
-    return 0
+        print(f"  no image for {b} at API {MIN_API}..={MAX_API} in {source}")
+    sizes = {p.name: p.stat().st_size for p in dest.iterdir() if p.is_file()}
+    print(f"  {len(sizes)} file(s), {sum(sizes.values()) / 1e6:.1f} MB in {dest}")
+    bad = over_limits(sizes)
+    for line in bad:
+        print(f"  {line}", file=sys.stderr)
+    return 1 if bad else 0
 
 
 def cmd_record(args) -> int:
@@ -180,21 +246,39 @@ def cmd_record(args) -> int:
     if not entries:
         print(f"  {dest} is empty; run 'stage' first", file=sys.stderr)
         return 1
+    # Release assets are flat and the kernel reads one directory, so a nested
+    # name is a line no CI download could ever verify.
+    stray = [e[0] for e in entries if "/" in e[0] or not OURS.match(e[0])]
+    if stray or not (dest / LICENCE_NAME).is_file():
+        print(f"  refusing {dest}: it must be flat, hold only images, and carry {LICENCE_NAME}",
+              file=sys.stderr)
+        for n in stray:
+            print(f"    not firmware: {n}", file=sys.stderr)
+        return 1
+    manifest = Path(args.manifest)
     text = payload.render(entries).replace(
         "# Written by tools/payload.py. The bytes an ISO build must fetch\n"
         "# before it can run mkiso.py, and what they have to hash to.",
         "# Written by tools/wifi_fw.py, in payload.py's format: wireless firmware\n"
         "# for \\GLADOS\\FW\\, redistributable in binary form on condition the\n"
         "# licence beside it travels with it.")
-    MANIFEST.write_text(text, encoding="utf-8")
-    print(f"  wrote {MANIFEST}, {len(entries)} file(s)")
+    manifest.write_text(text, encoding="utf-8")
+    print(f"  wrote {manifest}, {len(entries)} file(s)")
     return 0
 
 
+def kernel_const(path: str, name: str):
+    """A numeric constant out of the kernel source, `8 << 20` included."""
+    src = (ROOT / path).read_text(encoding="utf-8")
+    m = re.search(r"const " + name + r": \w+ = ([0-9 <]+);", src)
+    if not m:
+        return None
+    parts = [int(x) for x in m.group(1).split("<<")]
+    return parts[0] << parts[1] if len(parts) == 2 else parts[0]
+
+
 def kernel_max_api():
-    src = (ROOT / "src" / "dev" / "iwx" / "mod.rs").read_text(encoding="utf-8")
-    m = re.search(r"pub const MAX_API: u32 = (\d+);", src)
-    return int(m.group(1)) if m else None
+    return kernel_const("src/dev/iwx/mod.rs", "MAX_API")
 
 
 def selftest() -> int:
@@ -221,6 +305,23 @@ def selftest() -> int:
           pick("so-a0-hr-b0", [f"iwlwifi-so-a0-hr-b0-{n}.ucode.zst" for n in (72, 86, 89)])
           == "iwlwifi-so-a0-hr-b0-89.ucode.zst")
     claim("the ceiling here is the kernel's ceiling", kernel_max_api() == MAX_API)
+    claim("and the floor is the kernel's floor",
+          kernel_const("src/dev/iwx/mod.rs", "MIN_API") == MIN_API)
+    claim("an image below the floor is one the kernel never asks for",
+          pick("cc-a0", ["iwlwifi-cc-a0-46.ucode"]) is None)
+    fw = "src/dev/firmware.rs"
+    claim("the limits here are the firmware store's limits",
+          (kernel_const(fw, "MAX_FILES"), kernel_const(fw, "MAX_FILE"),
+           kernel_const(fw, "MAX_TOTAL"), kernel_const(fw, "MAX_NAME"))
+          == (MAX_FILES, MAX_FILE, MAX_TOTAL, MAX_NAME))
+    claim("a set the kernel would cut short is reported",
+          over_limits({f"f{i}": 1 for i in range(MAX_FILES + 1)}) != []
+          and over_limits({"a": MAX_TOTAL // 2, "b": MAX_TOTAL // 2 + 1}) != []
+          and over_limits({"a": 1}) == [])
+    claim("the prune touches images and the licence and nothing else",
+          OURS.match("iwlwifi-so-a0-hr-b0-89.ucode") and OURS.match("iwlwifi-ty-a0-gf-a0.pnvm")
+          and OURS.match(LICENCE_NAME) and not OURS.match("model.bin")
+          and not OURS.match("roots.der") and not OURS.match("iwlwifi-x.ucode.part"))
 
     with tempfile.TemporaryDirectory() as td:
         src = Path(td) / "src"
@@ -251,6 +352,7 @@ def main() -> int:
     s.add_argument("--for", dest="only", action="append", metavar="BASE")
     r = sub.add_parser("record")
     r.add_argument("--dest", default=str(DEST))
+    r.add_argument("--manifest", default=str(MANIFEST))
     args = ap.parse_args()
     return cmd_stage(args) if args.cmd == "stage" else cmd_record(args)
 
