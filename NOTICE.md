@@ -70,7 +70,18 @@ in full when the hardware it served stopped working.
 
 ## Firmware
 
-Intel's wireless firmware (`iwlwifi-so-a0-hr-b0-*.ucode`) is **not in this
-repository and is not redistributed by it**. It is loaded at runtime from wherever
-the operator has put it, under Intel's own redistribution terms, exactly as no
-model weights and no game data are in this repository either.
+Intel's wireless firmware (`iwlwifi-*.ucode` and `.pnvm`) is **not in this
+repository**, exactly as no model weights and no game data are. It is loaded at
+runtime from `\GLADOS\FW\` on the boot volume, or from `/fw/` in the namespace.
+
+**The install image does carry it**, and does so under Intel's own terms:
+`LICENCE.iwlwifi_firmware` permits redistribution and use in binary form,
+without modification, provided the licence is reproduced with it. So the
+images on the ISO are byte-for-byte what `linux-firmware` ships (each is
+recorded by digest in `payload/firmware.txt`), and the licence is placed
+beside them in `\GLADOS\FW\` -- `tools/mkiso.py` refuses to build an image
+with firmware and no licence, and `tools/wifi_fw.py stage` copies it in.
+
+The firmware is not covered by this tree's licence and is not open source; it
+is a binary Intel permits to be passed on unchanged, which is the whole of
+what is done with it here.

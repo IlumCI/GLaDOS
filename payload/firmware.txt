@@ -1,0 +1,22 @@
+# payload manifest -- sha256, size, name
+#
+# Written by tools/wifi_fw.py, in payload.py's format: wireless firmware
+# for \GLADOS\FW\, redistributable in binary form on condition the
+# licence beside it travels with it.
+16d5040c7cf851fc693b7542e20870935b99802533ea1bfd231c377a2305e5c5  2046  LICENCE.iwlwifi_firmware
+2d3dd82853e1f5859de168fc4c3e2078703cb5c62c38ae39658c28ca5b664443  1406576  iwlwifi-Qu-b0-hr-b0-77.ucode
+4f19e5786f3acfb8f923bb50bce78a1b6c618906a81286bf806e1adf0d6376c1  1323296  iwlwifi-Qu-b0-jf-b0-77.ucode
+73b622e56919f0e8707448458b1ac44c5bdb19cdec40cf64f1afda030411ed17  1406592  iwlwifi-Qu-c0-hr-b0-77.ucode
+a4d173d7334226c035b744dec3e53a2c52a82e05b0ed45188d5af8c66b961bc9  1323312  iwlwifi-Qu-c0-jf-b0-77.ucode
+8e80445e8b4871492c6b690d30118cbef548cd9e0518f70e73a6f3875b7e9602  1406720  iwlwifi-QuZ-a0-hr-b0-77.ucode
+d30d8265ea712a4312628885b3653dd252cc8ae4fc6cbe243be31d954a4aaad2  1323320  iwlwifi-QuZ-a0-jf-b0-77.ucode
+94f5fb915f2074f98059365e11cca313e25a6fa3b7cd6772e80b3ba5edfb966b  1368100  iwlwifi-cc-a0-77.ucode
+c81896a8b647ba8ceb25c09d7d6b6eef20b635d97946da65cec1a84cbb13d2a4  1752976  iwlwifi-ma-b0-gf-a0-89.ucode
+acc171641bbe1be9b0d71cf084b9c5ff6f13c230728933bc84dbb0b301c6f949  55096  iwlwifi-ma-b0-gf-a0.pnvm
+2a84db6d15b23949ffa32d79b706d7f4485314330d5d5c830a94a2133f236c44  1539836  iwlwifi-ma-b0-hr-b0-89.ucode
+698c913f938d9a8adce7ab9c049b1cd37daaa7473d8185f93e98f22733092f6b  1737012  iwlwifi-so-a0-gf-a0-89.ucode
+776606c7b5d0f582b5ec78a591fb1e5e621a6efa670e8261f29114bbf1b0f8d1  55176  iwlwifi-so-a0-gf-a0.pnvm
+27450fbc84198ec9288f749223e329e88d9beae9c7a7efa27b295123e8a21daf  1527004  iwlwifi-so-a0-hr-b0-89.ucode
+9dccba0a8ba98483cb8385398d013b693b5b37cbff9402763ba215cc4921386c  1446036  iwlwifi-so-a0-jf-b0-77.ucode
+cd4f8fe2242c115cf8687878c2534fbb436fbaa7172f49a1f69952a23c686ac9  1679080  iwlwifi-ty-a0-gf-a0-89.ucode
+cc4c0de4593292490459f1aa8c1606ea370a0307f5be9089ef99a0aa8e36be7a  55020  iwlwifi-ty-a0-gf-a0.pnvm

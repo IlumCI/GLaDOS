@@ -545,6 +545,30 @@ def main():
         for f in files:
             g.children.append(Entry(f.name, f.stat().st_size, f))
             payload_bytes += f.stat().st_size
+        # Device firmware, which `dev::firmware` reads out of \GLADOS\FW\.
+        # Held to the same allowlist -- `payload/firmware.txt` names every
+        # image, written by tools/wifi_fw.py -- and to the same rule about
+        # licences, for the same reason: the images are redistributable in
+        # binary form on condition that the notice travels with them, so a
+        # disc carrying them without it is a disc that should not exist.
+        fwdir = pdir / 'FW'
+        if fwdir.is_dir():
+            fws = [f for f in sorted(fwdir.iterdir()) if f.is_file()]
+            stray = [f.name for f in fws if f.name not in allowed]
+            if stray:
+                raise SystemExit(
+                    'not declared firmware: ' + ', '.join(sorted(stray)) + chr(10)
+                    + '  tools/wifi_fw.py stage, then record, writes payload/firmware.txt.')
+            if fws and not any(f.name.upper().startswith('LICENCE') for f in fws):
+                raise SystemExit(
+                    'firmware in ' + str(fwdir) + ' with no licence beside it' + chr(10)
+                    + '  tools/wifi_fw.py stage copies LICENCE.iwlwifi_firmware in.')
+            fw = Entry('FW', 0)
+            for f in fws:
+                fw.children.append(Entry(f.name, f.stat().st_size, f))
+                payload_bytes += f.stat().st_size
+            if fw.children:
+                g.children.append(fw)
         root.children.append(g)
 
     # FAT32 is *defined* as having at least 65525 clusters -- below that the
