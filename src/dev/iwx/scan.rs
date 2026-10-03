@@ -32,6 +32,8 @@ use alloc::vec::Vec;
 
 pub const SCAN_REQ_UMAC: u8 = 0x0d;
 pub const SCAN_COMPLETE_UMAC: u8 = 0x0f;
+/// Call a scan off. Eight bytes: the scan's uid, then reserved flags.
+pub const SCAN_ABORT_UMAC: u8 = 0x0e;
 pub const SCAN_ITERATION_COMPLETE_UMAC: u8 = 0xb5;
 
 /// The only layout written.
@@ -100,6 +102,9 @@ pub struct Request<'a> {
     pub band_5: bool,
     /// Whether the firmware wants a DS parameter element in the template.
     pub ds_param: bool,
+    /// How many channels the firmware takes in one request: its declared
+    /// count, which may be less than the request's room for sixty-seven.
+    pub max_channels: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -188,7 +193,7 @@ pub fn request(declared: Option<u8>, r: &Request) -> Result<Vec<u8>, Refused> {
         .iter()
         .copied()
         .filter(|&c| c != 0 && (c <= 14 || r.band_5))
-        .take(MAX_CHANNELS)
+        .take(MAX_CHANNELS.min(r.max_channels))
         .collect();
     if chans.is_empty() {
         return Err(Refused::NoChannels);
@@ -301,7 +306,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     ));
 
     let me = [2, 0, 0, 0, 0, 0x11];
-    let passive = Request { mac: me, channels: &[1, 6, 11, 36, 52], ssid: b"", band_5: true, ds_param: true };
+    let passive = Request { mac: me, channels: &[1, 6, 11, 36, 52], ssid: b"", band_5: true, ds_param: true, max_channels: MAX_CHANNELS };
     let v = request(Some(17), &passive);
     out.push(("a version-17 image gets a request", v.as_ref().map(|v| v.len()) == Ok(LEN)));
     out.push((
@@ -353,7 +358,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             seg(3) == (0, 0) && seg(4) == (26 + 19 + 10, 0),
         ));
     }
-    let named = Request { mac: me, channels: &[6], ssid: b"glados", band_5: false, ds_param: false };
+    let named = Request { mac: me, channels: &[6], ssid: b"glados", band_5: false, ds_param: false, max_channels: MAX_CHANNELS };
     if let Ok(v) = request(Some(17), &named) {
         let flags = u16::from_le_bytes([v[at::GENERAL], v[at::GENERAL + 1]]);
         let e = at::CHANNELS + 4;
@@ -367,12 +372,20 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     }
     out.push((
         "a part without 5 GHz is not asked to visit it, and an empty plan is refused",
-        request(Some(17), &Request { mac: me, channels: &[36, 40], ssid: b"", band_5: false, ds_param: false })
+        request(Some(17), &Request { mac: me, channels: &[36, 40], ssid: b"", band_5: false, ds_param: false, max_channels: MAX_CHANNELS })
             == Err(Refused::NoChannels),
     ));
+    {
+        let many: Vec<u8> = (1..=14).collect();
+        let v = request(Some(17), &Request { mac: me, channels: &many, ssid: b"", band_5: false, ds_param: false, max_channels: 3 });
+        out.push((
+            "a firmware declaring fewer scan channels than the request holds is sent no more than it declared",
+            v.as_ref().map(|v| v[at::CHANNELS + 1]).ok() == Some(3),
+        ));
+    }
     out.push((
         "an SSID past thirty-two bytes is refused",
-        request(Some(17), &Request { mac: me, channels: &[1], ssid: &[b'x'; 33], band_5: false, ds_param: false })
+        request(Some(17), &Request { mac: me, channels: &[1], ssid: &[b'x'; 33], band_5: false, ds_param: false, max_channels: MAX_CHANNELS })
             == Err(Refused::LongSsid),
     ));
     let mut complete = [0u8; 16];

@@ -95,29 +95,62 @@ impl Regulatory {
     }
 }
 
-/// Read the reply: a twenty-byte header (`LAR_UPDATE_MCC_CMD_RESP_S_VER_4`, which
-/// both of upstream's response structs actually are), then a word per channel.
+/// Which reply layout the firmware sends.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Layout {
+    /// `LAR_UPDATE_MCC_CMD_RESP_S_VER_3`: sixteen bytes, the count at twelve.
+    V3,
+    /// Version 4: twenty bytes, the count at sixteen. Firmware declaring
+    /// `MCC_UPDATE_11AX_SUPPORT` sends this one, the GF63's among them.
+    V4,
+}
+
+impl Layout {
+    /// Chosen by the capability, which is the rule Linux keeps. OpenBSD reads
+    /// version 4 on both of its branches, which is right for every image it has
+    /// met and wrong for one without the bit: four bytes of channel map read as
+    /// header, and every channel after shifted by one.
+    pub fn of(image: &super::fw::Image) -> Layout {
+        if image.has_capa(super::fw::capa::MCC_UPDATE_11AX_SUPPORT) {
+            Layout::V4
+        } else {
+            Layout::V3
+        }
+    }
+
+    fn header(self) -> usize {
+        match self {
+            Layout::V3 => 16,
+            Layout::V4 => 20,
+        }
+    }
+}
+
+/// The reply versions this reads. Upstream refuses eight and above.
+pub const MAX_REPLY_VER: u8 = 7;
+
+/// Read the reply: a header (`Layout`), then a word per channel.
 ///
 /// The count in the header is checked against the length, as upstream checks it:
 /// a reply whose words do not add up is refused rather than walked, because the
 /// channel words are the tail and a wrong count is a map read from the wrong
 /// bytes. `band_5` is the NVM's own SKU bit, and a part fused without 5 GHz has
 /// its 5 GHz channels cleared whatever the reply says, which is upstream's rule.
-pub fn response(payload: &[u8], band_5: bool) -> Option<Regulatory> {
-    const HDR: usize = 20;
-    if payload.len() < HDR {
+pub fn response(payload: &[u8], band_5: bool, layout: Layout) -> Option<Regulatory> {
+    let hdr = layout.header();
+    if payload.len() < hdr {
         return None;
     }
     let le32 = |at: usize| u32::from_le_bytes([payload[at], payload[at + 1], payload[at + 2], payload[at + 3]]);
     let status = le32(0);
     let mcc = u16::from_le_bytes([payload[4], payload[5]]);
-    let n = le32(16);
-    if payload.len() != HDR + n as usize * 4 {
+    let n = le32(hdr - 4);
+    if (payload.len() - hdr) as u64 != n as u64 * 4 {
         return None;
     }
     let mut channels = Vec::new();
     for i in 0..(n as usize).min(N_24 + N_5) {
-        let flags = le32(HDR + i * 4);
+        let flags = le32(hdr + i * 4);
         if flags & CH_VALID == 0 || (i >= N_24 && !band_5) {
             continue;
         }
@@ -153,7 +186,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     for w in &words {
         p.extend_from_slice(&w.to_le_bytes());
     }
-    let reg = response(&p, true);
+    let reg = response(&p, true, Layout::V4);
     out.push((
         "a reply's valid channels are read by position, with their flags",
         reg.as_ref().map(|r| r.channels.clone())
@@ -174,11 +207,23 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     ));
     out.push((
         "a part fused without 5 GHz keeps none, whatever the reply says",
-        response(&p, false).map(|r| r.channels.iter().all(|c| c.number <= 14)) == Some(true),
+        response(&p, false, Layout::V4).map(|r| r.channels.iter().all(|c| c.number <= 14)) == Some(true),
     ));
     let mut short = p.clone();
     short.truncate(p.len() - 4);
-    out.push(("a reply whose count and length disagree is refused", response(&short, true).is_none()));
-    out.push(("and one too short for its header", response(&p[..12], true).is_none()));
+    out.push(("a reply whose count and length disagree is refused", response(&short, true, Layout::V4).is_none()));
+    out.push(("and one too short for its header", response(&p[..12], true, Layout::V4).is_none()));
+    // The same map in the sixteen-byte layout: the count moves to twelve, and
+    // every word moves up four.
+    let mut v3 = p[..12].to_vec();
+    v3.extend_from_slice(&p[16..]);
+    out.push((
+        "a version-3 reply is read with its own header, to the same channels",
+        response(&v3, true, Layout::V3).map(|r| r.channels) == reg.as_ref().map(|r| r.channels.clone()),
+    ));
+    out.push((
+        "and read as version 4 it does not add up, so it is refused rather than shifted",
+        response(&v3, true, Layout::V4).is_none(),
+    ));
     out
 }

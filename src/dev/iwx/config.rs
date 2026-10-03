@@ -84,25 +84,75 @@ const CAPA_LAR_MULTI_MCC: usize = 29;
 /// because arbitration needs a Bluetooth stack to arbitrate with and there is none.
 pub const BT_COEX_WIFI: u32 = 0x3;
 
-/// The part is a discrete card rather than one in the chipset.
-///
-/// **Set for `8086:51f0`, which reads oddly and is upstream's own answer.** That
-/// id is a PCH function, so "discrete" is the last word anybody would choose for
-/// it -- and `iwx`'s product table sets `sc_integrated = 0` for it, which takes the
-/// version-1 branch of this command and sends exactly this flag. Followed rather
-/// than corrected: the alternative is guessing that a field named `integrated`
-/// means what the English word means, against a table written by people with the
-/// part in front of them.
-///
-/// **The two references disagree here, and this is the first suspect if the
-/// part goes quiet after SOC_CONFIGURATION.** OpenBSD files `0x51f0` as
-/// `WL_22500_11` -- discrete, no LTR delay, crystal latency 0 -- while Linux
-/// gives the same id its long-latency transport configuration: integrated, a
-/// 2500 us LTR delay, low-latency crystal, latency 12000. Not verified against
-/// Linux's source in this tree, so OpenBSD's answer stands as the one with a
-/// citation; the alternative is the row OpenBSD uses for `0x51f1`, which is
-/// exactly Linux's figures.
+/// The part is a discrete card rather than one in the chipset. Sent alone, as
+/// the command's version-1 integer, and only for a discrete part.
 pub const SOC_CONFIG_DISCRETE: u32 = 1 << 0;
+/// The crystal is the slow-to-settle kind, so the firmware should allow for it.
+pub const SOC_CONFIG_LOW_LATENCY: u32 = 1 << 1;
+/// Where the LTR apply delay sits in the flags: two bits, **shifted by two**.
+pub const SOC_LTR_DELAY_SHIFT: u32 = 2;
+pub const SOC_LTR_DELAY_MASK: u32 = 0xc;
+
+/// How a part sits on the platform, which is what SOC_CONFIGURATION tells the
+/// firmware.
+///
+/// **For `8086:51f0` this was wrong, and the reference was the reason.** OpenBSD
+/// files that id as `WL_22500_11` beside the discrete AX210 cards -- no LTR
+/// delay, crystal latency 0, the DISCRETE flag -- and this driver followed it.
+/// Intel's own Linux driver gives `0x51F0` `iwl_so_long_latency_mac_cfg`:
+/// integrated, low-latency crystal, 12000, a 2500 us LTR delay. The part is a
+/// CNVi function in the PCH, which is what "integrated" means, and OpenBSD files
+/// the same silicon under `0x51f1` exactly that way. Telling the firmware a
+/// long-latency crystal settles fast is the kind of mistake that works on the
+/// bench and drops the link the first time the platform sleeps.
+///
+/// **And OpenBSD encodes the delay without its shift**: `flags |= delay & 0xc`,
+/// where 2500 us is 2 -- so the delay it sends is zero. Linux encodes it into
+/// the mask (`le32_encode_bits`), which puts 2 at bit 3. The shift is followed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Soc {
+    pub integrated: bool,
+    /// 0 none, 1 200 us, 2 2500 us, 3 1820 us, as the firmware numbers them.
+    pub ltr_delay: u8,
+    pub low_latency_xtal: bool,
+    pub xtal_latency: u32,
+}
+
+impl Soc {
+    /// By product id, after Linux's `pcie/drv.c` and `cfg/ax210.c` for the
+    /// AX210 family. Anything else is the discrete default, which is what a
+    /// firmware that is told nothing better assumes.
+    pub fn for_device(device: u16) -> Soc {
+        const DISCRETE: Soc = Soc { integrated: false, ltr_delay: 0, low_latency_xtal: false, xtal_latency: 0 };
+        match device {
+            // Typhoon Peak and its sibling, the discrete cards.
+            0x2725 | 0x2726 => Soc { xtal_latency: 500, ..DISCRETE },
+            // Snow Owl in the PCH with the long-latency crystal: the GF63's.
+            0x51f0 | 0x51f1 | 0x54f0 | 0x7a70 => {
+                Soc { integrated: true, ltr_delay: 2, low_latency_xtal: true, xtal_latency: 12000 }
+            }
+            // Snow Owl in the PCH, ordinary crystal.
+            0x7af0 | 0x7f70 => Soc { integrated: true, ltr_delay: 1, low_latency_xtal: false, xtal_latency: 500 },
+            // Ma: integrated, and nothing else said.
+            0x7e40 | 0x2729 => Soc { integrated: true, ..DISCRETE },
+            _ => DISCRETE,
+        }
+    }
+
+    /// The command's flags word. `scan_ver` gates the low-latency bit, as both
+    /// references gate it: a firmware whose scan request predates version 2 does
+    /// not know the bit.
+    pub fn flags(&self, scan_ver: Option<u8>) -> u32 {
+        if !self.integrated {
+            return SOC_CONFIG_DISCRETE;
+        }
+        let mut f = ((self.ltr_delay as u32) << SOC_LTR_DELAY_SHIFT) & SOC_LTR_DELAY_MASK;
+        if self.low_latency_xtal && scan_ver.is_some_and(|v| v >= 2) {
+            f |= SOC_CONFIG_LOW_LATENCY;
+        }
+        f
+    }
+}
 
 /// Turn the latency-tolerance feature on. The rest of that command's thirty-two
 /// bytes stay zero.
@@ -133,8 +183,10 @@ pub enum Gate {
     /// property at all, which is why it is its own gate rather than a capability
     /// bit -- the answer is in config space.
     LtrEnabled,
-    /// Only when the firmware declares an API revision.
-    Api(usize),
+    /// The firmware must declare this API revision, and initialisation fails if
+    /// it does not -- upstream's ENOTSUP. A skipped scan configuration is a part
+    /// that then refuses every scan for a reason nothing on this side records.
+    Requires(usize),
     /// Only when the NVM says the firmware owns regulatory.
     Lar,
 }
@@ -223,7 +275,7 @@ pub const CONFIG: &[Step] = &[
         group: LONG_GROUP,
         code: SCAN_CFG_CMD,
         body: Body::ScanConfig,
-        gate: Gate::Api(super::fw::api::REDUCED_SCAN_CONFIG),
+        gate: Gate::Requires(super::fw::api::REDUCED_SCAN_CONFIG),
     },
     // Last, as upstream has it.
     Step { group: 0, code: REPLY_BEACON_FILTERING_CMD, body: Body::BeaconFilterOff, gate: Gate::Always },
@@ -234,10 +286,10 @@ pub const CONFIG: &[Step] = &[
 pub struct Facts {
     /// Which transmit chains, out of the NVM.
     pub tx_ant: u8,
-    /// Whether this part is described as discrete. Upstream's flag for `8086:51f0`.
-    pub discrete: bool,
-    /// The crystal latency, which is zero on this part.
-    pub xtal_latency: u32,
+    /// How the part sits on the platform, by product id.
+    pub soc: Soc,
+    /// The scan request's declared version, which gates one SOC flag.
+    pub scan_ver: Option<u8>,
     /// Whether the PCIe function says latency tolerance is on.
     pub ltr_enabled: bool,
     /// How much the radio may sleep. Zero, and `power.rs` argues for zero: a
@@ -278,9 +330,8 @@ pub fn body(b: Body, f: &Facts) -> Vec<u8> {
             // having something to coexist with, and there is no Bluetooth stack.
         }
         Body::Soc => {
-            let flags = if f.discrete { SOC_CONFIG_DISCRETE } else { 0 };
-            v[0..4].copy_from_slice(&flags.to_le_bytes());
-            v[4..8].copy_from_slice(&f.xtal_latency.to_le_bytes());
+            v[0..4].copy_from_slice(&f.soc.flags(f.scan_ver).to_le_bytes());
+            v[4..8].copy_from_slice(&f.soc.xtal_latency.to_le_bytes());
         }
         Body::Dqa => v[0..4].copy_from_slice(&(cmd::CMD_QUEUE).to_le_bytes()),
         Body::Ltr => v[0..4].copy_from_slice(&LTR_CFG_FLAG_FEATURE_ENABLE.to_le_bytes()),
@@ -308,6 +359,8 @@ pub enum Fault {
     /// The regulatory reply did not parse: its count and its length disagreed,
     /// or it was too short to hold a header.
     BadRegulatory(usize),
+    /// The firmware lacks an API revision a step requires.
+    Unsupported(usize),
 }
 
 impl Fault {
@@ -320,6 +373,10 @@ impl Fault {
                 ),
                 None => alloc::format!("configuration step {}: {}", i, e.why()),
             },
+            Fault::Unsupported(i) => alloc::format!(
+                "configuration step {} needs an API this firmware does not declare",
+                i
+            ),
             Fault::BadRegulatory(n) => alloc::format!(
                 "the regulatory reply was {} bytes and did not parse, so no channel is known to be usable",
                 n
@@ -348,9 +405,12 @@ impl Done {
 
 /// Send the sequence.
 ///
-/// **No replies are waited for.** Every one of these is a command firmware
-/// acknowledges by acting rather than by answering, and upstream sends them with
-/// no response buffer. A driver waiting for one would hang on the first.
+/// **Every step waits for its completion**, which is upstream's behaviour and
+/// what this used to deny: `iwx_send_cmd` without `ASYNC` sleeps until the part
+/// answers the command's slot, and fails init on a timeout or on CMD_FAILED. The
+/// earlier note here said waiting would hang, and was wrong -- the part completes
+/// every command it is sent, answered or not. Not waiting meant a refused SOC or
+/// scan configuration surfaced, if at all, as a scan that never worked.
 ///
 /// # Safety
 /// `bar0` must be a mapped aperture for a part whose firmware is alive and which
@@ -371,7 +431,12 @@ pub unsafe fn configure(
         let allowed = match s.gate {
             Gate::Always => true,
             Gate::Capa(n) => image.has_capa(n),
-            Gate::Api(n) => image.has_api(n),
+            Gate::Requires(n) => {
+                if !image.has_api(n) {
+                    return Err(Fault::Unsupported(i));
+                }
+                true
+            }
             Gate::LtrEnabled => f.ltr_enabled,
             Gate::Lar => f.lar,
         };
@@ -381,16 +446,23 @@ pub unsafe fn configure(
         }
         let payload = body(s.body, f);
         if s.body == Body::Mcc {
+            // Upstream refuses a reply version it does not know the shape of,
+            // before sending, rather than misreading one after.
+            if image.notif_ver(LONG_GROUP, s.code).is_some_and(|v| v > super::reg::MAX_REPLY_VER) {
+                return Err(Fault::Unsupported(i));
+            }
             // The one step answered rather than acted on, so the one step that
             // waits. Two seconds, which is generous for a command firmware
             // answers out of a table it already holds.
             let reply = cmd::ask_with(bar0, rings, bufs, rx, q, s.group, s.code, 0, &payload, 2000, aside)
                 .map_err(|e| Fault::At(i, e))?;
             d.regulatory = Some(
-                super::reg::response(reply.payload, band_5).ok_or(Fault::BadRegulatory(reply.payload.len()))?,
+                super::reg::response(reply.payload, band_5, super::reg::Layout::of(image)).ok_or(Fault::BadRegulatory(reply.payload.len()))?,
             );
         } else {
-            q.send(bar0, rings, s.group, s.code, 0, &payload).map_err(|e| Fault::At(i, e))?;
+            // One second, upstream's sync timeout.
+            cmd::ask_with(bar0, rings, bufs, rx, q, s.group, s.code, 0, &payload, 1000, aside)
+                .map_err(|e| Fault::At(i, e))?;
         }
         d.sent += 1;
     }
@@ -459,8 +531,8 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 
     let f = Facts {
         tx_ant: 0b11,
-        discrete: true,
-        xtal_latency: 0,
+        soc: Soc::for_device(0x2725),
+        scan_ver: Some(17),
         ltr_enabled: true,
         power_level: 0,
         rx_ant: 0b11,
@@ -476,13 +548,22 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         u32::from_le_bytes([v[4], v[5], v[6], v[7]]) == 0,
         "with no modules enabled, there being no Bluetooth stack to coexist with",
     );
+    let word = |v: &[u8], at: usize| u32::from_le_bytes([v[at], v[at + 1], v[at + 2], v[at + 3]]);
     let v = body(Body::Soc, &f);
+    ok(word(&v, 0) == SOC_CONFIG_DISCRETE && word(&v, 4) == 500, "a discrete card sends that flag alone, and its latency");
+    let v = body(Body::Soc, &Facts { soc: Soc::for_device(0x51f0), ..f });
     ok(
-        u32::from_le_bytes([v[0], v[1], v[2], v[3]]) == SOC_CONFIG_DISCRETE,
-        "a part upstream calls discrete sends that flag",
+        word(&v, 0) == 0xa && word(&v, 4) == 12000,
+        "the GF63's part is integrated with a long-latency crystal: LTR 2500 at bit 3, low latency, 12000",
     );
-    let v = body(Body::Soc, &Facts { discrete: false, ..f });
-    ok(u32::from_le_bytes([v[0], v[1], v[2], v[3]]) == 0, "and one it does not sends none");
+    ok(
+        Soc::for_device(0x51f0).flags(Some(1)) == 0x8,
+        "and a scan request older than version 2 does not get the low-latency bit",
+    );
+    ok(
+        Soc::for_device(0x7af0).flags(Some(17)) == 0x4 && Soc::for_device(0x7e40).flags(Some(17)) == 0,
+        "the delay is shifted into its mask, not masked unshifted -- 2500 us is not zero",
+    );
     let v = body(Body::Ltr, &f);
     ok(
         u32::from_le_bytes([v[0], v[1], v[2], v[3]]) == 1 && v[4..].iter().all(|&b| b == 0),
@@ -500,6 +581,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         human: String::new(), ver: 0, build: 0, sections: Vec::new(), cpus: None,
         capa: [0; super::fw::CAPA_WORDS], api: [0; super::fw::API_WORDS],
         iml: None, records: Vec::new(), cmd_versions: Vec::new(),
+        phy_config: None, n_scan_channels: None,
     };
     let unconditional = CONFIG.iter().filter(|s| s.gate == Gate::Always).count();
     ok(unconditional == 5, "five of the ten are unconditional");
@@ -508,8 +590,8 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         "two are gated on a firmware capability",
     );
     ok(
-        CONFIG.iter().filter(|s| matches!(s.gate, Gate::Api(_) | Gate::Lar)).count() == 2,
-        "and two on an API revision and on the NVM's regulatory bit",
+        CONFIG.iter().filter(|s| matches!(s.gate, Gate::Requires(_) | Gate::Lar)).count() == 2,
+        "and two on an API revision the firmware must have and on the NVM's regulatory bit",
     );
     // The sleep policy is four zero bytes by default, and the zeroes are the
     // decision rather than an unfilled buffer.

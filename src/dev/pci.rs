@@ -277,10 +277,30 @@ pub fn set_d0(ecam: u64, d: &Device) -> Option<u8> {
     let csr = cfg_read32(ecam, d, pm + 4);
     let was = (csr & 0b11) as u8;
     if was != 0 {
+        // **D3hot to D0 resets the function unless it says it will not.** With
+        // No_Soft_Reset (bit 3) clear the transition is a reset: BARs, the
+        // command register and the interrupt line come back as power-on
+        // defaults, and a caller holding the address it read before would map
+        // nothing. So the header is saved first and put back after, which is
+        // what the specification asks of system software in exactly this case.
+        // Intel's radios usually set the bit; a generic helper cannot assume so.
+        let soft_reset = was == 3 && csr & (1 << 3) == 0;
+        let saved: [u32; 6] = core::array::from_fn(|i| cfg_read32(ecam, d, 0x10 + 4 * i as u64));
+        let cmd = cfg_read32(ecam, d, 0x04) & 0xffff;
+        let line = cfg_read32(ecam, d, 0x3c);
         // Bit 15 is PME status, write-one-to-clear: writing it back as read
         // would clear a wake event somebody else may be waiting on.
         cfg_write32(ecam, d, pm + 4, csr & !0b11 & !(1 << 15));
         crate::time::delay_us(10_000);
+        if soft_reset {
+            for (i, v) in saved.iter().enumerate() {
+                cfg_write32(ecam, d, 0x10 + 4 * i as u64, *v);
+            }
+            cfg_write32(ecam, d, 0x3c, line);
+            // The command register last: decoding turned on before the BARs are
+            // back would decode whatever the reset left in them.
+            cfg_write32(ecam, d, 0x04, cmd);
+        }
     }
     Some(was)
 }

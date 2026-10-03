@@ -151,7 +151,7 @@ pub unsafe fn handshake(
                 }
                 super::gen3::prph_write(bar0, super::gen3::umac_prph(UREG_DOORBELL_TO_ISR6), DOORBELL_PNVM);
                 super::gen3::unlock(bar0);
-                cmd::expect(bar0, rings, bufs, rx, REGULATORY_AND_NVM_GROUP, PNVM_INIT_COMPLETE, ms)
+                cmd::expect(bar0, rings, bufs, rx, q, REGULATORY_AND_NVM_GROUP, PNVM_INIT_COMPLETE, ms)
                     .map_err(|e| Fault::At(i, e))?;
             }
             Step::Tell { group, code, flags } => {
@@ -161,7 +161,7 @@ pub unsafe fn handshake(
                     .map_err(|e| Fault::At(i, e))?;
             }
             Step::Await { group, code } => {
-                cmd::expect(bar0, rings, bufs, rx, group, code, ms).map_err(|e| Fault::At(i, e))?;
+                cmd::expect(bar0, rings, bufs, rx, q, group, code, ms).map_err(|e| Fault::At(i, e))?;
             }
         }
     }

@@ -55,6 +55,11 @@ pub enum Kind {
     SecInit,
     /// How many CPUs the image drives. Decides where the section list splits.
     NumOfCpu,
+    /// One word: the chains the firmware drives, in bits 16..20 (transmit) and
+    /// 20..24 (receive), which the NVM's masks narrow.
+    PhySku,
+    /// One word: how many channels a scan request may carry.
+    NScanChannels,
     /// A human-readable version, separate from the header's.
     Version,
     /// The image loader, on families that bootstrap through one.
@@ -83,6 +88,8 @@ impl Kind {
             19 => Kind::SecRt,
             20 => Kind::SecInit,
             27 => Kind::NumOfCpu,
+            23 => Kind::PhySku,
+            31 => Kind::NScanChannels,
             36 => Kind::Version,
             52 => Kind::Iml,
             29 => Kind::Api,
@@ -97,6 +104,8 @@ impl Kind {
             Kind::SecRt => 19,
             Kind::SecInit => 20,
             Kind::NumOfCpu => 27,
+            Kind::PhySku => 23,
+            Kind::NScanChannels => 31,
             Kind::Version => 36,
             Kind::Iml => 52,
             Kind::Api => 29,
@@ -165,6 +174,11 @@ pub enum Error {
     /// A second command-version table, which upstream refuses: which one
     /// governs has no answer.
     TwoVersionTables(usize),
+    /// A record that must be one word was not. Upstream's EINVAL, for the PHY
+    /// SKU and the scan-channel count: a different length is a different layout.
+    BadWord { at: usize, len: usize },
+    /// More scan channels than a scan request has room for. Upstream's ERANGE.
+    TooManyScanChannels(u32),
 }
 
 impl Error {
@@ -173,6 +187,12 @@ impl Error {
             Error::TooShort(n) => alloc::format!("{} bytes is shorter than the {}-byte header", n, HEADER),
             Error::NotTlv(v) => alloc::format!("leading word {:#010x} is not zero, so this is a v1 image", v),
             Error::BadMagic(m) => alloc::format!("magic {:#010x} is not {:#010x}", m, MAGIC),
+            Error::BadWord { at, len } => {
+                alloc::format!("record {} should be one four-byte word and is {} bytes", at, len)
+            }
+            Error::TooManyScanChannels(n) => {
+                alloc::format!("{} scan channels declared, past the {} a request holds", n, MAX_SCAN_CHANNELS)
+            }
             Error::TwoVersionTables(at) => {
                 alloc::format!("record {} is a second command-version table", at)
             }
@@ -227,9 +247,42 @@ pub struct Image {
     /// sends the layout it was written for to firmware expecting another gets a
     /// command error at best and a scan configured from misread fields at worst.
     pub cmd_versions: Vec<(u8, u8, u8, u8)>,
+    /// The PHY SKU word, if the image carried one.
+    pub phy_config: Option<u32>,
+    /// How many channels a scan may name, if the image said.
+    pub n_scan_channels: Option<u32>,
+}
+
+/// What a scan request holds at most, upstream's `IWX_MAX_SCAN_CHANNELS`.
+pub const MAX_SCAN_CHANNELS: u32 = 67;
+/// What a firmware that does not say is taken to allow, upstream's default.
+pub const DEFAULT_SCAN_CHANNELS: u32 = 40;
+
+fn narrow(fw: Option<u8>, nvm: u8) -> u8 {
+    // A firmware with no PHY SKU record leaves the NVM to decide alone, rather
+    // than upstream's zero-initialised word, which would mask every chain off.
+    let fw = fw.unwrap_or(0xf);
+    if nvm != 0 { fw & nvm } else { fw }
 }
 
 impl Image {
+    /// The transmit chains to use: the firmware's, narrowed by the NVM's when
+    /// the NVM names any. Upstream's `iwx_fw_valid_tx_ant`. An NVM reporting
+    /// zero left this driver sending a zero mask -- no chain at all.
+    pub fn valid_tx_ant(&self, nvm: u8) -> u8 {
+        narrow(self.phy_config.map(|c| ((c >> 16) & 0xf) as u8), nvm)
+    }
+
+    /// And the receive chains, the same way.
+    pub fn valid_rx_ant(&self, nvm: u8) -> u8 {
+        narrow(self.phy_config.map(|c| ((c >> 20) & 0xf) as u8), nvm)
+    }
+
+    /// How many channels a scan may name.
+    pub fn scan_channels(&self) -> usize {
+        self.n_scan_channels.unwrap_or(DEFAULT_SCAN_CHANNELS) as usize
+    }
+
     /// The version of a command this firmware declares, if it declares one.
     /// `None` is upstream's `IWX_FW_CMD_VER_UNKNOWN`, and callers treat it as
     /// the oldest layout, which is what firmware old enough not to say speaks.
@@ -276,6 +329,9 @@ pub const API_WORDS: usize = (128 + 31) / 32;
 pub mod capa {
     /// Firmware applies a learned regulatory profile.
     pub const LAR_SUPPORT: usize = 1;
+    /// The regulatory reply is the twenty-byte version 4, not the sixteen-byte
+    /// version 3.
+    pub const MCC_UPDATE_11AX_SUPPORT: usize = 89;
     /// Dynamic queue allocation, which the queue-enable command depends on.
     pub const DQA_SUPPORT: usize = 12;
     /// Firmware handles the critical-temperature shutdown itself.
@@ -333,6 +389,8 @@ pub fn parse(b: &[u8]) -> Result<Image, Error> {
     let mut capa = [0u32; CAPA_WORDS];
     let mut api = [0u32; API_WORDS];
     let mut cmd_versions: Vec<(u8, u8, u8, u8)> = Vec::new();
+    let mut phy_config = None;
+    let mut n_scan_channels = None;
     let mut at = HEADER;
     let mut n = 0usize;
 
@@ -364,6 +422,15 @@ pub fn parse(b: &[u8]) -> Result<Image, Error> {
                 });
             }
             Kind::NumOfCpu if len >= 4 => cpus = Some(le32(b, body)),
+            Kind::PhySku | Kind::NScanChannels if len != 4 => return Err(Error::BadWord { at: n, len }),
+            Kind::PhySku => phy_config = Some(le32(b, body)),
+            Kind::NScanChannels => {
+                let v = le32(b, body);
+                if v > MAX_SCAN_CHANNELS {
+                    return Err(Error::TooManyScanChannels(v));
+                }
+                n_scan_channels = Some(v);
+            }
             // **The last one wins**, which is upstream's rule: it frees any
             // earlier loader and keeps the newest. A file with two is malformed
             // and the choice still has to be defined, because "the first" and
@@ -427,7 +494,7 @@ pub fn parse(b: &[u8]) -> Result<Image, Error> {
     if sections.is_empty() {
         return Err(Error::NoSections);
     }
-    Ok(Image { human, ver, build, sections, cpus, capa, api, iml, records, cmd_versions })
+    Ok(Image { human, ver, build, sections, cpus, capa, api, iml, records, cmd_versions, phy_config, n_scan_channels })
 }
 
 /// Build a container, for the suite and for nothing else.
@@ -506,11 +573,39 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         human: String::new(), ver: 0, build: 0,
         sections: Vec::new(), cpus: None, capa: [0; CAPA_WORDS], api: [0; API_WORDS],
         iml: None, records: Vec::new(), cmd_versions: Vec::new(),
+        phy_config: None, n_scan_channels: None,
     });
     claim("the version string is read and NUL-trimmed", p.human == "77.1a2b3c4d.0 QuZ-a0-hr-b0-77");
     claim("the build number survives", p.build == 4242);
     claim("the cpu count is taken from its own record", p.cpus == Some(2));
     claim("every record is remembered, including the ignored one", p.records.len() == 5);
+
+    // --- the PHY SKU and the scan-channel count -----------------------------
+    let sec = (19u32, section_body(0x0040_0000, &[0xBB; 12]));
+    let with = |extra: Vec<(u32, Vec<u8>)>| {
+        let mut r = alloc::vec![sec.clone()];
+        r.extend(extra);
+        parse(&build("x", 0, 0, &r))
+    };
+    // Transmit chains A and B, receive A only.
+    let sku = with(alloc::vec![(23, ((0x3u32 << 16) | (0x1u32 << 20)).to_le_bytes().to_vec()), (31, 33u32.to_le_bytes().to_vec())]);
+    claim(
+        "the PHY SKU's chains are read and the NVM narrows them",
+        sku.as_ref().map(|i| (i.valid_tx_ant(0), i.valid_tx_ant(0x2), i.valid_rx_ant(0), i.scan_channels())).ok()
+            == Some((0x3, 0x2, 0x1, 33)),
+    );
+    claim(
+        "an image with neither leaves the NVM to decide, and allows upstream's forty",
+        with(alloc::vec![]).map(|i| (i.valid_tx_ant(0x1), i.scan_channels())).ok() == Some((0x1, 40)),
+    );
+    claim(
+        "a PHY SKU that is not one word is refused, as upstream refuses it",
+        matches!(with(alloc::vec![(23, alloc::vec![0; 8])]), Err(Error::BadWord { .. })),
+    );
+    claim(
+        "and so is a scan-channel count past what a request holds",
+        with(alloc::vec![(31, 68u32.to_le_bytes().to_vec())]) == Err(Error::TooManyScanChannels(68)),
+    );
 
     // --- the command versions ----------------------------------------------
     // Command before group in each entry: the struct's order, and the opposite

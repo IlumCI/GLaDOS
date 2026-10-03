@@ -74,13 +74,24 @@ pub struct Queue {
     pub cur_hw: u32,
     /// A command too large for its entry, in a buffer of its own, by slot.
     ///
-    /// **Freed when the slot comes round again, not when the command is
-    /// answered.** Upstream frees it on completion, which needs a completion
-    /// path to read; the slot's next use is later than any completion and needs
-    /// nothing, and a ring of 256 means at most 256 of these are alive at once,
-    /// which in practice is one -- the scan request.
+    /// **Freed when the part says it is done with the command**, which is
+    /// upstream's rule. It was freed when the slot came round again, on the
+    /// argument that 256 commands later is later than any completion -- true of
+    /// a firmware that answers, and exactly false of one that has hung, where a
+    /// fire-and-forget send could rewrite a descriptor the part had not fetched
+    /// and free the buffer it pointed at.
     big: Vec<Option<Dma>>,
+    /// Slots whose command the part has not yet completed. A slot still pending
+    /// when the ring comes round to it is a full ring, refused rather than
+    /// overwritten.
+    pending: Vec<bool>,
+    /// How many are pending.
+    pub inflight: usize,
 }
+
+/// The queue byte's top bit: set when firmware originates a packet, clear when
+/// the packet is the completion of a command the driver sent.
+pub const QID_UNSOLICITED: u8 = 0x80;
 
 /// The largest payload a command may carry, upstream's figure: a page, less the
 /// header.
@@ -104,6 +115,9 @@ pub enum CmdError {
     /// refusal look like silence -- two seconds of `NoReply` for a command the
     /// part had rejected at once.
     Refused { group: u8, code: u8 },
+    /// Every slot holds a command the part has not completed. A hung firmware,
+    /// most likely, and the one thing not to do is overwrite what it has not read.
+    Full,
 }
 
 /// The bit a reply's group byte carries when the command failed.
@@ -132,6 +146,7 @@ impl CmdError {
             CmdError::NoQueue => String::from("the command ring was not allocated"),
             CmdError::NoReply => String::from("the part did not answer"),
             CmdError::BadReply(e) => e.why(),
+            CmdError::Full => String::from("every command slot is still waiting on the part"),
             CmdError::Refused { group, code } => alloc::format!(
                 "the part refused group {:#04x} code {:#04x}",
                 group, code
@@ -152,7 +167,30 @@ impl Queue {
         // than tidied, since the requirement is the part's and not this driver's.
         let mut big = Vec::new();
         big.resize_with(TX_RING as usize, || None);
-        Some(Queue { buf: Dma::new(ENTRY * TX_RING as usize, 64)?, cur: 0, cur_hw: 0, big })
+        Some(Queue {
+            buf: Dma::new(ENTRY * TX_RING as usize, 64)?,
+            cur: 0,
+            cur_hw: 0,
+            big,
+            pending: alloc::vec![false; TX_RING as usize],
+            inflight: 0,
+        })
+    }
+
+    /// Note a packet off the receive ring. A completion of one of this queue's
+    /// commands frees its slot, and its large buffer with it -- upstream's
+    /// `iwx_cmd_done`, keyed the same way: the queue byte without its top bit,
+    /// and the index the command was framed with.
+    pub fn completed(&mut self, p: &Packet) {
+        if p.qid & QID_UNSOLICITED != 0 || (p.qid & !QID_UNSOLICITED) as u32 != CMD_QUEUE {
+            return;
+        }
+        let i = p.idx as usize;
+        if i < self.pending.len() && self.pending[i] {
+            self.pending[i] = false;
+            self.inflight -= 1;
+            self.big[i] = None;
+        }
     }
 
     /// The bus address of one command entry.
@@ -187,7 +225,9 @@ impl Queue {
             return Err(CmdError::TooLong(payload.len()));
         }
         let idx = self.cur;
-        // The slot's previous large buffer, if any, is done with by now.
+        if self.pending[idx] {
+            return Err(CmdError::Full);
+        }
         self.big[idx] = None;
         let large = HDR_WIDE + payload.len() > ENTRY;
         if large {
@@ -254,6 +294,8 @@ impl Queue {
             }
         }
 
+        self.pending[idx] = true;
+        self.inflight += 1;
         // Advance both, each by its own modulus. The doorbell is the caller's.
         self.cur = (self.cur + 1) % TX_RING as usize;
         self.cur_hw = (self.cur_hw + 1) % HW_WRAP;
@@ -348,6 +390,7 @@ pub unsafe fn ask_with<'a>(
     loop {
         while let Some(got) = rx.next(rings, bufs) {
             let pkt = got.map_err(CmdError::BadReply)?;
+            q.completed(&pkt);
             if let Some(failed) = answers(pkt.group, pkt.code, group, opcode) {
                 rx.ack(bar0, rings);
                 return if failed { Err(CmdError::Refused { group, code: opcode }) } else { Ok(pkt) };
@@ -388,11 +431,12 @@ pub unsafe fn expect<'a>(
     rings: &mut Rings,
     bufs: &'a Buffers,
     rx: &mut Rx,
+    q: &mut Queue,
     group: u8,
     code: u8,
     ms: u32,
 ) -> Result<Packet<'a>, CmdError> {
-    expect_with(bar0, rings, bufs, rx, group, code, ms, &mut |_| {})
+    expect_with(bar0, rings, bufs, rx, q, group, code, ms, &mut |_| {})
 }
 
 /// `expect`, handing every packet it steps over to `aside`.
@@ -404,6 +448,7 @@ pub unsafe fn expect_with<'a>(
     rings: &mut Rings,
     bufs: &'a Buffers,
     rx: &mut Rx,
+    q: &mut Queue,
     group: u8,
     code: u8,
     ms: u32,
@@ -413,6 +458,9 @@ pub unsafe fn expect_with<'a>(
     loop {
         while let Some(got) = rx.next(rings, bufs) {
             let pkt = got.map_err(CmdError::BadReply)?;
+            // The completions of commands sent without waiting -- the
+            // handshake's -- arrive while a notification is awaited.
+            q.completed(&pkt);
             let matched = answers(pkt.group, pkt.code, group, code);
             rx.ack(bar0, rings);
             match matched {
@@ -512,6 +560,35 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let _ = q.frame(&mut rings, 0, 0x05, 0, &[]);
         let e = &q.buf.as_slice()[2 * ENTRY..3 * ENTRY];
         ok(e[1] == LONG_GROUP, "a group-zero command is sent as the long group");
+        // Completions: a slot is freed by the part's answer and by nothing else.
+        let before = q.inflight;
+        let reply = |idx: u8, qid: u8| Packet { group: 1, code: 0x05, idx, qid, payload: &[] };
+        q.completed(&reply(2, QID_UNSOLICITED));
+        let unsolicited_ignored = q.inflight == before;
+        q.completed(&reply(2, 0));
+        let freed = q.inflight == before - 1;
+        q.completed(&reply(2, 0));
+        ok(unsolicited_ignored && freed && q.inflight == before - 1,
+           "a completion frees its slot once, and a notification frees nothing");
+        // Fill the ring, then come round to a slot nobody has completed.
+        let mut filled = 0;
+        while q.frame(&mut rings, 1, 0x05, 0, &[]).is_ok() {
+            filled += 1;
+            if filled > TX_RING as usize {
+                break;
+            }
+        }
+        // One slot short of the ring: the one completed above, behind the cursor.
+        ok(q.frame(&mut rings, 1, 0x05, 0, &[]) == Err(CmdError::Full) && q.inflight == TX_RING as usize - 1,
+           "a ring of commands the part has not completed is full, not overwritten");
+        let at = q.cur as u8;
+        q.completed(&reply(at, 0));
+        ok(q.frame(&mut rings, 1, 0x05, 0, &[]) == Ok(at), "and the slot it completes is the next one used");
+        // The part answers everything, so the claims after this have a ring.
+        for i in 0..TX_RING as usize {
+            q.completed(&reply(i as u8, 0));
+        }
+        ok(q.inflight == 0, "and once every command is answered nothing is in flight");
         ok(answers(LONG_GROUP, 0xc8, LONG_GROUP, 0xc8) == Some(false), "a reply in the group asked is an answer");
         ok(answers(LONG_GROUP | CMD_FAILED, 0xc8, LONG_GROUP, 0xc8) == Some(true), "and one carrying CMD_FAILED is a refusal, not silence");
         ok(answers(LONG_GROUP, 0x02, 0, 0x02) == Some(false) && answers(0, 0x02, 0, 0x02) == Some(false), "group zero is answered as either");

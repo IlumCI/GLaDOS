@@ -86,6 +86,10 @@ impl Radio for Air {
         super::with_held(|h| !h.scanning && h.inbox.frames.is_empty()).unwrap_or(true)
     }
 
+    fn scan_abort(&mut self) {
+        let _ = super::with_held(|h| h.scan_abort());
+    }
+
     fn prepare_join(&mut self, _t: &crate::dev::radio::JoinTarget) -> Result<(), &'static str> {
         Err("this driver scans and does not join yet: the station contexts are not written")
     }

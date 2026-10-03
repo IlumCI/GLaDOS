@@ -395,7 +395,10 @@ pub fn firmware_base(device: u16, rev: Rev, rf: RfId) -> Option<String> {
     let mac = match rev.mac {
         Mac::Snj if device == 0x2725 => return Some(alloc::format!("ty-a0-{}", radio)),
         Mac::So | Mac::Sof | Mac::Snj => String::from("so-a0"),
-        Mac::Ma => String::from("ma-b0"),
+        // By its own step: an A-step Ma handed the B-step image is firmware
+        // built for different silicon. linux-firmware ships no `ma-a0`, so such a
+        // part is reported as wanting an image nobody has, which is the truth.
+        Mac::Ma => alloc::format!("ma-{}0", step(rev.step)?),
         Mac::Qu => alloc::format!("Qu-{}0", step(rev.step)?),
         Mac::Quz => String::from("QuZ-a0"),
         _ => return None,
@@ -676,6 +679,11 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     claim("QuZ too", rev_of(0x35 << 4).mac.family() == Some(Family::F22000));
     claim("Bz is its own family, named so it can be refused", rev_of(0x46 << 4).mac.family() == Some(Family::Bz));
     claim("Ma is AX210 family, as both references file it", rev_of(0x44 << 4).mac.family() == Some(Family::Ax210));
+    claim(
+        "a Ma part names the image for its own step, and a B-step's is the one linux-firmware ships",
+        firmware_base(0x7e40, rev_of(0x441), rf_of(0x0010_a100)).as_deref() == Some("ma-b0-hr-b0")
+            && firmware_base(0x7e40, rev_of(0x440), rf_of(0x0010_a100)).as_deref() == Some("ma-a0-hr-b0"),
+    );
 
     // --- which image, from the registers -----------------------------------
     //
@@ -1202,6 +1210,7 @@ pub struct Facts {
     pub band_5: bool,
     pub scan_ver: Option<u8>,
     pub ds_param: bool,
+    pub scan_channels: usize,
 }
 
 impl Facts {
@@ -1211,6 +1220,7 @@ impl Facts {
             band_5: n.band_52,
             scan_ver: image.cmd_ver(config::LONG_GROUP, scan::SCAN_REQ_UMAC),
             ds_param: image.has_capa(scan::CAPA_DS_PARAM_SET_IE),
+            scan_channels: image.scan_channels(),
         }
     }
 }
@@ -1252,7 +1262,10 @@ impl Held {
         while let Some(got) = b.rx.next(&b.boot.rings, &b.buffers) {
             n += 1;
             match got {
-                Ok(p) => self.inbox.take(&p, self.desc),
+                Ok(p) => {
+                    b.cmds.completed(&p);
+                    self.inbox.take(&p, self.desc)
+                }
                 Err(_) => self.inbox.bad += 1,
             }
         }
@@ -1312,6 +1325,7 @@ impl Held {
             ssid,
             band_5: self.facts.band_5,
             ds_param: self.facts.ds_param,
+            max_channels: self.facts.scan_channels,
         };
         let body = scan::request(self.facts.scan_ver, &req).map_err(|e| e.why())?;
         let b: &mut Booted = &mut self.booted;
@@ -1325,6 +1339,42 @@ impl Held {
         self.scan_began = crate::net::now_ms();
         self.scan_ended = None;
         Ok(())
+    }
+
+    /// Call off a scan that is running, upstream's `iwx_scan_abort`: the abort
+    /// for uid zero, waited on, and the scan taken as over once the part has
+    /// completed the command. Its own end-of-scan arrives afterwards and is
+    /// thrown away by `poll`, which takes one whether or not a scan runs.
+    pub fn scan_abort(&mut self) -> Result<(), &'static str> {
+        if self.stopped.is_some() || !self.scanning {
+            return Ok(());
+        }
+        let b: &mut Booted = &mut self.booted;
+        let (inbox, desc) = (&mut self.inbox, self.desc);
+        // Safety: this part's aperture, alive, and not stopped.
+        let r = unsafe {
+            cmd::ask_with(
+                self.bar0,
+                &mut b.boot.rings,
+                &b.buffers,
+                &mut b.rx,
+                &mut b.cmds,
+                config::LONG_GROUP,
+                scan::SCAN_ABORT_UMAC,
+                0,
+                &[0u8; 8],
+                1000,
+                &mut |p| inbox.take(p, desc),
+            )
+        };
+        match r {
+            Ok(_) => {
+                self.scanning = false;
+                self.scan_ended = None;
+                Ok(())
+            }
+            Err(_) => Err("the part would not call its scan off"),
+        }
     }
 
     pub fn bar0(&self) -> u64 {
@@ -1373,18 +1423,61 @@ static HELD: crate::sync::Spin<Slot> = crate::sync::Spin::new(Slot(None));
 struct Slot(Option<Held>);
 unsafe impl Send for Slot {}
 
-fn grab() -> crate::sync::Guard<'static, Slot> {
+/// Which task holds `HELD`, so the same task asking again is told rather than
+/// left yielding forever. The lock records no owner of its own, and a wait that
+/// only another task can end is a hang when the other task is this one.
+static HOLDER: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
+
+struct Grabbed {
+    guard: crate::sync::Guard<'static, Slot>,
+}
+
+impl Drop for Grabbed {
+    fn drop(&mut self) {
+        HOLDER.store(usize::MAX, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl core::ops::Deref for Grabbed {
+    type Target = Slot;
+    fn deref(&self) -> &Slot {
+        &self.guard
+    }
+}
+
+impl core::ops::DerefMut for Grabbed {
+    fn deref_mut(&mut self) -> &mut Slot {
+        &mut self.guard
+    }
+}
+
+/// The lock, yielding to whoever has it -- or `None` if that is this task.
+fn grab() -> Option<Grabbed> {
+    let me = crate::task::current();
     loop {
         if let Some(g) = HELD.try_lock() {
-            return g;
+            HOLDER.store(me, core::sync::atomic::Ordering::Relaxed);
+            return Some(Grabbed { guard: g });
+        }
+        if HOLDER.load(core::sync::atomic::Ordering::Relaxed) == me {
+            return None;
         }
         crate::task::yield_now();
     }
 }
 
+/// For the two callers that change what is held: nesting either inside a
+/// `with_held` is a bug, and saying so beats a machine that stops answering.
+fn grab_or_say(who: &str) -> Grabbed {
+    match grab() {
+        Some(g) => g,
+        None => panic!("iwx::{} called while this task already holds the part", who),
+    }
+}
+
 /// Keep a booted part, stopping whatever was held before.
 pub fn hold(d: Held) {
-    let mut g = grab();
+    let mut g = grab_or_say("hold");
     // Replaced rather than swapped in place, so the old one's Drop -- the stop --
     // runs before the new one is reachable.
     g.0 = None;
@@ -1393,7 +1486,7 @@ pub fn hold(d: Held) {
 
 /// Stop and release the held part, answering how the stop went.
 pub fn release() -> Option<Stopped> {
-    let mut d = grab().0.take()?;
+    let mut d = grab_or_say("release").0.take()?;
     Some(d.stop())
 }
 
@@ -1406,13 +1499,14 @@ pub fn service() -> usize {
     }
 }
 
-/// Run `f` against the held part, if there is one.
+/// Run `f` against the held part, if there is one. `None` as well when this
+/// task is already inside a `with_held`.
 pub fn with_held<R>(f: impl FnOnce(&mut Held) -> R) -> Option<R> {
-    grab().0.as_mut().map(f)
+    grab()?.0.as_mut().map(f)
 }
 
 pub fn held() -> bool {
-    grab().0.is_some()
+    grab().is_some_and(|g| g.0.is_some())
 }
 
 /// Upstream's own figure, and it is **microseconds**: fifty, not fifty
@@ -1902,15 +1996,14 @@ impl Radio {
         };
         let (mcc_multi, scan_cfg_ver) = config::Facts::from_image(image);
         let f = config::Facts {
-            rx_ant: n.rx_chains,
+            rx_ant: image.valid_rx_ant(n.rx_chains),
             lar: n.lar,
             mcc_multi,
             scan_cfg_ver,
-            tx_ant: n.tx_chains,
-            // Upstream's flag for this product id, followed rather than reasoned
-            // about -- see the constant's own note on why it reads oddly.
-            discrete: true,
-            xtal_latency: 0,
+            tx_ant: image.valid_tx_ant(n.tx_chains),
+            // By product id; see `config::Soc` for why 0x51f0 is integrated.
+            soc: config::Soc::for_device(self.dev.device),
+            scan_ver: image.cmd_ver(config::LONG_GROUP, scan::SCAN_REQ_UMAC),
             ltr_enabled: config::ltr_enabled(ecam, &self.dev),
             // Not sleeping. `power.rs` argues for it: on a machine whose job is
             // mining or serving, a radio asleep between beacons trades latency for

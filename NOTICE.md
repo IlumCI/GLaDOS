@@ -22,6 +22,15 @@ implementation in this tree was written for it. Three of those numbers turned ou
 to be wrong or misleading in the reference, and each is documented at the point it
 is corrected.
 
+One table came from Intel's own Linux driver instead, because OpenBSD's was
+wrong about the GF63's part: how each AX210-family product id sits on the
+platform (integrated or discrete, its crystal latency and LTR delay), from
+`drivers/net/wireless/intel/iwlwifi/pcie/drv.c`, `cfg/ax210.c` and `fw/init.c`.
+Those files are `GPL-2.0 OR BSD-3-Clause`, Copyright (C) 2005-2014, 2018-2026
+Intel Corporation, (C) 2013-2015 Intel Mobile Communications GmbH and (C)
+2015-2017 Intel Deutschland GmbH -- the same dual licence from the same author,
+and the same BSD arm, whose conditions and disclaimer are the ones below.
+
 Intel's headers are offered under a dual BSD/GPLv2 licence. **This tree uses the
 BSD arm**, and that notice, its conditions and its disclaimer are reproduced in
 full below to satisfy it, whether or not taking a register offset triggers it at
