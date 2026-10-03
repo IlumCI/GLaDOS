@@ -150,6 +150,12 @@ impl<'a> KeyFrame<'a> {
     pub fn is_message3(&self) -> bool {
         self.has(KEY_INFO_PAIRWISE) && self.has(KEY_INFO_ACK) && self.has(KEY_INFO_MIC)
     }
+    /// The first of the two-message group-key handshake: the access point
+    /// handing out a new group key, which it does on a timer and when a station
+    /// leaves. No pairwise bit, and secure because it runs under the PTK.
+    pub fn is_group_message1(&self) -> bool {
+        !self.has(KEY_INFO_PAIRWISE) && self.has(KEY_INFO_ACK) && self.has(KEY_INFO_MIC) && self.has(KEY_INFO_SECURE)
+    }
 }
 
 /// The fixed part of a Key Descriptor: everything up to the key-data length.
@@ -297,10 +303,13 @@ pub struct Authenticator {
     pub anonce: [u8; 32],
     pub ptk: Option<Vec<u8>>,
     pub gtk: [u8; 16],
+    pub gtk_id: u8,
     pub aa: [u8; 6],
     pub spa: [u8; 6],
     replay: u64,
     pub done: bool,
+    /// The station acknowledged the last group key handed out.
+    pub group_acked: bool,
 }
 
 impl Authenticator {
@@ -315,10 +324,12 @@ impl Authenticator {
             anonce,
             ptk: None,
             gtk: [0x47; 16],
+            gtk_id: 1,
             aa,
             spa,
             replay: 0,
             done: false,
+            group_acked: false,
         }
     }
 
@@ -354,7 +365,7 @@ impl Authenticator {
             // The group key travels wrapped under the KEK, which is what makes
             // message 3 worth encrypting at all: the pairwise key is derived at
             // both ends and never sent, and the group key is sent.
-            let wrapped = aes::key_wrap(k.kek(), &gtk_kde(&self.gtk))?;
+            let wrapped = aes::key_wrap(k.kek(), &gtk_kde(&self.gtk, self.gtk_id))?;
             self.replay += 1;
             let info = KEY_INFO_PAIRWISE
                 | KEY_INFO_ACK
@@ -369,13 +380,32 @@ impl Authenticator {
             return Some(m3);
         }
 
-        // Message 4 is an acknowledgement and carries nothing but its MIC.
+        // Message 4 is an acknowledgement and carries nothing but its MIC; so
+        // is the group handshake's second, told apart by the pairwise bit.
         let ptk = self.ptk.clone()?;
         if !verify_mic(Ptk(&ptk).kck(), &f) {
             return None;
         }
-        self.done = true;
+        if f.has(KEY_INFO_PAIRWISE) {
+            self.done = true;
+        } else {
+            self.group_acked = true;
+        }
         None
+    }
+
+    /// A new group key, as an access point sends one on its rekey timer: group
+    /// message 1, under the KEK, alternating the key id.
+    pub fn group_rekey(&mut self, gtk: [u8; 16]) -> Option<Vec<u8>> {
+        let ptk = self.ptk.clone()?;
+        let k = Ptk(&ptk);
+        self.gtk = gtk;
+        self.gtk_id = if self.gtk_id == 1 { 2 } else { 1 };
+        self.group_acked = false;
+        let wrapped = aes::key_wrap(k.kek(), &gtk_kde(&self.gtk, self.gtk_id))?;
+        self.replay += 1;
+        let info = KEY_INFO_ACK | KEY_INFO_MIC | KEY_INFO_SECURE | KEY_INFO_ENCRYPTED | 2;
+        Some(build_key(info, self.replay, &[0u8; 32], &wrapped, Some(k.kck())))
     }
 
     /// The temporal key, once the handshake has finished.
@@ -387,12 +417,12 @@ impl Authenticator {
 /// Wrap a group key in the encapsulation `group_key` reads back: the RSN OUI,
 /// data type 1, a key id, then the key, padded to a multiple of eight because
 /// RFC 3394 wraps nothing else.
-fn gtk_kde(gtk: &[u8; 16]) -> Vec<u8> {
+fn gtk_kde(gtk: &[u8; 16], key_id: u8) -> Vec<u8> {
     let mut d = Vec::with_capacity(24);
     d.push(0xDD); // vendor-specific KDE
     d.push(6 + gtk.len() as u8);
     d.extend_from_slice(&[0x00, 0x0F, 0xAC, 0x01]); // RSN OUI, data type 1 (GTK)
-    d.extend_from_slice(&[0x01, 0x00]); // key id 1, reserved
+    d.extend_from_slice(&[key_id & 3, 0x00]); // key id, reserved
     d.extend_from_slice(gtk);
     while d.len() % 8 != 0 {
         d.push(0xDD); // the padding RFC 4017 specifies, and it is not zero
@@ -400,8 +430,13 @@ fn gtk_kde(gtk: &[u8; 16]) -> Vec<u8> {
     d
 }
 
-/// Pull the group key out of message 3's encrypted key data.
-pub fn group_key(kek: &[u8], key_data: &[u8]) -> Option<Vec<u8>> {
+/// Pull the group key and its key id out of a message's encrypted key data.
+///
+/// **The id is half of the answer.** A group-addressed frame names the key it
+/// was encrypted under in its CCMP header, and an access point alternates
+/// between two ids across a rekey so stations holding either can still read --
+/// a key kept without its id is a key nothing can be matched against.
+pub fn group_key(kek: &[u8], key_data: &[u8]) -> Option<(u8, Vec<u8>)> {
     let unwrapped = aes::key_unwrap(kek, key_data)?;
     // The result is a sequence of RSN key-data encapsulations; the GTK is the
     // one with OUI 00-0F-AC and data type 1.
@@ -415,7 +450,7 @@ pub fn group_key(kek: &[u8], key_data: &[u8]) -> Option<Vec<u8>> {
         let dtype = unwrapped[at + 5];
         if oui == [0x00, 0x0F, 0xAC] && dtype == 1 && len >= 6 {
             // Two bytes of key id and reserved precede the key itself.
-            return Some(unwrapped[at + 8..at + 2 + len].to_vec());
+            return Some((unwrapped[at + 6] & 3, unwrapped[at + 8..at + 2 + len].to_vec()));
         }
         at += 2 + len;
         // Encapsulations are padded to a multiple of eight.
@@ -429,29 +464,59 @@ pub fn group_key(kek: &[u8], key_data: &[u8]) -> Option<Vec<u8>> {
 /// The supplicant's side of the exchange, as a state machine over frames.
 pub struct Supplicant {
     pub pmk: Vec<u8>,
+    /// The pairwise key in force: committed by a message 3 whose MIC verified.
     pub ptk: Option<Vec<u8>>,
-    pub gtk: Option<Vec<u8>>,
+    /// The one a message 1 proposed. **Temporary until message 3 proves it**,
+    /// as wpa_supplicant keeps it: message 1 carries no MIC, so a forged one
+    /// that replaced the key in force would let anybody in the room break a
+    /// running link -- the next group rekey would fail its MIC under a key the
+    /// access point never had.
+    tptk: Option<Vec<u8>>,
+    /// A pairwise key was committed that the link has not been given. Set by
+    /// the first handshake and by every rekey; whoever installs it clears it.
+    pub ptk_fresh: bool,
+    /// The group key and its id.
+    pub gtk: Option<(u8, Vec<u8>)>,
+    /// A group key arrived that the link has not yet been given. Set by message
+    /// 3 and by every group rekey; whoever installs it clears it.
+    pub gtk_fresh: bool,
     pub snonce: [u8; 32],
     pub aa: [u8; 6],
     pub spa: [u8; 6],
     pub done: bool,
+    /// The highest replay counter on a frame whose MIC verified. A later frame
+    /// must carry a higher one: an old message 3 or group message 1 replayed
+    /// from the air is otherwise a key reinstalled with its counters reset,
+    /// which is the whole of KRACK.
+    replay_seen: Option<u64>,
 }
 
 impl Supplicant {
     pub fn new(passphrase: &str, ssid: &[u8], aa: [u8; 6], spa: [u8; 6]) -> Self {
+        Self::with_pmk(pmk(passphrase, ssid), aa, spa)
+    }
+
+    /// From a PMK derived earlier. The passphrase is then never held: a station
+    /// that can rejoin after a drop needs what the passphrase derives, and the
+    /// PMK is that, bound to one SSID and useless for any other network.
+    pub fn with_pmk(pmk: Vec<u8>, aa: [u8; 6], spa: [u8; 6]) -> Self {
         let mut snonce = [0u8; 32];
         for i in 0..4 {
             let t = crate::time::rdtsc().rotate_left((i * 13) as u32);
             snonce[i * 8..i * 8 + 8].copy_from_slice(&t.to_le_bytes());
         }
         Supplicant {
-            pmk: pmk(passphrase, ssid),
+            pmk,
             ptk: None,
+            tptk: None,
+            ptk_fresh: false,
             gtk: None,
+            gtk_fresh: false,
             snonce,
             aa,
             spa,
             done: false,
+            replay_seen: None,
         }
     }
 
@@ -462,31 +527,82 @@ impl Supplicant {
         if f.is_message1() {
             // Message 1 has no MIC -- there is no key yet to compute one with,
             // which is why an attacker can force a handshake and capture it.
+            // A fresh SNonce for a rekey: the same nonce against a new ANonce
+            // is safe, but the same nonce twice is a habit nothing should need.
+            if self.ptk.is_some() && self.tptk.is_none() {
+                for (i, c) in self.snonce.chunks_mut(8).enumerate() {
+                    let t = crate::time::rdtsc().rotate_left((i * 17 + 5) as u32);
+                    c.copy_from_slice(&t.to_le_bytes());
+                }
+            }
             let ptk = ptk(&self.pmk, &self.aa, &self.spa, &f.nonce, &self.snonce);
             let reply = build_reply(Ptk(&ptk).kck(), f.replay, Some(&self.snonce), &[], false);
-            self.ptk = Some(ptk);
+            self.tptk = Some(ptk);
             return Some(reply);
         }
 
         if f.is_message3() {
-            let ptk = self.ptk.clone()?;
-            let k = Ptk(&ptk);
+            // The proposed key if there is one, else the one in force -- which
+            // is the retransmitted message 3 of a handshake already finished.
+            let candidate = self.tptk.clone().or_else(|| self.ptk.clone())?;
+            let k = Ptk(&candidate);
             // Message 3 is the first frame that proves the AP knows the PMK.
             // A failed MIC here means the passphrase is wrong -- or someone is
             // impersonating the network.
-            if !verify_mic(k.kck(), &f) {
+            if !verify_mic(k.kck(), &f) || !self.fresh(f.replay) {
                 return None;
             }
-            if f.has(KEY_INFO_ENCRYPTED) {
-                self.gtk = group_key(k.kek(), f.key_data);
-            }
             let reply = build_reply(k.kck(), f.replay, None, &[], true);
+            // A retransmit, answered because the access point did not hear
+            // message 4, installs nothing: the key is in with counters running,
+            // and reinstalling it would reset them.
+            if self.tptk.is_none() {
+                return Some(reply);
+            }
+            if f.has(KEY_INFO_ENCRYPTED) {
+                if let Some(g) = group_key(k.kek(), f.key_data) {
+                    if self.gtk.as_ref() != Some(&g) {
+                        self.gtk = Some(g);
+                        self.gtk_fresh = true;
+                    }
+                }
+            }
+            self.ptk = self.tptk.take();
+            self.ptk_fresh = true;
             self.done = true;
             let _ = KEY_INFO_INSTALL;
             return Some(reply);
         }
 
+        if f.is_group_message1() && self.done {
+            let ptk = self.ptk.clone()?;
+            let k = Ptk(&ptk);
+            if !verify_mic(k.kck(), &f) || !self.fresh(f.replay) || !f.has(KEY_INFO_ENCRYPTED) {
+                return None;
+            }
+            let g = group_key(k.kek(), f.key_data)?;
+            // The same key again is acknowledged and not reinstalled, for the
+            // reason a retransmitted message 3 is not: its counter would reset.
+            if self.gtk.as_ref() != Some(&g) {
+                self.gtk = Some(g);
+                self.gtk_fresh = true;
+            }
+            let info = KEY_INFO_MIC | KEY_INFO_SECURE | 2;
+            return Some(build_key(info, f.replay, &[0u8; 32], &[], Some(k.kck())));
+        }
+
         None
+    }
+
+    /// Whether a verified frame's replay counter moves forward, recording it if
+    /// so. Called only after the MIC checks, so a forged frame cannot raise the
+    /// bar and lock the real access point out.
+    fn fresh(&mut self, replay: u64) -> bool {
+        if self.replay_seen.is_some_and(|r| replay <= r) {
+            return false;
+        }
+        self.replay_seen = Some(replay);
+        true
     }
 }
 

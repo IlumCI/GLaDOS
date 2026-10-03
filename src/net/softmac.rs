@@ -61,6 +61,9 @@ pub struct Link<R: Radio> {
     radio: R,
     bssid: Mac,
     keys: Option<ccmp::Keys>,
+    /// The group key, for frames addressed to more than one station. Its own
+    /// replay counter: the access point numbers group frames separately.
+    group: Option<ccmp::Keys>,
     seq: u16,
     joined: bool,
     /// Management frames seen while draining the radio for data, kept whole
@@ -74,6 +77,8 @@ pub struct Link<R: Radio> {
     pub dropped_unprotected: u32,
     pub dropped_replay: u32,
     pub dropped_malformed: u32,
+    /// Our own frames, reflected back by the access point.
+    pub dropped_own: u32,
 }
 
 impl<R: Radio> Link<R> {
@@ -82,12 +87,14 @@ impl<R: Radio> Link<R> {
             radio,
             bssid: [0; 6],
             keys: None,
+            group: None,
             seq: 0,
             joined: false,
             mgmt: Vec::new(),
             dropped_unprotected: 0,
             dropped_replay: 0,
             dropped_malformed: 0,
+            dropped_own: 0,
         }
     }
 
@@ -104,6 +111,25 @@ impl<R: Radio> Link<R> {
         self.bssid = bssid;
         self.joined = true;
         self.keys = None;
+        self.group = None;
+    }
+
+    /// The group key from the handshake or a group rekey, under its key id.
+    /// Offered to the radio first, as the pairwise key is.
+    pub fn keyed_group(&mut self, gtk: &[u8], key_id: u8) -> bool {
+        if gtk.len() != 16 {
+            return false;
+        }
+        if self.radio.caps().hw_ccmp {
+            let mut k = crate::dev::radio::Key { idx: key_id & 3, tk: [0; 16], pairwise: false, peer: [0xff; 6] };
+            k.tk.copy_from_slice(gtk);
+            if self.radio.set_key(&k) {
+                self.group = None;
+                return true;
+            }
+        }
+        self.group = ccmp::Keys::new(gtk, key_id);
+        self.group.is_some()
     }
 
     /// The four-way handshake finished and produced a temporal key.
@@ -141,6 +167,7 @@ impl<R: Radio> Link<R> {
     pub fn leave(&mut self) {
         self.joined = false;
         self.keys = None;
+        self.group = None;
         self.bssid = [0; 6];
     }
 
@@ -260,8 +287,19 @@ impl<R: Radio> Nic for Link<R> {
             let frame = got.frame;
             let protected = u16::from_le_bytes([frame[0], frame[1]]) & 0x4000 != 0;
 
+            // Group-addressed frames are under the group key, named by the id
+            // in their CCMP header; everything else under the pairwise key.
+            let group_addressed = frame.len() >= 10 && frame[4] & 1 != 0;
+            let named_id = ccmp::parse(&frame)
+                .and_then(|f| frame.get(f.hdr_len + 3))
+                .map(|b| b >> 6);
             let (hdr, body) = if protected {
-                match &mut self.keys {
+                let key = if group_addressed {
+                    self.group.as_mut().filter(|g| Some(g.key_id) == named_id)
+                } else {
+                    self.keys.as_mut()
+                };
+                match key {
                     Some(k) => match k.unprotect(&frame) {
                         Some(v) => v,
                         None => {
@@ -310,6 +348,13 @@ impl<R: Radio> Nic for Link<R> {
                     continue;
                 }
             };
+            // Our own broadcast, relayed back by the access point to everybody
+            // including us. Taken up, our own ARP request teaches the stack
+            // that our address is somebody else's.
+            if sa == self.radio.mac() {
+                self.dropped_own += 1;
+                continue;
+            }
             let (ethertype, payload) = match dot11::snap_unwrap(&body) {
                 Some(v) => v,
                 None => {

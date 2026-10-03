@@ -59,7 +59,13 @@ pub const OFFLOAD_SLACK_MS: u64 = 2000;
 
 /// Received frames held for the layer above while the MLME is the one draining
 /// the radio. Bounded for the reason the management queue is.
-const RX_QUEUE: usize = 32;
+/// Frames waiting for the IP stack. A TCP window is about twenty-two
+/// segments and a busy network adds broadcast, so thirty-two overflowed under
+/// one burst; and `drain` now stops at full rather than evicting.
+const RX_QUEUE: usize = 64;
+/// The first wait before rejoining after a drop, and the longest.
+const REJOIN_FIRST_MS: u64 = 2_000;
+const REJOIN_MAX_MS: u64 = 60_000;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
@@ -112,7 +118,17 @@ impl Bss {
 pub struct Station<R: Radio> {
     link: Link<R>,
     ssid: String,
-    pass: String,
+    /// What the passphrase derives for this SSID, and never the passphrase:
+    /// four thousand rounds of PBKDF2 at `join`, then only this, which is what
+    /// rejoining after a drop needs and is useless for any other network.
+    pmk: Option<Vec<u8>>,
+    /// This join reached a working link at least once, so losing it is a drop
+    /// to recover from rather than a join that never worked.
+    ran: bool,
+    /// When to try again after a drop, and how many tries so far.
+    rejoin: Option<(u64, u32)>,
+    /// Frames pushed out of a full receive queue.
+    pub rx_overflow: u32,
     state: State,
     /// When the current state was entered, in the caller's milliseconds.
     since: u64,
@@ -131,6 +147,13 @@ pub struct Station<R: Radio> {
     pub mgmt_tx: u32,
     pub mgmt_rx: u32,
     pub eapol_rx: u32,
+    /// Group keys the link would not take.
+    pub group_refused: u32,
+    /// How many times this station has reached Running. **The thing an IP
+    /// layer keys a lease on**: a different count is a different association,
+    /// possibly to a different network, and an address from the last one is
+    /// an address on a subnet this station may no longer be on.
+    pub joins: u32,
     /// The radio is scanning on its own, and the plan is only a deadline.
     offloaded: bool,
     /// `prepare_join` succeeded and `left` has not been called since, so the
@@ -143,7 +166,10 @@ impl<R: Radio> Station<R> {
         Station {
             link: Link::new(radio),
             ssid: String::new(),
-            pass: String::new(),
+            pmk: None,
+            ran: false,
+            rejoin: None,
+            rx_overflow: 0,
             state: State::Idle,
             since: 0,
             tries: 0,
@@ -159,6 +185,8 @@ impl<R: Radio> Station<R> {
             mgmt_tx: 0,
             mgmt_rx: 0,
             eapol_rx: 0,
+            group_refused: 0,
+            joins: 0,
             offloaded: false,
             prepared: false,
         }
@@ -185,9 +213,17 @@ impl<R: Radio> Station<R> {
     /// advertises no encryption and is joined by a station that expected some
     /// is a station about to send its traffic in the clear.
     pub fn start(&mut self, ssid: &str, pass: &str, now: u64) {
-        self.abort_scan();
+        self.pmk = if pass.is_empty() { None } else { Some(wpa2::pmk(pass, ssid.as_bytes())) };
         self.ssid = ssid.to_string();
-        self.pass = pass.to_string();
+        self.ran = false;
+        self.rejoin = None;
+        self.begin(now);
+    }
+
+    /// The join itself, from a PMK already derived. `start` for an operator's
+    /// request, and again from `poll` after a drop.
+    fn begin(&mut self, now: u64) {
+        self.abort_scan();
         self.seen.clear();
         self.rx_q.clear();
         self.eapol_q.clear();
@@ -254,6 +290,9 @@ impl<R: Radio> Station<R> {
     }
 
     pub fn stop(&mut self) {
+        // An operator leaving is not a drop to recover from.
+        self.rejoin = None;
+        self.ran = false;
         self.abort_scan();
         self.goodbye();
         self.sup = None;
@@ -350,7 +389,33 @@ impl<R: Radio> Station<R> {
         if matches!(self.state, State::Failed(_)) {
             self.goodbye();
         }
+        if self.state == State::Running {
+            self.ran = true;
+            self.rejoin = None;
+        }
+        // **A drop is recovered, not reported and left.** An access point
+        // deauthenticates on a rekey it did not like, a reboot, a roam; a link
+        // that worked and went is rejoined on a backoff -- two seconds, doubling
+        // to a minute -- from the PMK, without asking the operator to type the
+        // passphrase again. Before this one deauthentication was every
+        // consumer down until somebody noticed.
+        if matches!(self.state, State::Failed(_)) && self.ran {
+            match self.rejoin {
+                None => self.rejoin = Some((now + REJOIN_FIRST_MS, 0)),
+                Some((due, n)) if now >= due => {
+                    let next = (REJOIN_FIRST_MS << (n + 1).min(5)).min(REJOIN_MAX_MS);
+                    self.rejoin = Some((now + next, n + 1));
+                    self.begin(now);
+                }
+                Some(_) => {}
+            }
+        }
         self.state
+    }
+
+    /// Whether a drop is being recovered, and how many tries in.
+    pub fn rejoining(&self) -> Option<u32> {
+        self.rejoin.map(|(_, n)| n)
     }
 
     fn retry(&mut self, now: u64, why: &'static str, again: fn(&mut Self, u64)) {
@@ -417,7 +482,7 @@ impl<R: Radio> Station<R> {
         // A secured network with no passphrase, or a passphrase for an open
         // one, is a mismatch the operator should hear about rather than a
         // connection that half works.
-        if b.secured && self.pass.is_empty() {
+        if b.secured && self.pmk.is_none() {
             self.state = State::Failed("that network is encrypted and no passphrase was given");
             return;
         }
@@ -479,6 +544,11 @@ impl<R: Radio> Station<R> {
     /// Nothing is *acted* on here -- see `poll` for why the order matters.
     fn drain(&mut self) {
         loop {
+            // Full: leave the rest in the radio rather than pull it out only to
+            // push the oldest away. It is read next time, in order.
+            if self.rx_q.len() >= RX_QUEUE {
+                break;
+            }
             let eth = match self.link.receive() {
                 Some(e) => e,
                 None => break,
@@ -487,12 +557,10 @@ impl<R: Radio> Station<R> {
                 self.eapol_rx += 1;
                 if self.eapol_q.len() >= RX_QUEUE {
                     self.eapol_q.remove(0);
+                    self.rx_overflow += 1;
                 }
                 self.eapol_q.push(eth);
                 continue;
-            }
-            if self.rx_q.len() >= RX_QUEUE {
-                self.rx_q.remove(0);
             }
             self.rx_q.push(eth);
         }
@@ -523,8 +591,28 @@ impl<R: Radio> Station<R> {
             eth.extend_from_slice(&r);
             let _ = self.link.transmit(&eth);
         }
-        if done && self.state == State::Handshaking {
+        // Whichever key the supplicant committed, in whatever state: the first
+        // handshake ends Handshaking, but a pairwise rekey arrives while
+        // Running and a group rekey whenever the access point's timer says --
+        // and a key not installed is every later frame failing its MIC.
+        let (ptk_fresh, gtk_fresh) = self.sup.as_ref().map(|s| (s.ptk_fresh, s.gtk_fresh)).unwrap_or((false, false));
+        if done && ptk_fresh {
             self.install();
+        }
+        if gtk_fresh && matches!(self.state, State::Running) {
+            self.install_group();
+        }
+    }
+
+    /// The group key, for everything addressed to more than one station --
+    /// which is DHCP's offer and ARP's request, so without it a WPA2 network
+    /// associates, keys, and then can never be given an address.
+    fn install_group(&mut self) {
+        let Some(s) = self.sup.as_mut() else { return };
+        s.gtk_fresh = false;
+        let Some((id, key)) = s.gtk.clone() else { return };
+        if !self.link.keyed_group(&key, id) {
+            self.group_refused += 1;
         }
     }
 
@@ -544,8 +632,15 @@ impl<R: Radio> Station<R> {
                 return;
             }
         };
+        if let Some(s) = self.sup.as_mut() {
+            s.ptk_fresh = false;
+        }
         if self.link.keyed(&tk, 0) {
-            self.state = State::Running;
+            if self.state == State::Handshaking {
+                self.state = State::Running;
+                self.joins += 1;
+            }
+            self.install_group();
         } else {
             self.state = State::Failed("the key was refused");
         }
@@ -657,11 +752,14 @@ impl<R: Radio> Station<R> {
                     // and `secured()` says so afterwards rather than this
                     // pretending otherwise.
                     self.state = State::Running;
+                    self.joins += 1;
                     return;
                 }
-                let ssid = self.ssid.clone();
-                let pass = self.pass.clone();
-                self.sup = Some(wpa2::Supplicant::new(&pass, ssid.as_bytes(), bssid, me));
+                let Some(pmk) = self.pmk.clone() else {
+                    self.state = State::Failed("that network is encrypted and no passphrase was given");
+                    return;
+                };
+                self.sup = Some(wpa2::Supplicant::with_pmk(pmk, bssid, me));
                 self.since = now;
                 self.state = State::Handshaking;
             }
@@ -748,6 +846,14 @@ impl<R: Radio> Wlan for Station<R> {
     fn radio_name(&self) -> &'static str {
         self.link.name()
     }
+
+    fn joins(&self) -> u32 {
+        self.joins
+    }
+
+    fn rejoining(&self) -> Option<u32> {
+        Station::rejoining(self)
+    }
 }
 
 impl<R: Radio> Nic for Station<R> {
@@ -767,7 +873,12 @@ impl<R: Radio> Nic for Station<R> {
         // Drained and not acted on: EAPOL waits for `poll`, which handles the
         // management frames first. Feeding it here dropped message 1 of every
         // live handshake -- see the claim about the IP stack in `selftest`.
-        self.drain();
+        // Only when nothing is waiting: the stack takes one frame per call,
+        // and re-draining the radio on every call pulled bursts in faster than
+        // they were taken out.
+        if self.rx_q.is_empty() {
+            self.drain();
+        }
         if self.rx_q.is_empty() {
             return None;
         }
@@ -812,6 +923,8 @@ pub struct Ap {
     seq: u16,
     auth: Option<wpa2::Authenticator>,
     keys: Option<crate::net::ccmp::Keys>,
+    /// The group key in force, under the authenticator's group key id.
+    gkeys: Option<crate::net::ccmp::Keys>,
     /// Ethernet payloads received from the station after the handshake.
     pub got: Vec<Vec<u8>>,
     pub refuse_auth: bool,
@@ -831,6 +944,7 @@ impl Ap {
             sta,
             seq: 0,
             auth: None,
+            gkeys: None,
             keys: None,
             got: Vec::new(),
             refuse_auth: false,
@@ -1010,8 +1124,10 @@ impl Ap {
         // Message 4 finishes it, and the key goes in here for the same reason
         // it goes in there: not before the exchange that establishes it is over.
         let done = self.auth.as_ref().map(|a| a.done).unwrap_or(false);
-        if done && self.keys.is_none() {
-            if let Some(tk) = self.auth.as_ref().and_then(|a| a.tk()) {
+        let tk = self.auth.as_ref().and_then(|a| a.tk());
+        let current = self.keys.as_ref().map(|k| k.tk.to_vec());
+        if done && tk.is_some() && tk != current {
+            if let Some(tk) = tk {
                 self.keys = ccmp::Keys::new(&tk, 0);
             }
         }
@@ -1038,6 +1154,59 @@ impl Ap {
             None => f,
         };
         radio.inbox.push(f);
+    }
+
+    /// A group-addressed frame from another host on the network, as DHCP's
+    /// offer and ARP's request arrive: broadcast, under the group key.
+    pub fn send_group(&mut self, ethertype: u16, payload: &[u8], from: Mac, radio: &mut crate::net::softmac::Loopback) {
+        let Some(a) = self.auth.as_ref() else { return };
+        if self.gkeys.as_ref().map(|k| k.key_id) != Some(a.gtk_id & 3) {
+            self.gkeys = crate::net::ccmp::Keys::new(&a.gtk, a.gtk_id);
+        }
+        let seq = self.next_seq();
+        let body = dot11::snap_wrap(ethertype, payload);
+        let f = dot11::data_from_ds(&dot11::BROADCAST, &self.bssid, &from, seq, &body);
+        if let Some(p) = self.gkeys.as_mut().and_then(|k| k.protect(&f)) {
+            radio.inbox.push(p);
+        }
+    }
+
+    /// Hand out a new group key, as an access point does on its rekey timer:
+    /// group message 1, under the pairwise key.
+    pub fn rekey_group(&mut self, gtk: [u8; 16], radio: &mut crate::net::softmac::Loopback) -> bool {
+        let Some(m1) = self.auth.as_mut().and_then(|a| a.group_rekey(gtk)) else { return false };
+        let f = self.eapol_down(&m1);
+        let f = match self.keys.as_mut() {
+            Some(k) => match k.protect(&f) {
+                Some(p) => p,
+                None => return false,
+            },
+            None => f,
+        };
+        radio.inbox.push(f);
+        true
+    }
+
+    /// A pairwise rekey: a new message 1 on a running association.
+    pub fn rekey_pairwise(&mut self, radio: &mut crate::net::softmac::Loopback) -> bool {
+        let Some(a) = self.auth.as_mut() else { return false };
+        a.anonce[0] ^= 0x5a;
+        a.done = false;
+        let m1 = a.message1();
+        let f = self.eapol_down(&m1);
+        let f = match self.keys.as_mut() {
+            Some(k) => match k.protect(&f) {
+                Some(p) => p,
+                None => return false,
+            },
+            None => f,
+        };
+        radio.inbox.push(f);
+        true
+    }
+
+    pub fn group_acked(&self) -> bool {
+        self.auth.as_ref().is_some_and(|a| a.group_acked)
     }
 
     pub fn deauth(&mut self, reason: u16, radio: &mut crate::net::softmac::Loopback) {
@@ -1221,13 +1390,86 @@ pub fn selftest() -> bool {
     );
     check(
         "the group key came out of message three, wrapped under the KEK",
-        sta.sup.as_ref().and_then(|s| s.gtk.as_ref()).map(|g| g.len()) == Some(16),
+        sta.sup.as_ref().and_then(|s| s.gtk.as_ref()).map(|g| g.1.len()) == Some(16),
     );
     check(
         "a frame from the access point comes back up as Ethernet",
         {
             ap.send_down(0x0800, b"and back down", sta.link_mut().radio_mut());
             sta.receive().map(|e| e[14..].to_vec()) == Some(b"and back down".to_vec())
+        },
+    );
+
+    // --- the group key, and both rekeys ---------------------------------
+    //
+    // DHCP's offer and ARP's request are broadcast, and a WPA2 network sends
+    // broadcast under the group key. The station took the group key out of
+    // message 3 and never gave it to the link, so every one was dropped as a
+    // forgery: a network that associated, keyed, and could never be given an
+    // address.
+    let host: Mac = [0x02, 0x44, 0x48, 0x43, 0x50, 0x01];
+    check(
+        "a broadcast under the group key comes up, which is how a DHCP offer arrives",
+        {
+            ap.send_group(0x0800, b"an offer", host, sta.link_mut().radio_mut());
+            sta.receive().map(|e| (e[..6].to_vec(), e[14..].to_vec()))
+                == Some((dot11::BROADCAST.to_vec(), b"an offer".to_vec()))
+        },
+    );
+    check(
+        "a group rekey is answered, and the next broadcast is read under the new key and id",
+        {
+            let sent = ap.rekey_group([0x99; 16], sta.link_mut().radio_mut());
+            sta.poll(now);
+            ap.serve(sta.link_mut().radio_mut());
+            ap.send_group(0x0806, b"after the rekey", host, sta.link_mut().radio_mut());
+            sent && ap.group_acked()
+                && sta.receive().map(|e| e[14..].to_vec()) == Some(b"after the rekey".to_vec())
+        },
+    );
+    check(
+        "a forged message 1 on a running link changes nothing that is in force",
+        {
+            let forged = wpa2::Authenticator::new("not the passphrase", b"glados", ap_mac, me).message1();
+            let f = {
+                let body = dot11::snap_wrap(ETHERTYPE_EAPOL, &forged);
+                dot11::data_from_ds(&me, &ap_mac, &ap_mac, 4000, &body)
+            };
+            sta.link_mut().radio_mut().inbox.push(f);
+            sta.poll(now);
+            ap.serve(sta.link_mut().radio_mut());
+            ap.send_down(0x0800, b"still keyed", sta.link_mut().radio_mut());
+            sta.state() == State::Running && sta.receive().map(|e| e[14..].to_vec()) == Some(b"still keyed".to_vec())
+        },
+    );
+    check(
+        "a pairwise rekey on a running link installs the new key at both ends",
+        {
+            let sent = ap.rekey_pairwise(sta.link_mut().radio_mut());
+            for _ in 0..4 {
+                sta.poll(now);
+                ap.serve(sta.link_mut().radio_mut());
+            }
+            let mut eth = Vec::new();
+            eth.extend_from_slice(&ap_mac);
+            eth.extend_from_slice(&me);
+            eth.extend_from_slice(&0x0800u16.to_be_bytes());
+            eth.extend_from_slice(b"under the new key");
+            let up = sta.transmit(&eth);
+            ap.serve(sta.link_mut().radio_mut());
+            ap.send_down(0x0800, b"and down under it", sta.link_mut().radio_mut());
+            sent && up
+                && sta.state() == State::Running
+                && ap.got.last().map(|p| &p[..]) == Some(&b"under the new key"[..])
+                && sta.receive().map(|e| e[14..].to_vec()) == Some(b"and down under it".to_vec())
+        },
+    );
+    check(
+        "our own broadcast, relayed back by the access point, is not taken up",
+        {
+            let before = sta.link_mut().dropped_own;
+            ap.send_group(0x0806, b"our own arp", me, sta.link_mut().radio_mut());
+            sta.receive().is_none() && sta.link_mut().dropped_own == before + 1
         },
     );
 
@@ -1584,6 +1826,36 @@ pub fn selftest() -> bool {
         "a deauthentication ends the association and carries its reason",
         matches!(sta.state(), State::Failed(_)) && sta.reason == 7 && !sta.secured(),
     );
+    // And recovers from it: the same network, rejoined on its own after the
+    // backoff, from the PMK -- the passphrase is not held anywhere to use.
+    {
+        let joins_before = sta.joins;
+        let mut t = now;
+        let mut back = false;
+        for _ in 0..400 {
+            ap.serve(sta.link_mut().radio_mut());
+            t += DWELL_MS;
+            if sta.poll(t) == State::Running {
+                back = true;
+                break;
+            }
+        }
+        check(
+            "a dropped link rejoins on its own after a backoff, with a key of its own, and counts as a new join",
+            back && sta.secured() && sta.joins == joins_before + 1 && sta.rejoining().is_none(),
+        );
+        sta.stop();
+        let mut t2 = t;
+        for _ in 0..100 {
+            ap.serve(sta.link_mut().radio_mut());
+            t2 += DWELL_MS;
+            sta.poll(t2);
+        }
+        check(
+            "and leaving on purpose is not a drop: nothing rejoins",
+            sta.state() == State::Idle && sta.rejoining().is_none(),
+        );
+    }
 
     let mut sta = Station::new(Loopback::new(me));
     let mut ap = Ap::new(ap_mac, me, "glados", "correct horse", 6);
