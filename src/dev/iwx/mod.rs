@@ -38,6 +38,7 @@ pub mod gen3;
 pub mod init;
 pub mod nvm;
 pub mod power;
+pub mod rx;
 pub mod fw;
 
 use crate::dev::pci::{self, Device};
@@ -972,6 +973,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.extend(init::checks());
     out.extend(config::checks());
     out.extend(power::checks());
+    out.extend(rx::checks());
     out
 }
 
@@ -1154,16 +1156,52 @@ pub struct Held {
     bar0: u64,
     ecam: u64,
     stopped: Option<Stopped>,
+    /// Frames and notifications nobody was waiting for.
+    pub inbox: rx::Inbox,
+    /// The receive descriptor this family puts in front of a frame.
+    desc: usize,
 }
 
 impl Held {
-    pub fn new(radio: Radio, booted: Booted, ecam: u64) -> Option<Held> {
+    pub fn new(radio: Radio, booted: Booted, ecam: u64, family: Family) -> Option<Held> {
         let bar0 = radio.bar0.filter(|&b| b != 0)?;
-        Some(Held { radio, booted, bar0, ecam, stopped: None })
+        let desc = if family == Family::F22000 { rx::DESC_V1 } else { rx::DESC_V3 };
+        Some(Held { radio, booted, bar0, ecam, stopped: None, inbox: rx::Inbox::new(), desc })
+    }
+
+    /// Drain the receive ring into the inbox. Cheap, and safe to call as often
+    /// as anybody likes: it reads a producer index and does nothing more when the
+    /// ring is empty. Answers how many packets it took.
+    ///
+    /// Polled rather than interrupt-driven, like every network driver here: the
+    /// interrupt is masked (`alive::arm`), the status block is in memory, and the
+    /// idle loop already turns over every few milliseconds.
+    pub fn poll(&mut self) -> usize {
+        if self.stopped.is_some() {
+            return 0;
+        }
+        let mut n = 0;
+        let b = &mut self.booted;
+        while let Some(got) = b.rx.next(&b.boot.rings, &b.buffers) {
+            n += 1;
+            match got {
+                Ok(p) => self.inbox.take(&p, self.desc),
+                Err(_) => self.inbox.bad += 1,
+            }
+        }
+        if n > 0 {
+            // Safety: this part's aperture, and it has not been stopped.
+            unsafe { b.rx.ack(self.bar0, &b.boot.rings) };
+        }
+        n
     }
 
     pub fn bar0(&self) -> u64 {
         self.bar0
+    }
+
+    pub fn desc(&self) -> usize {
+        self.desc
     }
 
     /// Take the part down. Idempotent: the second call answers the first's result.
@@ -1185,27 +1223,64 @@ impl Drop for Held {
 }
 
 /// The one held part, if `iwx boot` brought one up and nothing has stopped it.
-static HELD: crate::sync::Racy<Option<Held>> = crate::sync::Racy::new(None);
+///
+/// **A lock and not a `Racy`, because two tasks reach it.** The shell boots,
+/// stops and reads it; `net::wifi_poll` drains it from the idle loop *and* from
+/// the clock task. A `Racy` there is the clock task servicing a part the shell
+/// is halfway through replacing. The service side only ever tries the lock and
+/// skips a tick if it is taken; the shell side yields between tries rather than
+/// spinning, because a holder preempted on this same core does not finish while
+/// its waiter spins.
+static HELD: crate::sync::Spin<Slot> = crate::sync::Spin::new(Slot(None));
+
+/// `Held` carries raw pointers to its DMA regions and so is not `Send` on its
+/// own. It is moved between tasks only behind `HELD`'s lock, one owner at a
+/// time, which is the property `Send` stands for.
+struct Slot(Option<Held>);
+unsafe impl Send for Slot {}
+
+fn grab() -> crate::sync::Guard<'static, Slot> {
+    loop {
+        if let Some(g) = HELD.try_lock() {
+            return g;
+        }
+        crate::task::yield_now();
+    }
+}
 
 /// Keep a booted part, stopping whatever was held before.
 pub fn hold(d: Held) {
-    let slot = unsafe { &mut *HELD.get() };
+    let mut g = grab();
     // Replaced rather than swapped in place, so the old one's Drop -- the stop --
     // runs before the new one is reachable.
-    *slot = None;
-    *slot = Some(d);
+    g.0 = None;
+    g.0 = Some(d);
 }
 
 /// Stop and release the held part, answering how the stop went.
 pub fn release() -> Option<Stopped> {
-    let slot = unsafe { &mut *HELD.get() };
-    let mut d = slot.take()?;
+    let mut d = grab().0.take()?;
     Some(d.stop())
 }
 
-pub fn held() -> bool {
-    unsafe { (*HELD.get()).is_some() }
+/// Drain the held part's ring, from the idle loop or the clock task. Nothing
+/// held, or the shell busy with it, and nothing is done this tick.
+pub fn service() -> usize {
+    match HELD.try_lock() {
+        Some(mut g) => g.0.as_mut().map(|h| h.poll()).unwrap_or(0),
+        None => 0,
+    }
 }
+
+/// Run `f` against the held part, if there is one.
+pub fn with_held<R>(f: impl FnOnce(&mut Held) -> R) -> Option<R> {
+    grab().0.as_mut().map(f)
+}
+
+pub fn held() -> bool {
+    grab().0.is_some()
+}
+
 /// Upstream's own figure, and it is **microseconds**: fifty, not fifty
 /// milliseconds. The semaphore is granted immediately or the part needs the
 /// prepare dance, so a generous timeout here buys nothing and hides which of the

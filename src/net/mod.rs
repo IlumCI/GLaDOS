@@ -285,6 +285,10 @@ pub fn wifi_poll() {
         return;
     }
     let now = now_ms();
+    // A part held up by `iwx boot` has its ring drained here whether or not it
+    // is attached as wlan0 yet: firmware that is talking and not being heard
+    // fills its ring and stops, which looks exactly like a part that died.
+    crate::dev::iwx::service();
     if let Some(w) = wlan() {
         w.poll_mlme(now);
     }

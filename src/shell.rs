@@ -5290,6 +5290,37 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // radio up reads registers and writes a handful, where this lets it
                 // fetch a megabyte and a half out of host memory on its own
                 // initiative. Somebody should have to ask for that by name.
+                // What the held part has said that nobody asked for. The first
+                // thing to read on the laptop after `iwx boot`: a part that is
+                // alive and silent and one that is talking into a full ring look
+                // the same from every other command.
+                "rx" => {
+                    crate::dev::iwx::service();
+                    let shown = crate::dev::iwx::with_held(|h| {
+                        let ib = &h.inbox;
+                        kprintln!(
+                            "  {} frame(s), {} notification(s) waiting; {} dropped for room, {} unreadable",
+                            ib.frames.len(), ib.notifs.len(), ib.dropped, ib.bad
+                        );
+                        for f in ib.frames.iter().rev().take(8) {
+                            let ty = (f.frame[0] >> 2) & 3;
+                            let sub = f.frame[0] >> 4;
+                            let ssid = crate::net::ieee80211::parse_beacon(&f.frame)
+                                .map(|b| b.ssid)
+                                .unwrap_or_default();
+                            kprintln!(
+                                "    type {} sub {:2}  ch {:3}  {:4} dBm  {} bytes  {}",
+                                ty, sub, f.channel, f.rssi, f.frame.len(), ssid
+                            );
+                        }
+                        for n in ib.notifs.iter().rev().take(8) {
+                            kprintln!("    notification group {:#04x} code {:#04x}, {} bytes", n.group, n.code, n.payload.len());
+                        }
+                    });
+                    if shown.is_none() {
+                        kprintln!("  nothing is held: `iwx boot` brings a part up");
+                    }
+                }
                 "down" => match crate::dev::iwx::release() {
                     Some(st) => kprintln!("  {}", st.say()),
                     None => kprintln!("  nothing is held: `iwx boot` brings a part up"),
@@ -5417,7 +5448,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             // ring into freed heap. `Held` owns both and stops the
                             // part before releasing either; `iwx down` does that
                             // on request, and the next `iwx boot` does it first.
-                            match crate::dev::iwx::Held::new(*r, b, ecam) {
+                            match crate::dev::iwx::Held::new(*r, b, ecam, crate::dev::iwx::Family::Ax210) {
                                 Some(h) => {
                                     crate::dev::iwx::hold(h);
                                     kprintln!("  held, running. `iwx down` stops it.");

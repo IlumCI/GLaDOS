@@ -267,6 +267,32 @@ pub unsafe fn ask<'a>(
     payload: &[u8],
     ms: u32,
 ) -> Result<Packet<'a>, CmdError> {
+    ask_with(bar0, rings, bufs, rx, q, group, opcode, version, payload, ms, &mut |_| {})
+}
+
+/// `ask`, handing every packet it steps over to `aside`.
+///
+/// **What lets a command be sent while the part is hearing things.** During a
+/// scan or an association every beacon is a packet in this ring, and `ask`
+/// stepped over them -- correctly for a part that only answers questions, and
+/// a scan that loses whatever arrived while a command was in flight otherwise.
+/// `iwx::rx::Inbox::take` is what `Held` passes.
+///
+/// # Safety
+/// As `ask`.
+pub unsafe fn ask_with<'a>(
+    bar0: u64,
+    rings: &mut Rings,
+    bufs: &'a Buffers,
+    rx: &mut Rx,
+    q: &mut Queue,
+    group: u8,
+    opcode: u8,
+    version: u8,
+    payload: &[u8],
+    ms: u32,
+    aside: &mut dyn FnMut(&Packet),
+) -> Result<Packet<'a>, CmdError> {
     let want_group = if group == 0 { LONG_GROUP } else { group };
     q.send(bar0, rings, group, opcode, version, payload)?;
 
@@ -278,9 +304,11 @@ pub unsafe fn ask<'a>(
                 rx.ack(bar0, rings);
                 return Ok(pkt);
             }
-            // Something else. Acknowledged and stepped over: leaving it would
-            // have the next reader see it again, and refusing on it would make
-            // any unsolicited notification break the next command.
+            // Something else. Handed aside, acknowledged and stepped over:
+            // leaving it would have the next reader see it again, and refusing
+            // on it would make any unsolicited notification break the next
+            // command.
+            aside(&pkt);
             rx.ack(bar0, rings);
         }
         if waited >= ms * 1000 {
@@ -316,6 +344,23 @@ pub unsafe fn expect<'a>(
     code: u8,
     ms: u32,
 ) -> Result<Packet<'a>, CmdError> {
+    expect_with(bar0, rings, bufs, rx, group, code, ms, &mut |_| {})
+}
+
+/// `expect`, handing every packet it steps over to `aside`.
+///
+/// # Safety
+/// As `expect`.
+pub unsafe fn expect_with<'a>(
+    bar0: u64,
+    rings: &mut Rings,
+    bufs: &'a Buffers,
+    rx: &mut Rx,
+    group: u8,
+    code: u8,
+    ms: u32,
+    aside: &mut dyn FnMut(&Packet),
+) -> Result<Packet<'a>, CmdError> {
     let mut waited = 0u32;
     loop {
         while let Some(got) = rx.next(rings, bufs) {
@@ -326,6 +371,7 @@ pub unsafe fn expect<'a>(
             if matched {
                 return Ok(pkt);
             }
+            aside(&pkt);
             // Anything else is stepped over. Firmware sends statistics,
             // temperature and debug unasked, and refusing on the first of them
             // would make an unrelated notification break the sequence.
