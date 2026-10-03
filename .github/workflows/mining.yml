@@ -38,6 +38,7 @@ on:
       - 'src/mine/**'
       - 'tools/mkiso.py'
       - '.github/workflows/mining.yml'
+      - 'payload/firmware.txt'
   workflow_dispatch:
 
 permissions:
@@ -116,6 +117,8 @@ jobs:
       # two lines that matter -- where, and whose address.
       #
       - name: Build the mining ISO
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p payload-dir out
           cat > payload-dir/MINER.TXT <<'CFG'
@@ -163,6 +166,17 @@ jobs:
           # only because the store it was built with held a root nothing needed.
           python3 tools/roots.py --selftest
           python3 tools/roots.py --out payload-dir/roots.der
+          # **The wireless firmware, so the screen's Wi-Fi button has a radio to
+          # turn on.** A miner is handed to somebody with no cable as often as to
+          # somebody with one. Fetched by manifest name from the same pinned
+          # release the model ISOs use, verified by digest, licence included --
+          # `mkiso.py` refuses FW\ without it and holds every file to
+          # payload/firmware.txt.
+          mkdir -p payload-dir/FW
+          for f in $(grep -v '^#' payload/firmware.txt | awk 'NF >= 3 {print $3}'); do
+            gh release download payload-wifi-fw-v1 --dir payload-dir/FW --clobber --pattern "$f"
+          done
+          python3 tools/payload.py verify payload-dir/FW payload/firmware.txt
           # `-miner`, not `-nomodel`: this is the file people download to mine, and
           # "no model" describes it by what it lacks. tools/site.py has the row.
           NAME="glados-$VERSION-miner"

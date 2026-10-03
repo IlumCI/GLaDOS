@@ -3714,6 +3714,12 @@ the firmware banner and the boot sequence first. `.qemu/qemu-stderr.log` says
 `Failed to find an available port`. Check for a running QEMU before launching,
 especially when the first run is in the background.
 
+**`@mouse <monitor command>` and `@shot <png>` are beats in the command list**,
+like `@wait`: `--mouse` sends its events only after every command and
+`--screenshot` photographs only the end, so click, type, click could not be
+driven. The miner's Wi-Fi panel is tested this way, against a miner ISO built
+with `mkiso.py --payload <dir with MINER.TXT and FW/>` and booted with `--iso`.
+
 **A screenshot is taken when `drive.py` exits, which for a full-screen program
 means you get the desktop.** The bounded `ms` form returns before the harness
 does, so `--screenshot` catches whatever is on screen *after* the program gave

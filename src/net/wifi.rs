@@ -195,6 +195,7 @@ pub fn hardware() -> alloc::vec::Vec<Hardware> {
 ///
 /// The display shape of `mlme::Bss`, and `from_bss` is the one conversion so
 /// the two cannot drift into disagreeing about what a network is called.
+#[derive(Clone)]
 pub struct Network {
     /// The network's name. **SSID and ESSID are the same field**; ESSID is the
     /// older name for it, from when a distinction between independent and

@@ -1088,6 +1088,26 @@ def main():
                     # put a do-nothing applet in the grammar the model decodes
                     # against, which is a real cost for a presentational
                     # problem. So the pause lives in the harness.
+                    # `@mouse <monitor command>` and `@shot <png>` are beats
+                    # too, in sequence with the commands: `--mouse` sends its
+                    # events only once every command has run and `--screenshot`
+                    # photographs only the end, so a click, then a typed line,
+                    # then another click could not be driven at all -- which
+                    # is exactly the shape of joining Wi-Fi from the miner's
+                    # screen.
+                    if line.startswith("@mouse ") or line.startswith("@shot "):
+                        verb, arg = line.split(None, 1)
+                        if verb == "@mouse":
+                            monitor([arg])
+                            print(f"[drive] mouse: {arg}")
+                        else:
+                            try:
+                                capture(arg)
+                            except Exception as e:
+                                print(f"[drive] screenshot failed: {e}", file=sys.stderr)
+                        time.sleep(0.4)
+                        force_send = True
+                        continue
                     if line.startswith("@wait "):
                         try:
                             secs = float(line.split(None, 1)[1])

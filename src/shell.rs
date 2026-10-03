@@ -219,6 +219,9 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
             // Beside TCP because it is the same bargain: no receive
             // interrupts, so a state machine advances when the shell is idle.
             crate::net::wifi_service();
+            // A miner image has no compositor, so the pointer is read here --
+            // the Wi-Fi panel is the one thing on that screen to click.
+            crate::mine::wifiui::pointer_poll();
             // USB is polled and not interrupt-driven in this kernel, so a
             // keyboard on it is only heard from when somebody asks. Here
             // rather than in the timer tick for the same reason the pointer
@@ -257,6 +260,18 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
 
         match key {
             b'\n' => {
+                // A Wi-Fi passphrase typed into the miner's panel is not a
+                // command: taken here, before the serial log and the history
+                // below -- the two places every other line is kept -- and
+                // never echoed. See `mine::wifiui`.
+                if crate::mine::wifiui::wants_passphrase() {
+                    let pass = core::mem::take(&mut line);
+                    cursor = 0;
+                    crate::mine::wifiui::take_passphrase(pass);
+                    serial_println!("{}(a Wi-Fi passphrase, not logged)", PROMPT);
+                    prompt();
+                    continue;
+                }
                 console::with(|c| {
                     let avail = c.cols().saturating_sub(PROMPT_LEN + 1);
                     c.set_col(PROMPT_LEN + line.len().min(avail));

@@ -94,15 +94,15 @@ const SKY: [(u8, Color); 5] = [
     (236, Color::new(0x2C, 0x2E, 0x26)),
     (255, Color::new(0x5A, 0x3A, 0x14)),
 ];
-const WHITE: Color = Color::new(0xFF, 0xFF, 0xFF);
-const INK: Color = Color::new(0xE6, 0xF1, 0xF6);
-const DIM: Color = Color::new(0x86, 0xA8, 0xB8);
-const TEAL: Color = Color::new(0x8F, 0xDC, 0xF0);
-const GOLD: Color = theme::APERTURE;
-const GREEN: Color = Color::new(0x4A, 0xDE, 0x80);
-const AMBER: Color = Color::new(0xFB, 0xBF, 0x24);
-const RED: Color = Color::new(0xF8, 0x71, 0x71);
-const SHADE: Color = Color::new(0x00, 0x00, 0x00);
+pub(super) const WHITE: Color = Color::new(0xFF, 0xFF, 0xFF);
+pub(super) const INK: Color = Color::new(0xE6, 0xF1, 0xF6);
+pub(super) const DIM: Color = Color::new(0x86, 0xA8, 0xB8);
+pub(super) const TEAL: Color = Color::new(0x8F, 0xDC, 0xF0);
+pub(super) const GOLD: Color = theme::APERTURE;
+pub(super) const GREEN: Color = Color::new(0x4A, 0xDE, 0x80);
+pub(super) const AMBER: Color = Color::new(0xFB, 0xBF, 0x24);
+pub(super) const RED: Color = Color::new(0xF8, 0x71, 0x71);
+pub(super) const SHADE: Color = Color::new(0x00, 0x00, 0x00);
 
 /// Where to get it, on every frame, because every frame is a screenshot.
 const SITE: &str = "glados.aperture.institute";
@@ -167,7 +167,7 @@ fn split_line(s: &str, n: usize) -> (String, String) {
     }
 }
 
-fn trunc(s: &str, n: usize) -> String {
+pub(super) fn trunc(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         return String::from(s);
     }
@@ -189,30 +189,30 @@ fn short_addr(a: &str) -> String {
 
 // ---- drawing helpers -------------------------------------------------------
 
-fn text_w(s: &str, scale: u32) -> u32 {
+pub(super) fn text_w(s: &str, scale: u32) -> u32 {
     s.chars().count() as u32 * crate::gfx::font::GLYPH_W * scale
 }
 
 /// Text with a soft drop shadow, which is what keeps white type legible where
 /// the sky turns gold.
-fn say(fb: &Framebuffer, x: u32, y: u32, s: &str, c: Color, scale: u32) {
+pub(super) fn say(fb: &Framebuffer, x: u32, y: u32, s: &str, c: Color, scale: u32) {
     let d = (scale / 2).max(1);
     fb.draw_text_over(x + d, y + d, s, SHADE, scale);
     fb.draw_text_over(x, y, s, c, scale);
 }
 
-fn say_centred(fb: &Framebuffer, cx: u32, y: u32, s: &str, c: Color, scale: u32) {
+pub(super) fn say_centred(fb: &Framebuffer, cx: u32, y: u32, s: &str, c: Color, scale: u32) {
     say(fb, cx.saturating_sub(text_w(s, scale) / 2), y, s, c, scale);
 }
 
 /// The largest scale at which `s` fits in `w`, capped at `max`.
-fn fit(s: &str, w: u32, max: u32) -> u32 {
+pub(super) fn fit(s: &str, w: u32, max: u32) -> u32 {
     let per = (s.chars().count() as u32 * crate::gfx::font::GLYPH_W).max(1);
     (w / per).clamp(1, max)
 }
 
 /// A rounded pane of glass: lighter at the top, thinner at the foot.
-fn pane(fb: &Framebuffer, x: u32, y: u32, w: u32, h: u32, r: u32, edge: Option<Color>) {
+pub(super) fn pane(fb: &Framebuffer, x: u32, y: u32, w: u32, h: u32, r: u32, edge: Option<Color>) {
     let shape = Shape::round_rect(w, h, r);
     crate::gfx::with_shape(&shape, x as i32, y as i32, || {
         fb.glass(x, y, w, h, WHITE, &[(0, 34), (255, 14)]);
@@ -238,7 +238,7 @@ fn sun(fb: &Framebuffer, cx: i32, cy: i32, r: i32) {
 
 /// The unit everything is sized in: 1 at 640x400, 2 at 1280x800 and at
 /// 1920x1080, 3 at 2560x1440. Integer, because glyphs scale by whole pixels.
-fn unit(fb: &Framebuffer) -> u32 {
+pub(super) fn unit(fb: &Framebuffer) -> u32 {
     (fb.width() / 640).min(fb.height() / 400).max(1)
 }
 
@@ -253,6 +253,10 @@ fn bar(fb: &Framebuffer, k: u32, status: Option<(&str, Color)>) {
     let ty = (cy as u32).saturating_sub(4 * ts);
     say(fb, m + 2 * r as u32 + 6 * k, ty, "GLaDOS", WHITE, ts);
     say(fb, m + 2 * r as u32 + 6 * k + text_w("GLaDOS ", ts), ty + 4 * ts - 4 * k, "MINER", GOLD, k);
+    // Wi-Fi, beside the name: the one setting a miner may need besides the
+    // address, and the one with no other way in on this image.
+    let bx = m + 2 * r as u32 + 6 * k + text_w("GLaDOS ", ts) + text_w("MINER", k) + 18 * k;
+    super::wifiui::bar_button(fb, bx, (cy as u32).saturating_sub(10 * k), k);
 
     if let Some((word, c)) = status {
         let pw = text_w(word, k) + 16 * k + 14 * k;
@@ -333,6 +337,8 @@ fn ask_frame(fb: &Framebuffer) {
         None => say_centred(fb, cx, hint_y, "then press Enter. Nothing else to set up.", DIM, k),
     }
     foot(fb, k);
+    super::wifiui::overlay(fb, k);
+    super::wifiui::cursor(fb, k);
 }
 
 /// Everything the mining view shows, read at one instant.
@@ -526,6 +532,8 @@ fn mine_frame(fb: &Framebuffer, n: &Now) {
     }
 
     foot(fb, k);
+    super::wifiui::overlay(fb, k);
+    super::wifiui::cursor(fb, k);
 }
 
 // ---- taking the screen, and drawing it -----------------------------------
@@ -539,6 +547,7 @@ fn mine_frame(fb: &Framebuffer, n: &Now) {
 /// the shell's echo, its caret, a stray log line -- paints over the frame.
 pub fn take() {
     let Some(fb) = crate::gfx::primary() else { return };
+    TAKEN.store(true, Ordering::Relaxed);
     crate::gfx::set_exclusive(true);
     compose::init();
     // **Every console, not the default one.** The miner takes the screen while
@@ -555,15 +564,41 @@ pub fn take() {
     }
 }
 
+/// The screen has been taken, so frames may be drawn.
+static TAKEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn taken() -> bool {
+    TAKEN.load(Ordering::Relaxed)
+}
+
+/// One frame at a time. Two tasks draw here now -- the miner's socket loop once
+/// a second and the shell's idle loop when the pointer moves -- into the one
+/// back buffer, and a frame drawn over half of another is a torn screenshot.
+/// Tried rather than waited for: a frame skipped is redrawn a moment later.
+static PAINTING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+struct Painting;
+impl Drop for Painting {
+    fn drop(&mut self) {
+        PAINTING.store(false, Ordering::Release);
+    }
+}
+
 fn paint(f: impl FnOnce(&Framebuffer)) -> bool {
     if !console::is_ready() {
         return false;
     }
+    if PAINTING.swap(true, Ordering::Acquire) {
+        return false;
+    }
+    let _painting = Painting;
     // No compositor (no heap for two frames) means no screen, rather than a
     // screen drawn straight onto the aperture where every frame would tear.
     let Some(back) = compose::target() else { return false };
     let t0 = crate::time::rdtsc();
+    super::wifiui::begin();
     f(&back);
+    super::wifiui::commit();
     let t1 = crate::time::rdtsc();
     // The whole frame every time, not the diff. Anything that ever writes the
     // aperture directly -- a boot-time window edge, a status strip -- leaves the
@@ -610,9 +645,30 @@ pub fn ask_draw() -> bool {
     paint(ask_frame)
 }
 
+/// Paint whichever view is up, for the pointer. Unlike `draw` it takes no
+/// hashrate sample: the history is one sample a second, and a pointer moving
+/// thirty times a second would make a minute of graph two seconds long.
+pub fn redraw() -> bool {
+    if super::boot::asking() {
+        return ask_draw();
+    }
+    if !super::boot::is_miner_image() {
+        return false;
+    }
+    let n = gather();
+    paint(|fb| mine_frame(fb, &n))
+}
+
 /// The shell's line editor, mirrored on every keystroke while an address is
 /// being asked for. Also clears a refusal once the next attempt is under way.
 pub fn typed(line: &str) {
+    // A passphrase being typed into the Wi-Fi panel is counted there and
+    // shown nowhere else -- not in the address field, which is what took
+    // every keystroke before.
+    if super::wifiui::wants_passphrase() {
+        super::wifiui::typed(line);
+        return;
+    }
     let asking = super::boot::asking();
     if !asking && !super::boot::is_miner_image() {
         return;
