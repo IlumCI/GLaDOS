@@ -35,6 +35,27 @@ use alloc::vec::Vec;
 /// and nothing here chose them.
 pub const DIR: &str = "/linux/bin";
 
+/// Where a program's declared argument set lives, one per line.
+///
+/// Optional, and absent means "this program takes no argument the model may
+/// choose" rather than "no arguments" -- the shell still passes whatever it
+/// likes. **The two are gated differently on purpose.** The *program* is
+/// checked at the dispatch, because naming it is naming what executes; its
+/// *arguments* are passed through, because by then the thing running them is
+/// at ring 3 behind its own page-table root with writes refused outside
+/// `/tmp`, so argv cannot reach anything the program could not reach anyway.
+/// Validating argv at the dispatch as well would buy nothing and would cost
+/// `linux busybox ls -l` from the shell, where argv is legitimately open.
+///
+/// So this set exists for *reachability* and not for containment: it is what
+/// makes `quickjs hello.js` something a grammar can spell, in the one place
+/// `constrain.rs` cares about -- a script the model cannot name is a script it
+/// cannot run, which is `skill_choices`'s lesson arriving one argument along.
+///
+/// A sibling directory rather than `/linux/bin/<name>.args`, so `installed()`
+/// needs no name filter and cannot offer a manifest as a program.
+pub const ARGS_DIR: &str = "/linux/args";
+
 /// Whether `name` is a name rather than a path.
 ///
 /// Checked because the resolution below joins it onto `DIR`, and a name
@@ -114,6 +135,36 @@ pub fn path_of(name: &str) -> Option<String> {
     p.push('/');
     p.push_str(name);
     crate::sysbox::blob_len(&p).is_some_and(|l| l > 0).then_some(p)
+}
+
+/// The arguments `name` declares, in declaration order, or empty.
+///
+/// Each line is one whole argument, trimmed, with blanks and `#` comments
+/// dropped so a manifest can say what it is for. An argument carrying the
+/// grammar's terminator cannot exist by construction -- the lines *are* split
+/// on it -- which is the one way this is safer than the program names beside
+/// it, where the check has to be made explicitly.
+pub fn args_of(name: &str) -> Vec<String> {
+    if !is_name(name) {
+        return Vec::new();
+    }
+    let mut p = String::from(ARGS_DIR);
+    p.push('/');
+    p.push_str(name);
+    let Some(bytes) = crate::sysbox::read_blob(&p) else {
+        return Vec::new();
+    };
+    let Ok(text) = core::str::from_utf8(&bytes) else {
+        return Vec::new();
+    };
+    text.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        // A declared argument is still rendered into a prompt and matched back
+        // out of a decode, so it owes what a name owes.
+        .filter(|l| !l.chars().any(|c| c.is_control()))
+        .map(String::from)
+        .collect()
 }
 
 pub fn checks() -> Vec<(&'static str, bool)> {
@@ -198,6 +249,31 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push((
         "a guest cannot write the program directory",
         !super::fs::writable(DIR) && !super::fs::writable(&(DIR.to_string() + "/sh")),
+    ));
+    // The manifests decide what the model may *say*, so a guest that could
+    // write them could widen its own reachable argument set -- the same
+    // escalation the program directory is placed to prevent, one argument
+    // along, and it would be easy to put this one inside `/tmp` by accident.
+    out.push((
+        "nor the declared-argument directory",
+        !super::fs::writable(ARGS_DIR)
+            && !super::fs::writable(&(ARGS_DIR.to_string() + "/quickjs")),
+    ));
+
+    // A program nobody declared arguments for offers none, which is what keeps
+    // the second decode level off for every program that does not want it.
+    out.push((
+        "a program with no manifest declares no arguments",
+        args_of("nothing-is-installed-under-this-name").is_empty(),
+    ));
+    out.push(("and a path cannot name a manifest", args_of("../../ai/about").is_empty()));
+    // Vacuous where nothing declares any, and reported rather than asserted
+    // for the reason above.
+    out.push((
+        "every declared argument is free of control characters",
+        names
+            .iter()
+            .all(|n| args_of(n).iter().all(|a| !a.chars().any(|c| c.is_control()))),
     ));
 
     out

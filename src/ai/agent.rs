@@ -501,6 +501,140 @@ fn prompt_for(goal: &str, steps: &[Step], ctx: &EpisodeCtx, names: &[&str]) -> S
 /// make `run` unable to reach things that work. Sorted, because `children` is
 /// sorted and a grammar built in a stable order is one a later reader can
 /// rebuild.
+/// The enumerable first argument of an applet, or empty when it has none.
+///
+/// **One function because the decode must not know which applets are special.**
+/// It was `if name == "run" || name == "linux"` with the sources inlined, and
+/// the next applet with a closed argument set would have made it three. The
+/// sources live in different modules -- skills under `/ai/tools`, programs
+/// under `/linux/bin` -- which is why this is a function here rather than a
+/// column on `sysbox::APPLETS`: that table is the action surface and must not
+/// learn to depend on `ai` or `linux` to describe itself.
+///
+/// Every other applet's arguments are genuinely open -- a filename to write, a
+/// string to search for -- and free text is right for them. Answering empty is
+/// how that is said.
+fn arg_choices(name: &str) -> Vec<String> {
+    match name {
+        "run" => skill_choices(),
+        "linux" => crate::linux::program::installed(),
+        _ => Vec::new(),
+    }
+}
+
+/// What the chosen first argument itself admits, or empty.
+///
+/// A second level, because `linux quickjs hello.js` is two enumerable choices
+/// and not one: the program is installed and the script it runs is declared.
+/// Stopping at the first level would leave the script free text, which is the
+/// `skill_choices` failure one argument along -- a script the model cannot
+/// spell is a script it cannot run.
+fn inner_choices(name: &str, first: &str) -> Vec<String> {
+    match name {
+        "linux" => crate::linux::program::args_of(first),
+        _ => Vec::new(),
+    }
+}
+
+/// Decode one choice out of a closed set, positioning the engine first.
+///
+/// `sofar` is what has already been decided, so the second level sees the
+/// program it is choosing a script for. The prompt is `harness::args_prompt`'s,
+/// which is the one place the separator after the applet name lives.
+///
+/// Factored out because the two levels would otherwise be two copies of a loop
+/// whose every bound was got wrong once already.
+fn pick_closed(goal: &str, name: &str, sofar: &str, choices: &[String]) -> Option<usize> {
+    // **A closed set of one admits no decision, so nothing is asked.** The
+    // grammar has a single path and walking it can only end where it started;
+    // putting a decode in front of that spends a prefill to maybe fail, and
+    // failing means falling back to free text over an argument that had
+    // exactly one legal value. Measured: with one declared argument the decode
+    // returned `None` and the argument was dropped, on a set it could not have
+    // got wrong.
+    if choices.len() == 1 {
+        return Some(0);
+    }
+    harness::with_alphabet(|alphabet| {
+        with_engine(|e| {
+            let refs: Vec<&str> = choices.iter().map(|s| s.as_str()).collect();
+            let grammar = super::constrain::Grammar::new(refs.iter().copied());
+            let bound = super::constrain::step_bound(&grammar);
+            let mut cursor = super::constrain::Cursor::new(&grammar);
+            let limit = e.model.cfg.seq_len;
+
+            // Always positioned, never assumed. A `reflex` choice leaves the
+            // engine unpositioned and sampling it is sampling logits no
+            // forward pass has written: `e.pos` is 0 on an episode's first
+            // step, `sample_among` answers `None` on its first call, and the
+            // whole closed set falls through to free text. Measured, after
+            // four wrong theories about ring positions -- two steps of one
+            // episode, same tier, same single-choice set, `picked None` then
+            // `picked Some(0)`, the second working only because the first
+            // step's own free-text prefill had left logits behind.
+            let mut p = harness::args_prompt(goal, name);
+            p.push_str(sofar);
+            // **The separator that prompt ends with is right for free text and
+            // wrong here, and it cost a measurement to see.** `decode_args`
+            // samples the whole vocabulary, so without a space after the
+            // applet name the model continues it mid-word -- that is why
+            // `args_prompt` ends with one. Under a grammar continuing mid-word
+            // is already unreachable, and the space does active harm: the most
+            // likely token after it is another space, `Cursor::push` refuses an
+            // all-space piece while nothing has been produced, and the decode
+            // spends its whole idle allowance on whitespace and commits to
+            // nothing. Measured as `lvl2 returned None` on a set of exactly one
+            // choice -- a grammar with one path, declining to walk it.
+            //
+            // Trimmed, the model emits ` hello` as one piece, which the
+            // cursor's own leading-space trim turns into progress. That
+            // tolerance exists for precisely this and was being defeated by
+            // the prompt.
+            while p.ends_with(' ') {
+                p.pop();
+            }
+            let tokens = e.tok.encode(&p, true, false);
+            let at = e.pos;
+            let mut pos = e.model.prefill(&mut e.state, &tokens, at);
+            let (mut steps, mut idle, mut found) = (0usize, 0usize, None);
+            while steps < bound && idle <= ARGS_TOKEN_BUDGET && pos < limit {
+                let mut cands = cursor.candidates(alphabet);
+                // Once whitespace has cost a step, stop offering it. `push`
+                // refuses an all-space piece while nothing has been produced,
+                // and the set goes on admitting one -- so a model that wants a
+                // space here can be handed one sixteen times and commit to
+                // nothing, which is a decode losing to its own tolerance. One
+                // wasted step is the tolerance; a budget of them is the bug.
+                if idle > 0 {
+                    cands.retain(|&id| {
+                        !alphabet.piece(id as usize).iter().all(|b| *b == b' ')
+                    });
+                }
+                let Some(next) =
+                    sample::sample_among(&e.state.logits, &cands, 0.7, 0.0, &mut e.rng)
+                else {
+                    break;
+                };
+                if cursor.push(alphabet, next) {
+                    steps += 1;
+                } else {
+                    idle += 1;
+                }
+                if let Some(i) = cursor.finished() {
+                    found = Some(i);
+                    break;
+                }
+                e.model.forward(&mut e.state, next, pos);
+                pos += 1;
+            }
+            harness::invalidate_conversation(e);
+            found
+        })
+    })
+    .flatten()
+    .flatten()
+}
+
 pub fn skill_choices() -> Vec<String> {
     sysbox::children("/ai/tools")
         .into_iter()
@@ -568,87 +702,35 @@ fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option
     // and is better than free-texting argv: an unspellable program is a
     // program the model cannot use, which is the failure `skill_choices` was
     // written to end, and offering argv it cannot get right would re-earn it.
-    if name == "run" || name == "linux" {
-        let choices = if name == "linux" {
-            crate::linux::program::installed()
-        } else {
-            skill_choices()
-        };
-        if !choices.is_empty() {
-            let picked = harness::with_alphabet(|alphabet| {
-                with_engine(|e| {
-                    let refs: Vec<&str> = choices.iter().map(|s| s.as_str()).collect();
-                    let grammar = super::constrain::Grammar::new(refs.iter().copied());
-                    let bound = super::constrain::step_bound(&grammar);
-                    let mut cursor = super::constrain::Cursor::new(&grammar);
-                    let limit = e.model.cfg.seq_len;
-                    let mut pos = e.pos;
-                    // **A reflex choice leaves the engine unpositioned, and
-                    // sampling it is sampling logits no forward pass has
-                    // written.** `from_context` is exactly that signal and
-                    // this branch used to ignore it: on the first step of an
-                    // episode `e.pos` is 0, nothing has run, so
-                    // `sample_among` answers `None` on its first call and the
-                    // whole closed set falls through to free text.
-                    //
-                    // Measured rather than reasoned, because four hypotheses
-                    // about ring positions and stale logits came first and all
-                    // of them were wrong. One episode, two steps, the same
-                    // tier and the same single-choice set:
-                    //
-                    //     (closed set: 1 choice(s), from_context false, picked None)
-                    //     1. linux 64-bit        <- free text, refused
-                    //     (closed set: 1 choice(s), from_context false, picked Some(0))
-                    //     2. linux hello         <- committed
-                    //
-                    // Step 2 worked only because step 1's own free-text
-                    // prefill had left logits behind. So the guarantee was
-                    // arriving one step late, for the life of this branch --
-                    // `run` included, where it reads as the model spelling a
-                    // skill path it was never offered.
-                    if !from_context {
-                        let p = harness::args_prompt(goal, &name);
-                        let tokens = e.tok.encode(&p, true, false);
-                        pos = e.model.prefill(&mut e.state, &tokens, pos);
-                    }
-                    let (mut steps, mut idle, mut found) = (0usize, 0usize, None);
-                    while steps < bound && idle <= ARGS_TOKEN_BUDGET && pos < limit {
-                        let cands = cursor.candidates(alphabet);
-                        let Some(next) =
-                            sample::sample_among(&e.state.logits, &cands, 0.7, 0.0, &mut e.rng)
-                        else {
-                            break;
-                        };
-                        if cursor.push(alphabet, next) {
-                            steps += 1;
-                        } else {
-                            idle += 1;
-                        }
-                        if let Some(i) = cursor.finished() {
-                            found = Some(i);
-                            break;
-                        }
-                        e.model.forward(&mut e.state, next, pos);
-                        pos += 1;
-                    }
-                    harness::invalidate_conversation(e);
-                    found
-                })
-            })
-            .flatten()
-            .flatten();
-            if let Some(i) = picked {
-                return Some((name, choices[i].clone()));
+    // Some applets take an argument out of a closed set, and for those the
+    // decode has to make a wrong one unreachable rather than refuse it
+    // afterwards -- which is the whole of what `constrain.rs` is for. Which
+    // applets those are lives in `arg_choices`, so this reads the same however
+    // many of them there come to be.
+    let choices = arg_choices(&name);
+    if !choices.is_empty() {
+        if let Some(i) = pick_closed(goal, &name, "", &choices) {
+            let mut args = choices[i].clone();
+            // And the chosen argument may itself admit a closed set:
+            // `linux quickjs hello.js` is two choices, not one.
+            let inner = inner_choices(&name, &choices[i]);
+            if !inner.is_empty() {
+                let mut sofar = args.clone();
+                sofar.push(' ');
+                if let Some(j) = pick_closed(goal, &name, &sofar, &inner) {
+                    args.push(' ');
+                    args.push_str(&inner[j]);
+                } else {
+                    kprintln!("     (its argument set did not settle -- left bare)");
+                }
             }
-            // Said out loud, because the whole point of a closed set is that
-            // what comes next cannot be spelled wrongly, and falling through
-            // gives that up. It degraded silently for the life of this branch
-            // and the only visible symptom was an argument no table contained.
-            kprintln!("     (the closed set did not settle -- free text instead)");
-            // Falling through to the free-text walk is deliberate. A decode
-            // that would not commit is a small model failing to choose, not a
-            // reason to abandon the step -- and the old path still works.
+            return Some((name, args));
         }
+        // Said out loud, because the whole point of a closed set is that what
+        // comes next cannot be spelled wrongly, and falling through gives that
+        // up. It degraded silently for the life of this branch and the only
+        // visible symptom was an argument no table contained.
+        kprintln!("     (the closed set did not settle -- free text instead)");
     }
 
     // The same walk a workflow worker runs, lifted into `harness` so the two
