@@ -583,6 +583,34 @@ fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option
                     let mut cursor = super::constrain::Cursor::new(&grammar);
                     let limit = e.model.cfg.seq_len;
                     let mut pos = e.pos;
+                    // **A reflex choice leaves the engine unpositioned, and
+                    // sampling it is sampling logits no forward pass has
+                    // written.** `from_context` is exactly that signal and
+                    // this branch used to ignore it: on the first step of an
+                    // episode `e.pos` is 0, nothing has run, so
+                    // `sample_among` answers `None` on its first call and the
+                    // whole closed set falls through to free text.
+                    //
+                    // Measured rather than reasoned, because four hypotheses
+                    // about ring positions and stale logits came first and all
+                    // of them were wrong. One episode, two steps, the same
+                    // tier and the same single-choice set:
+                    //
+                    //     (closed set: 1 choice(s), from_context false, picked None)
+                    //     1. linux 64-bit        <- free text, refused
+                    //     (closed set: 1 choice(s), from_context false, picked Some(0))
+                    //     2. linux hello         <- committed
+                    //
+                    // Step 2 worked only because step 1's own free-text
+                    // prefill had left logits behind. So the guarantee was
+                    // arriving one step late, for the life of this branch --
+                    // `run` included, where it reads as the model spelling a
+                    // skill path it was never offered.
+                    if !from_context {
+                        let p = harness::args_prompt(goal, &name);
+                        let tokens = e.tok.encode(&p, true, false);
+                        pos = e.model.prefill(&mut e.state, &tokens, pos);
+                    }
                     let (mut steps, mut idle, mut found) = (0usize, 0usize, None);
                     while steps < bound && idle <= ARGS_TOKEN_BUDGET && pos < limit {
                         let cands = cursor.candidates(alphabet);
@@ -612,6 +640,11 @@ fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option
             if let Some(i) = picked {
                 return Some((name, choices[i].clone()));
             }
+            // Said out loud, because the whole point of a closed set is that
+            // what comes next cannot be spelled wrongly, and falling through
+            // gives that up. It degraded silently for the life of this branch
+            // and the only visible symptom was an argument no table contained.
+            kprintln!("     (the closed set did not settle -- free text instead)");
             // Falling through to the free-text walk is deliberate. A decode
             // that would not commit is a small model failing to choose, not a
             // reason to abandon the step -- and the old path still works.

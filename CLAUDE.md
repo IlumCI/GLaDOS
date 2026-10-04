@@ -2676,21 +2676,64 @@ shadows a longer one it prefixes. Nothing is likely to be called `sh\nls`; the
 point is that a set offered to a grammar has to be checked against the
 grammar's own delimiter rather than against what a filename usually looks like.
 
-**Two things are deliberately not done and one of them is not verified.** Only
-the *program* is decoded under the grammar; argv is not enumerable -- `busybox
-ls -l` is argv no table can hold -- so a program needing arguments is reached
-through the shell or installed as a wrapper. And **the grammar branch has not
-been entered by a real decode.** It was attempted rather than assumed: there is
-no checkpoint on the development host, and `hybtest.py`'s fixture declares
-`seq 32`, which no episode prompt fits -- but context is a four-byte stamp, so
-`ctxstamp.py out/hybtest.bin 512` makes the fixture drivable for nothing. An
-episode then ran end to end on it and routed to `find` twice with mojibake
-arguments, which is exactly what a 353 KB fixture of random weights over a
-byte vocabulary should do. The branch is reached only when the model picks the
-name, and that is a one-in-twenty-four coin on a model that knows nothing. So
-what is established is the table, the dispatch, the leash, the decodability of
-the set and a real guest run; what is not is that a decode lands on `linux`,
-and settling that wants a real checkpoint rather than a bigger fixture.
+**Driving the decode found two things, and neither was the applet.**
+
+**A new applet is spellable and invisible.** The grammar is built from
+`APPLETS`, so `linux` was reachable the moment the row existed -- and the
+*router* had never heard of it. `corpus.rs` supplies labels for 21 applets
+while the probe head carries 24: `linux`, `run` and `remember` have no
+examples at all, so a closed-form fit has nothing to key them on. The first
+episode on the real 0.6B routed "run the hello linux program at ring 3" to
+`find` three times at the `pulse` tier, with coherent arguments and the
+repetition detector firing -- a working model with no reason to pick a name it
+had never been taught. Four `teach linux ...` lines and a `fit` (361 train,
+360 held out, 24 classes, 71% held out) moved it to `reflex`, the probe's most
+confident tier. **Adding an applet is two edits, and the second one is the
+corpus.** `run` and `remember` are still untaught, which is the same latent
+hole and is now written down rather than discovered again.
+
+**And the closed set was arriving one step late.** The branch sampled
+`e.state.logits` without ensuring a forward pass had written any.
+`from_context` is exactly that signal -- a `reflex` choice leaves the engine
+unpositioned -- and the branch ignored it, so on an episode's first step
+`e.pos` is 0, nothing has run, `sample_among` answers `None` on its first call
+and the whole closed set falls through to free text. Measured, because four
+hypotheses about ring positions and stale logits came first and all of them
+were wrong:
+
+    (closed set: 1 choice(s), from_context false, picked None)
+    1. linux 64-bit        <- free text; '64-bit' is not installed
+    (closed set: 1 choice(s), from_context false, picked Some(0))
+    2. linux hello         <- committed
+
+Two steps, the same tier, the same single-choice set, opposite outcomes. Step 2
+worked only because step 1's own free-text prefill had left logits behind. With
+one program installed a closed-set decode *cannot* emit `64-bit` -- the grammar
+has one path -- so that argument is the proof the branch did not fire, and
+`run` had the same defect for its whole life, where it reads as the model
+spelling a skill path it was never offered. The branch prefills through
+`harness::args_prompt` now, one function because the trailing space after the
+name is what stops the model continuing mid-word, and two copies of that are
+two chances to drop it. Step 1 commits immediately afterwards.
+
+**The dispatch-level check is what made the bug survivable, which is the
+argument for having put it there.** `'64-bit' is not an installed Linux
+program / installed: hello` turned a wrong decode into a correct next step: the
+model read the refusal and asked for `hello`. A grammar-only leash would have
+had nothing to say.
+
+**Two things are deliberately not done.** Only the *program* is decoded; argv
+is not enumerable -- `busybox ls -l` is argv no table can hold -- so a program
+needing arguments is reached through the shell or installed as a wrapper. And
+ownership is bounded rather than solved, as below.
+
+Driven on the resident checkpoint rather than the small one, which is worth
+recording because the instinct is wrong in both directions: `--stage-iso` has
+no size cap, so Qwen3-0.6B at `--seq 512` (570.5 MiB, 112 MiB of KV cache) runs
+here under `-accel kvm` with a **60-second** boot, against the 370 s this file
+quotes for WHPX. And SmolLM2-135M would have been the *worse* instrument, not
+merely the smaller one: twelve of its fourteen candidate goals route to `ls`,
+so a negative from it would have said nothing about the branch.
 
 **The open question is ownership rather than purity.** A guest holds the shell
 until it exits and the model runs on the agent task, which holds the engine for

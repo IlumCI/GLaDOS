@@ -755,6 +755,22 @@ pub(crate) const ARGS_TOKEN_BUDGET: usize = 16;
 /// `prefill` is false when the caller has already left the engine positioned
 /// after the chosen name, which is the branch `propose` takes when the choice
 /// came from a deliberation rather than from a reflex.
+/// The prompt that positions the engine to decode an applet's *arguments*.
+///
+/// Targeted: the routed name is known and only what follows it is wanted.
+///
+/// **One function because two callers have to agree, and the trailing space is
+/// why.** `agent::propose` decodes some arguments under a closed-set grammar
+/// and the rest as free text here, and a prompt that does not emit a separator
+/// after the name leaves the model continuing *mid-word* -- which is the bug
+/// `work.rs` records as every step of its first run planning `find - - - -`,
+/// and which this path never had precisely because its prompt ends `"name "`.
+/// Two copies of that would be two chances to drop the space, and dropping it
+/// is invisible until the arguments come back wrong.
+pub(crate) fn args_prompt(goal: &str, name: &str) -> alloc::string::String {
+    alloc::format!("Task: {}\n{} ", goal, name)
+}
+
 pub(crate) fn decode_args(goal: &str, name: &str, prefill: bool) -> Option<String> {
     with_alphabet(|_alphabet| {
         with_engine(|e| {
@@ -763,10 +779,7 @@ pub(crate) fn decode_args(goal: &str, name: &str, prefill: bool) -> Option<Strin
             let limit = e.model.cfg.seq_len;
             let mut pos = e.pos;
             if prefill {
-                // Targeted prompt: the routed name is known, only its
-                // arguments are wanted.
-                let p = alloc::format!("Task: {}\n{} ", goal, name);
-                let tokens = e.tok.encode(&p, true, false);
+                let tokens = e.tok.encode(&args_prompt(goal, name), true, false);
                 pos = e.model.prefill(&mut e.state, &tokens, pos);
             }
             for _ in 0..ARGS_TOKEN_BUDGET {
