@@ -6566,6 +6566,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                     r & 0xFFFF_FFFF, calls.len()
                                 );
                                 console::set_color(LTGRAY);
+                            } else if r & linux::syscall::SIGNALED != 0 {
+                                kprintln!(
+                                    "  ended by signal {} after {} syscall(s), machine intact",
+                                    r & 0x7F,
+                                    calls.len()
+                                );
                             } else if r & linux::syscall::EXITED != 0 {
                                 kprintln!(
                                     "  exited {} after {} syscall(s)",

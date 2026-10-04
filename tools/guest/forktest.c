@@ -17,6 +17,7 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <sys/syscall.h>
+#include <signal.h>
 
 extern char **environ;
 
@@ -58,6 +59,57 @@ int main(int argc, char **argv) {
         int ok = w == s && WIFEXITED(st) && WEXITSTATUS(st) == 9;
         printf("forktest: spawn parent saw child %d exit %d %s\n", s, WEXITSTATUS(st), ok ? "ok" : "WRONG");
         if (!ok) bad |= 8;
+    }
+    /* A child that crashes ends itself and nothing else: the parent is told it
+     * died of SIGSEGV and carries on. Twice, so a fault that leaves the kernel
+     * in a state the second one trips over is caught too. */
+    for (int round = 0; round < 2; round++) {
+        pid_t k = fork();
+        if (k == 0) {
+            volatile int *nowhere = (int *)0x10;
+            *nowhere = 1;
+            _exit(0);
+        }
+        int st = 0;
+        pid_t w = waitpid(k, &st, 0);
+        int ok = w == k && WIFSIGNALED(st) && WTERMSIG(st) == 11;
+        printf("forktest: crashing child %d %s signal %d %s\n", k,
+               WIFSIGNALED(st) ? "died of" : "exited, not", WIFSIGNALED(st) ? WTERMSIG(st) : WEXITSTATUS(st),
+               ok ? "ok" : "WRONG");
+        if (!ok) bad |= 16;
+    }
+    /* A child spinning in a loop that makes no syscall can only be stopped by
+     * SIGKILL, which therefore cannot wait for a syscall to be delivered. */
+    {
+        pid_t k = fork();
+        if (k == 0) { for (;;) {} }
+        kill(k, SIGKILL);
+        int st = 0;
+        pid_t w = waitpid(k, &st, 0);
+        int ok = w == k && WIFSIGNALED(st) && WTERMSIG(st) == 9;
+        printf("forktest: spinning child %d %s\n", k, ok ? "killed by SIGKILL ok" : "WRONG");
+        if (!ok) bad |= 32;
+    }
+
+    /* Many in a row, so a child that leaks its memory copy runs the heap out
+     * rather than going unnoticed. */
+    {
+        int good = 0;
+        for (int i = 0; i < 20; i++) {
+            pid_t k = fork();
+            if (k == 0) _exit(i);
+            int st = 0;
+            if (waitpid(k, &st, 0) == k && WIFEXITED(st) && WEXITSTATUS(st) == i) good++;
+        }
+        printf("forktest: %d of 20 back-to-back children %s\n", good, good == 20 ? "ok" : "WRONG");
+        if (good != 20) bad |= 64;
+    }
+
+    /* An orphan: left spinning when the parent exits, for the session's end to
+     * sweep up. The shell coming back is the check. */
+    if (argc > 1 && !strcmp(argv[1], "orphan")) {
+        if (fork() == 0) { for (;;) {} }
+        printf("forktest: leaving a spinning orphan behind\n");
     }
     printf("forktest: %s\n", bad ? "FAILED" : "all ok");
     return bad;

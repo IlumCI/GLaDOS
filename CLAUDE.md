@@ -2028,6 +2028,45 @@ same fault stopped the machine, because a guest sharing an address space with
 the kernel might already have corrupted anything. At ring 3 the kernel is
 intact by construction, so ending the guest is the honest response.
 
+**"The guest" stopped being one thing, and the flag that said so did not
+notice.** `running()` was a single `GUEST_RUNNING` for the machine and the
+kill path cleared it. With `fork` that is a session of several guests on
+several tasks, so the first forked child to crash was killed correctly and
+took the flag with it -- and the second faulted at ring 3 with nothing saying
+a guest was there, was taken for the kernel's own fault, and halted the
+machine. One child's death disarmed isolation for every guest after it.
+`forktest` crashes two children in a row for exactly that reason.
+
+Fault ownership is **per task** now (`IN_GUEST`), set by the one wrapper all
+three doors into ring 3 go through (`syscall::as_guest`: `run`, `run_thread`,
+a forked child's `enter_resumed`), and cleared only by that task or its own
+kill. `GUEST_RUNNING` means what `run` means by it and nothing more: the
+session deadline is armed.
+
+**Nothing kills another task directly**, because ending a guest is a longjmp
+out of *its* stack. It is marked instead (`syscall::doom`) and ends itself at
+the next point holding nothing: a syscall's way in or out, any wait loop's
+existing deadline check (`overran` answers for a doom too), or the timer
+finding it at ring 3. That one mechanism is how a session ending takes its
+orphans with it (there is no init to reparent to), how `SIGKILL` reaches a
+child spinning in a loop with no syscalls, and how a crashing *thread* ends
+its whole process, as on Linux. A doom lands only on a task inside a guest,
+so a pool task's next tenant cannot inherit its predecessor's.
+
+Two more isolation holes came out of the same test. A forked child's mapping
+records were the parent's cloned verbatim, so a child's `munmap` freed the
+**parent's** pages; they are `Source::Copied` now and give nothing back. And a
+finished child's whole memory copy was never freed -- every fork leaked a
+process. `release_guest` frees it when the child ends: three runs of
+`forktest` (26 forks each, an orphan in the middle) move the heap 176 bytes.
+
+`wait4` reports a crash as Linux does -- `WIFSIGNALED`, `SIGSEGV` for a wild
+pointer -- where it reported an *exit* whose code was the vector number.
+
+**Still not isolated: a fault at ring 0 while the kernel serves a guest's
+syscall.** That is a kernel bug reached through guest input, the kernel's own
+state may be half-updated, and it still halts the machine.
+
 **Getting there took finding an ABI bug that looked like a ring-3 bug for a
 long time.** `syscall::kill` was calling `glados_leave_guest` through its
 `extern "sysv64"` declaration. This target is Windows-ABI, so an ordinary Rust

@@ -83,14 +83,63 @@ pub fn live() -> usize {
 /// spawned is kept and reused, exactly as `thread`'s is, because a kernel task
 /// that returns is not reclaimed and spawning one per fork would exhaust
 /// `MAX_TASKS` in four runs.
+///
+/// **A child still running is left alone.** `run` dooms every child and waits
+/// for them, but the wait is bounded, and a child that outlived it is still
+/// on its task reading its own slot. Marking that slot free would hand it to
+/// the next `fork` while its tenant is alive, and zeroing the count would make
+/// `live` lie about it. It ends at its next safe point and tidies its own
+/// slot then, exactly as it would have inside the bound.
 pub fn reset() {
     let s = unsafe { SLOTS.get() };
+    let mut still = 0;
     for slot in s.iter_mut() {
+        if slot.live {
+            still += 1;
+            continue;
+        }
         slot.work = None;
-        slot.live = false;
         slot.status = None;
+        slot.pid = 0;
     }
-    LIVE.store(0, Ordering::Release);
+    LIVE.store(still, Ordering::Release);
+}
+
+/// Tell every running child to end itself with `code`. The session's end, and
+/// nothing else, sweeps them all -- see `syscall::run`.
+///
+/// A child forked but not yet entered is not in a guest, so it cannot be
+/// doomed -- it is cancelled instead: its work withdrawn before its task ever
+/// picks it up, its entry freed, and its parent told it was killed.
+pub fn doom_all(code: u64) {
+    let s = unsafe { SLOTS.get() };
+    for slot in s.iter_mut() {
+        if !slot.live {
+            continue;
+        }
+        if slot.work.take().is_some() {
+            syscall::release_guest(slot.guest);
+            slot.status = Some(syscall::wait_status(code));
+            slot.live = false;
+            LIVE.fetch_sub(1, Ordering::Release);
+            continue;
+        }
+        if let Some(t) = slot.task {
+            syscall::doom(t, code);
+        }
+    }
+}
+
+/// The task running the guest `pid` names, for a `SIGKILL` that has to reach a
+/// child which may never make another syscall.
+pub fn task_of_pid(pid: i64) -> Option<usize> {
+    if pid == 1 {
+        return syscall::main_task();
+    }
+    unsafe { &*SLOTS.get() }
+        .iter()
+        .find(|x| x.live && x.work.is_none() && x.pid == pid as u64)
+        .and_then(|x| x.task)
 }
 
 /// Copy one of the parent's ranges into pages of the child's own.
@@ -401,14 +450,37 @@ fn body() {
         // nothing switches between arming this task and entering the
         // child, so the global would still name the parent's stack.
         unsafe { syscall::set_syscall_stack(stack) };
-        let code = unsafe { syscall::enter_resumed(&work) };
+        let code = syscall::as_guest(|| unsafe { syscall::enter_resumed(&work) });
         crate::task::ring3_active(false, 0);
         crate::task::set_root(me, 0);
         syscall::set_current_guest(prev);
 
+        // Said, because nothing else will say it: the parent learns only a
+        // signal number from `wait4`, and a person watching learns nothing.
+        // Printed here, off the fault handler's stack -- painting from inside
+        // an interrupt gate is the console bug `cpu::idt` records.
+        let pid = unsafe { (*SLOTS.get())[i].pid };
+        if code & syscall::FAULTED != 0 {
+            match syscall::take_task_fault(me) {
+                Some(f) => crate::kprintln!(
+                    "  [linux] child {} killed by fault {:#04x} at rip {:#x} (cr2 {:#x}), its parent carries on",
+                    pid, f.regs.vector, f.regs.rip, f.cr2
+                ),
+                None => crate::kprintln!("  [linux] child {} killed by a fault, its parent carries on", pid),
+            }
+        }
+
+        // **The child's memory goes back now, not never.** Its copy of the
+        // parent and its tables lived in a guest entry nothing ever freed, so
+        // every fork leaked a whole process and a shell running commands in a
+        // loop would have run the heap dry. The root is off by now, which is
+        // the order `Space` needs: tables are freed only once nothing walks
+        // them.
+        syscall::release_guest(guest);
+
         let parent = {
             let s = unsafe { SLOTS.get() };
-            s[i].status = Some((code & 0xFF) as i32);
+            s[i].status = Some(syscall::wait_status(code));
             s[i].live = false;
             s[i].parent
         };
@@ -501,10 +573,11 @@ pub fn wait(pid: i64, status: u64, options: u64) -> u64 {
             let got = s[i].pid;
             s[i].pid = 0;
             if status != 0 && syscall::owns(status, 4) {
-                // The wait status is encoded, not the exit code: bits 8..15
-                // are what `WEXITSTATUS` shifts back down, and a shell that
-                // read a bare code would report every exit as a signal.
-                unsafe { core::ptr::write(status as *mut i32, code << 8) };
+                // Already a wait status, encoded by `syscall::wait_status`
+                // when the child ended: an exit in bits 8..15, a signal in the
+                // low seven. Encoded there rather than here because only the
+                // end knows which of the two it was.
+                unsafe { core::ptr::write(status as *mut i32, code) };
             }
             return got;
         }

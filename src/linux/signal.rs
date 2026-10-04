@@ -298,6 +298,16 @@ pub fn kill(pid: i64, sig: u64) -> u64 {
     if sig == 0 {
         return 0;
     }
+    // **`SIGKILL` cannot wait for a syscall.** Delivery happens on the way
+    // out of one, so a child spinning in a loop that makes none would never
+    // receive the one signal that exists to stop exactly that. Its task is
+    // doomed instead, which the timer acts on at ring 3.
+    if sig == 9 {
+        if let Some(t) = super::fork::task_of_pid(pid) {
+            syscall::doom(t, syscall::SIGNALED | 9);
+            return 0;
+        }
+    }
     if !raise_at(guest, sig as u32) {
         return EINVAL;
     }
@@ -343,7 +353,7 @@ pub fn deliver(f: &mut Frame) -> bool {
         if sig == SIGCHLD {
             return false;
         }
-        unsafe { syscall::kill_guest_now(128 + sig as u64) };
+        unsafe { syscall::kill_guest_now(syscall::SIGNALED | sig as u64) };
     }
     // A handler with nowhere to return to is refused rather than entered: the
     // `ret` at the end of it would take whatever the stack happened to hold.

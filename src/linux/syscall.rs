@@ -570,6 +570,15 @@ pub enum Source {
     /// something it never owned. The pages to release are the backing's, and
     /// this is the only place that still knows which they were.
     Backed(u64),
+    /// A forked child's inherited record of one of its parent's mappings.
+    ///
+    /// **A sixth way back, and it is to do nothing.** The record was cloned
+    /// with the rest of the parent's entry, so it still named the parent's
+    /// source -- and a child calling `munmap` handed the *parent's* pages
+    /// back to the heap while the parent was still using them. The child's
+    /// own copy of those bytes is in its entry's `owned` list and goes back
+    /// with the entry, so the record owes nothing at all.
+    Copied,
     /// Pages a `memfd` owns, which the guest sees at their own address.
     ///
     /// A fifth source because it goes back a fifth way, and the way is to do
@@ -913,7 +922,7 @@ pub fn guest_rsp() -> u64 {
 /// forever on a child that is never coming back.
 pub unsafe fn kill_if_overdue() -> bool {
     let d = DEADLINE.load(Ordering::Relaxed);
-    d != 0 && crate::dev::lapic::ticks() >= d
+    doomed() != 0 || (d != 0 && crate::dev::lapic::ticks() >= d)
 }
 
 /// Copy a guest entry into another slot, for `fork`.
@@ -944,7 +953,8 @@ pub fn clone_guest(
         brk_start: p.brk_start,
         brk_now: p.brk_now,
         brk_end: p.brk_end,
-        maps: p.maps.clone(),
+        // Re-badged as the child's copies: see `Source::Copied`.
+        maps: p.maps.iter().map(|m| Mapping { from: Source::Copied, ..*m }).collect(),
         fds: p.fds.clone(),
         cwd: p.cwd.clone(),
         argv: p.argv.clone(),
@@ -1241,6 +1251,31 @@ pub fn teardown() -> usize {
         *guest_slot() = None;
     }
     freed
+}
+
+/// Free a finished forked child's guest entry: its descriptors, the mappings
+/// it made itself, the pages it was copied into and its tables.
+///
+/// **Not `teardown`**, which belongs to the session: it stands down the
+/// screen, the input script, the display server and every pool. A child ending
+/// owes none of that, only its own memory.
+///
+/// The caller must already be off this entry's root; dropping the entry drops
+/// the tables.
+pub fn release_guest(i: usize) {
+    let Some(mut sp) = (unsafe { slot_at(i) }).take() else { return };
+    for slot in sp.fds.iter_mut() {
+        if let Some(f) = slot.take() {
+            f.flush();
+        }
+    }
+    for m in sp.maps.drain(..) {
+        give_back(m.at, m.len, Some(m.from));
+    }
+    for (at, len) in core::mem::take(&mut sp.owned) {
+        free_pages(at, len);
+    }
+    drop(sp);
 }
 
 pub fn page_up(n: usize) -> usize {
@@ -3439,7 +3474,23 @@ pub fn run_thread(w: super::thread::Work, stack: u64) {
         core::ptr::write(core::ptr::addr_of_mut!(GLADOS_SYSCALL_STACK), stack);
         crate::cpu::wrmsr(IA32_FS_BASE, w.fs);
     }
-    let _ = unsafe { glados_enter_guest(w.rip, w.rsp) };
+    let code = as_guest(|| unsafe { glados_enter_guest(w.rip, w.rsp) });
+    // **A thread that crashes takes its process with it**, as on Linux: the
+    // memory it shares with every other thread is exactly what a wild pointer
+    // may have just corrupted, so the others carrying on would be running on
+    // state nobody can vouch for. Ended here rather than in the fault handler,
+    // because ending the main thread means longjmping out of *its* stack --
+    // so it is doomed, and ends itself at its next safe point with this
+    // thread's fault as the session's report.
+    if code & FAULTED != 0 {
+        if let Some(f) = take_task_fault(me()) {
+            adopt_fault(f);
+        }
+        if let Some(m) = main_task() {
+            doom(m, code);
+        }
+        super::thread::begin_exit();
+    }
     // **Clearing this is the whole of how `pthread_join` works.** The joiner
     // futex-waits on the word, and the kernel zeroing it is the notification;
     // a kernel that ignored `CLONE_CHILD_CLEARTID` leaves a library waiting
@@ -4892,6 +4943,7 @@ fn give_back(at: u64, len: usize, from: Option<Source>) {
         Some(Source::Shared) => {
             crate::mem::paging::protect(at, page_up(len), crate::mem::paging::Perm::RWX);
         }
+        Some(Source::Copied) => {}
         // The backing, at its own address. Nothing is done about the guest's
         // mapping of it: those page tables belong to the guest's `Space` and
         // die with it, so unmapping here would be tidying something that is
@@ -5014,6 +5066,9 @@ fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
 /// assembly above, and the `sysv64` pinning is why `rdi` is the frame.
 #[no_mangle]
 pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
+    // A doomed guest asks for nothing more. Here and again on the way out,
+    // which bounds how long a task outlives its doom by one syscall's work.
+    unsafe { die_if_doomed() };
     let nr = f.rax;
     let args = [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9];
 
@@ -5196,6 +5251,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
     if nr != SYS_RT_SIGRETURN {
         super::signal::deliver(f);
     }
+    unsafe { die_if_doomed() };
 }
 
 extern "sysv64" {
@@ -5207,6 +5263,14 @@ extern "sysv64" {
 pub const EXITED: u64 = 1 << 32;
 /// Set when the guest was killed for running past its deadline.
 pub const OVERRAN: u64 = 1 << 34;
+/// Set when the guest was ended by a signal, whose number is the low byte.
+///
+/// Its own flag rather than an exit code of `128 + sig`, which is what a shell
+/// *prints* for a signalled child and is not what `wait4` reports: a parent
+/// reading `WIFSIGNALED` of an exit code would be told its child chose to exit
+/// with 137, and a parent that kills a child to stop it would never learn the
+/// kill landed.
+pub const SIGNALED: u64 = 1 << 35;
 
 /// How long a guest may run before the timer takes the machine back.
 ///
@@ -5255,9 +5319,29 @@ pub fn limit() -> u64 {
 static DEADLINE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Whether the running guest has outstayed its welcome.
+///
+/// Or has been told to die: a task marked by `doom` answers true here too, so
+/// every wait loop that already ends a guest at its deadline ends a doomed one
+/// at the same check, and the timer ends a doomed one spinning at ring 3. One
+/// question for both, because a second check beside the first at each of the
+/// eight sites is eight places to forget it.
 pub fn overran(now: u64) -> bool {
+    if !running() {
+        return false;
+    }
+    if doomed() != 0 {
+        return true;
+    }
     let d = DEADLINE.load(Ordering::Relaxed);
     d != 0 && now >= d && GUEST_RUNNING.load(Ordering::Relaxed)
+}
+
+/// What a task ending at a deadline or a doom check ends with.
+fn death_code() -> u64 {
+    match doomed() {
+        0 => OVERRAN,
+        d => d,
+    }
 }
 
 /// End a guest that would not stop on its own.
@@ -5267,7 +5351,7 @@ pub fn overran(now: u64) -> bool {
 /// executing. Called while the kernel is working on the guest's behalf it
 /// would abandon whatever that work was holding.
 pub unsafe fn kill_overrun() -> ! {
-    unsafe { kill_with(OVERRAN) }
+    unsafe { kill_with(death_code()) }
 }
 
 /// End a guest that blocked past its deadline.
@@ -5279,7 +5363,7 @@ pub unsafe fn kill_overrun() -> ! {
 /// is that this particular loop has no allocation in flight, no borrow of
 /// `SPACE` live and no lock taken across the yield.
 pub unsafe fn kill_blocked() -> ! {
-    unsafe { kill_with(OVERRAN) }
+    unsafe { kill_with(death_code()) }
 }
 
 /// Set instead when the guest died of a fault.
@@ -5393,8 +5477,153 @@ pub fn locate(at: u64) -> alloc::string::String {
 /// took a #GP inside the read on exactly that path.
 static GUEST_RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// **Per task, and one flag for the machine was the bug that halted it.**
+/// `GUEST_RUNNING` answered "is a guest running" for everybody, and the kill
+/// path cleared it -- so the first forked child to crash was ended correctly
+/// and took the flag with it, and the second faulted at ring 3 with nothing
+/// saying a guest was there to blame. The handler took it for the kernel's
+/// own fault and halted. One child's death disarmed isolation for every guest
+/// after it, which is the shape `forktest` crashes two children to catch.
+///
+/// What the fault handler needs to know is narrower than "a guest exists": it
+/// is whether *the task that faulted* entered ring 3 through one of the three
+/// doors that park a landing in its own `GLADOS_HOST_RSP` -- `run`,
+/// `run_thread` and a forked child's `enter_resumed`. Each sets its own task's
+/// flag, and only the task itself or its own kill ever clears it.
+/// `GUEST_RUNNING` stays, meaning only what `run` means by it: the session's
+/// deadline is armed.
+static IN_GUEST: [AtomicBool; crate::task::MAX_TASKS] =
+    [const { AtomicBool::new(false) }; crate::task::MAX_TASKS];
+
+/// Per task, a code to die with at the next safe point; zero for none.
+///
+/// Ending a guest means longjmping out of *its* stack, which only its own task
+/// can do, so nobody kills a task directly: they mark it here and it ends
+/// itself at the next point that holds nothing -- a syscall's way in or out,
+/// a wait loop's check, or the timer finding it at ring 3. That is how a
+/// session ending takes its children with it, how `SIGKILL` reaches a child
+/// spinning in a loop that makes no syscall, and how a thread's crash ends its
+/// process.
+static DOOM: [core::sync::atomic::AtomicU64; crate::task::MAX_TASKS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; crate::task::MAX_TASKS];
+
+/// The fault each task last died of, read by whoever ran it.
+static TASK_FAULT: Racy<[Option<Fault>; crate::task::MAX_TASKS]> =
+    Racy::new([None; crate::task::MAX_TASKS]);
+
+/// The task running the session's first guest, the one `linux run` started.
+static MAIN_TASK: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(usize::MAX);
+
+pub fn main_task() -> Option<usize> {
+    let t = MAIN_TASK.load(Ordering::Relaxed);
+    (t != usize::MAX).then_some(t)
+}
+
+fn me() -> usize {
+    crate::task::current().min(crate::task::MAX_TASKS - 1)
+}
+
+/// Whether the running task is inside a guest, so that its own landing is
+/// valid and a ring-3 fault on it may end the guest rather than the machine.
 pub fn running() -> bool {
-    GUEST_RUNNING.load(Ordering::Relaxed)
+    IN_GUEST[me()].load(Ordering::Acquire)
+}
+
+/// Mark a task to end itself with `code` at its next safe point.
+///
+/// The first doom wins: a child crashing and then being swept up by its
+/// session ending died of the crash, and the report should say so.
+///
+/// Only a task that is inside a guest can be doomed, and answers whether this
+/// one was. A mark left on a task between guests would be inherited by its
+/// next tenant, which would die the instant it started for something its
+/// predecessor did; `as_guest` clears on both sides as well, so the window
+/// that remains loses a doom rather than misdirecting one.
+pub fn doom(task: usize, code: u64) -> bool {
+    if task >= crate::task::MAX_TASKS || !IN_GUEST[task].load(Ordering::Acquire) {
+        return false;
+    }
+    let _ = DOOM[task].compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire);
+    true
+}
+
+/// The code this task has been told to die with, or zero.
+pub fn doomed() -> u64 {
+    DOOM[me()].load(Ordering::Acquire)
+}
+
+/// The fault a task died of, taken so the next run on the same task starts
+/// clean.
+pub fn take_task_fault(task: usize) -> Option<Fault> {
+    if task >= crate::task::MAX_TASKS {
+        return None;
+    }
+    unsafe { (*TASK_FAULT.get())[task].take() }
+}
+
+/// Run `enter` as a guest on this task: armed so a fault ends it and not the
+/// machine, with any doom from a previous tenant of the task forgotten.
+///
+/// The one place the flag is set, so the three doors cannot disagree about
+/// it. Cleared on the way back whichever way the guest left -- an exit, a
+/// kill, a fault -- because all of them return here through the longjmp.
+pub fn as_guest(enter: impl FnOnce() -> u64) -> u64 {
+    let t = me();
+    DOOM[t].store(0, Ordering::Release);
+    unsafe { (*TASK_FAULT.get())[t] = None };
+    IN_GUEST[t].store(true, Ordering::Release);
+    let code = enter();
+    IN_GUEST[t].store(false, Ordering::Release);
+    DOOM[t].store(0, Ordering::Release);
+    code
+}
+
+/// End this task's guest now if it has been doomed. From the syscall path's
+/// way in and way out, where nothing is held.
+///
+/// # Safety
+/// Longjmps; only where `exit_group` itself could be served.
+unsafe fn die_if_doomed() {
+    let d = doomed();
+    if d != 0 {
+        unsafe { glados_leave_guest(d) };
+    }
+}
+
+/// What a guest's end means as a `wait4` status word.
+///
+/// The encoding is Linux's: an exit puts its code in bits 8..15 and a signal
+/// puts its number in the low seven, which is what `WIFEXITED` and
+/// `WIFSIGNALED` tell apart. A fault is the signal Linux would have raised for
+/// it, so a parent sees `SIGSEGV` for a wild pointer rather than an exit code
+/// of 14 -- the vector number -- which is what it saw before.
+pub fn wait_status(code: u64) -> i32 {
+    if code & FAULTED != 0 {
+        signal_of_vector((code & 0xFF) as u8) as i32
+    } else if code & SIGNALED != 0 {
+        (code & 0x7F) as i32
+    } else if code & OVERRAN != 0 {
+        9
+    } else {
+        ((code & 0xFF) as i32) << 8
+    }
+}
+
+/// The signal Linux sends for a processor exception taken at ring 3.
+pub fn signal_of_vector(v: u8) -> u32 {
+    const SIGILL: u32 = 4;
+    const SIGTRAP: u32 = 5;
+    const SIGBUS: u32 = 7;
+    const SIGFPE: u32 = 8;
+    const SIGSEGV: u32 = 11;
+    match v {
+        0 | 16 | 19 => SIGFPE,
+        1 | 3 => SIGTRAP,
+        6 => SIGILL,
+        17 => SIGBUS,
+        _ => SIGSEGV,
+    }
 }
 
 /// End a guest that faulted, and go back to whoever started it.
@@ -5410,8 +5639,20 @@ pub fn running() -> bool {
 pub unsafe fn kill(f: Fault) -> ! {
     let vector = f.regs.vector;
     // Copied out before the longjmp, which abandons the stack this arrived on.
-    unsafe { *LAST_FAULT.get() = Some(f) };
+    // Into the faulting task's own cell: a child's crash is its parent's to
+    // read through `wait4`, and writing it over the session's report would
+    // put a child's registers under the main guest's name.
+    let t = me();
+    unsafe { (*TASK_FAULT.get())[t] = Some(f) };
+    if main_task() == Some(t) {
+        unsafe { *LAST_FAULT.get() = Some(f) };
+    }
     unsafe { kill_with(FAULTED | vector) }
+}
+
+/// Record a fault as the session's, for a thread whose crash ends the process.
+pub fn adopt_fault(f: Fault) {
+    unsafe { *LAST_FAULT.get() = Some(f) };
 }
 
 /// The longjmp both reasons share.
@@ -5420,7 +5661,9 @@ pub unsafe fn kill(f: Fault) -> ! {
 /// Only while a guest is running, and only from a context that may abandon its
 /// stack.
 unsafe fn kill_with(code: u64) -> ! {
-    GUEST_RUNNING.store(false, Ordering::Relaxed);
+    // This task's flag and nobody else's. Clearing the session's here was
+    // what let one dead child disarm the next one's fault.
+    IN_GUEST[me()].store(false, Ordering::Release);
     // **Inline, and calling `glados_leave_guest` through its declaration was
     // the bug.** This target is Windows-ABI, so an ordinary Rust function is
     // Microsoft x64, where xmm6-xmm15 are non-volatile. `glados_leave_guest`
@@ -5506,7 +5749,8 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
     crate::task::ring3_active(true, unsafe {
         core::ptr::read(core::ptr::addr_of!(GLADOS_SYSCALL_STACK))
     });
-    let code = unsafe { glados_enter_guest(entry, stack_top) };
+    MAIN_TASK.store(me(), Ordering::Relaxed);
+    let code = as_guest(|| unsafe { glados_enter_guest(entry, stack_top) });
     crate::task::ring3_active(false, 0);
     // **Every thread has to be gone before the space is.** A child still
     // running would be reading regions `teardown` is about to hand back, and
@@ -5514,11 +5758,23 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
     // longjmping out of its own stack, which only that thread can do.
     // Bounded, because a thread that makes no syscall never notices the ask
     // and the alternative is a shell that never comes back.
+    //
+    // **And every child goes with the session.** There is no init to reparent
+    // an orphan to, and an orphan left running was a guest nobody would ever
+    // wait for, holding a pool task forever -- and, before `IN_GUEST`, one
+    // whose next fault halted the machine because the session it belonged to
+    // had already cleared the flag. `SIGKILL`, as a terminal hangup ends a
+    // shell's jobs. A child that does not notice inside the bound is still
+    // doomed, and the timer ends it at its next tick at ring 3.
     super::thread::begin_exit();
+    super::fork::doom_all(SIGNALED | 9);
     let give_up = crate::dev::lapic::ticks() + 200;
-    while super::thread::live() > 0 && crate::dev::lapic::ticks() < give_up {
+    while (super::thread::live() > 0 || super::fork::live() > 0)
+        && crate::dev::lapic::ticks() < give_up
+    {
         crate::task::yield_now();
     }
+    MAIN_TASK.store(usize::MAX, Ordering::Relaxed);
     DEADLINE.store(0, Ordering::Relaxed);
     GUEST_RUNNING.store(false, Ordering::Relaxed);
     if flags & (1 << 9) != 0 {
@@ -5611,6 +5867,45 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // Errors are small negatives in rax, which is the whole of Linux's error
     // convention. A positive ENOSYS would read to a guest as a successful call
     // that returned 38.
+    // How a guest's end reads to its parent. Linux's encoding, because
+    // `WIFEXITED` and `WIFSIGNALED` are macros compiled into the parent: an
+    // exit in bits 8..15, a signal in the low seven. A crash used to arrive as
+    // an *exit* whose code was the vector number.
+    out.push((
+        "a child's exit reads as an exit, and its crash as the signal Linux would send",
+        wait_status(EXITED | 7) == 7 << 8
+            && wait_status(FAULTED | 14) == 11
+            && wait_status(FAULTED | 13) == 11
+            && wait_status(FAULTED | 0) == 8
+            && wait_status(FAULTED | 6) == 4
+            && wait_status(SIGNALED | EXITED | 9) == 9
+            && wait_status(OVERRAN) == 9,
+    ));
+    out.push((
+        "and every one of those reads as signalled, not as exited, by the parent's own test",
+        [FAULTED | 14, SIGNALED | 9, OVERRAN]
+            .iter()
+            .all(|&c| { let w = wait_status(c); w & 0x7F != 0 && w & 0x7F != 0x7F })
+            && wait_status(EXITED | 3) & 0x7F == 0,
+    ));
+    // A forked child's records of its parent's mappings must give nothing
+    // back: the pages behind them are the parent's, and freeing them from the
+    // child pulled memory out from under a running process.
+    out.push((
+        "a forked child's inherited mapping owes nothing when it is unmapped",
+        {
+            let m = Mapping { at: 0x1000, len: 4096, from: Source::Heap };
+            let c = Mapping { from: Source::Copied, ..m };
+            c.from == Source::Copied && c.at == m.at && c.len == m.len
+        },
+    ));
+    // Doom lands only on a task inside a guest, so a stale mark can never be
+    // inherited by the next program a pool task runs. Asked of a task index
+    // nothing is running a guest on at boot.
+    out.push((
+        "a task that is not inside a guest cannot be doomed",
+        !doom(crate::task::MAX_TASKS - 1, SIGNALED | 9) && !doom(crate::task::MAX_TASKS, 1),
+    ));
     out.push((
         "an unimplemented call answers a negative errno, not a plausible length",
         (ENOSYS as i64) < 0 && (EBADF as i64) < 0 && ENOSYS as i64 == -38 && EBADF as i64 == -9,
