@@ -2514,6 +2514,23 @@ not a bug: the field is defined by kinship, not by who asked. Driven on a
 family of four: `sealed and purged 4 process(es)`, the run `ended by signal 9
 ... machine intact`, and the shell answered afterwards.
 
+**One thing the en-masse kill exposed, and it is the SMP audit rather than
+this feature.** Sealing a field and dooming every task in it at once means
+several ring-3 guests are timer-killed in the same breath -- `kill_overrun`
+longjmps out of each and the scheduler re-picks under that churn. At `-smp 1`
+the whole signal suite passes, as it does at `-smp 2` for `diag all` 73/73
+and for a quarantine run on its own or after one other guest session. But a
+quarantine of three pure-spinning children as the *third* guest session of a
+`-smp 2` boot panics in `task::finish_handoff` with a corrupted cpu index
+(`this_cpu()` reads back garbage) -- shared scheduler state, `PENDING` and the
+LAPIC-to-cpu map, touched from the other core while the kills land. The
+timer-kill-to-longjmp-to-reschedule path predates signals and nothing had ever
+killed several guests at once before, so `forktest` run three times over
+(crashing children, a `SIGKILL`ed spinner, an orphan) stays clean at `-smp 2`
+where this does not. It belongs to the ~149-`Racy` SMP audit the 1.4.0 plan
+holds, not to the signal table, and it is written here so the next reader does
+not rediscover it from a panic.
+
 Measured, on `mkelf.py --kind signal`:
 
     13 rt_sigaction  0xa 0x8010000191 0x0 -> 0
