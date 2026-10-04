@@ -461,6 +461,12 @@ pub struct Resume {
     pub r13: u64,
     pub r14: u64,
     pub r15: u64,
+    /// The thread-local base, `IA32_FS_BASE`. **Last, and read by Rust, not by
+    /// the assembly** that loads the fields above at fixed offsets. A forked
+    /// child was entered with whatever FS its pool task had -- zero -- and the
+    /// first thing glibc does is read its stack canary at `%fs:0x28`, so every
+    /// glibc child faulted reading address 0x28.
+    pub fs: u64,
 }
 
 /// Where the guest's stack pointer went while the handler runs.
@@ -885,7 +891,16 @@ pub unsafe fn set_syscall_stack(stack: u64) {
 }
 
 pub unsafe fn enter_resumed(r: &Resume) -> u64 {
-    unsafe { glados_enter_guest_regs(r as *const Resume) }
+    unsafe {
+        crate::cpu::wrmsr(IA32_FS_BASE, r.fs);
+        glados_enter_guest_regs(r as *const Resume)
+    }
+}
+
+/// The running guest's thread-local base, for a `fork` that gives its child
+/// the same one.
+pub fn guest_fs() -> u64 {
+    unsafe { crate::cpu::rdmsr(IA32_FS_BASE) }
 }
 
 /// Where the running guest's stack pointer went, for a `fork` that has to give
@@ -3253,13 +3268,13 @@ impl MinFd for u64 {
 /// is one the caller is relying on.
 /// Start a thread, and refuse everything else `clone` can mean.
 ///
-/// **`fork` is the one thing this system cannot grow into.** One address space
-/// is its founding claim rather than a shortcut, and a `clone` without
-/// `CLONE_VM` is asking for a second one. `CLONE_THREAD` is the other half: a
-/// clone without it becomes a process, and there are none. Both are refused
-/// with `ENOSYS` rather than approximated, because a thread handed back for a
-/// process request is two names for one address space and a program free to
-/// write through both.
+/// Threads only. A clone asking for a process never reaches here -- the
+/// dispatcher sends it to `fork::clone_process`, which is how glibc forks --
+/// and anything that is neither is refused with `ENOSYS` rather than
+/// approximated: a thread handed back for a request it does not match is two
+/// names for one address space and a program free to write through both.
+/// (This said `fork` was "the one thing this system cannot grow into", which
+/// `fork.rs` has since disproved.)
 fn sys_clone(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64, rip: u64) -> u64 {
     if !super::thread::is_thread(flags) {
         return ENOSYS;
@@ -5094,7 +5109,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_KILL => (super::signal::kill(f.rdi as i64, f.rsi), true),
         // No parent, and no group but the one. `getppid` answering zero is
         // what a process reparented to nothing reports.
-        SYS_GETPPID => (0, true),
+        SYS_GETPPID => (super::fork::parent_pid(), true),
         SYS_GETGROUPS => (0, true),
         SYS_UNAME => (sys_uname(f.rdi), true),
         SYS_FCNTL => (sys_fcntl(f.rdi, f.rsi, f.rdx), true),
@@ -5106,6 +5121,9 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         // `rcx` is where `syscall` stashed the return address, which is where
         // the child resumes: a cloned thread does not start at an entry point,
         // it returns from `clone` on a different stack with `rax` zero.
+        // A process-shaped clone is glibc's fork and posix_spawn; see
+        // `fork::clone_process`. Everything else is a thread or refused.
+        SYS_CLONE if super::fork::is_process(f.rdi) => (super::fork::clone_process(f), true),
         SYS_CLONE => (sys_clone(f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.rip), true),
         // The whole frame, because a child resumes with its parent's
         // registers and this is the only place that still has them.
@@ -5132,7 +5150,8 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         }
         // One process, and it is the guest. Reporting a pid at all is what
         // stops a runtime deciding it failed to start.
-        SYS_GETPID | SYS_SET_TID_ADDRESS => (1, true),
+        SYS_GETPID => (super::fork::current_pid(), true),
+        SYS_SET_TID_ADDRESS => (super::thread::current_tid(), true),
         // Root, and every id the same. There is no privilege boundary above a
         // guest here to be anything else, which is the same fact `AT_SECURE`
         // reports as zero and `stat` reports as uid 0 -- said once per place

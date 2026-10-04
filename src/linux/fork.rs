@@ -64,6 +64,13 @@ static SLOTS: Racy<[Slot; MAX_CHILDREN]> = Racy::new(
 /// The next process id. From 2, because `getpid` answers 1 for the first guest.
 static NEXT_PID: AtomicU64 = AtomicU64::new(2);
 
+/// The next id, for a process *or* a thread. One counter, as Linux has one id
+/// space: two counters both starting at 2 gave a thread and a forked child the
+/// same number, and `wait4` or `kill` naming it would mean either.
+pub fn next_id() -> u64 {
+    NEXT_PID.fetch_add(1, Ordering::Relaxed)
+}
+
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 
 pub fn live() -> usize {
@@ -142,6 +149,58 @@ fn dup_range(
 /// child -- the child's first instruction is the one after the parent's
 /// `syscall`, on another task.
 pub fn fork(f: &Frame) -> u64 {
+    fork_with(f, None, None)
+}
+
+const SIGCHLD: u64 = 17;
+const CLONE_VFORK: u64 = 0x0000_4000;
+const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+
+/// Whether a `clone` is asking for a process rather than a thread: no
+/// `CLONE_THREAD`, an exit signal of `SIGCHLD` or none, and nothing among its
+/// flags this kernel cannot honour. `CLONE_VM` is allowed only with
+/// `CLONE_VFORK`, which is how `posix_spawn` asks -- see `clone_process`.
+pub fn is_process(flags: u64) -> bool {
+    use super::thread::{CLONE_CHILD_CLEARTID, CLONE_PARENT_SETTID, CLONE_THREAD, CLONE_VM};
+    let signal = flags & 0xFF;
+    let known = CLONE_VM | CLONE_VFORK | CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | CLONE_PARENT_SETTID | 0xFF;
+    flags & CLONE_THREAD == 0
+        && (signal == SIGCHLD || signal == 0)
+        && flags & !known == 0
+        && (flags & CLONE_VM == 0 || flags & CLONE_VFORK != 0)
+}
+
+/// `clone` asking for a process, which is how glibc forks.
+///
+/// **glibc never calls `fork`.** Its `fork()` is `clone(CLONE_CHILD_SETTID |
+/// CLONE_CHILD_CLEARTID | SIGCHLD)` with the child's tid written into the
+/// child's own thread block, and `posix_spawn` -- which `system()` uses -- is
+/// `clone(CLONE_VM | CLONE_VFORK | SIGCHLD)` on a stack of its own. This kernel
+/// served `fork` and `vfork` by number, which is musl's way, and answered
+/// `ENOSYS` to both of glibc's, so a glibc shell could run nothing.
+///
+/// `CLONE_VM | CLONE_VFORK` is served by a copy, not a share: the child of a
+/// spawn runs on the stack it was given until it calls `execve` or exits,
+/// which a copy does identically. What is lost is the child writing into the
+/// parent's memory before `exec` -- `posix_spawn` reports a failed `exec` that
+/// way, so here a spawn whose `exec` failed reads as started, and its exit
+/// status of 127 is what says otherwise. `CLONE_CHILD_CLEARTID` is accepted
+/// and not acted on: it clears a word in the child's own memory when the child
+/// ends, and nothing outside that child waits on it.
+pub fn clone_process(f: &Frame) -> u64 {
+    use super::thread::CLONE_PARENT_SETTID;
+    let (flags, stack, ptid, ctid) = (f.rdi, f.rsi, f.rdx, f.r10);
+    let settid = (flags & CLONE_CHILD_SETTID != 0 && ctid != 0).then_some(ctid);
+    let pid = fork_with(f, (stack != 0).then_some(stack), settid);
+    if (pid as i64) > 0 && flags & CLONE_PARENT_SETTID != 0 && ptid != 0 && syscall::reachable(ptid, 4, true) {
+        unsafe { core::ptr::write_volatile(ptid as *mut u32, pid as u32) };
+    }
+    pid
+}
+
+/// `fork`, running the child on `stack` if given, and writing its pid at
+/// `settid` in the child's memory if given.
+fn fork_with(f: &Frame, stack: Option<u64>, settid: Option<u64>) -> u64 {
     const EAGAIN: u64 = (-11i64) as u64;
     const ENOMEM: u64 = (-12i64) as u64;
     const ENOSYS: u64 = (-38i64) as u64;
@@ -178,17 +237,34 @@ pub fn fork(f: &Frame) -> u64 {
         (r, m)
     };
 
-    let mut owned: Vec<(u64, usize)> = Vec::new();
-    for (at, len) in regions.iter().chain(maps.iter()) {
-        if !dup_range(&mut tables, *at, *len, &mut owned) {
-            for (p, n) in owned {
-                syscall::free_pages(p, n);
-            }
-            return ENOMEM;
-        }
+    // The pid first, so it can be in the child's memory from its first
+    // instruction: `CLONE_CHILD_SETTID` is the child's copy of a word, and the
+    // simplest way to have a copy say something is to say it in the original
+    // for the length of the copy.
+    let pid = next_id();
+    let settid = settid.filter(|&a| syscall::reachable(a, 4, true));
+    let saved = settid.map(|a| unsafe { core::ptr::read_volatile(a as *const u32) });
+    if let Some(a) = settid {
+        unsafe { core::ptr::write_volatile(a as *mut u32, pid as u32) };
     }
 
-    let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+    let mut owned: Vec<(u64, usize)> = Vec::new();
+    let mut failed = false;
+    for (at, len) in regions.iter().chain(maps.iter()) {
+        if !dup_range(&mut tables, *at, *len, &mut owned) {
+            failed = true;
+            break;
+        }
+    }
+    if let (Some(a), Some(v)) = (settid, saved) {
+        unsafe { core::ptr::write_volatile(a as *mut u32, v) };
+    }
+    if failed {
+        for (p, n) in owned {
+            syscall::free_pages(p, n);
+        }
+        return ENOMEM;
+    }
 
     // A pool slot, and its stack on first use.
     let idx = {
@@ -218,7 +294,9 @@ pub fn fork(f: &Frame) -> u64 {
     // one call return twice.
     let resume = Resume {
         rip: f.rip,
-        rsp: syscall::guest_rsp(),
+        // A spawn's child runs on the stack it was handed; a fork's on its copy
+        // of the parent's.
+        rsp: stack.unwrap_or_else(syscall::guest_rsp),
         rflags: f.rflags,
         rax: 0,
         rbx: f.rbx,
@@ -227,6 +305,8 @@ pub fn fork(f: &Frame) -> u64 {
         r13: f.r13,
         r14: f.r14,
         r15: f.r15,
+        // The parent's TLS, which a child's copy of memory needs pointed at.
+        fs: syscall::guest_fs(),
     };
 
     // The child's guest entry, cloned from the parent's and given the tables
@@ -347,6 +427,32 @@ fn body() {
 ///
 /// Pid 1 is the guest the shell started, which `getpid` has always answered
 /// for and which has no slot here -- it was never forked.
+/// The pid of the guest entry `guest`: a forked child's own, or 1 for the
+/// guest `linux run` started.
+pub fn pid_of_guest(guest: usize) -> u64 {
+    unsafe { &*SLOTS.get() }
+        .iter()
+        .find(|s| s.live && s.guest == guest)
+        .map(|s| s.pid)
+        .unwrap_or(1)
+}
+
+/// `getpid`. It answered 1 to everybody, so a forked child named itself after
+/// its parent -- and glibc checks exactly that after `fork`.
+pub fn current_pid() -> u64 {
+    pid_of_guest(syscall::current_guest())
+}
+
+/// `getppid`: a child's parent's pid, and 0 for the first guest, whose parent
+/// is the kernel.
+pub fn parent_pid() -> u64 {
+    let me = syscall::current_guest();
+    match unsafe { &*SLOTS.get() }.iter().find(|s| s.live && s.guest == me) {
+        Some(s) => pid_of_guest(s.parent),
+        None => 0,
+    }
+}
+
 pub fn guest_of_pid(pid: i64) -> Option<usize> {
     if pid == 1 {
         return Some(0);

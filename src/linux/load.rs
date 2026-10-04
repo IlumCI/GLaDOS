@@ -522,16 +522,16 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
 
 /// Whether a guest gets a page-table root of its own.
 ///
-/// **Off by default, and that is the whole point of it being a switch.** The
-/// space a guest gets here *shares* every mapping with the kernel's, so on and
-/// off should be indistinguishable in every observable way -- which is exactly
-/// what makes it worth having: a fixture that behaves identically both ways
-/// says the guest lifecycle survives a non-kernel CR3, and that is the thing
-/// that has to be true before any of it diverges. Defaulting on would make the
-/// first divergence bug and the first "does this work at all" bug arrive
-/// together, with nothing to tell them apart.
+/// **On by default, since 1.4.0.** It was off, deliberately, while a space was
+/// new: one that shares every kernel mapping should be indistinguishable from
+/// none, and proving that before anything diverged kept the first divergence
+/// bug apart from the first "does this work at all" one. It has since carried
+/// busybox under both libcs, the dynamic loaders, fixed-address images and
+/// `fork` -- and with it off, `fork` and `posix_spawn` refuse, so no glibc
+/// program could start another. `linux space off` remains, for telling a bug
+/// in the space apart from a bug in a program.
 static OWN_SPACE: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+    core::sync::atomic::AtomicBool::new(true);
 
 pub fn set_own_space(on: bool) {
     OWN_SPACE.store(on, core::sync::atomic::Ordering::Relaxed);
