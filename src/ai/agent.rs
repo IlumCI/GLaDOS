@@ -555,8 +555,25 @@ fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option
     // conversation is invalidated either way -- the free-text walk below ends
     // with the identical call -- so this costs nothing that path was not
     // already paying.
-    if name == "run" {
-        let choices = skill_choices();
+    // `linux` is the same shape as `run` and for the same reason: its first
+    // argument is a program and which programs exist is knowable, so the model
+    // picks out of a closed set instead of spelling a path. The set is
+    // `linux::program::installed()` rather than a directory listing taken here,
+    // because the dispatch resolves names through that one function and a
+    // second enumeration is a second answer to "what may be run".
+    //
+    // Only the *program* is decoded. Its argv is not enumerable -- `busybox ls
+    // -l` is argv a table cannot hold -- so a program needing arguments is
+    // reached through the shell or installed as a wrapper. That limit is real
+    // and is better than free-texting argv: an unspellable program is a
+    // program the model cannot use, which is the failure `skill_choices` was
+    // written to end, and offering argv it cannot get right would re-earn it.
+    if name == "run" || name == "linux" {
+        let choices = if name == "linux" {
+            crate::linux::program::installed()
+        } else {
+            skill_choices()
+        };
         if !choices.is_empty() {
             let picked = harness::with_alphabet(|alphabet| {
                 with_engine(|e| {

@@ -2565,6 +2565,141 @@ The lesson the pair of them teaches is the one to keep: **a limitation stated
 as a founding claim is still a limitation, and it will be removed by somebody
 who did not read the claim as permanent.**
 
+### The model can run one, out of a closed table
+
+`linux run` was a shell verb and nothing else, so the model had no route to a
+guest at all: `linux` was absent from `sysbox::APPLETS`, the decoding grammar
+is built from that table, and no Aiksi builtin named `crate::linux::*` either.
+That was the deliberate `work` / `skill trust` / `app trust` pattern -- verbs
+the grammar cannot spell.
+
+**The founding premise survives giving it one, and the half that could have
+broken it turned out already broken.** A tool call from the model is a function
+call, and an applet row is exactly that: `sysbox::dispatch` into a Rust fn into
+`syscall::run`, with no marshalling anywhere between the model and the kernel.
+The ring-3 boundary is *inside* the tool, below the call, the way `fsck`
+touching NVMe is. What looked fatal was the result: `sysbox`'s own module doc
+says results are computed before printing because "the model will be another"
+consumer of them, which reads as a promise of structured values that a guest's
+exit code and stdout could not keep. It is future tense and still is --
+`agent.rs` wraps every dispatch in `console::begin_capture` and hands the model
+captured *text*. A guest's stdout is the same kind of thing `ls` already gives
+it, so this concedes nothing that was not already conceded.
+
+**`linux::program` is the table, and the directory is the security property.**
+`constrain.rs` makes invalid output unreachable rather than improbable, and
+"any path in the namespace" is not a set anything can enumerate -- so the first
+argument is a *program name* out of a closed set, the shape `skill_choices`
+gave `run` after the model turned out unable to spell
+`/ai/tools/learned-3f2a91c4.ai&xi`. The set is `/linux/bin`, scanned rather
+than declared, which is the opposite of `load::INTERPRETERS` for a stated
+reason: an interpreter path is dictated by some binary's `PT_INTERP` and the
+useful list is of paths to check *for*, while a program is whatever somebody
+installed.
+
+It is **not** `/tmp`, and that is the whole of it rather than tidiness. `fs.rs`
+lets a guest write inside `/tmp` and refuses everywhere else, so a table
+scanned from `/tmp` would let a program install the next program the model is
+able to invoke -- the model's action vocabulary writable by the things it runs,
+which is an escalation from ring 3 to the kernel's action surface with no gate
+in front of it. Nothing at ring 3 can write `/linux/bin`. The claim is made
+against `fs::writable` rather than restated, so a jail that ever widens fails
+there instead of becoming an escalation nobody noticed.
+
+**The table is asked at the dispatch and not only in the grammar.** A decode
+cannot reach a name outside the set, but the shell and a skill's own `applet`
+builtin arrive at the same dispatch without a grammar, so a check living only
+in `constrain` would be a check on one caller of three. `path_of` is the one
+resolution both consult, and it refuses a name carrying a separator, `.` or
+`..` before anything is joined onto a directory -- five claims, because those
+are the inputs that would turn a closed set back into any path the model can
+spell.
+
+**Mutating by construction, exactly as `run` is.** A guest may write inside
+`/tmp`, so no inspection of the binary may claim otherwise and the read-only
+grammar never carries it. That it is *more* contained than `run` is a reason to
+be comfortable offering it and not a reason to call it read-only: `run` on a
+trusted Aiksi program gets operator capabilities -- raw memory, I/O ports,
+sockets -- where a guest gets ring 3 with the U bit only on its own pages, its
+own page-table root, every pointer it hands back bounds-checked to `EFAULT`, no
+socket surface at all, a session deadline, and since the fault work a crash
+that ends only itself. It is the best-leashed thing in the applet table.
+
+**What it prints is an observation, not a report**, and that is the one design
+decision in the dispatch. The shell verb prints the whole syscall trace, which
+is right for somebody debugging a loader and would hand the model sixty lines
+of register dumps as the answer to "list that directory". So the trace stays
+with the shell verb and the applet prints the program's own output -- which
+arrives on its own through `sys_write` -- plus one line saying how it ended. A
+refusal names what *is* installed, for the same reason: "no such program" is
+not something a model can act on.
+
+`[args...]` is a new argument shape and `check_args` had no way to say it.
+`<text>` would have demanded at least one argument and refused a program that
+takes none; leaving it off the tail list capped argv at the spec's own word
+count, which is two. Both ends are claims -- a program with no arguments, and
+more argv than the usage has words -- because the middle case passes under
+every arity rule and would hide both.
+
+Driven, with `mkelf.py`'s static fixture installed into the table:
+
+    linux                    nothing is installed in /linux/bin -- that
+                             directory is the whole set
+    cp /tmp/hello /linux/bin/hello
+    linux                    installed: hello
+    linux hello              hello from ring 3
+                             hello exited 5 after 2 syscall(s)
+    linux nope               'nope' is not an installed Linux program
+                             installed: hello
+
+Exit 5 is the code `mkelf.py` built in, and two lines is the whole observation.
+`diag linux` is 279 claims and `sysbox` lists the row as mutating.
+
+**A closed set is not the same property as a decodable one, and the second is
+the one a reader will not think to ask about.** Every name becomes a grammar
+alternative, `Cursor::finished` is an exact match on what has been produced,
+and the decode loop breaks the moment it hits -- so an alternative that is a
+prefix of another makes the longer program unreachable however well it was
+installed. That is "a skill it could not spell was a skill it could not use"
+arriving on programs, and `run` never had to care: its choices are paths ending
+`.ai&xi`, so none can prefix another. Bare names can -- `sh` and `shuf`, `ls`
+and `lsof`.
+
+`constrain::Grammar::new` already prevents it, by appending `TERMINATOR` to
+every alternative, which is also why the pre-existing `snap`/`snaps` pair is
+safe. So the hazard is real, handled, and handled *elsewhere* -- which makes
+the invariant worth naming where the names are made: a program name may not
+contain the terminator, or it puts the delimiter inside an alternative and
+hands the property straight back. `is_name` refuses a newline and every other
+control character, and three claims cover it, including that no offered name
+shadows a longer one it prefixes. Nothing is likely to be called `sh\nls`; the
+point is that a set offered to a grammar has to be checked against the
+grammar's own delimiter rather than against what a filename usually looks like.
+
+**Two things are deliberately not done and one of them is not verified.** Only
+the *program* is decoded under the grammar; argv is not enumerable -- `busybox
+ls -l` is argv no table can hold -- so a program needing arguments is reached
+through the shell or installed as a wrapper. And **the grammar branch has not
+been entered by a real decode.** It was attempted rather than assumed: there is
+no checkpoint on the development host, and `hybtest.py`'s fixture declares
+`seq 32`, which no episode prompt fits -- but context is a four-byte stamp, so
+`ctxstamp.py out/hybtest.bin 512` makes the fixture drivable for nothing. An
+episode then ran end to end on it and routed to `find` twice with mojibake
+arguments, which is exactly what a 353 KB fixture of random weights over a
+byte vocabulary should do. The branch is reached only when the model picks the
+name, and that is a one-in-twenty-four coin on a model that knows nothing. So
+what is established is the table, the dispatch, the leash, the decodability of
+the set and a real guest run; what is not is that a decode lands on `linux`,
+and settling that wants a real checkpoint rather than a bigger fixture.
+
+**The open question is ownership rather than purity.** A guest holds the shell
+until it exits and the model runs on the agent task, which holds the engine for
+a whole episode -- so a model-invoked guest takes the terminal for its lifetime
+with the engine still claimed, and every other task answers "another task holds
+it" meanwhile. The session deadline bounds it. That is the same gap Skywalker
+names as "a client running beside the shell", and it is bounded here rather
+than solved.
+
 ### A second address space
 
 `src/mem/space.rs`, and the thing it removed was an assumption rather than a

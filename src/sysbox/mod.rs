@@ -76,6 +76,18 @@ pub const APPLETS: &[Applet] = &[
     // is reachable by the same route as `ls`, and an answer that merely *says*
     // it will remember cannot be mistaken for one that did.
     Applet { name: "remember", args: "<text>",     help: "keep a fact about the operator", mutates: true },
+    // A program this kernel did not compile, at ring 3, named out of a closed
+    // table rather than by path -- `linux::program` says why the set has to be
+    // enumerable and why its directory sits outside what a guest may write.
+    //
+    // Mutating by construction, exactly as `run` is: a guest may write inside
+    // `/tmp`, so no inspection of the binary may claim otherwise and the
+    // read-only grammar never carries it. That it is *more* contained than
+    // `run` -- ring 3, its own page-table root, every pointer it hands back
+    // bounds-checked, no socket surface, a deadline, and since the fault work
+    // a crash that ends only itself -- is a reason to be comfortable offering
+    // it at all, and not a reason to call it read-only.
+    Applet { name: "linux",  args: "<program> [args...]", help: "run an installed Linux program at ring 3", mutates: true },
 ];
 
 /// Resolve a path the way every applet does, against the working directory.
@@ -473,6 +485,7 @@ pub fn dispatch(cmd: &str, rest: &str) -> bool {
         "fsck" => cmd_fsck(),
         "run" => cmd_run(a1),
         "remember" => cmd_remember(rest),
+        "linux" => cmd_linux(rest.trim()),
         _ => {}
     }
     true
@@ -680,6 +693,110 @@ fn cmd_run(path: &str) {
     }
 }
 
+/// Run an installed Linux program at ring 3, named out of `linux::program`.
+///
+/// **What this prints is an observation and not a report, and that is the one
+/// design decision in here.** `agent::run` wraps an applet in
+/// `console::begin_capture`, so everything written between the dispatch and
+/// its end *is* what the model reads back as the result of its own action. The
+/// shell's `linux run` prints the whole syscall trace, which is exactly right
+/// for somebody debugging a loader and would hand the model sixty lines of
+/// register dumps as the answer to "list that directory". So the trace stays
+/// with the shell verb, and what the model gets is the program's own output --
+/// which arrives here on its own, through `sys_write` -- plus one line saying
+/// how it ended.
+///
+/// A refusal names what *is* installed, for the same reason: an observation
+/// saying only "no such program" tells the model nothing it can act on, and
+/// the set is small and already enumerated.
+fn cmd_linux(rest: &str) {
+    let mut words = rest.split_whitespace();
+    let name = words.next().unwrap_or("");
+    if name.is_empty() {
+        err("usage: linux <program> [args...]");
+        offer_programs();
+        return;
+    }
+
+    // The table is the leash and is asked here as well as in the grammar. A
+    // decode cannot reach a name outside the set, but the shell and a skill's
+    // `applet` builtin both arrive at this same dispatch without one -- so a
+    // check that lived only in the grammar would be a check on one caller of
+    // three.
+    let Some(path) = crate::linux::program::path_of(name) else {
+        err(&format!("'{}' is not an installed Linux program", name));
+        offer_programs();
+        return;
+    };
+    let Some(bytes) = read_blob(&path) else {
+        err(&format!("{} is installed but unreadable", name));
+        return;
+    };
+
+    // The resolved path as argv[0], which is what the shell verb passes and
+    // what a multi-call binary dispatches on, with the model's own words
+    // behind it.
+    let mut argv: Vec<&str> = Vec::new();
+    argv.push(path.as_str());
+    argv.extend(words);
+
+    let mut g = match crate::linux::load::load(&bytes, &argv) {
+        Ok(g) => g,
+        Err(why) => {
+            err(&format!("will not run {}: {}", name, why));
+            // The refusal's type is a `&'static str` and cannot carry the
+            // path, which is the whole of what a reader needs here.
+            if let Some(want) = crate::linux::load::wants(&bytes) {
+                let here = blob_len(&want).is_some();
+                kprintln!(
+                    "  it asks for {}, which is {}",
+                    want,
+                    if here { "here" } else { "not in the namespace" }
+                );
+            }
+            return;
+        }
+    };
+
+    // Safety: the same call the shell verb makes. The guest's pages are armed,
+    // a fault at ring 3 ends the guest and not the machine, and the session
+    // deadline bounds a program that will not stop.
+    let r = unsafe { crate::linux::load::run(&mut g) };
+    let calls = crate::linux::syscall::trace().len();
+
+    if r & crate::linux::syscall::OVERRAN != 0 {
+        kprintln!("  {} ran too long and was killed after {} syscall(s)", name, calls);
+    } else if r & crate::linux::syscall::FAULTED != 0 {
+        kprintln!(
+            "  {} died of fault {:#04x} after {} syscall(s)",
+            name,
+            r & 0xFFFF_FFFF,
+            calls
+        );
+    } else if r & crate::linux::syscall::SIGNALED != 0 {
+        kprintln!("  {} was ended by signal {} after {} syscall(s)", name, r & 0x7F, calls);
+    } else if r & crate::linux::syscall::EXITED != 0 {
+        // The exit code is the one number a caller branches on, so it is said
+        // plainly and first.
+        kprintln!("  {} exited {} after {} syscall(s)", name, r & 0xFFFF_FFFF, calls);
+    } else {
+        kprintln!("  {} returned without exiting -- {} syscall(s)", name, calls);
+    }
+}
+
+/// What `linux` will accept, said in one line.
+fn offer_programs() {
+    let names = crate::linux::program::installed();
+    if names.is_empty() {
+        kprintln!(
+            "  nothing is installed in {} -- that directory is the whole set",
+            crate::linux::program::DIR
+        );
+        return;
+    }
+    kprintln!("  installed: {}", names.join(" "));
+}
+
 /// The content address of a namespace path, for callers that want to compare
 /// rather than print. `print_hash` is the operator's view; this is the
 /// programmatic one, and it is what makes a fitted probe verifiable against
@@ -741,9 +858,16 @@ pub fn check_args(name: &str, rest: &str) -> Result<(), String> {
     // A trailing <text> absorbs everything after it: `write <path> <text>`
     // takes two words minimum but any number beyond that.
     let text_tail = spec.last() == Some(&"<text>");
+    // And a trailing [args...] absorbs everything *optionally*, which `<text>`
+    // cannot express: `linux <program>` alone is legal and `linux busybox ls -l`
+    // is the same applet with argv behind it. Spelling it `<text>` would have
+    // demanded at least one argument and refused a program that takes none;
+    // leaving it off the tail list would have capped argv at the spec's own
+    // word count, which is two.
+    let args_tail = spec.last() == Some(&"[args...]");
     let required = spec.iter().filter(|s| s.starts_with('<')).count();
 
-    if text_tail {
+    if text_tail || args_tail {
         if words.len() < required {
             return Err(format!(
                 "'{}' wants at least {} argument(s), got {}: usage {}",
@@ -1324,6 +1448,33 @@ pub fn selftest() -> bool {
                 .is_err(),
         );
     }
+
+    // `linux` takes a program and then any amount of argv, which is a shape no
+    // applet had before it. `[args...]` is the spec that says so, and the two
+    // ends of it are what a wrong `check_args` would get wrong: a program with
+    // no arguments at all, and more arguments than the spec has words. The
+    // middle case passes under every arity rule and would hide both.
+    ok &= check(
+        "a Linux program may be named with no arguments",
+        check_args("linux", "busybox").is_ok(),
+    );
+    ok &= check(
+        "and with more argv than the usage has words",
+        check_args("linux", "busybox ls -l -a /tmp").is_ok(),
+    );
+    ok &= check(
+        "but not with no program at all",
+        check_args("linux", "").is_err(),
+    );
+    // The leash, read off the one definition of it rather than restated. A
+    // guest may write inside `/tmp`, so this applet is mutating by
+    // construction; `harness::admitted` filters the read-only grammar on
+    // exactly this flag, so asserting it here is asserting that the read-only
+    // model cannot reach ring 3.
+    ok &= check(
+        "running a Linux program counts as mutating, so a read-only grammar cannot carry it",
+        applet_mutates("linux") == Some(true),
+    );
 
     ok
 }

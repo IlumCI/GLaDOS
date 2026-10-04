@@ -59,7 +59,13 @@ pub const DOMAINS: &[Domain] = &[
     Domain { name: "inspect", applets: &["cat", "stat", "hash", "same", "diff", "du", "fsck"] },
     Domain { name: "mutate", applets: &["mkdir", "write", "rm", "mv", "cp"] },
     Domain { name: "history", applets: &["snap", "back", "snaps"] },
-    Domain { name: "meta", applets: &["sysbox", "run", "remember"] },
+    // `linux` sits beside `run` rather than in `mutate`, and the division is
+    // the curriculum's rather than `mutates`': both of these execute a program
+    // whose effects are the program's own, where every row in `mutate` names
+    // the one thing it changes. A domain is what a stage is trained on, so a
+    // name that could be in two places would make the claim below ambiguous
+    // and the curriculum's stages overlap.
+    Domain { name: "meta", applets: &["sysbox", "run", "remember", "linux"] },
 ];
 
 /// Which domain an applet belongs to, if any.
