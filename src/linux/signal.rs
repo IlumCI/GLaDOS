@@ -60,6 +60,44 @@ pub const SIGTERM: u32 = 15;
 pub const SIGCHLD: u32 = 17;
 pub const SIGSTOP: u32 = 19;
 
+/// Two signals this kernel adds that Linux has no number for, placed well above
+/// the real-time range (`SIGRTMAX` is 64) so they can never be confused with a
+/// signal a libc might send. They are not delivered to a handler -- like
+/// `SIGKILL`, they are acted on by the kernel the moment they are sent.
+///
+/// `SIGRANDOM` rolls a real signal and sends *that* instead: a signal roulette,
+/// self-explanatory and about as safe as the wheel lands on, since the roll
+/// includes `SIGKILL`.
+pub const SIGRANDOM: u64 = 69420;
+/// `SIGQUARANTINE` seals the target and its whole process family -- parent,
+/// children and siblings, transitively -- into an isolation field no other
+/// process can observe, then terminates the entire field at once. For stopping
+/// a self-replicating process tree, where killing one at a time loses the race
+/// against it forking more.
+pub const SIGQUARANTINE: u64 = 2020;
+
+/// The wheel `SIGRANDOM` spins: real signals only, a spread of catchable and
+/// fatal, so the roll genuinely means something.
+const ROLL: [u32; 8] = [1, 2, 3, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGTERM];
+
+/// A signal's short name, for the one line `SIGRANDOM` prints saying what it
+/// landed on.
+pub fn name(sig: u32) -> &'static str {
+    match sig {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        SIGKILL => "SIGKILL",
+        SIGUSR1 => "SIGUSR1",
+        SIGSEGV => "SIGSEGV",
+        SIGUSR2 => "SIGUSR2",
+        SIGTERM => "SIGTERM",
+        SIGCHLD => "SIGCHLD",
+        SIGSTOP => "SIGSTOP",
+        _ => "signal",
+    }
+}
+
 /// `SIG_DFL` is 0 and `SIG_IGN` is 1, which are addresses no handler can have.
 const SIG_DFL: u64 = 0;
 const SIG_IGN: u64 = 1;
@@ -288,6 +326,33 @@ pub fn raise_at(guest: usize, sig: u32) -> bool {
 pub fn kill(pid: i64, sig: u64) -> u64 {
     const ESRCH: u64 = (-3i64) as u64;
     const EINVAL: u64 = (-22i64) as u64;
+
+    // The two custom signals are kernel actions rather than deliveries, and
+    // they live above the real-time range, so they are handled before the guard
+    // that would reject them as out of range.
+    if sig == SIGQUARANTINE {
+        let Some(guest) = super::fork::guest_of_pid(pid) else { return ESRCH };
+        let sealed = super::fork::quarantine(guest);
+        crate::kprintln!("  [linux] SIGQUARANTINE sealed and purged {} process(es)", sealed);
+        return 0;
+    }
+    if sig == SIGRANDOM {
+        // Resolved first, so a target that does not exist is `ESRCH` rather
+        // than a roll thrown away on nobody.
+        if super::fork::guest_of_pid(pid).is_none() {
+            return ESRCH;
+        }
+        let mut b = [0u8; 1];
+        crate::rng::fill(&mut b);
+        let rolled = ROLL[b[0] as usize % ROLL.len()];
+        crate::kprintln!("  [linux] SIGRANDOM rolled {} for pid {}", name(rolled), pid);
+        // Through `kill` itself, so the rolled signal takes exactly the path it
+        // would have as an ordinary send -- the `SIGKILL` doom, the default
+        // terminate, a handler. The roll is always a real signal, so this
+        // recurses once and never onto another custom one.
+        return kill(pid, rolled as u64);
+    }
+
     if sig as usize > NSIG {
         return EINVAL;
     }
@@ -487,4 +552,31 @@ pub fn sigreturn(f: &mut Frame) -> u64 {
     sp.signals.blocked = unsafe { core::ptr::read((at + frame::SIGMASK) as *const u64) };
     sp.signals.depth = sp.signals.depth.saturating_sub(1);
     f.rax
+}
+
+/// What `diag linux` asks of the two custom signals without sending one.
+pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
+    let mut out = alloc::vec::Vec::new();
+    // Above the real-time range, so they bypass the range guard on purpose and
+    // can never be the number a libc means by a real or real-time signal.
+    out.push((
+        "the custom signals sit above every real signal, so nothing collides with them",
+        SIGRANDOM > 64 && SIGQUARANTINE > 64 && SIGRANDOM != SIGQUARANTINE,
+    ));
+    // Every face of the wheel is a real, deliverable signal -- never a custom
+    // one, which is what stops `SIGRANDOM` ever recursing onto itself.
+    out.push((
+        "SIGRANDOM only ever rolls a real signal, never another custom one",
+        !ROLL.is_empty()
+            && ROLL.iter().all(|&s| (s as usize) <= NSIG
+                && s as u64 != SIGRANDOM
+                && s as u64 != SIGQUARANTINE),
+    ));
+    // The roulette line names what it landed on rather than printing a bare
+    // number, so every face has a name of its own.
+    out.push((
+        "every signal the wheel can land on has a name to print",
+        ROLL.iter().all(|&s| name(s) != "signal"),
+    ));
+    out
 }

@@ -2481,6 +2481,39 @@ three-right-one-wrong that passes.
 ignored by default -- which is why a parent that installs no handler is not
 killed by its own children finishing.
 
+**Two signals this kernel adds that Linux has no number for.** Both sit above
+the real-time range (`SIGRTMAX` is 64) so no libc can mean them by accident,
+and both are kernel actions rather than deliveries -- handled in `kill` before
+the range guard, the way `SIGKILL` is special-cased.
+
+- **`SIGRANDOM` (69420)** rolls a real signal off a fixed wheel and sends
+  *that*, through `kill` itself so the rolled signal takes exactly the path an
+  ordinary send would. The wheel is real signals only, so it recurses once and
+  never onto another custom one; it includes `SIGKILL`, so the roulette can
+  cost the target its life. It prints what it landed on. Driven: two runs
+  rolled `SIGSEGV` and `SIGUSR1`, and the child died of each.
+- **`SIGQUARANTINE` (2020)** seals a process and its whole connected family --
+  parent, children and siblings, transitively -- into an isolation field no
+  other process can observe, then terminates the entire field at once. It is
+  for a self-replicating tree, where killing one process at a time loses the
+  race against it forking more: sealing comes *before* the kill, so a member
+  that forks once more in the gap hands the new child to a family nobody can
+  see, and it is swept by the same doom. "Sealed" means `guest_of_pid`,
+  `task_of_pid` and `wait4` all skip the member, so from outside the field it
+  is already gone. The field is the connected component over the parent/child
+  graph, walked to a fixpoint rather than assumed -- in the one-session model
+  that is the whole session, but the day two unrelated guest trees exist,
+  sealing one leaves the other untouched. Terminating the field uses the same
+  `doom` the orphan sweep does, so a member spinning without syscalls is ended
+  by the timer at ring 3.
+
+Because every live child's parent chain leads back to pid 1, quarantining any
+member pulls in pid 1 and so ends the session -- including the process that
+sent it, if it is in the family. That is inherent to the group operation and
+not a bug: the field is defined by kinship, not by who asked. Driven on a
+family of four: `sealed and purged 4 process(es)`, the run `ended by signal 9
+... machine intact`, and the shell answered afterwards.
+
 Measured, on `mkelf.py --kind signal`:
 
     13 rt_sigaction  0xa 0x8010000191 0x0 -> 0

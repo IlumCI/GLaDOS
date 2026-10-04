@@ -51,6 +51,7 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     out.extend(unix::checks());
     out.extend(poll::checks());
     out.extend(epoll::checks());
+    out.extend(signal::checks());
     out.extend(proc::checks());
     out.extend(syscall::checks());
     out.extend(load::checks());

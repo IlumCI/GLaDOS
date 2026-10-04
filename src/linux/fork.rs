@@ -53,11 +53,21 @@ struct Slot {
     pid: u64,
     /// What it exited with, once it has. `wait4` reads this.
     status: Option<i32>,
+    /// Sealed into a quarantine field, invisible to everything outside it.
+    ///
+    /// A quarantined slot answers no pid lookup, no `kill`, no `wait4`: the
+    /// process is still on its task until it dies, but as far as the rest of
+    /// the machine is concerned it is already gone. `SIGQUARANTINE` sets it on
+    /// a whole process family at once and then dooms every task in the field --
+    /// which is what makes a self-replicating tree stoppable, since a fork that
+    /// lands after the lookups are blinded has nobody to be seen by and is
+    /// swept by the same doom.
+    quarantined: bool,
 }
 
 static SLOTS: Racy<[Slot; MAX_CHILDREN]> = Racy::new(
     [Slot { task: None, stack: 0, guest: 0, parent: 0, work: None, live: false,
-            pid: 0, status: None };
+            pid: 0, status: None, quarantined: false };
         MAX_CHILDREN],
 );
 
@@ -101,8 +111,91 @@ pub fn reset() {
         slot.work = None;
         slot.status = None;
         slot.pid = 0;
+        slot.quarantined = false;
     }
     LIVE.store(still, Ordering::Release);
+    MAIN_QUARANTINED.store(false, Ordering::Release);
+}
+
+/// Whether the session's first guest, pid 1, has been sealed into a quarantine
+/// field. It has no `Slot`, so its flag lives here.
+static MAIN_QUARANTINED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Seal a process and everyone connected to it by parent or child -- so its
+/// parent, its children and its siblings, transitively -- into one quarantine
+/// field, then terminate the whole field at once. Answers how many processes
+/// were sealed.
+///
+/// **The field is the connected component, computed rather than assumed.** In
+/// today's one-session model the parent chain of every child leads back to
+/// pid 1, so the component is usually the whole session; the closure is walked
+/// honestly anyway, so the day two unrelated guest trees exist, sealing one
+/// leaves the other untouched. That is the whole promise: nothing outside the
+/// field learns anything happened inside it.
+///
+/// Sealing comes before dooming, and the order is the point. Once every member
+/// is invisible to pid lookup, a member that forks one more child in the gap
+/// before it dies has handed that child to a family nobody can see, and the
+/// child is caught by the same sweep -- which is exactly what a self-replicating
+/// process is.
+pub fn quarantine(target_guest: usize) -> usize {
+    let s = unsafe { SLOTS.get() };
+    // The connected component over parent/child links, to a fixpoint. Bounded
+    // by the slot count plus the main guest, so the walk terminates.
+    let mut field: Vec<usize> = alloc::vec![target_guest];
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for slot in s.iter() {
+            if !slot.live {
+                continue;
+            }
+            if !(field.contains(&slot.guest) || field.contains(&slot.parent)) {
+                continue;
+            }
+            for g in [slot.guest, slot.parent] {
+                if !field.contains(&g) {
+                    field.push(g);
+                    grew = true;
+                }
+            }
+        }
+    }
+
+    // Seal first, every member, so the lookups are blinded before anything dies
+    // and a late fork has nowhere to escape to. Guest 0 is pid 1, the session
+    // itself: sealing it ends the whole session, there being nothing above it
+    // to be isolated from.
+    let mut sealed = 0;
+    if field.contains(&0) {
+        MAIN_QUARANTINED.store(true, Ordering::Release);
+        sealed += 1;
+    }
+    for slot in s.iter_mut() {
+        if slot.live && field.contains(&slot.guest) {
+            slot.quarantined = true;
+            sealed += 1;
+        }
+    }
+
+    // Then doom the whole field at once. Each task ends itself at its next safe
+    // point -- a syscall boundary, a wait loop, or the timer finding it at ring
+    // 3 -- so a member spinning without syscalls is ended by the timer just as
+    // `SIGKILL` reaches one.
+    if field.contains(&0) {
+        if let Some(t) = syscall::main_task() {
+            syscall::doom(t, syscall::SIGNALED | 9);
+        }
+    }
+    for slot in s.iter() {
+        if slot.live && field.contains(&slot.guest) {
+            if let Some(t) = slot.task {
+                syscall::doom(t, syscall::SIGNALED | 9);
+            }
+        }
+    }
+    sealed
 }
 
 /// Tell every running child to end itself with `code`. The session's end, and
@@ -134,11 +227,13 @@ pub fn doom_all(code: u64) {
 /// child which may never make another syscall.
 pub fn task_of_pid(pid: i64) -> Option<usize> {
     if pid == 1 {
-        return syscall::main_task();
+        return (!MAIN_QUARANTINED.load(Ordering::Acquire))
+            .then(syscall::main_task)
+            .flatten();
     }
     unsafe { &*SLOTS.get() }
         .iter()
-        .find(|x| x.live && x.work.is_none() && x.pid == pid as u64)
+        .find(|x| x.live && x.work.is_none() && x.pid == pid as u64 && !x.quarantined)
         .and_then(|x| x.task)
 }
 
@@ -527,13 +622,17 @@ pub fn parent_pid() -> u64 {
 
 pub fn guest_of_pid(pid: i64) -> Option<usize> {
     if pid == 1 {
-        return Some(0);
+        // Sealed pid 1 is gone to the rest of the machine, as every sealed
+        // process is.
+        return (!MAIN_QUARANTINED.load(Ordering::Acquire)).then_some(0);
     }
     if pid <= 0 {
         return None;
     }
     let s = unsafe { SLOTS.get() };
-    s.iter().find(|x| x.pid == pid as u64).map(|x| x.guest)
+    s.iter()
+        .find(|x| x.pid == pid as u64 && !x.quarantined)
+        .map(|x| x.guest)
 }
 
 /// `wait4`, in the one shape a shell needs: wait for any child, or for one.
@@ -565,7 +664,7 @@ pub fn wait(pid: i64, status: u64, options: u64) -> u64 {
             let s = unsafe { SLOTS.get() };
             s.iter()
                 .position(|x| x.pid != 0 && !x.live && x.status.is_some()
-                    && (pid <= 0 || x.pid == pid as u64))
+                    && !x.quarantined && (pid <= 0 || x.pid == pid as u64))
         };
         if let Some(i) = found {
             let s = unsafe { SLOTS.get() };
@@ -583,7 +682,7 @@ pub fn wait(pid: i64, status: u64, options: u64) -> u64 {
         }
         let any = {
             let s = unsafe { SLOTS.get() };
-            s.iter().any(|x| x.pid != 0 && (pid <= 0 || x.pid == pid as u64))
+            s.iter().any(|x| x.pid != 0 && !x.quarantined && (pid <= 0 || x.pid == pid as u64))
         };
         if !any {
             return ECHILD;
