@@ -2796,10 +2796,10 @@ shadowed by its own applet, which is how it was found. The discriminator is
 list already exists as the match arms and a second copy is two things that have
 to agree.
 
-**What is left is an exit-path fault, and it is characterised rather than
-fixed.** It is bit-deterministic -- `42` then fault at syscall 181, twice in
-one boot -- and it happens *after* all output, with the machine intact. The
-fault reporter plus one disassembly of the unstripped binary name it exactly:
+**And the third bug was the syscall ABI, which every guest had been subject to
+all along.** The exit path faulted deterministically at syscall 181, *after* all
+output. The fault reporter plus one disassembly of the unstripped binary named
+it exactly:
 
     rip image+0x1532c0   musl pthread_key_delete, pthread_key_create.c:65
     mov 0x80(%rax),%rdx      ; t->tsd       <- rax = 0
@@ -2807,18 +2807,59 @@ fault reporter plus one disassembly of the unstripped binary name it exactly:
     reached for 0x80 (error 0x4: user read, not present)
 
 `rbp` is `self` and the first pass of that `do/while` succeeded, so
-`self->next` is zero -- musl's circular thread list was never linked. `__init_tp`
-sets `td->next = td->prev = td`, but only after `__set_thread_area`, and the
-trace shows `arch_prctl(ARCH_SET_FS) -> 0` and `set_tid_address -> 1`, both of
-which are what musl wants. So the store should have happened and the field
-reads back zero. Two theories are already dead: the loader's span is **exactly**
-the ELF's highest `vaddr + memsz` (0x1be838), so `self + 0x18` is inside mapped
-memory; and `ring3_now` samples `IA32_FS_BASE` at every switch, so FS survives
-preemption without `arch_prctl` having to record anything.
+`self->next` was zero -- musl's circular thread list had never been linked,
+although `__init_tp` sets `td->next = td->prev = td` and the trace showed the
+two calls it needs, `arch_prctl(ARCH_SET_FS) -> 0` and `set_tid_address -> 1`,
+both answering what musl wants.
 
-Worth knowing before trusting an exit code: the applet reports this as
-`died of fault`, so a model reading that observation sees a failure after
-correct output.
+Two theories died first and are worth recording as dead: the loader's span is
+**exactly** the ELF's highest `vaddr + memsz` (0x1be838), so `self + 0x18` is
+inside mapped memory; and `ring3_now` samples `IA32_FS_BASE` at every switch,
+so FS survives preemption without `arch_prctl` having to record anything.
+
+What settled it was disassembling `__init_tp` itself:
+
+    movq       %rbx,%xmm0        ; xmm0 = td
+    punpcklqdq %xmm0,%xmm0       ; xmm0 = {td, td}
+    mov        $0xda,%eax        ; SYS_set_tid_address
+    syscall                      ; <-- td live in xmm0 across it
+    movups     %xmm0,0x10(%rbx)  ; td->prev = td->next = td, one 16-byte store
+
+musl keeps the value in `xmm0` across the syscall and writes both list pointers
+with a single `movups`. **That is legal and this kernel was writing zeros over
+it.** A Linux syscall clobbers `rax`, `rcx` and `r11` and nothing else: every
+other register, the whole FPU and SSE state included, is the caller's.
+`glados_syscall_entry` saved fifteen general-purpose registers and then called
+into Rust, where SSE is not optional -- a `memcpy` is enough -- so **any guest
+holding a live value in an XMM register across any syscall got silent data
+corruption**. musl's thread list was simply the first place it was caught, and
+it took a crash thousands of instructions later in a function that had done
+nothing wrong.
+
+The stub does `fxsave64`/`fxrstor64` into 512 bytes of its own stack now, which
+is per task so a preempted syscall keeps its own copy, with `and rsp, -16`
+making the alignment `fxsave` requires self-enforcing rather than inherited
+from whoever allocated the stack. Two instructions against thirty-two `movaps`,
+and it covers x87 and `MXCSR` as well, which the ABI also promises. **The
+residual gap is AVX**: `fxsave` does not carry `ymm`'s upper halves, so a guest
+holding one of those across a syscall still loses it; closing that means
+`xsave` with `XCR0` in `edx:eax` and a 64-byte-aligned area, and it is named
+in the stub rather than left to be rediscovered the way this was.
+
+Measured after the fix, and the engine is genuinely working rather than merely
+exiting:
+
+    write /tmp/h.js print(6*7)
+    linux quickjs /tmp/h.js            42          exited 0 after 197 syscall(s)
+
+    write /tmp/a.js print(JSON.stringify([1,2,3,4].map(function(x){return x*x})))
+    linux quickjs /tmp/a.js            [1,4,9,16]  exited 0 after 207 syscall(s)
+
+    write /tmp/b.js function f(n){return n<2?n:f(n-1)+f(n-2)}print(f(20))
+    linux quickjs /tmp/b.js            6765        exited 0 after 197 syscall(s)
+
+Closures, arrays, `JSON.stringify` and thirteen thousand recursive calls, and
+`exited 0` rather than a fault. `diag all` 73 of 73 throughout.
 
 ### A second address space
 

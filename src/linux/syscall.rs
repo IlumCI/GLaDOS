@@ -297,12 +297,53 @@ pub struct Frame {
 // at the `call` -- getting that wrong does not fault, it misaligns every SSE
 // spill the dispatcher makes, which on this machine surfaces as #GP inside
 // unrelated Rust code.
+//
+// **The `fxsave64` pair is the ABI and not a precaution, and it was missing.**
+// A Linux syscall clobbers `rax`, `rcx` and `r11` and *nothing else*: every
+// other register, the whole FPU and SSE state included, is the caller's and
+// must come back. This stub saved fifteen general-purpose registers and then
+// called into Rust, where SSE is not optional -- a `memcpy` is enough, never
+// mind anything holding a float -- so a guest's `xmm` registers were destroyed
+// by any syscall at all. Silent, because nothing faults: the guest reads back
+// whatever the kernel happened to leave.
+//
+// Found from the guest side after a long way round, which is the argument for
+// writing it down here. QuickJS died at exit in musl's `pthread_key_delete`,
+// walking a thread list whose `self->next` was zero, and musl's `__init_tp`
+// plainly sets it. One disassembly says why:
+//
+//     movq       %rbx,%xmm0        ; xmm0 = td
+//     punpcklqdq %xmm0,%xmm0       ; xmm0 = {td, td}
+//     mov        $0xda,%eax        ; SYS_set_tid_address
+//     syscall                      ; <-- td live in xmm0 across it
+//     movups     %xmm0,0x10(%rbx)  ; td->prev = td->next = td, one 16-byte store
+//
+// musl keeps the value in `xmm0` across the syscall and writes both list
+// pointers with a single `movups`. Entirely legal, and this kernel wrote zeros
+// over it -- so the list was never linked and the fault arrived at exit,
+// thousands of instructions later, in a function that had done nothing wrong.
+//
+// `fxsave64` and not a run of `movaps`: two instructions against thirty-two,
+// and it covers x87 and `MXCSR` as well, which the ABI also promises. The area
+// is 512 bytes on the syscall stack, which is per task, so a preempted syscall
+// keeps its own copy. `and rsp, -16` makes the alignment `fxsave` requires
+// self-enforcing rather than inherited from whoever allocated the stack --
+// which the `sub rsp, 8` above had been quietly assuming all along.
+//
+// **The residual gap is AVX**: `fxsave` does not carry `ymm`'s upper halves,
+// so a guest holding one of those across a syscall still loses it. Closing
+// that means `xsave` with `XCR0` in `edx:eax` and a 64-byte-aligned area,
+// which is the same shape and a bigger decision; it is named here rather than
+// left to be rediscovered the way this was.
 core::arch::global_asm!(
     r#"
     .globl glados_syscall_entry
 glados_syscall_entry:
     mov [rip + GLADOS_GUEST_RSP], rsp
     mov rsp, [rip + GLADOS_SYSCALL_STACK]
+    and rsp, -16
+    sub rsp, 512
+    fxsave64 [rsp]
     push r15
     push r14
     push r13
@@ -337,6 +378,8 @@ glados_syscall_entry:
     pop r13
     pop r14
     pop r15
+    fxrstor64 [rsp]
+    add rsp, 512
     mov rsp, [rip + GLADOS_GUEST_RSP]
     sysretq
 
