@@ -66,6 +66,79 @@ FAMILIES = {
                               "command list", "tool list", "operations you support"]),
         ("{v} what you can {x}", ASK, ["do", "run", "handle"]),
     ],
+    # Four classes the applet table had and this corpus did not, which made
+    # them **unroutable on a fresh machine however well they worked**: `fit`
+    # has no label to key a class on, so the probe could never emit one, and
+    # the first episode to want it routed somewhere else. Found by driving
+    # `linux` and `web` -- each needed four `teach` lines and a `fit` before
+    # the router would reach it, and a runtime teach does not survive a reboot
+    # without a mounted store, so every fresh boot lost it again.
+    #
+    # **The confusions below are predicted and not measured**, which is the
+    # opposite footing from the paragraph above this table, and the
+    # measurement is owed. Three pairs look close enough to write against:
+    #
+    #   run vs linux
+    #     Both execute something and "run the program" is either. The
+    #     distinguishing idea is *whose* program: `run` is a skill this
+    #     machine wrote in its own language, `linux` is a binary somebody else
+    #     compiled. So `run` never says "program", "binary" or "elf", and
+    #     `linux` never says "skill" or "routine". They share verbs on
+    #     purpose, which is what `expand`'s docstring argues for -- the verb
+    #     vocabulary should be broad for every class and the nouns are where
+    #     the signal lives.
+    #   web vs ls and find
+    #     All three fetch and list. `web` never says "files" or "directory",
+    #     for the reason the `sysbox` family does not: that is the vocabulary
+    #     that collapsed three classes into `ls`.
+    #   remember vs write
+    #     Both keep something. `write` puts bytes at a path; `remember` keeps
+    #     a fact about the operator with nowhere named, so it leans on
+    #     me/my/about-me and never on a path or a filename.
+    "run": [
+        ("run the saved skill", []),
+        ("{v} the {x}", ["run", "use", "invoke", "replay", "carry out"],
+            ["skill you learned", "saved routine", "tool i stored",
+             "learned skill", "routine from the toolkit", "skill you kept"]),
+        ("use one of your own {x}", ["skills", "tools", "learned routines"]),
+        ("{v} that {x} again", ["run", "replay", "repeat"],
+            ["skill", "routine", "saved tool"]),
+        ("do the thing you {x} earlier", ["learned", "saved", "wrote", "worked out"]),
+        ("apply the {x} you kept", ["skill", "routine", "tool"]),
+    ],
+    "linux": [
+        ("run the linux program", []),
+        ("{v} the {x}", ["run", "start", "launch", "execute", "boot"],
+            ["linux binary", "installed linux program", "guest program",
+             "elf binary", "program at ring 3", "linux executable"]),
+        ("run {x} for me", ["quickjs", "the installed binary", "the guest"]),
+        ("{v} a {x} this kernel did not compile", ["run", "start"],
+            ["binary", "program", "executable"]),
+        ("execute the {x} at ring 3", ["binary", "guest", "program"]),
+        ("start the {x} in the linux world", ["program", "binary"]),
+    ],
+    "web": [
+        ("read the web page", []),
+        ("{v} the {x}", ["read", "fetch", "open", "load", "show me"],
+            ["web page", "site", "page online", "declared site", "url",
+             "page from the network"]),
+        ("follow {x}", ["the link", "link two", "the first link", "that link"]),
+        ("{v} what the {x} says", ["read", "tell me", "report"],
+            ["site", "page", "article"]),
+        ("browse to the {x}", ["site", "page", "address"]),
+        ("look it up {x}", ["online", "on the web", "on that site"]),
+    ],
+    "remember": [
+        ("remember that about me", []),
+        ("{v} this about {x}", ["remember", "keep in mind", "note", "hold on to"],
+            ["me", "myself", "who i am", "my preferences"]),
+        ("do not forget {x}", ["this", "that about me", "what i just told you"]),
+        ("{v} that i {x}", ["remember", "note", "keep in mind"],
+            ["prefer this", "said that", "work this way", "like it done this way"]),
+        ("keep a note of {x} for later", ["this fact", "that detail about me"]),
+        ("commit that to {x}", ["memory", "your notes"]),
+        ("{x} it for next time", ["remember", "note", "keep hold of"]),
+    ],
     "ls": [
         ("list the files", []),
         ("what is in {x}", ["this directory", "the folder", "here", "/ai"]),
@@ -368,6 +441,26 @@ def expand(family):
 # they start looking easy, the honest move is to write new ones, not to widen
 # these.
 EVAL = [
+    ("run", "replay the routine you picked up last time"),
+    ("run", "do that trick you taught yourself"),
+    ("run", "use the shortcut you saved for this"),
+    ("run", "invoke your own learned helper"),
+    ("run", "carry out the stored recipe"),
+    ("linux", "boot the foreign executable"),
+    ("linux", "launch that thing compiled elsewhere"),
+    ("linux", "put the guest binary on the processor"),
+    ("linux", "start busybox up"),
+    ("linux", "give the elf a turn at ring three"),
+    ("web", "pull down what that address serves"),
+    ("web", "go and see what is published there"),
+    ("web", "take the second link"),
+    ("web", "what does that site have to say"),
+    ("web", "fetch it off the network and read it to me"),
+    ("remember", "hold on to that detail about my habits"),
+    ("remember", "i want you to carry that fact forward"),
+    ("remember", "put that in your long term notes about me"),
+    ("remember", "never let go of what i just said about myself"),
+    ("remember", "store that preference of mine"),
     ("ls", "what have i got sitting in this folder"),
     ("ls", "just the immediate contents please"),
     ("ls", "run through what is here"),

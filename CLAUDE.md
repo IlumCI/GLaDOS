@@ -2981,6 +2981,80 @@ read, which is the closed set doing the one thing it exists for. The 404 is the
 real server's answer and correct. `diag web` is 19 claims and passes twice in
 one boot, which `forget()` is there to make true; `diag all` 74 of 74.
 
+### The applet table and the corpus were four classes apart
+
+**A new applet is spellable and unroutable, and this is the gap closed rather
+than named.** The decoding grammar is built from `sysbox::APPLETS`, so a row is
+reachable the moment it exists -- and the *router* is a ridge probe fitted on
+`corpus.rs`, which had labels for 21 of the table's 25. `linux`, `web`, `run`
+and `remember` therefore had no label to key on, the probe could never emit
+one, and the first episode to want one routed somewhere else. Measured on the
+untaught build: a goal naming a Linux program reached `find` at the `pulse`
+tier.
+
+It had been worked around twice by hand -- four `teach` lines and a `fit` each
+for `linux` and `web` -- and that does not survive a reboot without a mounted
+store, so every fresh boot lost it again.
+
+The four classes are in `dataset.py`'s `FAMILIES` now, with `EVAL` rows written
+separately so widening cannot eat the test set. **The confusions they are
+written against are predicted and not measured**, which is the opposite footing
+from the paragraph above that table, and the measurement is owed:
+
+- **run against linux.** Both execute something and "run the program" is
+  either. The distinguishing idea is *whose*: `run` is a skill this machine
+  wrote in its own language, `linux` is a binary somebody else compiled. So
+  `run` never says program, binary or elf, and `linux` never says skill or
+  routine. They share *verbs* deliberately -- `expand`'s docstring argues the
+  verb vocabulary should be broad for every class and the nouns are where the
+  signal lives.
+- **web against ls and find.** All three fetch and list. `web` never says
+  files or directory, for the reason the `sysbox` family does not: that is the
+  vocabulary that collapsed three classes into `ls`.
+- **remember against write.** Both keep something. `write` puts bytes at a
+  path; `remember` keeps a fact about the operator with nowhere named.
+
+**One scare on the way, and the correction is the useful part.** Regenerating
+looked destructive: `balance=True` truncates every class to the thinnest, the
+thinnest family set expands to 17, and `corpus.rs` appeared to hold 33-35 rows
+per class -- so regenerating read as halving the training data as a side
+effect. It was an arithmetic error. Those rows are train *and* test together;
+`fit` on the old build reports `357 train` over 21 labelled classes, which is
+17 each. **The corpus was already at the floor**, so the change is purely
+additive and nothing existing moved.
+
+Measured, and it is a gain rather than a trade:
+
+    before   357 train, 360 held out, 25 classes, held out 72%
+    after    425 train, 380 held out, 25 classes, held out 73%
+
+Held-out went *up* a point while four classes stopped being structurally
+unreachable, which is the part that matters: a class the probe cannot emit is
+0% recall by construction, and no amount of accuracy on the other 21 is worth
+that. `fit` reported 25 classes in both runs, because the head's width comes
+from the applet table and not from the corpus -- which is exactly how the gap
+was invisible.
+
+And on a fresh boot with **no teaching at all**, both of the new paths route
+and run:
+
+    agent -n 1 --trust full run the installed linux program hello
+      (tier: reflex)   1. linux hello    hello from ring 3, exited 5
+
+    agent -n 1 --trust full read the local site
+      (tier: reflex)   1. web local      200, the page
+
+`diag all` 74 of 74. The corpus hash changed, which refills the family-wise
+alpha budget -- correct by the design's own rule, since a new body of evidence
+is what refills it, and every ledger line is scoped to the corpus it was paid
+for out of.
+
+**What is still owed is the measurement.** `tools/analyse.py` is the instrument
+that produced the confusion table above this one, and it has not been re-run
+against 25 classes: the three pairs this corpus is written against are
+predictions, and whether `run` and `linux` actually confuse is a thing to read
+off a fitted probe rather than to argue about.
+
 ### A second address space
 
 `src/mem/space.rs`, and the thing it removed was an assumption rather than a
