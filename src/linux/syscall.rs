@@ -4064,7 +4064,22 @@ fn sys_readlinkat(dirfd: u64, path_at: u64, buf: u64, size: u64) -> u64 {
     let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
     let Some(path) = found else { return ENOENT };
     let Some(target) = super::proc::link(&path) else {
-        return if super::proc::claims(&path) || sysbox::blob_len(&path).is_some() {
+        // **A directory is not a symlink, and saying it does not exist is a
+        // different claim.** `blob_len` answers for a blob and nothing else,
+        // so every directory on the way to a file answered `ENOENT` here --
+        // and `realpath` is a walk over exactly those components. glibc reads
+        // `EINVAL` as "not a symlink, carry on" and `ENOENT` as "this path is
+        // not there", so resolving `/tmp/h.js` failed at `/tmp`.
+        //
+        // Found from the guest side rather than by reading: QuickJS printed
+        // `TypeError: realpath failure` and then dereferenced the null it had
+        // not checked, faulting at `0x80`. The errno was the whole of it --
+        // one wrong value sending a correct program down a path that ends in
+        // a crash it cannot explain.
+        return if super::proc::claims(&path)
+            || sysbox::blob_len(&path).is_some()
+            || sysbox::is_dir(&path)
+        {
             EINVAL
         } else {
             ENOENT

@@ -2382,10 +2382,32 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         return;
     }
 
-    // sysbox first: it owns a whole vocabulary of short names, and claiming
-    // them here keeps that list in one place instead of spreading twenty more
-    // arms across this match.
-    if crate::sysbox::dispatch(cmd, rest) {
+    // `linux` is two things told apart by shape, the way `write` is, and the
+    // shape is "does the first word name an installed program".
+    //
+    // The applet and the shell verb share a name, and sysbox is consulted
+    // first, so the applet claimed the whole verb the moment it existed --
+    // `linux trace` answered "'trace' is not an installed Linux program",
+    // taking `run`, `libc`, `env`, `space`, `deadline` and `feed` with it.
+    // Every diagnostic this subsystem has, shadowed by its own applet.
+    //
+    // Decided against `program::path_of` rather than against a list of the
+    // verb's subcommands, because that list already exists as the match arms
+    // below and a second copy is two things that have to agree: the next
+    // subcommand somebody adds would be silently eaten instead. The cost is
+    // that `linux <misspelled>` reaches the verb's usage rather than the
+    // applet's "not installed", and the usage names both forms, so the
+    // operator is not left guessing.
+    //
+    // The model's route is `sysbox::dispatch` directly and is untouched by any
+    // of this.
+    let shell_owns = cmd == "linux"
+        && crate::linux::program::path_of(rest.split_whitespace().next().unwrap_or("")).is_none();
+
+    // sysbox first otherwise: it owns a whole vocabulary of short names, and
+    // claiming them here keeps that list in one place instead of spreading
+    // twenty more arms across this match.
+    if !shell_owns && crate::sysbox::dispatch(cmd, rest) {
         return;
     }
 

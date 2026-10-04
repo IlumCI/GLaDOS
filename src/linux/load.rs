@@ -47,10 +47,32 @@ use super::{elf, syscall};
 use crate::cpu::code::Exec;
 use alloc::vec::Vec;
 
-/// Sixteen KiB of guest stack. A static binary that does not recurse needs a
-/// fraction of it; the number is chosen so overflowing it is a bug in the
-/// guest rather than a limit of the harness.
-const GUEST_STACK: usize = 16 * 1024;
+/// A mebibyte of guest stack.
+///
+/// **It was sixteen KiB, under a comment saying the number was chosen so that
+/// overflowing it is a bug in the guest rather than a limit of the harness.
+/// A real interpreter falsified that.** QuickJS is not a buggy guest: it
+/// recurses in its parser and again in its own interpreter loop, and at 16 KiB
+/// it died of `#PF` with `rsp` about 5.6 KiB *below* the region -- error 0x6, a
+/// user write to a page nothing owns, after 165 syscalls of perfectly healthy
+/// start-up. The old figure was right for a hand-assembled fixture and for
+/// busybox, which is what had been run.
+///
+/// The size is chosen against the *guest's* own guard rather than picked for
+/// roundness. An engine that tracks its own depth -- QuickJS defaults to about
+/// 256 KiB through `JS_SetMaxStackSize` -- should hit that limit and throw
+/// where a script recurses too far, because a `RangeError` the program can
+/// catch is worth incomparably more than a page fault that ends it. Four times
+/// its ceiling leaves the engine's guard strictly in front of the kernel's.
+///
+/// `prlimit64` reports this honestly as `RLIMIT_STACK`, so a guest that asks
+/// is told what it really has.
+///
+/// **The stack still does not grow**, which Linux's does. That is the next
+/// thing to want here and it is a fault handler rather than a constant: a
+/// write just below the region would have to be recognised as growth instead
+/// of as a violation, and nothing distinguishes the two today.
+const GUEST_STACK: usize = 1024 * 1024;
 
 /// What `brk` may grow into.
 ///

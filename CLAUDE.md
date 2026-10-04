@@ -2743,6 +2743,83 @@ it" meanwhile. The session deadline bounds it. That is the same gap Skywalker
 names as "a client running beside the shell", and it is bounded here rather
 than solved.
 
+### JavaScript, at ring 3
+
+`qjs` from quickjs-ng v0.17.0, a 1.77 MB stripped static-PIE built against
+musl, installed into `/linux/bin` and reached through the `linux` applet. It
+runs:
+
+    write /tmp/h.js print(6*7)
+    linux quickjs /tmp/h.js
+      42
+      quickjs died of fault 0x0e after 181 syscall(s)
+
+**The 42 is real** -- a parser, a bytecode compiler and an interpreter this
+kernel did not write, executing at CPL 3 on its own page-table root. Nothing
+in the syscall surface was missing: the trace has no `-ENOSYS` in it, so the
+93 calls already there carry a JS engine. The glibc-shaped `mmap` dance is
+visible and healthy -- it asks for 1 GB arenas, gets `ENOMEM`, and walks down
+to 64 KB without complaint.
+
+**Getting there found two kernel bugs, and a real interpreter is what found
+them.** Both had been invisible because what had been run was a hand-assembled
+fixture and busybox.
+
+*Sixteen KiB of guest stack was not enough*, under a comment saying the figure
+was chosen so that overflowing it is a bug in the guest rather than a limit of
+the harness. QuickJS is not a buggy guest: it recurses in its parser and again
+in its own interpreter loop, and it died with `rsp` about 5.6 KiB *below* the
+region after 165 syscalls of healthy start-up. It is a mebibyte now, and the
+size is chosen against the *guest's* own guard rather than for roundness --
+QuickJS tracks its own depth at about 256 KiB through `JS_SetMaxStackSize`, and
+four times that keeps the engine's `RangeError` strictly in front of the
+kernel's page fault. A script that recurses too far should get an exception it
+can catch. **The stack still does not grow**, which Linux's does, and that is a
+fault handler rather than a constant.
+
+*`readlink` answered `ENOENT` for a directory.* The errno logic already told
+"exists but is not a symlink" (`EINVAL`) from "is not there" (`ENOENT`) -- and
+only recognised blobs as existing, because `blob_len` answers for a blob and
+nothing else. `realpath` is a walk over path *components*, glibc and musl read
+`EINVAL` as "not a symlink, carry on", so resolving `/tmp/h.js` failed at
+`/tmp`. QuickJS printed `TypeError: realpath failure` and then dereferenced the
+null it had not checked. One wrong errno sending a correct program down a path
+that ends in a crash it cannot explain.
+
+**And `linux` is two things told apart by shape now, the way `write` is.** The
+applet and the shell verb share a name and sysbox is consulted first, so the
+applet claimed the whole verb the moment it existed: `linux trace` answered
+`'trace' is not an installed Linux program`, taking `run`, `libc`, `env`,
+`space`, `deadline` and `feed` with it -- every diagnostic this subsystem has,
+shadowed by its own applet, which is how it was found. The discriminator is
+`program::path_of` rather than a list of the verb's subcommands, because that
+list already exists as the match arms and a second copy is two things that have
+to agree.
+
+**What is left is an exit-path fault, and it is characterised rather than
+fixed.** It is bit-deterministic -- `42` then fault at syscall 181, twice in
+one boot -- and it happens *after* all output, with the machine intact. The
+fault reporter plus one disassembly of the unstripped binary name it exactly:
+
+    rip image+0x1532c0   musl pthread_key_delete, pthread_key_create.c:65
+    mov 0x80(%rax),%rdx      ; t->tsd       <- rax = 0
+    mov 0x18(%rax),%rax      ; t = t->next
+    reached for 0x80 (error 0x4: user read, not present)
+
+`rbp` is `self` and the first pass of that `do/while` succeeded, so
+`self->next` is zero -- musl's circular thread list was never linked. `__init_tp`
+sets `td->next = td->prev = td`, but only after `__set_thread_area`, and the
+trace shows `arch_prctl(ARCH_SET_FS) -> 0` and `set_tid_address -> 1`, both of
+which are what musl wants. So the store should have happened and the field
+reads back zero. Two theories are already dead: the loader's span is **exactly**
+the ELF's highest `vaddr + memsz` (0x1be838), so `self + 0x18` is inside mapped
+memory; and `ring3_now` samples `IA32_FS_BASE` at every switch, so FS survives
+preemption without `arch_prctl` having to record anything.
+
+Worth knowing before trusting an exit code: the applet reports this as
+`died of fault`, so a model reading that observation sees a failure after
+correct output.
+
 ### A second address space
 
 `src/mem/space.rs`, and the thing it removed was an assumption rather than a
