@@ -850,6 +850,20 @@ pub fn dump() {
 }
 
 fn finish_handoff(cpu: usize) {
+    // Both callers pass `this_cpu()` read *after* a context switch -- the one
+    // moment it is read on a stack another core's scheduling has been free to
+    // interleave with. `schedule` guards the identical read at its own top
+    // (`me >= MAX_CPUS`) and this did not, so a garbage index -- seen as
+    // 0xFFFFF600 under `-smp 2` while several ring-3 guests were torn down at
+    // once -- indexed `PENDING` and halted the whole machine. A core that
+    // cannot name itself clears nothing rather than killing everything; the
+    // task left in `Handoff` is leaked, not resumed onto, which is strictly the
+    // better failure for a machine meant to survive load. The corruption that
+    // produces the bad index is shared-scheduler-state SMP, and belongs to the
+    // audit the 1.4.0 plan holds, not to this guard.
+    if cpu >= MAX_CPUS {
+        return;
+    }
     let prev = PENDING[cpu].swap(NONE, Ordering::AcqRel);
     if prev == NONE {
         return;
