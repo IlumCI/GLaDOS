@@ -56,7 +56,15 @@ pub struct Domain {
 
 pub const DOMAINS: &[Domain] = &[
     Domain { name: "navigate", applets: &["ls", "cd", "pwd", "tree", "find"] },
-    Domain { name: "inspect", applets: &["cat", "stat", "hash", "same", "diff", "du", "fsck"] },
+    // `web` joins `inspect` rather than `navigate`, and the division is what
+    // the row *does* rather than where it goes: every row here looks at
+    // something and reports what it says, which is what reading a page is.
+    // `navigate`'s rows move a cursor around the namespace, and a link moves
+    // between documents outside it, so the resemblance is superficial.
+    Domain {
+        name: "inspect",
+        applets: &["cat", "stat", "hash", "same", "diff", "du", "fsck", "web"],
+    },
     Domain { name: "mutate", applets: &["mkdir", "write", "rm", "mv", "cp"] },
     Domain { name: "history", applets: &["snap", "back", "snaps"] },
     // `linux` sits beside `run` rather than in `mutate`, and the division is

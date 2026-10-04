@@ -141,6 +141,7 @@ pub mod css;
 pub mod dhcp;
 pub mod dns;
 pub mod html;
+pub mod reader;
 pub mod ieee80211;
 pub mod iface;
 pub mod tcp;

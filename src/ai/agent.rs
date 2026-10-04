@@ -518,6 +518,32 @@ fn arg_choices(name: &str) -> Vec<String> {
     match name {
         "run" => skill_choices(),
         "linux" => crate::linux::program::installed(),
+        // Two sources in one set, because at any moment they are the legal
+        // next moves and the model is choosing between them: a declared site
+        // to start at, or a link of the page it has just read. The set grows
+        // when a page is read and shrinks to the sites again when nothing has
+        // been, which is what makes a *closed* set the right shape for
+        // browsing at all -- a URL could never be one.
+        "web" => {
+            let mut v: Vec<String> =
+                crate::net::reader::sites().into_iter().map(|s| s.name).collect();
+            for i in 1..=crate::net::reader::links().len() {
+                let mut s = String::new();
+                let mut n = i;
+                let mut d = [0u8; 20];
+                let mut at = 20;
+                while n > 0 {
+                    at -= 1;
+                    d[at] = b'0' + (n % 10) as u8;
+                    n /= 10;
+                }
+                for c in &d[at..] {
+                    s.push(*c as char);
+                }
+                v.push(s);
+            }
+            v
+        }
         _ => Vec::new(),
     }
 }
@@ -669,7 +695,19 @@ fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option
     // Reflex choices carry no branch context; everything else left the
     // engine positioned right after the chosen name's tokens.
     let from_context = decision.tier != deliberate::Tier::Reflex;
-    if !from_context && sysbox::check_args(&name, "").is_ok() {
+    // The shortcut is for an applet that genuinely takes nothing -- `pwd`,
+    // `snaps`, `sysbox` -- where a decode would spend a prefill to produce the
+    // empty string. **It must not fire for an applet whose argument is
+    // optional and enumerable**, which `web` is: its spec reads `[site|link]`
+    // so `check_args` is happy with nothing, and the model was handed back
+    // `web` with no argument and got a list of sites where it had asked to
+    // read one. Driven, at the reflex tier, on the first episode that reached
+    // this applet at all.
+    //
+    // `arg_choices` is the test rather than the arity, because the question is
+    // not "may this run with no argument" but "is there a set we could have
+    // offered". A zero-argument applet has no such set and keeps the shortcut.
+    if !from_context && sysbox::check_args(&name, "").is_ok() && arg_choices(&name).is_empty() {
         return Some((name, String::new()));
     }
 

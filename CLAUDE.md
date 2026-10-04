@@ -2861,6 +2861,126 @@ exiting:
 Closures, arrays, `JSON.stringify` and thirteen thousand recursive calls, and
 `exited 0` rather than a fault. `diag all` 73 of 73 throughout.
 
+### The web as text, and a link as a number
+
+`src/net/reader.rs` and the `web` applet. `gfx::browse` lays a page out in rows
+for somebody looking at a screen; the model reads its world as captured console
+text, so what it needs is the same content laid out to be *read back* --
+headings marked, paragraphs flowed, and every link carrying the number that
+reaches it.
+
+**The number is the whole design.** `constrain.rs` makes invalid output
+unreachable rather than improbable, and a URL is not a set anything can
+enumerate -- but the links on the page in front of you are. So a journey starts
+at a name the operator declared in `/web/sites` and continues by index, and at
+every step the legal next moves are finite and known. That is
+`linux::program`'s shape one layer out: a closed table for the first move, and
+the page itself for every move after. `arg_choices("web")` is the union of the
+two, which is why it is one applet and not two -- "go somewhere" and "go
+deeper" are the same move to a reader, and splitting them would put two rows in
+the grammar whose union is that set anyway.
+
+**The observation is bounded, because the observation is a prompt.**
+`agent.rs` captures what an applet prints and hands it back as the step's
+result, so an unbounded page is an unbounded prefix -- a real article is tens of
+kilobytes against a context measured in hundreds of tokens, and a page that
+overflows the window costs the model the goal it was pursuing. `TEXT_CAP` is
+1400 bytes and the cut announces itself, because a page truncated silently
+reads as a short page. The **links are not** truncated with the text: they are
+numbered over the whole document, since the index is a contract and a numbering
+that depended on where the text stopped would renumber the page whenever the
+cap moved.
+
+**What comes back is untrusted input and cannot be made otherwise.** A fetched
+page is bytes a stranger chose and the applet's output becomes the model's
+prompt; nothing here can stop a page containing text shaped like an
+instruction. What it can do is never let that text arrive unlabelled, so the
+content is bracketed by `--- begin fetched page ---`. That is a mitigation and
+not a fix, and it is part of why the row is `mutates: true`.
+
+That flag is doing a different job on this row than on any other, and it is
+worth saying so. Nothing persistent changes; what happens is that a packet
+leaves the machine and a stranger's bytes enter the model's context. `mutates`
+is what `harness::Trust::ReadOnly` filters on, so it is this table's only word
+for "not safe to hand a read-only agent" -- and `eval.rs` draws the same line
+in the same place for `Touch::Net`, where `net_ifaces` is Read and
+`tcp_connect` is not.
+
+**The identity verdict is reported and not enforced**, which is the `https`
+verb's bargain rather than `update::fetch`'s: a machine deciding what to boot
+must refuse an unverified peer, and a reader is reading. But it is printed into
+the observation, because what the model does next may depend on the page and
+"who vouched for this" is part of the page. With no `roots.der` every fetch
+reads `NOT verified`, which is the correct default this tree already argues for.
+
+**Two bugs came out of building it, and the first was the browser's.**
+
+*Every relative link was being dropped.* `collect_links` was private to
+`browse.rs` and used `html::parse_url`, which accepts only absolute URLs -- so
+`href="/about"` and `href="page.html"` produced nothing, which on most pages is
+nearly every link. `html::links_of` is the one walk now, it takes the base and
+calls `resolve`, and `browse.rs` consumes it: two readers numbering the same
+links are two chances to disagree about what link 3 is.
+
+*And the parser was throwing away the space at every span boundary.*
+`flush_text!` trimmed the trailing space of each text run and `squeeze` drops
+leading whitespace while its target is empty -- which is right at the start of a
+block and wrong after a link. So `An <a>x</a> b` became the three spans `An`,
+`x`, `b` with nothing to say they had ever been apart, and a reader that
+concatenates got `Anxb`. Nothing noticed because the only consumer was
+`browse::wrap`, which splits spans into words and rejoins them with spaces of
+its own. **It cannot be repaired downstream**: the information that `x</a> b`
+had a space and `x</a>.` did not is exactly what was discarded, so the fix is
+in the parser, where a whitespace-only run is kept when it sits between spans
+and an anchor's own label is still trimmed.
+
+**And one interaction that only driving found.** `propose` short-circuits an
+applet that takes no arguments rather than spending a prefill to decode the
+empty string -- and `web`'s argument is *optional* (`[site|link]`), so
+`check_args` was happy with nothing and the model was handed back a bare `web`
+and got a list of sites where it had asked to read one. The test is
+`arg_choices(&name).is_empty()` now rather than the arity, because the question
+is not "may this run with no argument" but "is there a set we could have
+offered".
+
+Driven against a local TLS 1.3 server with a page built to exercise
+resolution -- an absolute, a root-relative and a directory-relative href:
+
+    web local
+      https://10.0.2.2:8443/t.html -- 200, NOT verified
+      --- begin fetched page ---
+      # Reader Test
+      # Top
+      An absolute [1] link, a root-relative [2] one, and a directory-relative [3] one.
+      - first item
+      - second item
+          verbatim
+            indented
+      ---
+      Tail paragraph after the rule.
+      links: 1..3
+      --- end fetched page ---
+
+    web 2    followed the root-relative link, which is the dropped-links fix
+    web 99   there is no link 99 -- this page has 1..1
+
+`<script>` is skipped entirely, `<pre>` keeps its indent where every other
+block loses the space a block never opens with, and the refusal names the
+*current* page's range rather than the one before it.
+
+**And the model browsed on its own**, after four `teach web ...` lines and a
+`fit` put the row in front of the router -- `linux`'s lesson, that adding an
+applet is two edits and the second one is the corpus:
+
+    goal: read the local site   trust: full   budget: 2 steps
+      1. web local    200, the page
+      2. web 1        https://example.com/abs -- 404
+
+Step 2 is the model choosing a link *by number* out of the page it had just
+read, which is the closed set doing the one thing it exists for. The 404 is the
+real server's answer and correct. `diag web` is 19 claims and passes twice in
+one boot, which `forget()` is there to make true; `diag all` 74 of 74.
+
 ### A second address space
 
 `src/mem/space.rs`, and the thing it removed was an assumption rather than a

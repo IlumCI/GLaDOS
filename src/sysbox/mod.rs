@@ -88,6 +88,19 @@ pub const APPLETS: &[Applet] = &[
     // a crash that ends only itself -- is a reason to be comfortable offering
     // it at all, and not a reason to call it read-only.
     Applet { name: "linux",  args: "<program> [args...]", help: "run an installed Linux program at ring 3", mutates: true },
+    // A declared site by name, or a link of the page last read by number --
+    // `net::reader` says why the first move is a closed table and every move
+    // after it is an index.
+    //
+    // Mutating, and this is the one row where that word is doing a different
+    // job. Nothing persistent changes; what happens is that a packet leaves
+    // the machine and bytes a stranger chose come back into the model's own
+    // prompt. `mutates` is what `harness::Trust::ReadOnly` filters on, so it
+    // is this table's only word for "not safe to hand a read-only agent", and
+    // that is exactly what a fetch is not. `eval.rs` draws the same line for
+    // `Touch::Net` and draws it in the same place: `net_ifaces` is Read and
+    // `tcp_connect` is not.
+    Applet { name: "web",    args: "[site|link]",  help: "read a declared site, or follow a link by number", mutates: true },
 ];
 
 /// Resolve a path the way every applet does, against the working directory.
@@ -486,6 +499,7 @@ pub fn dispatch(cmd: &str, rest: &str) -> bool {
         "run" => cmd_run(a1),
         "remember" => cmd_remember(rest),
         "linux" => cmd_linux(rest.trim()),
+        "web" => cmd_web(rest.trim()),
         _ => {}
     }
     true
@@ -781,6 +795,67 @@ fn cmd_linux(rest: &str) {
         kprintln!("  {} exited {} after {} syscall(s)", name, r & 0xFFFF_FFFF, calls);
     } else {
         kprintln!("  {} returned without exiting -- {} syscall(s)", name, calls);
+    }
+}
+
+/// Read a declared site, or follow a link of the page last read.
+///
+/// One applet and not two, because at any moment the legal next moves are one
+/// set: the sites the operator declared plus the links of the page in front of
+/// you. Splitting it would put two rows in the grammar whose union is that set
+/// anyway, and would make "go somewhere" and "go deeper" different verbs to a
+/// reader for whom they are the same move.
+///
+/// A digit decides which, and `is_site_name` refuses an all-digit site name so
+/// the two can never collide.
+fn cmd_web(rest: &str) {
+    let arg = rest.split_whitespace().next().unwrap_or("");
+    if arg.is_empty() {
+        offer_sites();
+        return;
+    }
+
+    let r = if arg.chars().all(|c| c.is_ascii_digit()) {
+        match arg.parse::<usize>() {
+            Ok(n) => crate::net::reader::follow(n),
+            // A number too long for a `usize` is not a link on any page.
+            Err(_) => Err(format!("'{}' is not a link number", arg)),
+        }
+    } else {
+        match crate::net::reader::url_of(arg) {
+            Some(u) => crate::net::reader::open(&u),
+            None => {
+                err(&format!("'{}' is not a declared site", arg));
+                offer_sites();
+                return;
+            }
+        }
+    };
+
+    match r {
+        // The page is printed whole rather than returned, because the caller
+        // that matters is `begin_capture`: this *is* the observation.
+        Ok(text) => kprintln!("{}", text.trim_end()),
+        Err(why) => err(&why),
+    }
+}
+
+/// What `web` will accept right now, which is a different set after a page has
+/// been read than before one has.
+fn offer_sites() {
+    let sites = crate::net::reader::sites();
+    if sites.is_empty() {
+        kprintln!(
+            "  nothing is declared in {} -- a line there is 'name url'",
+            crate::net::reader::SITES
+        );
+    } else {
+        let names: Vec<&str> = sites.iter().map(|s| s.name.as_str()).collect();
+        kprintln!("  sites: {}", names.join(" "));
+    }
+    let n = crate::net::reader::links().len();
+    if n > 0 {
+        kprintln!("  and the page last read offers links 1..{}", n);
     }
 }
 
