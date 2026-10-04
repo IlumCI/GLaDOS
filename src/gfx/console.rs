@@ -1214,13 +1214,25 @@ pub fn _print(args: fmt::Arguments) {
 /// cannot.
 #[macro_export]
 macro_rules! kprint {
+    // **The arguments are evaluated once**, and the one `Arguments` handed to
+    // all three sinks. They were expanded once per sink, so every expression
+    // in every `kprintln!` in the tree ran three times: a side effect in one
+    // happened three times -- `hda down` stopped the controller for the
+    // console, found nothing for serial and said so -- and a costly one was
+    // paid for three times. `match` rather than `let`, because it is the form
+    // that keeps `format_args!`'s temporaries alive across the arms.
     ($($arg:tt)*) => {{
-        $crate::gfx::console::_print(format_args!($($arg)*));
-        $crate::serial::_print(format_args!($($arg)*));
-        // The third sink. The console keeps one screen and the serial port
-        // needs somebody listening on the other end; neither survives a boot
-        // on the laptop, which is the machine whose boot lines matter.
-        $crate::log::_record(format_args!($($arg)*));
+        match format_args!($($arg)*) {
+            args => {
+                $crate::gfx::console::_print(args);
+                $crate::serial::_print(args);
+                // The third sink. The console keeps one screen and the serial
+                // port needs somebody listening on the other end; neither
+                // survives a boot on the laptop, which is the machine whose
+                // boot lines matter.
+                $crate::log::_record(args);
+            }
+        }
     }};
 }
 
