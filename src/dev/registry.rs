@@ -461,7 +461,17 @@ pub static TABLE: &[Entry] = &[
         rule: Match::Class(0x04, 0x03),
         role: Role::Audio,
         what: "HD Audio controller",
-        support: Support::Known("no audio stack"),
+        support: Support::Partial("hda", "plays to its speaker or a jack; no recording, no volume control yet"),
+    },
+    // Intel's controllers with their DSP enabled report class 04/01 and are HD
+    // Audio underneath -- the GF63's 51c8 among them. By id, since 04/01 is
+    // every other kind of multimedia audio device too.
+    Entry {
+        bus: Bus::Pci,
+        rule: Match::Ids(0x8086, crate::dev::hda::INTEL_DSP_IDS),
+        role: Role::Audio,
+        what: "Intel HD Audio controller, DSP enabled",
+        support: Support::Partial("hda", "driven as plain HD Audio: speaker and jacks, no digital microphone"),
     },
     Entry {
         bus: Bus::Pci,

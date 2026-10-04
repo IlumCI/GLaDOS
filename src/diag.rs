@@ -285,6 +285,11 @@ pub const SUITES: &[Suite] = &[
         run: firmware_selftest,
     },
     Suite {
+        name: "hda",
+        about: "HD Audio verbs, pin defaults, the path to a speaker, a test tone",
+        run: hda_selftest,
+    },
+    Suite {
         name: "iwx",
         about: "the Intel Wi-Fi 6 revision decode, which no emulator can exercise",
         run: iwx_selftest,
@@ -480,6 +485,21 @@ fn wifi_selftest() -> bool {
 /// the shape `mem::fixed` refuses for its own map. What is left is the decode,
 /// and the decode is where a wrong answer picks the wrong firmware and gets
 /// silence.
+fn hda_selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    let mut n = 0usize;
+    for (what, good) in crate::dev::hda::checks() {
+        n += 1;
+        if !good {
+            kprintln!("    FAIL: {}", what);
+            ok = false;
+        }
+    }
+    kprintln!("    {} claim(s)", n);
+    ok
+}
+
 fn firmware_selftest() -> bool {
     use crate::kprintln;
     let mut ok = true;
@@ -632,7 +652,7 @@ fn linux_selftest() -> bool {
 /// says it exists to prevent. A `static` cannot be read in a const context, so
 /// the array cannot be measured directly; naming its length is the next best
 /// thing and it is now the only place the number appears.
-const SLOTS: usize = 72;
+const SLOTS: usize = 73;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.

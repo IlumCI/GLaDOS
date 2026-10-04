@@ -5590,6 +5590,120 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             }
         }
 
+        // **Sound.** `hda` lists the controllers and, once one is up, its
+        // codecs and the path it plays through; `hda up` brings one up (it
+        // grants the controller DMA, so it is asked for rather than done at
+        // boot); `hda tone [hz] [ms]` plays a sine, a quarter of full scale.
+        "hda" | "sound" => {
+            let mut w = rest.split_whitespace();
+            let sub = w.next().unwrap_or("");
+            let Some(ecam) = acpi.as_ref().and_then(|a| a.mcfg) else {
+                kprintln!("  no ECAM: the bus cannot be read");
+                return;
+            };
+            let bring_up = |pick: Option<usize>| -> bool {
+                let found = crate::dev::hda::find(ecam);
+                if found.is_empty() {
+                    kprintln!("  no HD Audio controller on the bus");
+                    return false;
+                }
+                // The one asked for, or the first whose codecs have an output
+                // wired to something -- an HDMI-only controller has none.
+                let order: alloc::vec::Vec<usize> = match pick {
+                    Some(i) => alloc::vec![i],
+                    None => (0..found.len()).collect(),
+                };
+                for i in order {
+                    let Some(d) = found.get(i).copied() else {
+                        kprintln!("  no controller {}", i);
+                        return false;
+                    };
+                    match crate::dev::hda::Hda::up(ecam, d) {
+                        Ok(h) => {
+                            let has = h.output().is_some();
+                            for line in crate::dev::hda::describe(&h) {
+                                kprintln!("  {}", line);
+                            }
+                            if has || pick.is_some() {
+                                crate::dev::hda::hold(h);
+                                return true;
+                            }
+                        }
+                        Err(f) => kprintln!("  {:04x}:{:04x}: {}", d.vendor, d.device, f.why()),
+                    }
+                }
+                kprintln!("  no controller has an output to play to");
+                false
+            };
+            match sub {
+                "" => {
+                    let found = crate::dev::hda::find(ecam);
+                    kprintln!("[hda] {} controller(s)", found.len());
+                    for (i, d) in found.iter().enumerate() {
+                        kprintln!(
+                            "  {} {:02x}:{:02x}.{} {:04x}:{:04x} class {:02x}/{:02x}",
+                            i, d.bus, d.dev, d.func, d.vendor, d.device, d.class, d.subclass
+                        );
+                    }
+                    let shown = crate::dev::hda::with(|h| {
+                        for line in crate::dev::hda::describe(h) {
+                            kprintln!("  {}", line);
+                        }
+                    });
+                    if shown.is_none() && !found.is_empty() {
+                        kprintln!("  'hda up' brings one up; 'hda tone' plays a test tone");
+                    }
+                }
+                "up" => {
+                    crate::dev::hda::release();
+                    let pick = w.next().and_then(|n| n.parse::<usize>().ok());
+                    bring_up(pick);
+                }
+                "tone" => {
+                    let hz = w.next().and_then(|n| n.parse::<u32>().ok()).unwrap_or(440).clamp(20, 20_000);
+                    let ms = w.next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(1000).min(60_000);
+                    if crate::dev::hda::with(|_| ()).is_none() && !bring_up(None) {
+                        return;
+                    }
+                    let fmt = crate::dev::hda::verb::format(48_000, 16, 2).unwrap_or(0x11);
+                    let pcm = crate::dev::hda::tone(hz, 0.25);
+                    // Taken out first: a `match` on `with(..)` keeps its lock
+                    // guard alive across every arm, and the arm below asks
+                    // for the controller again.
+                    let played = crate::dev::hda::with(|h| h.play(&pcm, fmt));
+                    match played {
+                        Some(Ok(())) => {
+                            kprintln!("  {} Hz, 48 kHz 16-bit stereo, a quarter of full scale", hz);
+                            if ms > 0 {
+                                let end = crate::dev::lapic::ticks() + ms * crate::TIMER_HZ as u64 / 1000;
+                                while crate::dev::lapic::ticks() < end {
+                                    crate::task::yield_now();
+                                }
+                                let at = crate::dev::hda::with(|h| {
+                                    let p = h.position();
+                                    h.stop();
+                                    p
+                                })
+                                .flatten();
+                                kprintln!("  stopped after {} ms, {} byte(s) into the loop", ms, at.unwrap_or(0));
+                            } else {
+                                kprintln!("  looping until 'hda stop'");
+                            }
+                        }
+                        Some(Err(f)) => kprintln!("  {}", f.why()),
+                        None => {}
+                    }
+                }
+                "stop" => {
+                    crate::dev::hda::with(|h| h.stop());
+                }
+                "down" => {
+                    kprintln!("  {}", if crate::dev::hda::release() { "stopped, and bus mastering taken away" } else { "nothing was up" });
+                }
+                other => kprintln!("  no such step '{}' -- hda [up [n] | tone [hz] [ms] | stop | down]", other),
+            }
+        }
+
         "fw" | "firmware" => {
             // What the boot volume provided, and what a driver would be handed.
             // `fw <name>` answers the second question for one name, because the
