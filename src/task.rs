@@ -15,7 +15,7 @@
 //! interrupt frame around with it.
 
 use crate::sync::Racy;
-use alloc::alloc::{alloc, Layout};
+use alloc::alloc::{alloc, dealloc, Layout};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// **Forty, and the arithmetic is now visible where it was hidden by a bug.**
@@ -203,6 +203,21 @@ pub struct Task {
     /// the interrupted code called nothing, spilled nothing, and expects every
     /// register back. XMM and YMM are caller-saved, so nobody was holding them.
     pub fpu: *mut u8,
+    /// Base of the stack allocation, or null when this task does not own one.
+    ///
+    /// `rsp` is somewhere *inside* the stack and moves, so it cannot be handed
+    /// back to the allocator. This is the pointer `alloc` answered, kept for
+    /// the one moment it is needed. Null for an adopted idle task, whose stack
+    /// is the one the firmware or the trampoline was already standing on --
+    /// freeing that would hand away the stack a core is running on.
+    pub stack: *mut u8,
+    /// Set by a task that has finished and is waiting to be let go.
+    ///
+    /// Read by `finish_handoff`, on the core that switched *away* from it,
+    /// because that is the only moment this task's `rsp` is known to have
+    /// landed and nothing is executing on its stack any more. A task cannot
+    /// free its own stack: it is standing on it.
+    pub exiting: bool,
 }
 
 // The extended-state image is a raw pointer, and moving a task between cores
@@ -222,6 +237,8 @@ const EMPTY: Task = Task {
     fpu: core::ptr::null_mut(),
     ring3: None,
     root: 0,
+    stack: core::ptr::null_mut(),
+    exiting: false,
 };
 
 /// Allocate a zeroed, 64-byte aligned extended-state image.
@@ -337,6 +354,10 @@ pub fn init(name: &'static str) {
             fpu,
             ring3: None,
             root: 0,
+            // The boot stack, which the firmware handed over. Not ours to free
+            // and nothing ever exits task 0 anyway.
+            stack: core::ptr::null_mut(),
+            exiting: false,
         };
     }
     // **`fetch_max` and not `store`.** By the time this runs the application
@@ -478,7 +499,86 @@ pub fn migration_selftest() -> bool {
         claim(&mut ok, mask == 1 << cpu, "and ran only there");
     }
 
+    // --- a finished task gives its slot and its stack back -----------------
+    //
+    // `trampoline` ended in `loop { yield_now() }` under the comment "a task
+    // that returns just stops being scheduled onto". True, and it kept the
+    // slot and its 64 KiB stack forever: with `MAX_TASKS` at 40 and 37
+    // committed at sixteen cores, anything that spawns and finishes repeatedly
+    // ran out of tasks. Background processes cannot be built on that, which is
+    // why this is the first of the three the 1.4.0 plan orders.
+    //
+    // What makes the claim worth making rather than reading: reclaim happens
+    // on *another* core's pass through `finish_handoff`, so a bug here is a
+    // slot that comes back sometimes.
+    {
+        let before = crate::mem::heap::HEAP.stats().0;
+        let first = spawn("reaped", || {});
+        claim(&mut ok, first.is_some(), "a task that returns immediately can be spawned");
+
+        // It has to be switched away from before its slot comes back, and this
+        // task is the one holding the core. Bounded rather than waiting
+        // forever, so a reclaim that never happens fails instead of hanging.
+        let mut freed = false;
+        if let Some(i) = first {
+            for _ in 0..200 {
+                crate::time::delay_us(5_000);
+                if state_of(i) == Some(State::Unused) {
+                    freed = true;
+                    break;
+                }
+            }
+        }
+        claim(&mut ok, freed, "and its slot goes back to unused once it has run");
+
+        // The slot is reusable, which is the whole point: an `Unused` slot that
+        // `spawn` never looks at is a leak with a tidier name.
+        let second = spawn("reaped2", || {});
+        claim(
+            &mut ok,
+            second.is_some() && second == first,
+            "and the next spawn takes that very slot, rather than a new one",
+        );
+        if let Some(i) = second {
+            for _ in 0..200 {
+                crate::time::delay_us(5_000);
+                if state_of(i) == Some(State::Unused) {
+                    break;
+                }
+            }
+        }
+
+        // The stack and the extended-state image go back too. Both are heap,
+        // and a reclaim that returned the slot and leaked 64 KiB a time would
+        // pass every claim above it.
+        //
+        // Against a baseline rather than zero, and `<=` rather than `==`: this
+        // is a live machine with a clock task and a compositor on it, so
+        // another task may legitimately have allocated during the delays. What
+        // is being asserted is that two 64 KiB stacks did not stay resident,
+        // which a slack of one stack is still tight enough to catch.
+        let after = crate::mem::heap::HEAP.stats().0;
+        let grew = after.saturating_sub(before);
+        crate::kprintln!("  heap {} -> {} B, grew {} B", before, after, grew);
+        claim(
+            &mut ok,
+            grew < STACK_SIZE,
+            "and the stacks went back, rather than the slot alone",
+        );
+    }
+
     ok
+}
+
+/// What state a slot is in, for a caller that is watching one come back.
+///
+/// Answers nothing for an index that is not a task, so a caller cannot read a
+/// bounds failure as a verdict about a task.
+pub fn state_of(index: usize) -> Option<State> {
+    if index >= MAX_TASKS {
+        return None;
+    }
+    Some(TASKS.lock_irq()[index].state)
 }
 
 /// Let a task run on any core.
@@ -545,6 +645,9 @@ pub fn adopt_idle(cpu: usize) -> bool {
             fpu,
             ring3: None,
             root: 0,
+            // Not ours: this core is standing on it.
+            stack: core::ptr::null_mut(),
+            exiting: false,
         };
     }
     CURRENT[cpu].store(slot, Ordering::Release);
@@ -626,10 +729,37 @@ pub fn spawn_on(name: &'static str, entry: fn(), cpu: usize) -> Option<usize> {
     if cpu >= MAX_CPUS || cpu >= crate::smp::online() {
         return None;
     }
-    let slot = COUNT.load(Ordering::Acquire);
-    if slot >= MAX_TASKS {
-        return None;
-    }
+    // A free slot, which is a reclaimed one before it is a new one.
+    //
+    // **Claimed under `TASKS` rather than off `COUNT`, and that is the
+    // difference reclaim makes.** `COUNT` is a high-water mark and the scan
+    // bound `schedule` uses; it never comes down, because lowering it would
+    // mean deciding that nothing above the new value is live, which is not a
+    // question a count can answer. So a reclaimed slot sits `Unused` *below*
+    // `COUNT`, and the only way to take one without racing another `spawn` is
+    // to look and claim in the same critical section.
+    //
+    // It also closes a window that was open before: the old form read `COUNT`,
+    // allocated a stack, and stored `slot + 1` afterwards, so an `adopt_idle`
+    // landing in between had its `fetch_add` discarded by that store -- the
+    // bug this file's own `COUNT` comment describes, still reachable by the
+    // other caller.
+    let slot = {
+        let tasks = TASKS.lock_irq();
+        let n = COUNT.load(Ordering::Acquire);
+        let reused = (0..n).find(|&i| tasks[i].state == State::Unused);
+        match reused {
+            Some(i) => i,
+            None if n < MAX_TASKS => {
+                // Published while the lock is held, so the slot this answers
+                // is already inside the scan bound by the time anybody else
+                // can look -- and it is still `Unused`, so nothing picks it.
+                COUNT.store(n + 1, Ordering::Release);
+                n
+            }
+            None => return None,
+        }
+    };
 
     let layout = Layout::from_size_align(STACK_SIZE, 16).ok()?;
     let stack = unsafe { alloc(layout) };
@@ -674,10 +804,11 @@ pub fn spawn_on(name: &'static str, entry: fn(), cpu: usize) -> Option<usize> {
             fpu: alloc_fpu_area(),
             ring3: None,
             root: 0,
+            stack,
+            exiting: false,
         };
     }
 
-    COUNT.store(slot + 1, Ordering::Release);
     Some(slot)
 }
 
@@ -709,10 +840,8 @@ extern "C" fn trampoline() -> ! {
         f();
     }
 
-    // A task that returns just stops being scheduled onto.
-    loop {
-        yield_now();
-    }
+    // A task that returns gives its slot back. See `exit`.
+    exit();
 }
 
 pub fn enable() {
@@ -868,9 +997,76 @@ fn finish_handoff(cpu: usize) {
     if prev == NONE {
         return;
     }
-    let mut t = TASKS.lock_irq();
-    if matches!(t[prev].state, State::Handoff(_)) {
-        t[prev].state = State::Ready;
+    // Freed outside the lock, below: `dealloc` can take the heap's own lock,
+    // and taking that under `TASKS` is a lock order nothing else in the kernel
+    // uses. The slot is already `Unused` by then, so nothing can pick the task
+    // up while its memory is going back.
+    let mut reclaim = (core::ptr::null_mut(), core::ptr::null_mut());
+    {
+        let mut t = TASKS.lock_irq();
+        if matches!(t[prev].state, State::Handoff(_)) {
+            if t[prev].exiting {
+                // **The one moment this is safe.** We are the incoming task on
+                // the core that just switched away from `prev`, so `prev`'s
+                // `rsp` has landed, nothing is executing on its stack, and
+                // nothing will: the slot goes `Unused`, which `schedule` never
+                // selects. A task cannot do this for itself -- it is standing
+                // on the stack in question -- which is why `exit` only raises a
+                // flag and yields.
+                reclaim = (t[prev].stack, t[prev].fpu);
+                // `root` is not freed here and must already be zero. A
+                // `Space` is owned by whoever installed it, as `set_root` says,
+                // so a task exiting with one set is a caller bug rather than
+                // something to tidy up -- freeing page tables the kernel may
+                // still be walking is the failure `Space::drop` orders against.
+                t[prev] = EMPTY;
+            } else {
+                t[prev].state = State::Ready;
+            }
+        }
+    }
+    let (stack, fpu) = reclaim;
+    if !stack.is_null() {
+        if let Ok(l) = Layout::from_size_align(STACK_SIZE, 16) {
+            unsafe { dealloc(stack, l) };
+        }
+    }
+    if !fpu.is_null() {
+        if let Ok(l) = Layout::from_size_align(crate::cpu::xsave_area_size(), 64) {
+            unsafe { dealloc(fpu, l) };
+        }
+    }
+}
+
+/// End this task, giving its slot and its stack back.
+///
+/// **It raises a flag and yields rather than doing the work**, because the work
+/// is freeing the stack this function is running on. `finish_handoff` does it
+/// on the core that switches away from here, which is the first moment this
+/// task's `rsp` has been written down and nothing is standing on it.
+///
+/// The loop is not belt-and-braces: `yield_now` returns normally when there was
+/// nothing else to switch to, and with the flag already set this task is still
+/// the one running. So it asks again, and the first switch that does happen
+/// never comes back.
+///
+/// What this replaced was `loop { yield_now() }` with no flag, under the
+/// comment "a task that returns just stops being scheduled onto" -- true, and
+/// it kept the slot and its 64 KiB stack forever. With `MAX_TASKS` at 40 and
+/// 37 committed at sixteen cores, a kernel that spawns and finishes anything
+/// repeatedly runs out of tasks rather than leaking quietly.
+pub fn exit() -> ! {
+    {
+        let me = crate::smp::this_cpu() as usize;
+        if me < MAX_CPUS {
+            let cur = CURRENT[me].load(Ordering::Acquire);
+            if cur != NONE {
+                TASKS.lock_irq()[cur].exiting = true;
+            }
+        }
+    }
+    loop {
+        yield_now();
     }
 }
 
