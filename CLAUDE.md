@@ -5657,6 +5657,45 @@ So this is the mechanism and the headroom with no behaviour change to anything
 running. The two items it unblocks are still open -- blocking primitives spin
 rather than sleep, and a guest still holds the shell until it exits.
 
+### Which guest a task speaks for
+
+`CURRENT_GUEST` was one machine-wide atomic, and `guest_slot()` resolves every
+syscall's view of its own memory through it. `fork` sets it before entering a
+child and restores it after, which reads as correct and is not: **the child is
+preempted at ring 3.** While it sits suspended holding index 3, any other task
+taking a syscall resolves `guest_slot()` to slot 3 -- somebody else's `Space`,
+and therefore somebody else's memory at every address they share, which is all
+of them. Every bounds check in `reachable` then passes, because it is checking
+the wrong guest's regions and those are perfectly valid.
+
+It could not bite while one guest ran in the foreground: the shell was inside
+`run` for the duration and there was no second guest to be confused with.
+`fork` made two and survived because a child's syscalls are short and the
+window is narrow. It is the first thing a background guest would hit.
+
+`Task.guest` carries it, saved and loaded by `schedule` beside the `Ring3`
+block -- the pattern that function already uses for this shape of problem. A
+global only read while its own task is running *is* per-task, provided somebody
+swaps it.
+
+Two places where the obvious form is wrong. **The live value is read back from
+the global rather than taken from the field**: the field is where the index was
+parked and the global is what it has been since, so taking the field writes
+back a stale index and undoes every `set_current_guest` since the last switch.
+And **the write is unconditional** where `root` and `ring3` beside it are
+guarded, because their guard reads the parked field and here the field and the
+live value legitimately differ -- a task that entered a guest since its last
+switch has 3 in the global and 0 in its field, so a guard on the field skips
+the save.
+
+Four claims, needing no guest at all. Proved to discriminate rather than
+assumed to: with the save/restore disabled the suite fails and prints the bug,
+which is why the helper holds its index *across a sleep* instead of setting and
+clearing it.
+
+    disabled   helper took 7 and saw 0, while this task reads 7 (was 0)  FAIL
+    enabled    helper took 7 and saw 0, while this task reads 0 (was 0)  ok
+
 ### A task that waits stands down
 
 `sys_nanosleep` was the one wait in this kernel that genuinely spun:
