@@ -105,6 +105,14 @@ pub enum State {
     /// core that switched *in* clears this, by which time the store has
     /// happened.
     Handoff(u8),
+    /// Waiting for a tick deadline, and not claimable until it passes.
+    ///
+    /// The deadline is `wake_at`. `schedule` promotes an expired sleeper back
+    /// to `Ready` at the top of its own pass, so waking costs no timer hook and
+    /// no separate queue -- the scan bound is already being walked to pick a
+    /// task, and at `MAX_TASKS` of 40 the test is cheaper than maintaining a
+    /// sorted list would be.
+    Asleep,
 }
 
 impl State {
@@ -117,6 +125,7 @@ impl State {
     pub fn name(self) -> &'static str {
         match self {
             State::Unused => "unused",
+            State::Asleep => "asleep",
             State::Ready => "ready",
             State::Running(_) => "running",
             State::Handoff(_) => "handoff",
@@ -218,6 +227,24 @@ pub struct Task {
     /// landed and nothing is executing on its stack any more. A task cannot
     /// free its own stack: it is standing on it.
     pub exiting: bool,
+    /// The tick this task is waiting for, or 0 when it is not waiting.
+    ///
+    /// Set by `sleep_until` and honoured in the same place `exiting` is, and
+    /// for the identical reason: `schedule` writes the outgoing task's state
+    /// unconditionally, so a task that marked itself `Asleep` and yielded would
+    /// have that overwritten by `Handoff` and then by `Ready`. A task cannot
+    /// put itself to sleep any more than it can free its own stack -- both are
+    /// things the core switching away has to do on its behalf.
+    pub wake_at: u64,
+    /// Set by `wake`, cleared by the sleeper when it notices.
+    ///
+    /// **A deadline and a wake have to be told apart**, which cost a failing
+    /// claim to learn: `sleep_until` loops while the deadline is in the future,
+    /// so making a task `Ready` only ended one iteration of that loop and it
+    /// went straight back to sleep. Waking was indistinguishable from an
+    /// ordinary scheduling pass, so a sixty-second sleep stayed a
+    /// sixty-second sleep however often anybody woke it.
+    pub woken: bool,
 }
 
 // The extended-state image is a raw pointer, and moving a task between cores
@@ -239,6 +266,8 @@ const EMPTY: Task = Task {
     root: 0,
     stack: core::ptr::null_mut(),
     exiting: false,
+    wake_at: 0,
+    woken: false,
 };
 
 /// Allocate a zeroed, 64-byte aligned extended-state image.
@@ -358,6 +387,8 @@ pub fn init(name: &'static str) {
             // and nothing ever exits task 0 anyway.
             stack: core::ptr::null_mut(),
             exiting: false,
+            wake_at: 0,
+            woken: false,
         };
     }
     // **`fetch_max` and not `store`.** By the time this runs the application
@@ -369,6 +400,24 @@ pub fn init(name: &'static str) {
 }
 
 // --- proving migration works, without risking anything that matters -----
+
+/// How many ticks the sleeper actually slept, and whether it finished.
+static SLEPT: AtomicU64 = AtomicU64::new(0);
+static SLEEP_DONE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+/// How long the sleeper is told to sleep, in ticks.
+static SLEEP_FOR: AtomicU64 = AtomicU64::new(0);
+
+/// Sleeps for `SLEEP_FOR` ticks and records what it cost, then exits.
+///
+/// Exits rather than parking, so this doubles as a second run through the
+/// reclaim path above.
+fn sleeper() {
+    let began = crate::dev::lapic::ticks();
+    sleep_until(began.saturating_add(SLEEP_FOR.load(Ordering::Relaxed)));
+    SLEPT.store(crate::dev::lapic::ticks().saturating_sub(began), Ordering::Release);
+    SLEEP_DONE.store(true, Ordering::Release);
+}
 
 static MIG_SEEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static MIG_LOOPS: AtomicUsize = AtomicUsize::new(0);
@@ -567,6 +616,97 @@ pub fn migration_selftest() -> bool {
         );
     }
 
+    // --- a task that waits stands down, rather than holding its core --------
+    //
+    // `nanosleep` was the one wait in this kernel that genuinely spun:
+    // `while ticks() < until { spin_loop() }`, with no yield in it at all. One
+    // foreground guest made that invisible, and background processes would make
+    // it a CPU sink per sleeping guest.
+    //
+    // The claim that separates a sleep from a spin is the second one. A
+    // spinning task is `Running` for the whole wait, so seeing it `asleep` from
+    // *another* task is the thing no busy loop can produce -- the elapsed time
+    // alone would pass either way.
+    {
+        SLEEP_DONE.store(false, Ordering::Release);
+        SLEPT.store(0, Ordering::Release);
+        // 30 ticks is 300 ms at TIMER_HZ, long enough to be caught mid-sleep
+        // from here without making the suite slow.
+        SLEEP_FOR.store(30, Ordering::Release);
+
+        let who = spawn("sleeper", sleeper);
+        claim(&mut ok, who.is_some(), "a task that sleeps can be spawned");
+
+        let mut seen_asleep = false;
+        if let Some(i) = who {
+            for _ in 0..60 {
+                crate::time::delay_us(10_000);
+                if state_of(i) == Some(State::Asleep) {
+                    seen_asleep = true;
+                    break;
+                }
+            }
+        }
+        claim(
+            &mut ok,
+            seen_asleep,
+            "and is seen asleep from another task, which a spin could not be",
+        );
+
+        let mut done = false;
+        for _ in 0..200 {
+            crate::time::delay_us(10_000);
+            if SLEEP_DONE.load(Ordering::Acquire) {
+                done = true;
+                break;
+            }
+        }
+        let slept = SLEPT.load(Ordering::Acquire);
+        crate::kprintln!("  slept {} tick(s) for a 30 tick request", slept);
+        claim(&mut ok, done, "and it wakes by itself, with nobody waking it");
+        // At least what it asked for. A sleep that returns early is a busy
+        // wait's failure mode wearing a sleep's name, and `>=` is the only
+        // honest direction -- the tick is 10 ms, so overshooting is expected and
+        // undershooting is a bug.
+        claim(&mut ok, slept >= 30, "and slept at least as long as it asked");
+    }
+
+    // Woken early, which is what the doom path needs: a guest being ended
+    // should not wait out a sleep it will never return from.
+    {
+        SLEEP_DONE.store(false, Ordering::Release);
+        SLEPT.store(0, Ordering::Release);
+        // Far longer than the suite would wait, so finishing at all is the
+        // evidence that `wake` and not the deadline is what ended it.
+        SLEEP_FOR.store(6_000, Ordering::Release);
+        let who = spawn("sleeper", sleeper);
+
+        let mut asleep = false;
+        if let Some(i) = who {
+            for _ in 0..60 {
+                crate::time::delay_us(10_000);
+                if state_of(i) == Some(State::Asleep) {
+                    asleep = true;
+                    break;
+                }
+            }
+            claim(&mut ok, asleep, "a long sleeper reaches asleep");
+            claim(&mut ok, wake(i), "and wake() reports having woken it");
+            let mut done = false;
+            for _ in 0..100 {
+                crate::time::delay_us(10_000);
+                if SLEEP_DONE.load(Ordering::Acquire) {
+                    done = true;
+                    break;
+                }
+            }
+            claim(&mut ok, done, "and it returns at once, sixty seconds early");
+            // Nothing is asleep now, so the same call must say so rather than
+            // reporting a second success.
+            claim(&mut ok, !wake(i), "while waking what is not asleep answers false");
+        }
+    }
+
     ok
 }
 
@@ -648,6 +788,8 @@ pub fn adopt_idle(cpu: usize) -> bool {
             // Not ours: this core is standing on it.
             stack: core::ptr::null_mut(),
             exiting: false,
+            wake_at: 0,
+            woken: false,
         };
     }
     CURRENT[cpu].store(slot, Ordering::Release);
@@ -806,6 +948,8 @@ pub fn spawn_on(name: &'static str, entry: fn(), cpu: usize) -> Option<usize> {
             root: 0,
             stack,
             exiting: false,
+            wake_at: 0,
+            woken: false,
         };
     }
 
@@ -1020,6 +1164,12 @@ fn finish_handoff(cpu: usize) {
                 // something to tidy up -- freeing page tables the kernel may
                 // still be walking is the failure `Space::drop` orders against.
                 t[prev] = EMPTY;
+            } else if t[prev].wake_at != 0 {
+                // Asleep rather than Ready, so nothing picks it up until its
+                // deadline passes. Same seam as `exiting` and for the same
+                // reason: this is the one place that sees a task *after* it
+                // has stopped running.
+                t[prev].state = State::Asleep;
             } else {
                 t[prev].state = State::Ready;
             }
@@ -1070,6 +1220,106 @@ pub fn exit() -> ! {
     }
 }
 
+/// Set or clear the current task's wake deadline. Answers whether it took.
+fn set_wake(tick: u64) -> bool {
+    let me = crate::smp::this_cpu() as usize;
+    if me >= MAX_CPUS {
+        return false;
+    }
+    let cur = CURRENT[me].load(Ordering::Acquire);
+    if cur == NONE {
+        return false;
+    }
+    TASKS.lock_irq()[cur].wake_at = tick;
+    true
+}
+
+/// Stand down until `tick`, letting every other task have the core.
+///
+/// **This is a loop and not a single yield**, which is not defensiveness:
+/// `yield_now` returns normally when there was nothing else to switch to, and
+/// then this task is still the one running with its deadline still in the
+/// future. So it asks again. The sleep is only as precise as the tick, which at
+/// `TIMER_HZ` is 10 ms, and a caller wanting better precision wants a busy wait
+/// and should say so.
+///
+/// Falls back to a spin when the deadline cannot be recorded -- before the
+/// scheduler is enabled, or on a core that cannot name itself. That is no worse
+/// than what every caller did before there was a sleep queue, and it keeps the
+/// one bad case bounded rather than returning early and having the caller
+/// believe it slept.
+pub fn sleep_until(tick: u64) -> bool {
+    let mut woken = false;
+    while crate::dev::lapic::ticks() < tick {
+        if !set_wake(tick) {
+            core::hint::spin_loop();
+            continue;
+        }
+        yield_now();
+        // Somebody wanted this task back before its deadline. Checked after the
+        // yield and before the loop condition, because the condition is still
+        // true -- that is the whole of what `woken` exists to say.
+        if take_woken() {
+            woken = true;
+            break;
+        }
+    }
+    // Cleared unconditionally. `schedule` clears it when it promotes a
+    // sleeper, but a task that came back because nothing else was runnable was
+    // never promoted and would otherwise carry a stale deadline into its next
+    // handoff -- and be put to sleep by it.
+    set_wake(0);
+    !woken
+}
+
+/// Read and clear this task's wake flag.
+fn take_woken() -> bool {
+    let me = crate::smp::this_cpu() as usize;
+    if me >= MAX_CPUS {
+        return false;
+    }
+    let cur = CURRENT[me].load(Ordering::Acquire);
+    if cur == NONE {
+        return false;
+    }
+    let mut t = TASKS.lock_irq();
+    let was = t[cur].woken;
+    t[cur].woken = false;
+    was
+}
+
+/// Stand down for roughly this many microseconds.
+pub fn sleep_us(us: u64) -> bool {
+    let hz = crate::TIMER_HZ as u64;
+    // Rounded *up*, so a sleep shorter than a tick still yields the core once
+    // rather than returning immediately. A zero-tick sleep is how a caller
+    // asking for 100 us would otherwise become a busy loop that never yields.
+    let ticks = (us.saturating_mul(hz) + 999_999) / 1_000_000;
+    sleep_until(crate::dev::lapic::ticks().saturating_add(ticks.max(1)))
+}
+
+/// Wake a sleeping task now, whatever its deadline said.
+///
+/// For the paths that have to reach a task that is standing down: a guest being
+/// doomed should not wait out a sleep it will never return from. Answers
+/// whether this woke anything, so a caller cannot read "no such task" as "woken".
+pub fn wake(index: usize) -> bool {
+    if index >= MAX_TASKS {
+        return false;
+    }
+    let mut t = TASKS.lock_irq();
+    if t[index].state != State::Asleep {
+        return false;
+    }
+    t[index].state = State::Ready;
+    t[index].wake_at = 0;
+    // The flag, not merely the state. Making it `Ready` alone put it back in
+    // the scheduler and left `sleep_until`'s own loop condition unchanged, so
+    // it slept again immediately.
+    t[index].woken = true;
+    true
+}
+
 /// Pick a task for `cpu` and switch to it.
 ///
 /// Real work first, then this core's own idle task. Taking them in one pass
@@ -1088,6 +1338,19 @@ fn schedule() {
     let (save, load, out_fpu, in_fpu, out_r3, in_r3, out_root, in_root) = {
         let mut t = TASKS.lock_irq();
         let n = COUNT.load(Ordering::Acquire);
+
+        // Anything whose deadline has passed is runnable again, decided here
+        // rather than from the timer. The scan bound is already being walked to
+        // pick a task, so this costs one comparison per slot and needs no
+        // second data structure that could disagree with `state` about who is
+        // runnable -- the bug `State::name` exists to keep one spelling of.
+        let now = crate::dev::lapic::ticks();
+        for i in 0..n {
+            if t[i].state == State::Asleep && now >= t[i].wake_at {
+                t[i].state = State::Ready;
+                t[i].wake_at = 0;
+            }
+        }
 
         // `Ready` is the only claimable state. `Running` belongs to a core,
         // and `Handoff` is a stack whose pointer has not landed yet.

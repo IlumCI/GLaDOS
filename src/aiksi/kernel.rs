@@ -683,6 +683,7 @@ pub fn call(it: &mut Interp, name: &str, args: &[Value]) -> Result<Value, String
                         t(match task.state {
                             crate::task::State::Ready => "ready",
                             crate::task::State::Unused => "unused",
+                            crate::task::State::Asleep => "asleep",
                             // Which core, because with more than one the
                             // interesting question about a running task is
                             // where rather than whether.

@@ -1996,8 +1996,28 @@ fn sys_nanosleep(req: u64) -> u64 {
     let hz = crate::TIMER_HZ as u64;
     let want = sec.saturating_mul(hz) + nsec * hz / 1_000_000_000;
     let until = crate::dev::lapic::ticks().saturating_add(want);
+
+    // **This spun, and it was the one wait in the kernel that did.** The loop
+    // was `while ticks() < until { spin_loop() }`: no yield, so a guest
+    // sleeping a second held its core for a second and every other task on it
+    // waited; no deadline check, so a sleep longer than the session's own
+    // bound outlived it; and no `sky::server::pump`, so a Wayland client that
+    // slept stopped serving its own display connection. Harmless with one
+    // foreground guest and a CPU sink with several.
+    //
+    // A tick at a time rather than one long sleep, deliberately. The slice is
+    // what keeps the two checks below running at the cadence every other
+    // blocking path here uses -- the sleep is the only thing that changes, and
+    // what it changes is that the core is free meanwhile.
     while crate::dev::lapic::ticks() < until {
-        core::hint::spin_loop();
+        if overran(crate::dev::lapic::ticks()) {
+            unsafe { kill_blocked() }
+        }
+        // The display server answers while its client sleeps, for the same
+        // reason it does while one waits on a socket.
+        crate::sky::server::pump();
+        let now = crate::dev::lapic::ticks();
+        let _ = crate::task::sleep_until(until.min(now.saturating_add(1)));
     }
     0
 }
@@ -6363,6 +6383,44 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             "a relative path may not climb out with .. , as resolve refuses it",
             sys_statat(fd, rel_p, sbuf, 0) == ENOENT,
         ));
+        teardown();
+    }
+
+    // `nanosleep`, which was the one wait in this kernel that genuinely spun:
+    // `while ticks() < until { spin_loop() }`, no yield in it at all. One
+    // foreground guest made that invisible; a background one per sleeping
+    // process is a core each.
+    //
+    // Tested here rather than through a fixture because the only fixture that
+    // calls it is `--kind fb`, which sleeps ten minutes holding the display so
+    // the harness can photograph it -- a poor instrument for asking whether a
+    // sleep of 50 ms takes 50 ms.
+    {
+        let mut buf = [0u8; 32];
+        let at = buf.as_mut_ptr() as u64;
+        let owned = Region { at, len: 32 };
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+
+        // 50 ms as a timespec, which at TIMER_HZ is five ticks.
+        buf[0..8].copy_from_slice(&0u64.to_le_bytes());
+        buf[8..16].copy_from_slice(&50_000_000u64.to_le_bytes());
+        let before = crate::dev::lapic::ticks();
+        let rc = sys_nanosleep(at);
+        let elapsed = crate::dev::lapic::ticks().saturating_sub(before);
+        out.push(("nanosleep answers 0 for a sleep it completed", rc == 0));
+        // At least what was asked for. Returning early is the failure a busy
+        // wait cannot have and a sleep can, so `>=` is the honest direction --
+        // the tick is 10 ms, so overshooting by one is expected.
+        out.push((
+            "and it slept at least the five ticks it was asked for",
+            elapsed >= 5,
+        ));
+        // A nanosecond field at or past a second is EINVAL on Linux, and this
+        // is checked after the sleep so a refusal cannot be mistaken for the
+        // sleep above having been skipped.
+        buf[8..16].copy_from_slice(&1_000_000_000u64.to_le_bytes());
+        out.push(("a nanosecond field of a whole second is EINVAL", sys_nanosleep(at) == EINVAL));
+        out.push(("and an unreachable timespec is EFAULT", sys_nanosleep(0x1000) == EFAULT));
         teardown();
     }
 
