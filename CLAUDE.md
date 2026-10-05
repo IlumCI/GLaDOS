@@ -3350,13 +3350,18 @@ its own task is running *is* per-task as long as somebody swaps it. The
 alternative was `swapgs` and a per-thread block, which collides with
 `cpu::percpu` owning GS -- the same reason a guest is refused `ARCH_SET_GS`.
 
-**A pool, not a task per thread.** `MAX_TASKS` is 24 and a kernel task that
-returns is not reclaimed, it spins in `yield_now` forever. Reclaiming slots
-means teaching the scheduler about a finished task, and the outgoing task's
-state is written unconditionally in `schedule`, so that is surgery on the most
-delicate loop here. Instead a finished thread parks its task and the next
-`clone` takes it back: the limit is eight *concurrent* threads rather than
-eight ever created, and a machine that never runs one spawns nothing.
+**A pool, not a task per thread.** The reason given here was that `MAX_TASKS`
+was 24 and a kernel task that returns "is not reclaimed, it spins in
+`yield_now` forever", and that reclaiming slots meant surgery on the most
+delicate loop in the kernel. **A finished task is reclaimed now** -- see the
+section below -- so the surgery is done and the pool stays for its own reason
+rather than that one: a thread that parks keeps its syscall stack and its
+slot's identity, so `clone` taking one back costs nothing, and the limit is
+eight *concurrent* threads rather than eight ever created.
+
+That reason was half right in a way worth keeping. The outgoing task's state
+*is* written unconditionally in `schedule`, which is exactly why reclaim could
+not go there and went into `finish_handoff` instead.
 
 `clone` returns twice, in two threads, at the same instruction, and only `rax`
 tells them apart. The child arrives with every register zero except `rsp`,
@@ -5585,6 +5590,68 @@ been driven under QEMU with an injected fault, which is not the same as the real
 one: QEMU reports `hwp no`, so the GF63's actual `#GP` cannot reproduce here at
 all. The sequence of that machine faulting, being repaired by `skip-hwp`,
 persisting it and booting clean is still owed, and it needs the laptop.
+
+### A finished task gives its slot back
+
+`trampoline` ended in `loop { yield_now() }` under the comment "a task that
+returns just stops being scheduled onto". True, and not the whole story: the
+slot stayed claimed and its 64 KiB stack and extended-state image stayed
+resident forever. `MAX_TASKS` is 40 and `task.rs`'s own budget counts 37
+committed at sixteen cores, so anything that spawns and finishes repeatedly
+does not leak quietly -- it runs out of tasks.
+
+**Reclaim belongs in `finish_handoff` and nowhere else**, and that is the whole
+design. A task cannot free its own stack, because it is standing on it; and
+`schedule` cannot either, because it writes the outgoing state *before*
+`glados_switch_context` has stored that task's `rsp`. `finish_handoff` already
+runs as the incoming task on the core that switched away, which is both the only
+moment the outgoing `rsp` is known to have landed and the first moment nothing
+is executing on that stack. So `exit` raises a flag and yields, and the core
+that leaves does the work.
+
+The loop in `exit` is load-bearing rather than defensive: `yield_now` returns
+normally when there was nothing else to switch to, so with the flag set this
+task is still running and has to ask again.
+
+`Task` gained `stack`, because `rsp` is somewhere inside the allocation and
+moves, so it cannot be handed back. **Null where the stack is not ours** -- task
+0 stands on the firmware's and an adopted idle task on the one its core arrived
+on, and freeing either hands away a stack a core is running on.
+
+**Slots are claimed under `TASKS` now rather than off `COUNT`.** `COUNT` is a
+high-water mark and the scan bound `schedule` uses; it cannot come down, since
+lowering it asserts nothing above the new value is live and a count cannot
+answer that. So a reclaimed slot sits `Unused` *below* `COUNT` and `spawn` looks
+for one -- and looking then claiming has to be one critical section, or two
+spawns take the same slot. That also closed a live window: the old form read
+`COUNT`, allocated, and stored `slot + 1` afterwards, so an `adopt_idle` landing
+in between had its `fetch_add` discarded, which is the bug `task.rs`'s own
+`COUNT` comment describes still reachable by the other caller.
+
+Freeing happens outside the `TASKS` lock, because `dealloc` takes the heap's and
+`TASKS`-then-heap is a lock order nothing else here uses. Safe because the slot
+goes `Unused` first.
+
+Measured in `diag migrate`, and exact rather than approximate:
+
+    -smp 2   slot goes unused, the next spawn takes that very slot, heap grew 0 B
+    -smp 4   the same, twice in one boot, heap grew 0 B both times
+
+The heap claim is the one that earns its place: a reclaim returning the slot and
+leaking 64 KiB a time passes every other claim above it. It is written as
+`grew < STACK_SIZE` rather than `== 0` because this is a live machine with a
+clock task and a compositor on it, and one stack of slack catches the leak
+without flaking.
+
+`root` is deliberately not freed -- a `Space` belongs to whoever installed it,
+and freeing page tables the kernel may still be walking is the failure
+`Space::drop` orders against.
+
+**Nothing calls `exit` yet except a task whose entry returns, and today nothing's
+does**: the clock and compositor loop forever, guest threads park into a pool.
+So this is the mechanism and the headroom with no behaviour change to anything
+running. The two items it unblocks are still open -- blocking primitives spin
+rather than sleep, and a guest still holds the shell until it exits.
 
 ### Concurrency
 
