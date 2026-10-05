@@ -2306,7 +2306,7 @@ than how often.
 `linux` reports whether the trap is armed, `linux run <path> [args...]` loads
 and runs, `linux trace` prints what the last guest asked for, `linux libc` says
 which interpreters are installed, and `linux env NAME=VALUE` adds a variable to
-what the next guest is handed. `diag linux` is 134 claims.
+what the next guest is handed. `diag linux` is 289 claims.
 
 **The trace records the path, not only the pointer.** A row read `257 openat
 0x2d23faa 0x0 0x0` and the useful half of it was in the guest's memory, so
@@ -2653,7 +2653,7 @@ Driven, with `mkelf.py`'s static fixture installed into the table:
                              installed: hello
 
 Exit 5 is the code `mkelf.py` built in, and two lines is the whole observation.
-`diag linux` is 279 claims and `sysbox` lists the row as mutating.
+`diag linux` is 289 claims and `sysbox` lists the row as mutating.
 
 **A closed set is not the same property as a decodable one, and the second is
 the one a reader will not think to ask about.** Every name becomes a grammar
@@ -3879,11 +3879,35 @@ snapshot. `EACCES`, and the day a guest needs to write, what it needs is a
 scratch subtree with the same jail an Aiksi program gets, not this call quietly
 growing a second meaning.
 
-**A descriptor-relative `openat` is refused too**, with `ENOSYS` and for a
-smaller reason: resolving one needs the directory's own path kept per open
-descriptor, and resolving it against the working directory instead would open a
-real file that is not the one the guest named. `AT_FDCWD` and absolute paths
-are the whole of what works.
+**A descriptor-relative `openat` works, and the refusal it replaced is worth
+knowing about.** It answered `ENOSYS` for a long time under a comment saying
+resolving one "needs the directory's own path kept per open descriptor" -- and
+`fs::Dir` has carried `path` since it was written, snapshotted at `open` for
+`getdents64`'s sake. The reasoning was right and the thing it was waiting for
+was already there, so the refusal outlived its reason. That is a different
+defect from an unimplemented call: nothing fails, nothing is missing, and the
+call says no.
+
+What it cost is most of a tree walk. `openat(dirfd, rel)` is how every
+`fts`-based program descends, so `find`, `rm -r`, `du` and `cp -r` stopped at
+the first subdirectory -- and stopped with `ENOSYS`, which reads as a kernel
+without the call rather than one declining.
+
+`at_base` is the one resolution `openat`, `newfstatat` and `readlinkat` share,
+and its three refusals are three different answers a program acts on: an open
+non-directory is `ENOTDIR`, nothing open is `EBADF`, and `AT_FDCWD` is the
+working directory. **An absolute path ignores `dirfd` entirely**, which is
+POSIX rather than a shortcut -- a closed descriptor beside an absolute path is
+correct code, so consulting the descriptor first would refuse it. `..` still
+cannot climb out, because `resolve` refuses it and the new base does not go
+around that.
+
+Six claims, and they were *proved to run* rather than assumed to: `diag` prints
+only failures and a count, so one claim was flipped to a value `sys_statat`
+cannot return, the suite failed naming that claim alone with the count
+unchanged at 289, and it was disarmed after. Not verified end to end -- no
+static busybox is staged on this host, so `find` walking a tree is the expected
+consequence and not a measurement.
 
 **An open file holds its whole contents.** `read_blob` answers a `Vec`, so the
 honest options were to keep that or to teach the store ranged reads. Keeping it
@@ -6252,9 +6276,24 @@ Four things that cost a run each and are silent when wrong:
   which is the one asymmetry in RFC 3394 and the only place the two directions
   can silently disagree.
 
-Owed, and written at the top of `ccmp.rs` rather than only here: an IEEE
-802.11-2016 Annex J CCMP vector. The cipher is checked against RFC 3610; the
-*framing* is structural and round-trip only.
+**The CCMP framing is checked against a published vector at last**, IEEE
+802.11-2012 Annex M.6.4, which the top of `ccmp.rs` had said it owed since the
+file was written. The cipher was always checked against RFC 3610; the framing
+was checked only against itself, and the AAD masking and nonce layout can be
+self-consistently wrong and round-trip perfectly while failing against every
+access point in the world.
+
+It was verified on the host first, against an independent AES-CCM and
+reimplementing *this file's own* AAD and nonce rules rather than the standard's
+prose -- so a failure in the kernel would have been the port and not the
+arithmetic. The vector's frame carries the retry bit set, which is the case the
+mask exists for, and both directions are asserted: a change to an address the
+AAD covers must fail the MIC, and a retry bit set in flight must not. Only the
+second breaks under a too-eager mask, and it presents as a flaky radio rather
+than as a bug.
+
+Still structural rather than published: the QoS layout, since Annex M's example
+is a non-QoS data frame.
 
 For the rtl8188eu dongle specifically, more exists than a summary here once
 claimed: `xhci` identifies the part, reads its chip id and calls `bring_up`,
