@@ -302,13 +302,31 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         .and_then(|b| mine::boot::parse(b.as_slice()));
     {
         let note = match (&miner_bytes, &miner_plan) {
-            (None, _) => "glados: no \\GLADOS\\MINER.TXT on the boot volume -- this is not a miner image",
+            (None, _) => "glados: no \\GLADOS\\MINER.TXT -- an ordinary boot",
             (Some(_), None) => "glados: MINER.TXT was read and says nothing this understands -- it needs 'pool' and 'worker'",
             (Some(_), Some(_)) => "glados: MINER.TXT parsed -- no desktop, and this image mines",
         };
+        // **All three to serial, and only the two that found a file to the
+        // screen.** The absent case is every ordinary boot, so putting it on
+        // the display announced the default -- and it announced it as "this is
+        // not a miner image", which reads as a complaint about something
+        // missing. On real hardware that is a false alarm in the one place a
+        // person can least afford to misread the boot log, and it was read as
+        // one the first time this image booted on the GF63.
+        //
+        // The diagnostic is kept rather than deleted, because the failure the
+        // three-state split was written for is still live: a miner ISO whose
+        // `MINER.TXT` went somewhere `mkiso` did not mean it boots a desktop
+        // and says nothing, which is the "came up, printed nothing, pool
+        // unset" bug returning. Serial costs nothing, nobody reads it unless
+        // they are debugging, and `log send` carries it off a machine with no
+        // UART -- so the question is still answerable without putting a line
+        // on screen for every boot that was always going to be ordinary.
         serial_println!("{}", note);
-        con_out(st, note);
-        con_out(st, "\r\n");
+        if miner_bytes.is_some() {
+            con_out(st, note);
+            con_out(st, "\r\n");
+        }
     }
 
     let (persisted, repair_note) = update::repairs::at_boot(bs, image);
