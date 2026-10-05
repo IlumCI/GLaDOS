@@ -6778,6 +6778,60 @@ continuation of it. `companion::interject_frame` closes the open turn and opens
 a labelled one, so neither the operator nor the model has to guess who said
 what.
 
+### Learning from being corrected
+
+The routing corpus grew by `teach` and by nothing else, so a machine used for a
+month routed exactly as it did on its first boot, and every correction the
+operator made by hand was discarded at the moment it was most informative.
+
+**Corrections, and emphatically not successes**, because this tree has already
+measured the alternative. `work.rs`'s role adapters were trained on harvested
+transcripts and reported `fixed 0 broke 0` over 23 examples -- structurally, not
+for want of data, since **a harvested label is the base model's own argmax**:
+`choose` decodes at temperature zero, so the action in a successful transcript
+is what the classifier already ranked first. Filtering on "it ran" does not
+escape it, because running says the applet accepted its arguments and never
+that it was the right applet.
+
+A correction inverts that. The model ranked `find` first, a person ranked `ls`
+first, and the disagreement is the whole signal -- the one label here the model
+did not generate.
+
+`learn::judge` is pure, in the `update::decide` shape, so its ten claims need no
+engine, no corpus and no disk. Six refusals each with their own reason, and the
+dangerous one is **agreement**: recording it would feed the model its own output
+back, which is the role-adapter result arriving by a second route.
+
+Driven, and the first attempt was a bad test that proved the right thing --
+asking for a directory routed to `ls` and correcting with `ls /ai` recorded
+nothing, correctly. With a real disagreement:
+
+    1. ls                     <- what the agent chose
+    tree /ai                  <- what the operator then did
+      [learn] 'tree' for: show me the files in the ai directory
+
+And it reaches routing rather than only the disk. `fit` across that one
+correction:
+
+    before   425 train, 380 held out, 25 classes
+    after    426 train, 380 held out, 25 classes
+
+Train grew by exactly one and **held out did not move** -- `vocab::splits` takes
+its boundaries from recorded positions and anything past the recorded length
+trains, so an append is a training row by construction. The "test set that
+moved" failure is now checked against this path too.
+
+Nothing has to be typed for it to take effect: the cached router is keyed by
+`/ai/train`'s hash and `ensure_router` refits when that moves. `learn.rs` does
+not know that and must not -- it is a property of the cache.
+
+**Capped at eight a boot, and every row printed.** The alpha budget is scoped to
+a corpus hash so a comparison knows which evidence it was paid for; a corpus
+that moved on every command would refill it on every command. `learn` shows the
+live request and what was written, `learn forget` drops the request, `learn off`
+stands it down. Durability is still a snapshot, which the verb says at the point
+of writing.
+
 ### Skills, and who is allowed to be the operator
 
 Every program under `/ai/tools` used to run on `TOOLS`, which is
