@@ -245,6 +245,23 @@ pub struct Task {
     /// ordinary scheduling pass, so a sixty-second sleep stayed a
     /// sixty-second sleep however often anybody woke it.
     pub woken: bool,
+    /// Which entry in the guest table this task speaks for.
+    ///
+    /// **This was one machine-wide atomic and that was a latent bug.**
+    /// `fork` sets it before entering a child and restores it after, which
+    /// reads as correct and is not: the child is *preempted* at ring 3, so
+    /// while it is suspended any other task taking a syscall read a global
+    /// naming the child's slot and resolved `guest_slot()` to somebody else's
+    /// memory. It could not bite while one guest ran in the foreground,
+    /// because the shell was inside `run` and there was no other guest to be
+    /// confused with -- and it is the first thing a background guest would
+    /// have hit.
+    ///
+    /// Saved and loaded by `schedule` beside the `Ring3` block, which is the
+    /// pattern that already exists here for exactly this shape of problem: a
+    /// global only read while its own task is running *is* per-task, provided
+    /// somebody swaps it.
+    pub guest: usize,
 }
 
 // The extended-state image is a raw pointer, and moving a task between cores
@@ -268,6 +285,7 @@ const EMPTY: Task = Task {
     exiting: false,
     wake_at: 0,
     woken: false,
+    guest: 0,
 };
 
 /// Allocate a zeroed, 64-byte aligned extended-state image.
@@ -389,6 +407,7 @@ pub fn init(name: &'static str) {
             exiting: false,
             wake_at: 0,
             woken: false,
+            guest: 0,
         };
     }
     // **`fetch_max` and not `store`.** By the time this runs the application
@@ -417,6 +436,24 @@ fn sleeper() {
     sleep_until(began.saturating_add(SLEEP_FOR.load(Ordering::Relaxed)));
     SLEPT.store(crate::dev::lapic::ticks().saturating_sub(began), Ordering::Release);
     SLEEP_DONE.store(true, Ordering::Release);
+}
+
+/// What the helper saw and set, for the per-task guest-index claim.
+static GI_SAW: AtomicU64 = AtomicU64::new(u64::MAX);
+static GI_SET: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Claims a guest index, records what it had been, and keeps it set for a
+/// while so the task that spawned it can look at its own.
+fn guest_index_helper() {
+    GI_SAW.store(crate::linux::syscall::current_guest() as u64, Ordering::Release);
+    crate::linux::syscall::set_current_guest(7);
+    GI_SET.store(true, Ordering::Release);
+    // Held across several switches, which is the whole point: the claim is
+    // about what the *other* task sees while this one is suspended holding a
+    // guest index.
+    sleep_us(300_000);
+    crate::linux::syscall::set_current_guest(0);
 }
 
 static MIG_SEEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -707,6 +744,72 @@ pub fn migration_selftest() -> bool {
         }
     }
 
+    // --- which guest a task speaks for is the task's, not the machine's ----
+    //
+    // `CURRENT_GUEST` was one machine-wide atomic. `fork` sets it before
+    // entering a child and restores it after, which reads as correct and is
+    // not: the child is preempted at ring 3, so while it is suspended any
+    // other task taking a syscall resolved `guest_slot()` through a global
+    // naming the child -- somebody else's memory, at every address. It could
+    // not bite while one guest ran in the foreground, because the shell was
+    // inside `run` and there was no second guest to be confused with. It is
+    // the first thing a background guest would have hit.
+    //
+    // This claim is the mechanism and not the bug: it needs no guest at all,
+    // only two tasks and an index, which is what makes it cheap enough to run
+    // on every boot.
+    {
+        GI_SAW.store(u64::MAX, Ordering::Release);
+        GI_SET.store(false, Ordering::Release);
+        let mine_before = crate::linux::syscall::current_guest();
+
+        let who = spawn("guestidx", guest_index_helper);
+        claim(&mut ok, who.is_some(), "a second task can be spawned to hold a guest index");
+
+        let mut set = false;
+        for _ in 0..100 {
+            crate::time::delay_us(10_000);
+            if GI_SET.load(Ordering::Acquire) {
+                set = true;
+                break;
+            }
+        }
+        claim(&mut ok, set, "and it claims one");
+
+        // The claim that would have failed before this was per-task: the other
+        // task is suspended *now*, holding index 7, and this task must still
+        // see its own.
+        let mine_now = crate::linux::syscall::current_guest();
+        crate::kprintln!(
+            "  helper took 7 and saw {}, while this task reads {} (was {})",
+            GI_SAW.load(Ordering::Acquire) as i64,
+            mine_now,
+            mine_before
+        );
+        claim(
+            &mut ok,
+            mine_now == mine_before,
+            "while this task's own index is untouched by it",
+        );
+        // And the helper started from a fresh index rather than inheriting
+        // whatever the machine last used, which is what a new task should see.
+        claim(
+            &mut ok,
+            GI_SAW.load(Ordering::Acquire) == 0,
+            "and a new task starts out speaking for no guest",
+        );
+
+        // Let it finish, so the slot and its stack go back before the suite
+        // ends -- and so a later run of this suite in the same boot starts
+        // from the same place. `diag` is run twice in one boot deliberately.
+        for _ in 0..100 {
+            crate::time::delay_us(10_000);
+            if who.and_then(state_of) == Some(State::Unused) {
+                break;
+            }
+        }
+    }
+
     ok
 }
 
@@ -790,6 +893,7 @@ pub fn adopt_idle(cpu: usize) -> bool {
             exiting: false,
             wake_at: 0,
             woken: false,
+            guest: 0,
         };
     }
     CURRENT[cpu].store(slot, Ordering::Release);
@@ -950,6 +1054,8 @@ pub fn spawn_on(name: &'static str, entry: fn(), cpu: usize) -> Option<usize> {
             exiting: false,
             wake_at: 0,
             woken: false,
+            // A new task speaks for no guest until something enters one.
+            guest: 0,
         };
     }
 
@@ -1335,7 +1441,7 @@ fn schedule() {
         return;
     }
 
-    let (save, load, out_fpu, in_fpu, out_r3, in_r3, out_root, in_root) = {
+    let (save, load, out_fpu, in_fpu, out_r3, in_r3, out_root, in_root, out_guest, in_guest) = {
         let mut t = TASKS.lock_irq();
         let n = COUNT.load(Ordering::Acquire);
 
@@ -1406,6 +1512,12 @@ fn schedule() {
             t[next].ring3,
             t[cur].root,
             t[next].root,
+            // A pointer rather than a value, the way the `Ring3` slot above
+            // is one: the write happens after this lock is dropped, and
+            // re-taking `TASKS` between the xrstor and the stack switch is a
+            // lock acquisition nothing else on that path makes.
+            &mut t[cur].guest as *mut usize,
+            t[next].guest,
         )
     };
 
@@ -1435,6 +1547,27 @@ fn schedule() {
             }
             crate::linux::syscall::ring3_load(in_r3);
         }
+        // Which guest the syscall path speaks for, on the same seam and for the
+        // same reason. Guarded on both being zero so a machine with no guest
+        // anywhere pays one comparison and no stores -- the bargain `root` and
+        // `ring3` already make one branch up.
+        //
+        // The live value is read back from the global rather than taken from
+        // the field: the field is where this task's index was *parked*, and the
+        // global is what it has been since, because `set_current_guest` writes
+        // the global. Reading the field here would write back a stale index and
+        // undo every `set_current_guest` made since the last switch.
+        //
+        // **Unconditional, where `root` and `ring3` above are guarded.** Their
+        // guard reads the outgoing task's parked field, and for this one the
+        // parked field and the live value legitimately differ: a task that
+        // entered a guest since its last switch has `set_current_guest(3)` in
+        // the global and 0 still in its field, so a guard on the field skips
+        // the save and loses the index. Two stores on a path that runs a
+        // hundred times a second is not worth a branch that can be wrong.
+        let live = crate::linux::syscall::current_guest();
+        *out_guest = live;
+        crate::linux::syscall::set_current_guest(in_guest);
         if !in_fpu.is_null() {
             crate::cpu::xrstor_from(in_fpu);
         }
