@@ -1639,6 +1639,39 @@ fn with_fds<T>(f: impl FnOnce(&mut Vec<Option<super::fs::Fd>>, &str) -> T) -> Op
     Some(f(fds, cwd))
 }
 
+/// The directory a `*at` call's relative path is resolved against.
+///
+/// `AT_FDCWD` means the working directory; anything else is a descriptor that
+/// has to *be* a directory. This was `ENOSYS` for a long time under a comment
+/// saying a descriptor-relative path "needs the directory's path, which means
+/// keeping one per open directory" -- and `fs::Dir` has carried `path` since it
+/// was written, so the thing the refusal was waiting for was already there. The
+/// refusal outlived its reason, which is why it is worth saying so here.
+///
+/// What it cost while it stood: `openat(dirfd, rel)` is how every `fts`-based
+/// program walks a tree, so `find`, `rm -r`, `du` and `cp -r` all stopped at
+/// the first subdirectory.
+///
+/// **An absolute path ignores `dirfd` entirely**, which is POSIX and is not a
+/// shortcut: a caller passing a closed descriptor with an absolute path is
+/// correct code, so checking the descriptor first would refuse it.
+fn at_base(fds: &[Option<super::fs::Fd>], dirfd: u64, cwd: &str) -> Result<String, u64> {
+    if (dirfd as i64) == super::fs::AT_FDCWD {
+        return Ok(String::from(cwd));
+    }
+    let i = dirfd as i64;
+    if i < 0 || i as usize >= fds.len() {
+        return Err(EBADF);
+    }
+    match &fds[i as usize] {
+        Some(super::fs::Fd::Dir(d)) => Ok(d.borrow().path.clone()),
+        // A descriptor that is open and is not a directory is `ENOTDIR`, which
+        // is a different fact from `EBADF` and sends a program somewhere else.
+        Some(_) => Err(ENOTDIR),
+        None => Err(EBADF),
+    }
+}
+
 /// Open a path in the namespace and hand back a descriptor.
 ///
 /// **Read-only, and that is a decision rather than a gap.** The namespace is
@@ -1694,14 +1727,18 @@ fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
         return ENOENT;
     }
     let cwd_relative = !raw.starts_with('/');
-    if cwd_relative && (dirfd as i64) != super::fs::AT_FDCWD {
-        // A descriptor-relative open needs the directory's path, which means
-        // keeping one per open directory. Refused rather than resolved against
-        // the wrong place.
-        return ENOSYS;
-    }
     with_fds(|fds, cwd| {
-        let Some(path) = super::fs::resolve(cwd, &raw) else { return ENOENT };
+        // Only consulted for a relative path, so a closed `dirfd` beside an
+        // absolute one is not refused -- see `at_base`.
+        let base = if cwd_relative {
+            match at_base(fds, dirfd, cwd) {
+                Ok(b) => b,
+                Err(e) => return e,
+            }
+        } else {
+            String::new()
+        };
+        let Some(path) = super::fs::resolve(&base, &raw) else { return ENOENT };
         // **Before the store, because these are answers rather than blobs.**
         // Nothing under `/proc` is writable, listed by `sysbox` or in a
         // snapshot, and asking the store about it first would answer `ENOENT`
@@ -4098,13 +4135,19 @@ fn sys_readlinkat(dirfd: u64, path_at: u64, buf: u64, size: u64) -> u64 {
     if raw.is_empty() {
         return ENOENT;
     }
-    if !raw.starts_with('/') && (dirfd as i64) != super::fs::AT_FDCWD {
-        return ENOSYS;
-    }
     if size == 0 {
         return EINVAL;
     }
-    let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
+    let rel = !raw.starts_with('/');
+    let found = with_fds(|fds, cwd| {
+        let base = if rel { at_base(fds, dirfd, cwd)? } else { String::new() };
+        super::fs::resolve(&base, &raw).ok_or(ENOENT)
+    });
+    let found = match found {
+        Some(Ok(p)) => Some(p),
+        Some(Err(e)) => return e,
+        None => None,
+    };
     let Some(path) = found else { return ENOENT };
     let Some(target) = super::proc::link(&path) else {
         // **A directory is not a symlink, and saying it does not exist is a
@@ -4410,10 +4453,16 @@ fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 {
         }
         return ENOENT;
     }
-    if !raw.starts_with('/') && (dirfd as i64) != super::fs::AT_FDCWD {
-        return ENOSYS;
-    }
-    let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
+    let rel = !raw.starts_with('/');
+    let found = with_fds(|fds, cwd| {
+        let base = if rel { at_base(fds, dirfd, cwd)? } else { String::new() };
+        super::fs::resolve(&base, &raw).ok_or(ENOENT)
+    });
+    let found = match found {
+        Some(Ok(p)) => Some(p),
+        Some(Err(e)) => return e,
+        None => None,
+    };
     let Some(path) = found else { return ENOENT };
     if let Some(n) = super::dev::node(&path) {
         return write_stat(buf, super::fs::Kind::Char, super::dev::size(n), super::fs::ino_of(&path));
@@ -6248,6 +6297,71 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         out.push((
             "with the flag and a descriptor nobody opened it is EBADF, not success",
             sys_statat(99, p, at, AT_EMPTY_PATH) == EBADF,
+        ));
+        teardown();
+    }
+
+    // A descriptor-relative path, which was `ENOSYS` under a comment saying it
+    // needed the directory's own path kept per open descriptor -- and
+    // `fs::Dir` has carried `path` since it was written. The refusal outlived
+    // its reason, and what it cost is every `fts`-based program: `find`,
+    // `rm -r`, `du` and `cp -r` all stop at the first subdirectory.
+    //
+    // `/lib` is the directory used because it is seeded at every boot, so this
+    // needs no store mounted and no guest staged.
+    {
+        let mut buf = [0u8; 512];
+        let at = buf.as_mut_ptr() as u64;
+        let owned = Region { at, len: 512 };
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+
+        // Three disjoint slices of the one region: the paths have to live
+        // inside what the guest owns, because `read_cstr` bounds-checks them
+        // like any other guest pointer, and a `stat` writes 144 bytes.
+        let dir_p = at;            // "/lib"
+        let rel_p = at + 32;       // "geom.ai&xi"
+        let abs_p = at + 64;       // "/lib/geom.ai&xi"
+        let sbuf = at + 256;
+        let put = |off: usize, text: &str, b: &mut [u8; 512]| {
+            b[off..off + text.len()].copy_from_slice(text.as_bytes());
+            b[off + text.len()] = 0;
+        };
+        put(0, "/lib", &mut buf);
+        put(32, "geom.ai&xi", &mut buf);
+        put(64, "/lib/geom.ai&xi", &mut buf);
+
+        let fd = sys_openat(super::fs::AT_FDCWD as u64, dir_p, O_DIRECTORY, 0);
+        out.push(("a directory opens, which is what a relative path is resolved against", (fd as i64) > 2));
+
+        out.push((
+            "a path relative to an open directory resolves, where it was ENOSYS",
+            sys_statat(fd, rel_p, sbuf, 0) == 0,
+        ));
+        // A descriptor that is open and is not a directory is a different fact
+        // from one nobody opened, and sends a program somewhere else.
+        out.push((
+            "the same path against stdin is ENOTDIR rather than EBADF",
+            sys_statat(0, rel_p, sbuf, 0) == ENOTDIR,
+        ));
+        out.push((
+            "and against a descriptor nobody opened it is EBADF",
+            sys_statat(99, rel_p, sbuf, 0) == EBADF,
+        ));
+        // POSIX: an absolute path ignores `dirfd` entirely. A caller passing a
+        // closed descriptor with an absolute path is correct code, so checking
+        // the descriptor first would refuse it -- which is why `at_base` is
+        // consulted only for a relative path.
+        out.push((
+            "an absolute path ignores dirfd, so a closed one is not an error",
+            sys_statat(99, abs_p, sbuf, 0) == 0,
+        ));
+        // `..` is still refused, and that has to survive the new base: a tree
+        // with O(1) copies has no single parent to walk back to, so a relative
+        // path cannot be used to climb out of the directory it was opened on.
+        put(32, "../lib/geom.ai&xi", &mut buf);
+        out.push((
+            "a relative path may not climb out with .. , as resolve refuses it",
+            sys_statat(fd, rel_p, sbuf, 0) == ENOENT,
         ));
         teardown();
     }
