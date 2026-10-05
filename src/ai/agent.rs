@@ -673,6 +673,42 @@ pub fn skill_choices() -> Vec<String> {
         .collect()
 }
 
+/// Does this argument look like the model reciting the tool list?
+///
+/// **A detector for a bug class rather than a filter on the model.** The
+/// argument decode used to continue from the step prompt's own position, and
+/// `prompt_for` ends `Tools: cat, ls, cd, ... . Next tool:` -- so after the
+/// grammar emitted a name, free continuation reproduced that comma-separated
+/// list as the argument, on every tier but reflex, for every applet. Measured
+/// on Qwen3-0.6B: four steps, four rejections, score -5.50, and not one line of
+/// the transcript said why.
+///
+/// The cause is fixed (the decode prefills now), so this should never fire. It
+/// exists because the failure was *silent*: an argument that is a list of tool
+/// names is not a plausible argument to anything here, so recognising one and
+/// saying so converts a whole-agent outage into a printed line. The same reason
+/// `differ`'s canary exists -- a check that has never reported a difference is
+/// indistinguishable from one that compares nothing.
+///
+/// Deliberately strict. Two or more known applet names and *nothing else* but
+/// separators: one name alone is a legitimate argument (`help ls`, `same cat`),
+/// and a name beside real text is somebody's filename.
+fn recites_tools(args: &str) -> bool {
+    let mut names = 0usize;
+    for piece in args.split(|c: char| c == ',' || c.is_whitespace()) {
+        if piece.is_empty() {
+            continue;
+        }
+        if sysbox::is_applet(piece) || piece == DONE {
+            names += 1;
+            continue;
+        }
+        // Anything that is not an applet name means this is not a recitation.
+        return false;
+    }
+    names >= 2
+}
+
 fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option<(String, String)> {
     let names = harness::admitted(trust);
     let prompt_of = || {
@@ -692,9 +728,6 @@ fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option
         return Some((name, String::new()));
     }
 
-    // Reflex choices carry no branch context; everything else left the
-    // engine positioned right after the chosen name's tokens.
-    let from_context = decision.tier != deliberate::Tier::Reflex;
     // The shortcut is for an applet that genuinely takes nothing -- `pwd`,
     // `snaps`, `sysbox` -- where a decode would spend a prefill to produce the
     // empty string. **It must not fire for an applet whose argument is
@@ -707,7 +740,15 @@ fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option
     // `arg_choices` is the test rather than the arity, because the question is
     // not "may this run with no argument" but "is there a set we could have
     // offered". A zero-argument applet has no such set and keeps the shortcut.
-    if !from_context && sysbox::check_args(&name, "").is_ok() && arg_choices(&name).is_empty() {
+    //
+    // **The tier is not part of this question and used to be.** The test read
+    // `!from_context && ...`, so the shortcut fired only for a reflex and a
+    // deliberated `pwd` went on to decode an argument it has nowhere to put.
+    // Whether an applet takes arguments is a property of the applet; the tier
+    // is a property of how its *name* was chosen. Conflating them was free
+    // while the argument decode continued from context, because that path was
+    // producing the tool list for everything anyway.
+    if sysbox::check_args(&name, "").is_ok() && arg_choices(&name).is_empty() {
         return Some((name, String::new()));
     }
 
@@ -773,10 +814,45 @@ fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option
 
     // The same walk a workflow worker runs, lifted into `harness` so the two
     // cannot drift. It was always greedy; only the `run` path above samples.
-    let args = harness::decode_args(goal, &name, !from_context);
+    //
+    // **Always prefilled, and it used to be `!from_context`.** The intent was
+    // to save a prefill: a tier that left the engine positioned just after the
+    // chosen name has a cache worth continuing, so why pay for another. The
+    // position it leaves is the problem. `prompt_for` ends
+    // `Tools: cat, ls, cd, pwd, ... . Next tool:`, the grammar then emits one
+    // name, and free continuation from *there* is a continuation of that
+    // comma-separated list -- so the argument the model produced was the tool
+    // list, verbatim, every time.
+    //
+    // Measured on Qwen3-0.6B before the change, and it is not a degradation,
+    // it is total:
+    //
+    //     goal: list the files in /ai and say how many there are
+    //       1. cat , ls, cd, pwd, tree, cat, stat, hash, same
+    //       2. ls  cd pwd tree stat hash same du find diff snaps fsck ...
+    //       budget steps=4/4 ok=0 rej=4 score=-5.50
+    //
+    // Only the reflex tier escaped it, because a reflex carries no branch
+    // context and therefore took the prefill -- which is why episodes that
+    // routed at reflex looked fine and nothing in the suite caught it.
+    //
+    // This is the same correction the closed-set path above already carries,
+    // arriving on the other branch: both now go through `args_prompt`, whose
+    // trailing space is what stops a continuation mid-word. One prefill per
+    // step is the cost, and the alternative is an argument that cannot be
+    // right.
+    let args = harness::decode_args(goal, &name, true);
     // `decode_args` unwraps the with_alphabet/with_engine layers itself, so
     // what arrives here is the argument string or nothing.
     let args = args.unwrap_or_default();
+    // See `recites_tools`. Dropped rather than passed on, because an argument
+    // made of tool names cannot be what any applet here wanted, and a bare
+    // applet either runs or says what it needed -- both of which are better
+    // next steps for the model than a rejection it cannot read.
+    if recites_tools(&args) {
+        kprintln!("     (the argument came back as the tool list -- dropped)");
+        return Some((name, String::new()));
+    }
     Some((name, args))
 }
 
@@ -1253,6 +1329,34 @@ pub fn selftest() -> bool {
         console::set_color(LTGRAY);
         ok &= pass;
     };
+
+    // --- the tool-list recitation detector ---------------------------
+    //
+    // Model-free, which is the point: the bug it names took a real checkpoint
+    // and three episodes to find, and these claims run on every boot with no
+    // forward pass at all.
+    check(
+        "an argument that is two tool names is recognised as a recitation",
+        recites_tools("ls, cd"),
+    );
+    check(
+        "and the real transcript that found it, verbatim",
+        recites_tools(", ls, cd, pwd, tree, cat, stat, hash, same")
+            && recites_tools("cd pwd tree stat hash same du find diff snaps fsck mkdir write rm mv"),
+    );
+    // The three shapes a legitimate argument takes, none of which may be
+    // mistaken for a recitation. One name alone is what `help ls` is; a name
+    // beside text is somebody's path; and the empty string is every
+    // zero-argument applet.
+    check(
+        "while one tool name alone is a legitimate argument",
+        !recites_tools("ls"),
+    );
+    check(
+        "and a tool name beside real text is not a recitation",
+        !recites_tools("cat /ai/tools/count.ai&xi") && !recites_tools("/ai ls"),
+    );
+    check("and nothing at all is not one", !recites_tools("") && !recites_tools("   "));
 
     // --- the outcome signal ------------------------------------------
     //

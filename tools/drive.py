@@ -403,6 +403,7 @@ def ports_held():
     spent two ten-minute runs on it.
     """
     held = []
+    lingering = []
     for what, port in (("serial", PORT), ("monitor", MONITOR_PORT)):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         # Deliberately no SO_REUSEADDR. On Windows it permits binding a port
@@ -411,10 +412,50 @@ def ports_held():
         try:
             s.bind(("127.0.0.1", port))
         except OSError:
-            held.append(f"{what} on {port}")
+            # **Bindability is not the question, and answering it cost two more
+            # runs.** A killed run leaves its accepted socket in TIME_WAIT for
+            # a minute or so, and a TIME_WAIT remnant refuses a bind while no
+            # process is listening at all -- so this reported "another QEMU
+            # still owns it" about a machine that had already exited, which is
+            # the one thing the message must never be wrong about.
+            #
+            # So the bind failure is a suspicion and a successful *connect* is
+            # the confirmation: something accepting a connection is a live
+            # listener, and nothing accepting one is a remnant to wait out.
+            try:
+                probe = socket.create_connection(("127.0.0.1", port), timeout=0.5)
+                probe.close()
+                held.append(f"{what} on {port}")
+            except OSError:
+                lingering.append(f"{what} on {port}")
         finally:
             s.close()
+    if lingering and not held:
+        # Nothing is listening, so this is a remnant and waiting is the whole
+        # fix. Said out loud with how long, because a silent pause here looks
+        # exactly like the hang this function exists to prevent.
+        print("[drive] " + " and ".join(lingering)
+              + " is in TIME_WAIT from a run that was killed -- nothing is"
+              + " listening, waiting for it to clear")
+        for _ in range(90):
+            time.sleep(1)
+            if not ports_held_raw():
+                return []
+        print("[drive] it did not clear; carrying on and letting the bind decide")
     return held
+
+
+def ports_held_raw():
+    """Can both ports be bound right now. Used only to wait out a TIME_WAIT."""
+    for port in (PORT, MONITOR_PORT):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            return True
+        finally:
+            s.close()
+    return False
 
 
 def main():
