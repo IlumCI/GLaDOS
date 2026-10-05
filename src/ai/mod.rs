@@ -13,6 +13,7 @@ pub mod clade;
 pub mod constrain;
 pub mod context;
 pub mod initiative;
+pub mod learn;
 pub mod train;
 pub mod deliberate;
 pub mod corpus;
@@ -773,6 +774,25 @@ pub fn with_engine<R>(f: impl FnOnce(&mut Engine) -> R) -> Option<R> {
 /// in the record and confirm the refusal, which is the branch that matters --
 /// it is the one that was missing for the initiative task and let a second
 /// `&mut Engine` out.
+/// `learn`'s claims, printed one per line like every other suite.
+///
+/// Model-free by construction: `learn::judge` is a pure function of six
+/// arguments, which is the `update::decide` shape, so this needs no engine, no
+/// corpus and no disk.
+pub fn learn_selftest() -> bool {
+    use crate::gfx::console::{self, LTGRAY, LTGREEN, LTRED};
+    let mut ok = true;
+    let rows = learn::checks();
+    for (what, good) in &rows {
+        console::set_color(if *good { LTGREEN } else { LTRED });
+        crate::kprintln!("  {}  {}", if *good { "ok  " } else { "FAIL" }, what);
+        console::set_color(LTGRAY);
+        ok &= *good;
+    }
+    crate::kprintln!("    {} claim(s)", rows.len());
+    ok
+}
+
 pub fn engine_selftest() -> bool {
     let me = crate::task::current();
 

@@ -2372,6 +2372,34 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
     let cmd = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim();
 
+    // **The operator's own hands are the one label the model did not produce.**
+    // If they asked for something, watched the agent choose, and are now
+    // running a different applet themselves, that disagreement is a routing
+    // label -- and the only kind worth having, since a harvested success is the
+    // model's own argmax and `work.rs` measured what training on those is
+    // worth. `ai::learn::judge` owns every refusal; this is only the place the
+    // typing happens.
+    //
+    // Before the dispatch rather than after, because the verdict is about which
+    // verb was typed and not about whether it worked: an operator correcting
+    // the machine with a command that then fails has still said which applet
+    // they meant.
+    match crate::ai::learn::operator_ran(cmd) {
+        crate::ai::learn::Verdict::Learn(applet, task) => {
+            console::set_color(LTGREEN);
+            kprintln!("  [learn] '{}' for: {}", applet, task);
+            console::set_color(LTGRAY);
+            kprintln!("          routing will be refitted from this. 'learn' to see, 'learn forget' to drop");
+        }
+        crate::ai::learn::Verdict::Spent => {
+            console::set_color(YELLOW);
+            kprintln!("  [learn] not recorded: this boot has already learned {} correction(s)",
+                crate::ai::learn::PER_BOOT);
+            console::set_color(LTGRAY);
+        }
+        _ => {}
+    }
+
     // One name, two meanings, told apart by shape: `write <path> <text>` is
     // the sysbox applet and has always been; `write [path]` with no text is
     // the editor window, because an editor is what "write" with nothing to
@@ -2692,6 +2720,50 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         // the transfer `fat get` leaves in the namespace. Replacing rather
         // than appending, because the bundle carries split *positions* and a
         // merge would leave them describing a corpus that no longer exists.
+        "learn" => {
+            use crate::ai::learn;
+            match rest {
+                "off" => {
+                    learn::set_enabled(false);
+                    kprintln!("  learning from corrections is off");
+                }
+                "on" => {
+                    learn::set_enabled(true);
+                    kprintln!("  learning from corrections is on");
+                }
+                "forget" => {
+                    learn::clear();
+                    kprintln!("  the live request is forgotten, so the next command is not a correction");
+                    kprintln!("  rows already written stay in /ai/train -- 'ls /ai/train' to see them");
+                }
+                _ => {
+                    kprintln!("  learning from corrections: {}",
+                        if learn::enabled() { "on" } else { "off" });
+                    let (goal, chose) = learn::pending();
+                    match (goal, chose) {
+                        (Some(g), Some(c)) =>
+                            kprintln!("  live request: {}\n  the agent chose: {}", g, c),
+                        (Some(g), None) =>
+                            kprintln!("  live request: {}\n  the agent has not acted on it", g),
+                        _ => kprintln!("  nothing asked, so nothing to correct"),
+                    }
+                    let rows = learn::rows();
+                    if rows.is_empty() {
+                        kprintln!("  nothing learned this boot (cap is {})", learn::PER_BOOT);
+                    } else {
+                        kprintln!("  learned this boot, {} of {}:", rows.len(), learn::PER_BOOT);
+                        for (applet, task) in &rows {
+                            kprintln!("    {:<10} {}", applet, task);
+                        }
+                        // Said because a row in the working tree is not a row
+                        // that survives: `write_blob` lands in memory and only
+                        // `snap` commits it. Autosnap is on by default, so this
+                        // is usually already done -- usually is not always.
+                        kprintln!("  durable only once a snapshot has been taken ('snaps' to check)");
+                    }
+                }
+            }
+        }
         "teach" if rest.starts_with("bundle ") => {
             let path = rest[7..].trim();
             match crate::sysbox::read_blob(path) {

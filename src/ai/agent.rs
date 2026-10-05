@@ -860,6 +860,11 @@ fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option
 /// written to /ai/episodes/. Executes on the resident agent task -- the
 /// shell returned to its caller the moment this episode was queued.
 pub fn run(goal: &str, trust: Trust, max_steps: usize) {
+    // The request, so an operator command that follows it can be read as a
+    // correction. Noted here rather than in the shell because every route into
+    // an episode -- the verb, the applet, the resident mind -- arrives at this
+    // function, and a second notice site is a second thing to keep in step.
+    super::learn::goal_given(goal);
     console::set_color(YELLOW);
     kprintln!("[agent]");
     console::set_color(LTGRAY);
@@ -1270,6 +1275,13 @@ fn episode(
             match checked {
                 Err(why) => (false, format!("invalid arguments: {}", why)),
                 Ok(()) => {
+                    // What the agent did about the live request, for
+                    // `learn`. Recorded at the dispatch rather than at the
+                    // decode, so a step the trust gate refused is not counted
+                    // as the agent's answer -- the operator correcting a
+                    // refusal is correcting the machine's policy, not its
+                    // routing.
+                    super::learn::agent_chose(&name);
                     console::begin_capture();
                     let ran = sysbox::dispatch(&name, &args);
                     let mut obs = console::end_capture().unwrap_or_default();
