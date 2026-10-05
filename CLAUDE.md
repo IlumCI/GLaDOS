@@ -2407,8 +2407,12 @@ with no `HOME` writes its dotfiles into the working directory. `TERM=dumb`
 because `ioctl` already says there is no terminal, and `PWD=/` because there is
 no `chdir`.
 
-`nanosleep` spins on the timer tick, because there is no guest scheduler to
-block against, so it costs the CPU it is not using.
+`nanosleep` **sleeps** now, and this said it "spins on the timer tick, because
+there is no guest scheduler to block against, so it costs the CPU it is not
+using". The second clause was the stale one: `task.rs` has a sleep queue, and
+the loop was `while ticks() < until { spin_loop() }` with no yield in it at all
+-- so it cost the CPU *and* skipped the deadline check *and* stopped pumping
+Skywalker for its own client. See "A task that waits stands down" below.
 
 **Signals used to be accepted and never delivered, and that paragraph is worth
 keeping because of how it stopped being true.** It read: "nothing here can
@@ -5652,6 +5656,52 @@ does**: the clock and compositor loop forever, guest threads park into a pool.
 So this is the mechanism and the headroom with no behaviour change to anything
 running. The two items it unblocks are still open -- blocking primitives spin
 rather than sleep, and a guest still holds the shell until it exits.
+
+### A task that waits stands down
+
+`sys_nanosleep` was the one wait in this kernel that genuinely spun:
+`while ticks() < until { spin_loop() }`. Three things wrong with that and one
+foreground guest hid all three -- the core was held for the whole sleep, the
+session deadline went unchecked (the timer only fires that from ring 3), and
+`sky::server::pump` stopped, so a Wayland client that slept stopped serving its
+own display connection. A background process per sleeping guest makes each of
+those a core.
+
+`State::Asleep` plus `Task.wake_at`, honoured in exactly the place `exiting`
+is and for the identical reason: `schedule` writes the outgoing state
+unconditionally, so a task that marked itself `Asleep` and yielded would have
+it overwritten. A task can no more put itself to sleep than free its own stack.
+
+Waking is decided in `schedule`'s own pass rather than from a timer hook -- the
+scan bound is already walked to pick a task, so an expired sleeper costs one
+comparison per slot and there is no second structure to disagree with `state`
+about who is runnable.
+
+**A deadline and a wake have to be told apart**, and that cost two failing
+claims. `wake` first set the task `Ready` and nothing else, which looks right:
+but `sleep_until` loops while the deadline is in the future, so being made
+runnable ended one iteration and the task slept again. A sixty-second sleep
+stayed sixty seconds however often it was woken. `Task.woken` is the flag the
+sleeper reads after its yield and before the loop condition, and `sleep_until`
+answers whether it reached its deadline.
+
+**nanosleep sleeps a tick at a time**, not once for the whole duration, and the
+slice is the point: it keeps the deadline check and the pump at the cadence
+every other blocking path uses. Only the sleeping changed.
+
+**The other yield loops are deliberately left alone.** `futex` WAIT, `accept`,
+the socket reads and the input wait all re-poll a condition *and* pump the
+display server each pass. Sleeping 10 ms between pumps trades a CPU sink for a
+sluggish display, and their existing form watches both the wake counter and the
+word, which is the lost-wakeup argument. So this is a sleep queue the one true
+busy-wait uses, not a wake protocol the pollers were rewritten into.
+
+Nine claims in `diag migrate`, four in `diag linux`. The one that separates a
+sleep from a spin is seeing the sleeper **asleep from another task** -- a
+spinning task is `Running` throughout, so elapsed time alone passes either way.
+Both duration claims are `>=` and never `==`: the tick is 10 ms so overshooting
+is expected, and returning early is the failure a sleep can have and a spin
+cannot.
 
 ### Concurrency
 
