@@ -129,6 +129,16 @@ pub fn applet_mutates(name: &str) -> Option<bool> {
     APPLETS.iter().find(|a| a.name == name).map(|a| a.mutates)
 }
 
+/// An applet's argument spec and help line, for a caller building a prompt.
+///
+/// Answers the table's own two strings rather than a sentence composed here:
+/// the usage an operator reads from `sysbox` and the usage the model is told
+/// have to be the same, or a decode is being guided by a description of an
+/// applet that does not exist.
+pub fn applet_usage(name: &str) -> Option<(&'static str, &'static str)> {
+    APPLETS.iter().find(|a| a.name == name).map(|a| (a.args, a.help))
+}
+
 pub fn is_applet(name: &str) -> bool {
     APPLETS.iter().any(|a| a.name == name)
 }

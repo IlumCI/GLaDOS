@@ -693,6 +693,61 @@ pub fn skill_choices() -> Vec<String> {
 /// Deliberately strict. Two or more known applet names and *nothing else* but
 /// separators: one name alone is a legitimate argument (`help ls`, `same cat`),
 /// and a name beside real text is somebody's filename.
+/// The step that already did this, when repeating it could say nothing new.
+///
+/// **A repeat of a *failed* action and a repeat of a *successful* one are
+/// different facts.** Repeating a failure is a model going in circles, and the
+/// right answer is the refusal `LOOP_LIMIT` produces, which names the step and
+/// tells it to try something else. Repeating a success that nothing has
+/// invalidated is informationally empty: the observation already said what
+/// happened, the world has not moved since, and running it again produces the
+/// same bytes.
+///
+/// Both were the same case, so a one-step goal spent its whole budget and
+/// scored *negative* for having finished early. Measured on Qwen3-0.6B, once
+/// arguments had stopped coming back wrong:
+///
+/// ```text
+///     1. write  /tmp/notes.txt hello   -> /tmp/notes.txt  8 B
+///     2. write  /tmp/notes.txt hello   -> /tmp/notes.txt  8 B
+///     3. write  /tmp/notes.txt hello
+///     budget steps=3/3 ok=2 rej=0 rep=2 loop=1 score=-1.00
+/// ```
+///
+/// The applet was right, the file was written, and the episode reports as worse
+/// than one that did nothing at all.
+///
+/// **"Nothing has invalidated it" is the whole of the care here, and the first
+/// version of this did not have it.** Ending on any repeat of a success would
+/// break a sequence every careful agent runs: look, change something, look
+/// again. `ls /ai`, `rm /ai/x`, `ls /ai` is three useful steps and the third is
+/// not a repeat in any sense that matters -- the directory moved underneath it.
+/// So a dispatched *mutating* applet after the earlier success clears the
+/// finding, and the re-check is allowed.
+///
+/// Pure, over the transcript the loop already keeps, so every case is a claim
+/// with no model and no dispatch: the codebase's `update::decide` shape.
+fn satisfied_at(steps: &[Step], action: &str) -> Option<usize> {
+    // The *last* identical success, not the first: with a mutation in between
+    // the earlier one has been superseded and the question is only about what
+    // has happened since the most recent one.
+    let at = steps.iter().rposition(|st| st.action == action && st.ok)?;
+    // Anything that changed the world since means a repeat is a fresh reading
+    // rather than the same one. Only a step that actually ran counts -- a
+    // mutating applet the trust gate refused changed nothing.
+    let moved = steps[at + 1..].iter().any(|st| {
+        st.ok && {
+            let verb = st.action.split_whitespace().next().unwrap_or("");
+            sysbox::applet_mutates(verb) == Some(true)
+        }
+    });
+    if moved {
+        None
+    } else {
+        Some(at)
+    }
+}
+
 fn recites_tools(args: &str) -> bool {
     let mut names = 0usize;
     for piece in args.split(|c: char| c == ',' || c.is_whitespace()) {
@@ -1010,6 +1065,15 @@ impl End {
     fn from_outcome(s: &str) -> End {
         match s {
             "model called done" => End::Done,
+            // A completion the *loop* decided, not the model: it proposed an
+            // action that had already succeeded with nothing changed since, so
+            // there was nothing left for it to learn by running it again. Both
+            // are `End::Done` because both are an episode that finished its
+            // work, and they are different strings because they are different
+            // facts -- a transcript saying "model called done" about a model
+            // that did no such thing is the kind of wrong this file cannot
+            // afford, since the transcript is what `learn` and the judges read.
+            "the goal was already met" => End::Done,
             "aborted by operator" => End::Aborted,
             "decode did not settle" => End::Stuck,
             "script exhausted" => End::Script,
@@ -1245,6 +1309,22 @@ fn episode(
         let prior = steps.iter().filter(|s| s.action == action).count();
         let first_at = steps.iter().position(|s| s.action == action).map(|i| i + 1);
 
+        // A repeat that cannot tell the model anything new ends the episode.
+        // See `satisfied_at`.
+        if let Some(at) = satisfied_at(&steps, &action) {
+            if !quiet {
+                console::set_color(LTCYAN);
+                kprintln!("  (step {} already did this, so the goal is met)", at + 1);
+                console::set_color(LTGRAY);
+            }
+            elog(format!("done: step {} already did this", at + 1));
+            // Its own string, mapped to `End::Done` by `from_outcome`. Not
+            // "model called done", which would credit the model with a
+            // decision the loop made.
+            outcome = "the goal was already met";
+            break;
+        }
+
         // Shape-check before dispatch. Rejection is an observation, not an
         // error: the model gets to read why and choose differently.
         let admitted = script.is_none()
@@ -1410,25 +1490,68 @@ pub fn selftest() -> bool {
     // runs *before* dispatch inside the loop, which is the only place it can
     // save anything, and that `LOOP_LIMIT` is where it fires.
     //
-    // `ls /sys` four times: the first two dispatch, the third and fourth are
-    // refused. Read-only and idempotent on purpose, so a broken check that
-    // dispatched anyway would still leave the machine exactly as it found it.
+    // **A repeated *failure* four times**, and the action is what changed here.
+    // It used to be `ls /sys`, which succeeds -- and a repeat of a success now
+    // ends the episode (see `satisfied_at`), so the loop-breaker was never
+    // reached and this claim was asserting a path the loop no longer takes for
+    // that input. The mechanism is unchanged and still has to be checked, so it
+    // is checked on the input that still uses it: circling on something that
+    // does not work, which is the case circling actually hurts.
+    //
+    // `cat` with no argument is refused for arity every time, so it is
+    // idempotent in the strongest sense -- it does not even run.
     let circles = alloc::vec![
-        String::from("ls /sys"),
-        String::from("ls /sys"),
-        String::from("ls /sys"),
-        String::from("ls /sys"),
+        String::from("cat"),
+        String::from("cat"),
+        String::from("cat"),
+        String::from("cat"),
     ];
     let (spun_end, spun) = episode("boot selftest", Trust::ReadOnly, 8, Some(&circles), true);
     let spun_signal = Outcome::observe("circles", 8, &spun_end, &spun);
     check("the loop stops dispatching an action at the third identical try", {
         spun.len() == 4
-            && spun[0].ok
-            && spun[1].ok
+            && !spun[0].ok
+            && !spun[1].ok
             && !spun[2].ok
             && spun[2].looped
             && !spun[3].ok
             && spun[3].looped
+    });
+
+    // --- a repeat that can say nothing new ends the episode -----------
+    //
+    // Pure over a transcript, so these need no dispatch and no model. The
+    // third is the one that earns its place: it is the sequence a careful
+    // agent runs -- look, change something, look again -- and the first
+    // version of this rule would have ended the episode on it.
+    let ok_step = |a: &str, ok: bool| Step {
+        action: String::from(a),
+        ok,
+        looped: false,
+        observation: String::from("x"),
+    };
+    check("a repeat of a success that nothing has invalidated is the end", {
+        satisfied_at(&[ok_step("ls /ai", true)], "ls /ai") == Some(0)
+    });
+    check("a repeat of a failure is not, because it never worked", {
+        satisfied_at(&[ok_step("cat", false)], "cat").is_none()
+    });
+    check("and a re-check after something changed is allowed, not ended", {
+        satisfied_at(&[ok_step("ls /ai", true), ok_step("rm /ai/x", true)], "ls /ai").is_none()
+    });
+    check("a mutating step the trust gate refused changed nothing, so it still ends", {
+        satisfied_at(&[ok_step("ls /ai", true), ok_step("rm /ai/x", false)], "ls /ai") == Some(0)
+    });
+    check("an action not taken before is not a repeat at all", {
+        satisfied_at(&[ok_step("ls /ai", true)], "tree /ai").is_none()
+    });
+    // The *last* success, not the first: with a mutation between two
+    // identical successes only what happened after the later one matters.
+    check("it reads the most recent success, not the first", {
+        satisfied_at(
+            &[ok_step("ls /ai", true), ok_step("rm /ai/x", true), ok_step("ls /ai", true)],
+            "ls /ai",
+        ) == Some(2)
     });
     // The notice is the mechanism, so it has to be readable and it has to
     // point somewhere the model can still see. A refusal that said only "no"
@@ -1439,8 +1562,13 @@ pub fn selftest() -> bool {
     });
     // A loop-break is not a rejection, and conflating them would make an
     // episode that went in circles read as one that asked for the impossible.
+    //
+    // The numbers moved with the fixture and the claim did not weaken: the
+    // first two `cat`s are genuine arity refusals and the last two are
+    // loop-breaks, so `rejected == 2` is exactly what says the two kinds are
+    // still counted apart. Conflating them would read 4.
     check("a loop-break counts as looped and never as rejected", {
-        spun_signal.looped == 2 && spun_signal.rejected == 0 && spun_signal.dispatched == 2
+        spun_signal.looped == 2 && spun_signal.rejected == 2 && spun_signal.dispatched == 0
     });
 
     // An applet that runs and says nothing is legal and uninformative, which
