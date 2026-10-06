@@ -311,7 +311,7 @@ fn radio_scanned() -> Status {
 }
 
 /// Whether `prepare_join` has put a link up: the five contexts and two queues
-/// of `iwx::mld`. The journal says which step refused, if one did.
+/// of `iwx::join`. The journal says which step refused, if one did.
 fn radio_prepared() -> Status {
     match crate::dev::iwx::with_held(|h| match &h.link {
         Some(l) => Some(alloc::format!("queues {} and {}", l.mgmt.id.unwrap_or(255), l.data.id.unwrap_or(255))),

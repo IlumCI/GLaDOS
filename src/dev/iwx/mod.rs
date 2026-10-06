@@ -43,7 +43,7 @@ pub mod rx;
 pub mod scan;
 pub mod wlan;
 pub mod fw;
-pub mod mld;
+pub mod join;
 
 use crate::dev::pci::{self, Device};
 use alloc::string::String;
@@ -988,7 +988,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.extend(rx::checks());
     out.extend(reg::checks());
     out.extend(scan::checks());
-    out.extend(mld::checks());
+    out.extend(join::checks());
     out
 }
 
@@ -1209,8 +1209,8 @@ pub struct Held {
 pub struct Link {
     pub target: crate::dev::radio::JoinTarget,
     pub band24: bool,
-    pub mgmt: mld::TxQueue,
-    pub data: mld::TxQueue,
+    pub mgmt: join::TxQueue,
+    pub data: join::TxQueue,
     /// The association id, once `associated` has been told it.
     pub assoc: Option<u16>,
     /// Transmit responses seen, and how many said the frame went out.
@@ -1234,10 +1234,11 @@ pub struct Facts {
     pub ds_param: bool,
     pub scan_channels: usize,
     /// What the join path needs to know about the image's command table.
-    pub vers: mld::Versions,
+    pub vers: join::Versions,
     /// The transmit chains the NVM declares, which is which antenna a fixed-rate
-    /// frame is sent on.
+    /// frame is sent on; and the receive chains, which the PHY context listens on.
     pub tx_ant: u8,
+    pub rx_ant: u8,
 }
 
 impl Facts {
@@ -1248,8 +1249,9 @@ impl Facts {
             scan_ver: image.cmd_ver(config::LONG_GROUP, scan::SCAN_REQ_UMAC),
             ds_param: image.has_capa(scan::CAPA_DS_PARAM_SET_IE),
             scan_channels: image.scan_channels(),
-            vers: mld::Versions::of(image),
+            vers: join::Versions::of(image),
             tx_ant: n.tx_chains,
+            rx_ant: n.rx_chains,
         }
     }
 }
@@ -1314,17 +1316,17 @@ impl Held {
         // Transmit responses arrive on the data queues' ids, which the command
         // queue rightly ignores; counted here so a trip can say whether frames
         // left the part. A session-protection end is noted and nothing more.
-        while let Some(t) = self.inbox.notif(0, mld::TX_CMD).or_else(|| self.inbox.notif(config::LONG_GROUP, mld::TX_CMD)) {
+        while let Some(t) = self.inbox.notif(0, join::TX_CMD).or_else(|| self.inbox.notif(config::LONG_GROUP, join::TX_CMD)) {
             if let Some(l) = self.link.as_mut() {
                 l.tx_done += 1;
-                let st = mld::tx_status(&t.payload);
+                let st = join::tx_status(&t.payload);
                 l.tx_last = st;
                 if matches!(st.map(|s| s & 0xff), Some(1) | Some(2)) {
                     l.tx_ok += 1;
                 }
             }
         }
-        while let Some(n) = self.inbox.notif(mld::MAC_CONF_GROUP, mld::SESSION_PROTECTION_NOTIF) {
+        while let Some(n) = self.inbox.notif(join::MAC_CONF_GROUP, join::SESSION_PROTECTION_NOTIF) {
             let status = n.payload.get(4).copied().unwrap_or(0);
             self.note(alloc::format!("session protection ended, status {}", status));
         }
@@ -1472,9 +1474,9 @@ impl Held {
         }
     }
 
-    /// Set the firmware up to talk to one access point: the sequence `mld.rs`
-    /// opens with. On any refusal what was already added is taken down again,
-    /// so a failed join leaves the part as it was.
+    /// Set the firmware up to talk to one access point: `iwx_auth`'s
+    /// sequence, which `join.rs` opens with. On any refusal what was already
+    /// added is taken down again, so a failed join leaves the part as it was.
     pub fn prepare_join(&mut self, t: &crate::dev::radio::JoinTarget) -> Result<(), &'static str> {
         if self.stopped.is_some() {
             return Err("the part is stopped");
@@ -1486,61 +1488,98 @@ impl Held {
         let band24 = matches!(crate::dev::radio::band_of(t.channel), Some(crate::dev::radio::Band::G24));
         let addr = self.facts.mac;
         let vers = self.facts.vers;
-        let g = mld::MAC_CONF_GROUP;
         let l = config::LONG_GROUP;
         self.note(alloc::format!(
             "join {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} on channel {} ({})",
             t.bssid[0], t.bssid[1], t.bssid[2], t.bssid[3], t.bssid[4], t.bssid[5], t.channel, if band24 { "2.4 GHz" } else { "5 GHz" }
         ));
 
-        self.ask(l, mld::PHY_CONTEXT_CMD, 0, &mld::phy_context(mld::ACTION_ADD, t.channel, band24, vers.cdb), 2000, "PHY_CONTEXT_CMD add")?;
-        if let Err(e) = self.ask(g, mld::MAC_CONFIG_CMD, 0, &mld::mac_config(mld::ACTION_ADD, addr, None), 2000, "MAC_CONFIG_CMD add") {
-            let _ = self.ask(l, mld::PHY_CONTEXT_CMD, 0, &mld::phy_context(mld::ACTION_REMOVE, t.channel, band24, vers.cdb), 1000, "PHY_CONTEXT_CMD remove");
-            return Err(e);
-        }
-        let params = mld::LinkParams { band24, bi: t.beacon_int, dtim: t.dtim.unwrap_or(0) };
+        // The PHY, and where its receive chains are declared depends on the
+        // image: in `RLC_CONFIG_CMD` at version 2, in the context itself before.
+        let chains = join::rx_chain_info(self.facts.rx_ant);
+        let rx_in_phy = if vers.rlc_separate() { None } else { Some(chains) };
+        self.ask(l, join::PHY_CONTEXT_CMD, 0, &join::phy_context(join::ACTION_ADD, t.channel, band24, vers.cdb, rx_in_phy), 2000, "PHY_CONTEXT_CMD add")?;
+        let mac = join::MacParams { band24, bi: t.beacon_int, dtim: t.dtim.unwrap_or(0), assoc: None };
         let step: Result<(), &'static str> = (|| {
-            self.ask(g, mld::LINK_CONFIG_CMD, 0, &mld::link_add(addr), 2000, "LINK_CONFIG_CMD add")?;
-            self.ask(g, mld::LINK_CONFIG_CMD, 0, &mld::link_modify(addr, true, &params), 2000, "LINK_CONFIG_CMD activate")?;
-            self.ask(g, mld::STA_CONFIG_CMD, 0, &mld::sta_config(vers.sta_len(), t.bssid, None), 2000, "STA_CONFIG_CMD add")?;
-            let mut mgmt = mld::TxQueue::new(mld::MGMT_TID).ok_or("no memory for a management queue")?;
-            let rsp = self.ask(mld::DATA_PATH_GROUP, mld::SCD_QUEUE_CONFIG_CMD, 0, &mgmt.add_body(), 2000, "SCD_QUEUE_CONFIG_CMD add (management)")?;
-            mgmt.activated(&rsp)?;
-            let mut data = mld::TxQueue::new(mld::DATA_TID).ok_or("no memory for a data queue")?;
-            let rsp = self.ask(mld::DATA_PATH_GROUP, mld::SCD_QUEUE_CONFIG_CMD, 0, &data.add_body(), 2000, "SCD_QUEUE_CONFIG_CMD add (data)")?;
-            data.activated(&rsp)?;
-            self.note(alloc::format!("queues: management {}, data {}", mgmt.id.unwrap_or(255), data.id.unwrap_or(255)));
-            self.link = Some(Link { target: *t, band24, mgmt, data, assoc: None, tx_done: 0, tx_ok: 0, tx_last: None });
-            // Hold the channel for the handshake. Advisory: a refusal here is
-            // noted and the join goes on, since without a scan or power save
-            // running nothing is competing for the radio anyway.
-            let _ = self.ask(g, mld::SESSION_PROTECTION_CMD, 0, &mld::session_protection(mld::ACTION_ADD, mld::msec_to_tu(2000)), 1000, "SESSION_PROTECTION_CMD add");
-            Ok(())
+            if vers.rlc_separate() {
+                self.ask(join::DATA_PATH_GROUP, join::RLC_CONFIG_CMD, 2, &join::rlc_config(self.facts.rx_ant), 2000, "RLC_CONFIG_CMD")?;
+            }
+            self.ask(l, join::MAC_CONTEXT_CMD, 0, &join::mac_context(join::ACTION_ADD, addr, t.bssid, &mac), 2000, "MAC_CONTEXT_CMD add")?;
+            let r = (|| {
+                // The binding answers a status word, zero for success.
+                let rsp = self.ask(l, join::BINDING_CONTEXT_CMD, 0, &join::binding(join::ACTION_ADD, 0), 2000, "BINDING_CONTEXT_CMD add")?;
+                if rsp.len() >= 4 && rsp[..4] != [0, 0, 0, 0] {
+                    self.note(alloc::format!("BINDING_CONTEXT_CMD answered status {:#x}", u32::from_le_bytes([rsp[0], rsp[1], rsp[2], rsp[3]])));
+                    return Err("BINDING_CONTEXT_CMD refused");
+                }
+                let r = (|| {
+                    let rsp = self.ask(l, join::ADD_STA, 0, &join::add_sta(false, t.bssid), 2000, "ADD_STA add")?;
+                    if !join::add_sta_ok(&rsp) {
+                        self.note(alloc::format!("ADD_STA answered status {:#x}", rsp.first().copied().unwrap_or(0xff)));
+                        return Err("ADD_STA refused");
+                    }
+                    let r = (|| {
+                        let mut mgmt = join::TxQueue::new(join::MGMT_TID).ok_or("no memory for a management queue")?;
+                        let rsp = self.ask(join::DATA_PATH_GROUP, join::SCD_QUEUE_CONFIG_CMD, 0, &mgmt.add_body(), 2000, "SCD_QUEUE_CONFIG_CMD add (management)")?;
+                        mgmt.activated(&rsp)?;
+                        let mut data = join::TxQueue::new(join::DATA_TID).ok_or("no memory for a data queue")?;
+                        let rsp = self.ask(join::DATA_PATH_GROUP, join::SCD_QUEUE_CONFIG_CMD, 0, &data.add_body(), 2000, "SCD_QUEUE_CONFIG_CMD add (data)")?;
+                        if let Err(e) = data.activated(&rsp) {
+                            let _ = self.ask(join::DATA_PATH_GROUP, join::SCD_QUEUE_CONFIG_CMD, 0, &mgmt.remove_body(), 1000, "SCD_QUEUE_CONFIG_CMD remove (management)");
+                            return Err(e);
+                        }
+                        self.note(alloc::format!("queues: management {}, data {}", mgmt.id.unwrap_or(255), data.id.unwrap_or(255)));
+                        self.link = Some(Link { target: *t, band24, mgmt, data, assoc: None, tx_done: 0, tx_ok: 0, tx_last: None });
+                        Ok(())
+                    })();
+                    if r.is_err() {
+                        let _ = self.ask(l, join::REMOVE_STA, 0, &join::sta_remove(), 1000, "REMOVE_STA");
+                    }
+                    r
+                })();
+                if r.is_err() {
+                    let _ = self.ask(l, join::BINDING_CONTEXT_CMD, 0, &join::binding(join::ACTION_REMOVE, 0), 1000, "BINDING_CONTEXT_CMD remove");
+                }
+                r
+            })();
+            if r.is_err() {
+                let _ = self.ask(l, join::MAC_CONTEXT_CMD, 0, &join::mac_context(join::ACTION_REMOVE, addr, t.bssid, &mac), 1000, "MAC_CONTEXT_CMD remove");
+            }
+            r
         })();
         if let Err(e) = step {
-            self.leave();
+            let _ = self.ask(l, join::PHY_CONTEXT_CMD, 0, &join::phy_context(join::ACTION_REMOVE, t.channel, band24, vers.cdb, rx_in_phy), 1000, "PHY_CONTEXT_CMD remove");
             return Err(e);
         }
+        // Hold the channel for the handshake: nine beacon intervals, upstream's
+        // figure, or 900 TU when the beacon did not say. Advisory -- a refusal
+        // is noted and the join goes on, since nothing else is competing for
+        // the radio.
+        let tu = if t.beacon_int == 0 { 900 } else { t.beacon_int as u32 * 9 };
+        let _ = self.ask(join::MAC_CONF_GROUP, join::SESSION_PROTECTION_CMD, 0, &join::session_protection(join::ACTION_ADD, tu), 1000, "SESSION_PROTECTION_CMD add");
         Ok(())
     }
 
-    /// The association succeeded: tell the firmware the id, and that beacons
-    /// are its business now.
+    /// The association succeeded: `iwx_run`'s half. The station is updated,
+    /// the MAC is told the id and stops asking for beacons, and the channel
+    /// no longer needs protecting.
     pub fn associated(&mut self, aid: u16, t: &crate::dev::radio::JoinTarget) {
         let Some(link) = self.link.as_mut() else { return };
         link.assoc = Some(aid);
         link.target = *t;
-        let (addr, vers, band24) = (self.facts.mac, self.facts.vers, link.band24);
-        let g = mld::MAC_CONF_GROUP;
-        let params = mld::LinkParams { band24, bi: t.beacon_int, dtim: t.dtim.unwrap_or(0) };
-        let _ = self.ask(g, mld::STA_CONFIG_CMD, 0, &mld::sta_config(vers.sta_len(), t.bssid, Some(aid)), 2000, "STA_CONFIG_CMD associated");
-        let _ = self.ask(g, mld::LINK_CONFIG_CMD, 0, &mld::link_modify(addr, true, &params), 2000, "LINK_CONFIG_CMD beacon timing");
-        let _ = self.ask(g, mld::MAC_CONFIG_CMD, 0, &mld::mac_config(mld::ACTION_MODIFY, addr, Some(aid)), 2000, "MAC_CONFIG_CMD associated");
-        let _ = self.ask(g, mld::SESSION_PROTECTION_CMD, 0, &mld::session_protection(mld::ACTION_REMOVE, 0), 1000, "SESSION_PROTECTION_CMD remove");
+        let (addr, band24) = (self.facts.mac, link.band24);
+        let l = config::LONG_GROUP;
+        let mac = join::MacParams { band24, bi: t.beacon_int, dtim: t.dtim.unwrap_or(0), assoc: Some(aid) };
+        match self.ask(l, join::ADD_STA, 0, &join::add_sta(true, t.bssid), 2000, "ADD_STA update") {
+            Ok(rsp) if !join::add_sta_ok(&rsp) => self.note(alloc::format!("ADD_STA update answered status {:#x}", rsp.first().copied().unwrap_or(0xff))),
+            _ => {}
+        }
+        let _ = self.ask(l, join::MAC_CONTEXT_CMD, 0, &join::mac_context(join::ACTION_MODIFY, addr, t.bssid, &mac), 2000, "MAC_CONTEXT_CMD associated");
+        let _ = self.ask(join::MAC_CONF_GROUP, join::SESSION_PROTECTION_CMD, 0, &join::session_protection(join::ACTION_REMOVE, 0), 1000, "SESSION_PROTECTION_CMD remove");
     }
 
     /// Take everything `prepare_join` put up back down, in reverse. Every step
-    /// is attempted whatever the one before it said, because a part left with
+    /// is attempted whatever the one before said, because a part left with
     /// half a station is the state the next join cannot recover from.
     pub fn leave(&mut self) {
         let Some(link) = self.link.take() else { return };
@@ -1548,23 +1587,23 @@ impl Held {
             return;
         }
         let (addr, band24, ch) = (self.facts.mac, link.band24, link.target.channel);
-        let g = mld::MAC_CONF_GROUP;
+        let vers = self.facts.vers;
         let l = config::LONG_GROUP;
-        let params = mld::LinkParams { band24, bi: link.target.beacon_int, dtim: link.target.dtim.unwrap_or(0) };
+        let mac = join::MacParams { band24, bi: link.target.beacon_int, dtim: link.target.dtim.unwrap_or(0), assoc: link.assoc };
         if link.assoc.is_none() {
-            let _ = self.ask(g, mld::SESSION_PROTECTION_CMD, 0, &mld::session_protection(mld::ACTION_REMOVE, 0), 1000, "SESSION_PROTECTION_CMD remove");
+            let _ = self.ask(join::MAC_CONF_GROUP, join::SESSION_PROTECTION_CMD, 0, &join::session_protection(join::ACTION_REMOVE, 0), 1000, "SESSION_PROTECTION_CMD remove");
         }
         if link.data.id.is_some() {
-            let _ = self.ask(mld::DATA_PATH_GROUP, mld::SCD_QUEUE_CONFIG_CMD, 0, &link.data.remove_body(), 1000, "SCD_QUEUE_CONFIG_CMD remove (data)");
+            let _ = self.ask(join::DATA_PATH_GROUP, join::SCD_QUEUE_CONFIG_CMD, 0, &link.data.remove_body(), 1000, "SCD_QUEUE_CONFIG_CMD remove (data)");
         }
         if link.mgmt.id.is_some() {
-            let _ = self.ask(mld::DATA_PATH_GROUP, mld::SCD_QUEUE_CONFIG_CMD, 0, &link.mgmt.remove_body(), 1000, "SCD_QUEUE_CONFIG_CMD remove (management)");
+            let _ = self.ask(join::DATA_PATH_GROUP, join::SCD_QUEUE_CONFIG_CMD, 0, &link.mgmt.remove_body(), 1000, "SCD_QUEUE_CONFIG_CMD remove (management)");
         }
-        let _ = self.ask(g, mld::STA_REMOVE_CMD, 0, &mld::sta_remove(), 1000, "STA_REMOVE_CMD");
-        let _ = self.ask(g, mld::LINK_CONFIG_CMD, 0, &mld::link_modify(addr, false, &params), 1000, "LINK_CONFIG_CMD deactivate");
-        let _ = self.ask(g, mld::LINK_CONFIG_CMD, 0, &mld::link_remove(addr), 1000, "LINK_CONFIG_CMD remove");
-        let _ = self.ask(g, mld::MAC_CONFIG_CMD, 0, &mld::mac_config(mld::ACTION_REMOVE, addr, None), 1000, "MAC_CONFIG_CMD remove");
-        let _ = self.ask(l, mld::PHY_CONTEXT_CMD, 0, &mld::phy_context(mld::ACTION_REMOVE, ch, band24, self.facts.vers.cdb), 1000, "PHY_CONTEXT_CMD remove");
+        let _ = self.ask(l, join::REMOVE_STA, 0, &join::sta_remove(), 1000, "REMOVE_STA");
+        let _ = self.ask(l, join::BINDING_CONTEXT_CMD, 0, &join::binding(join::ACTION_REMOVE, 0), 1000, "BINDING_CONTEXT_CMD remove");
+        let _ = self.ask(l, join::MAC_CONTEXT_CMD, 0, &join::mac_context(join::ACTION_REMOVE, addr, link.target.bssid, &mac), 1000, "MAC_CONTEXT_CMD remove");
+        let rx_in_phy = if vers.rlc_separate() { None } else { Some(join::rx_chain_info(self.facts.rx_ant)) };
+        let _ = self.ask(l, join::PHY_CONTEXT_CMD, 0, &join::phy_context(join::ACTION_REMOVE, ch, band24, vers.cdb, rx_in_phy), 1000, "PHY_CONTEXT_CMD remove");
         // The queues' memory goes back with `link`, which the firmware has now
         // been told to forget. A part that refused the removes keeps writing
         // transmit responses, not descriptors, so the heap is safe either way.
@@ -1580,9 +1619,9 @@ impl Held {
         }
         let (bar0, ant) = (self.bar0, self.facts.tx_ant);
         let link = self.link.as_mut().ok_or("no access point has been prepared; `prepare_join` first")?;
-        let rate = mld::legacy_rate(link.band24, ant);
-        let flags = mld::TX_FLAGS_CMD_RATE | mld::TX_FLAGS_ENCRYPT_DIS;
-        let q = if mld::is_mgmt(frame) { &mut link.mgmt } else { &mut link.data };
+        let rate = join::legacy_rate(link.band24, ant);
+        let flags = join::TX_FLAGS_CMD_RATE | join::TX_FLAGS_ENCRYPT_DIS;
+        let q = if join::is_mgmt(frame) { &mut link.mgmt } else { &mut link.data };
         // Safety: this part's aperture, alive, not stopped, and the queue was
         // activated by the firmware's own reply.
         unsafe { q.send(bar0, frame, rate, flags) }

@@ -13,13 +13,13 @@
 //! `rx`. That is enough for `wifi scan` and for the network manager to list what
 //! is in the air.
 //!
-//! It joins, through `mld.rs`: `prepare_join` puts up the PHY context, the MAC,
-//! the link, the station and two queues, `tx` sends the authentication and
-//! association `mlme` builds through the management queue, `associated` tells
-//! the firmware the id, and `left` takes it all down. **Untested on the part
-//! until the next trip**: every layout is asserted against the headers and
-//! every step is journalled (`iwx` prints it), which is what a trip with no
-//! serial line can bring home.
+//! It joins, through `join.rs`: `prepare_join` puts up the PHY context, the
+//! MAC context, the binding, the station and two queues, `tx` sends the
+//! authentication and association `mlme` builds through the management queue,
+//! `associated` tells the firmware the id, and `left` takes it all down.
+//! **Untested on the part until the next trip**: every layout is asserted
+//! against the headers and every step is journalled (`iwx journal` prints
+//! it), which is what a trip with no serial line can bring home.
 
 use crate::dev::radio::{Caps, Radio, Rx};
 
