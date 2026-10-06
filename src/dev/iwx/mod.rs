@@ -43,6 +43,7 @@ pub mod rx;
 pub mod scan;
 pub mod wlan;
 pub mod fw;
+pub mod mld;
 
 use crate::dev::pci::{self, Device};
 use alloc::string::String;
@@ -987,6 +988,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.extend(rx::checks());
     out.extend(reg::checks());
     out.extend(scan::checks());
+    out.extend(mld::checks());
     out
 }
 
@@ -1196,6 +1198,26 @@ pub struct Held {
     scan_began: u64,
     /// Scans that never said they ended and were given up on.
     pub scans_abandoned: u32,
+    /// The access point this part has been set up to talk to, if any.
+    pub link: Option<Link>,
+    /// What the join path did and what the part said, newest last. Bounded.
+    /// The laptop has no serial line, so this is what a trip brings home.
+    pub journal: alloc::collections::VecDeque<String>,
+}
+
+/// Everything set up in the firmware for one access point.
+pub struct Link {
+    pub target: crate::dev::radio::JoinTarget,
+    pub band24: bool,
+    pub mgmt: mld::TxQueue,
+    pub data: mld::TxQueue,
+    /// The association id, once `associated` has been told it.
+    pub assoc: Option<u16>,
+    /// Transmit responses seen, and how many said the frame went out.
+    pub tx_done: u32,
+    pub tx_ok: u32,
+    /// The last status byte a transmit response carried.
+    pub tx_last: Option<u8>,
 }
 
 /// How long a scan may run before the part is taken not to be scanning. Sixty-
@@ -1211,6 +1233,11 @@ pub struct Facts {
     pub scan_ver: Option<u8>,
     pub ds_param: bool,
     pub scan_channels: usize,
+    /// What the join path needs to know about the image's command table.
+    pub vers: mld::Versions,
+    /// The transmit chains the NVM declares, which is which antenna a fixed-rate
+    /// frame is sent on.
+    pub tx_ant: u8,
 }
 
 impl Facts {
@@ -1221,6 +1248,8 @@ impl Facts {
             scan_ver: image.cmd_ver(config::LONG_GROUP, scan::SCAN_REQ_UMAC),
             ds_param: image.has_capa(scan::CAPA_DS_PARAM_SET_IE),
             scan_channels: image.scan_channels(),
+            vers: mld::Versions::of(image),
+            tx_ant: n.tx_chains,
         }
     }
 }
@@ -1243,6 +1272,8 @@ impl Held {
             scan_ended: None,
             scan_began: 0,
             scans_abandoned: 0,
+            link: None,
+            journal: alloc::collections::VecDeque::new(),
         })
     }
 
@@ -1280,6 +1311,23 @@ impl Held {
         // scan's, the first ends it, and a second left lying would end the
         // *next* scan the moment it began -- every other scan empty. Upstream
         // throws a late one away for the same reason.
+        // Transmit responses arrive on the data queues' ids, which the command
+        // queue rightly ignores; counted here so a trip can say whether frames
+        // left the part. A session-protection end is noted and nothing more.
+        while let Some(t) = self.inbox.notif(0, mld::TX_CMD).or_else(|| self.inbox.notif(config::LONG_GROUP, mld::TX_CMD)) {
+            if let Some(l) = self.link.as_mut() {
+                l.tx_done += 1;
+                let st = mld::tx_status(&t.payload);
+                l.tx_last = st;
+                if matches!(st.map(|s| s & 0xff), Some(1) | Some(2)) {
+                    l.tx_ok += 1;
+                }
+            }
+        }
+        while let Some(n) = self.inbox.notif(mld::MAC_CONF_GROUP, mld::SESSION_PROTECTION_NOTIF) {
+            let status = n.payload.get(4).copied().unwrap_or(0);
+            self.note(alloc::format!("session protection ended, status {}", status));
+        }
         let ended = self.inbox.scan_done.take();
         if self.scanning {
             if ended.is_some() {
@@ -1375,6 +1423,169 @@ impl Held {
             }
             Err(_) => Err("the part would not call its scan off"),
         }
+    }
+
+
+    /// One line into the journal, oldest dropped past sixty-four.
+    pub fn note(&mut self, line: String) {
+        if self.journal.len() >= 64 {
+            self.journal.pop_front();
+        }
+        self.journal.push_back(line);
+    }
+
+    /// Send one command and wait for its completion, filing whatever else
+    /// arrives meanwhile. The reply's payload comes back; a refusal or a
+    /// silence is an `Err` naming the command.
+    fn ask(&mut self, group: u8, code: u8, version: u8, payload: &[u8], ms: u32, what: &'static str) -> Result<Vec<u8>, &'static str> {
+        if self.stopped.is_some() {
+            return Err("the part is stopped");
+        }
+        let b: &mut Booted = &mut self.booted;
+        let (inbox, desc) = (&mut self.inbox, self.desc);
+        // Safety: this part's aperture, alive, and not stopped.
+        let r = unsafe {
+            cmd::ask_with(
+                self.bar0,
+                &mut b.boot.rings,
+                &b.buffers,
+                &mut b.rx,
+                &mut b.cmds,
+                group,
+                code,
+                version,
+                payload,
+                ms,
+                &mut |p| inbox.take(p, desc),
+            )
+        };
+        match r {
+            Ok(p) => {
+                let v = p.payload.to_vec();
+                self.note(alloc::format!("{} ok, {} byte(s) back", what, v.len()));
+                Ok(v)
+            }
+            Err(e) => {
+                self.note(alloc::format!("{} failed: {}", what, e.why()));
+                Err(what)
+            }
+        }
+    }
+
+    /// Set the firmware up to talk to one access point: the sequence `mld.rs`
+    /// opens with. On any refusal what was already added is taken down again,
+    /// so a failed join leaves the part as it was.
+    pub fn prepare_join(&mut self, t: &crate::dev::radio::JoinTarget) -> Result<(), &'static str> {
+        if self.stopped.is_some() {
+            return Err("the part is stopped");
+        }
+        if self.link.is_some() {
+            self.leave();
+        }
+        self.facts.vers.check()?;
+        let band24 = matches!(crate::dev::radio::band_of(t.channel), Some(crate::dev::radio::Band::G24));
+        let addr = self.facts.mac;
+        let vers = self.facts.vers;
+        let g = mld::MAC_CONF_GROUP;
+        let l = config::LONG_GROUP;
+        self.note(alloc::format!(
+            "join {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} on channel {} ({})",
+            t.bssid[0], t.bssid[1], t.bssid[2], t.bssid[3], t.bssid[4], t.bssid[5], t.channel, if band24 { "2.4 GHz" } else { "5 GHz" }
+        ));
+
+        self.ask(l, mld::PHY_CONTEXT_CMD, 0, &mld::phy_context(mld::ACTION_ADD, t.channel, band24), 2000, "PHY_CONTEXT_CMD add")?;
+        if let Err(e) = self.ask(g, mld::MAC_CONFIG_CMD, 0, &mld::mac_config(mld::ACTION_ADD, addr, None), 2000, "MAC_CONFIG_CMD add") {
+            let _ = self.ask(l, mld::PHY_CONTEXT_CMD, 0, &mld::phy_context(mld::ACTION_REMOVE, t.channel, band24), 1000, "PHY_CONTEXT_CMD remove");
+            return Err(e);
+        }
+        let params = mld::LinkParams { band24, bi: t.beacon_int, dtim: t.dtim.unwrap_or(0) };
+        let step: Result<(), &'static str> = (|| {
+            self.ask(g, mld::LINK_CONFIG_CMD, 0, &mld::link_add(addr), 2000, "LINK_CONFIG_CMD add")?;
+            self.ask(g, mld::LINK_CONFIG_CMD, 0, &mld::link_modify(addr, true, &params), 2000, "LINK_CONFIG_CMD activate")?;
+            self.ask(g, mld::STA_CONFIG_CMD, 0, &mld::sta_config(vers.sta_len(), t.bssid, None), 2000, "STA_CONFIG_CMD add")?;
+            let mut mgmt = mld::TxQueue::new(mld::MGMT_TID).ok_or("no memory for a management queue")?;
+            let rsp = self.ask(mld::DATA_PATH_GROUP, mld::SCD_QUEUE_CONFIG_CMD, 0, &mgmt.add_body(), 2000, "SCD_QUEUE_CONFIG_CMD add (management)")?;
+            mgmt.activated(&rsp)?;
+            let mut data = mld::TxQueue::new(mld::DATA_TID).ok_or("no memory for a data queue")?;
+            let rsp = self.ask(mld::DATA_PATH_GROUP, mld::SCD_QUEUE_CONFIG_CMD, 0, &data.add_body(), 2000, "SCD_QUEUE_CONFIG_CMD add (data)")?;
+            data.activated(&rsp)?;
+            self.note(alloc::format!("queues: management {}, data {}", mgmt.id.unwrap_or(255), data.id.unwrap_or(255)));
+            self.link = Some(Link { target: *t, band24, mgmt, data, assoc: None, tx_done: 0, tx_ok: 0, tx_last: None });
+            // Hold the channel for the handshake. Advisory: a refusal here is
+            // noted and the join goes on, since without a scan or power save
+            // running nothing is competing for the radio anyway.
+            let _ = self.ask(g, mld::SESSION_PROTECTION_CMD, 0, &mld::session_protection(mld::ACTION_ADD, mld::msec_to_tu(2000)), 1000, "SESSION_PROTECTION_CMD add");
+            Ok(())
+        })();
+        if let Err(e) = step {
+            self.leave();
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// The association succeeded: tell the firmware the id, and that beacons
+    /// are its business now.
+    pub fn associated(&mut self, aid: u16, t: &crate::dev::radio::JoinTarget) {
+        let Some(link) = self.link.as_mut() else { return };
+        link.assoc = Some(aid);
+        link.target = *t;
+        let (addr, vers, band24) = (self.facts.mac, self.facts.vers, link.band24);
+        let g = mld::MAC_CONF_GROUP;
+        let params = mld::LinkParams { band24, bi: t.beacon_int, dtim: t.dtim.unwrap_or(0) };
+        let _ = self.ask(g, mld::STA_CONFIG_CMD, 0, &mld::sta_config(vers.sta_len(), t.bssid, Some(aid)), 2000, "STA_CONFIG_CMD associated");
+        let _ = self.ask(g, mld::LINK_CONFIG_CMD, 0, &mld::link_modify(addr, true, &params), 2000, "LINK_CONFIG_CMD beacon timing");
+        let _ = self.ask(g, mld::MAC_CONFIG_CMD, 0, &mld::mac_config(mld::ACTION_MODIFY, addr, Some(aid)), 2000, "MAC_CONFIG_CMD associated");
+        let _ = self.ask(g, mld::SESSION_PROTECTION_CMD, 0, &mld::session_protection(mld::ACTION_REMOVE, 0), 1000, "SESSION_PROTECTION_CMD remove");
+    }
+
+    /// Take everything `prepare_join` put up back down, in reverse. Every step
+    /// is attempted whatever the one before it said, because a part left with
+    /// half a station is the state the next join cannot recover from.
+    pub fn leave(&mut self) {
+        let Some(link) = self.link.take() else { return };
+        if self.stopped.is_some() {
+            return;
+        }
+        let (addr, band24, ch) = (self.facts.mac, link.band24, link.target.channel);
+        let g = mld::MAC_CONF_GROUP;
+        let l = config::LONG_GROUP;
+        let params = mld::LinkParams { band24, bi: link.target.beacon_int, dtim: link.target.dtim.unwrap_or(0) };
+        if link.assoc.is_none() {
+            let _ = self.ask(g, mld::SESSION_PROTECTION_CMD, 0, &mld::session_protection(mld::ACTION_REMOVE, 0), 1000, "SESSION_PROTECTION_CMD remove");
+        }
+        if link.data.id.is_some() {
+            let _ = self.ask(mld::DATA_PATH_GROUP, mld::SCD_QUEUE_CONFIG_CMD, 0, &link.data.remove_body(), 1000, "SCD_QUEUE_CONFIG_CMD remove (data)");
+        }
+        if link.mgmt.id.is_some() {
+            let _ = self.ask(mld::DATA_PATH_GROUP, mld::SCD_QUEUE_CONFIG_CMD, 0, &link.mgmt.remove_body(), 1000, "SCD_QUEUE_CONFIG_CMD remove (management)");
+        }
+        let _ = self.ask(g, mld::STA_REMOVE_CMD, 0, &mld::sta_remove(), 1000, "STA_REMOVE_CMD");
+        let _ = self.ask(g, mld::LINK_CONFIG_CMD, 0, &mld::link_modify(addr, false, &params), 1000, "LINK_CONFIG_CMD deactivate");
+        let _ = self.ask(g, mld::LINK_CONFIG_CMD, 0, &mld::link_remove(addr), 1000, "LINK_CONFIG_CMD remove");
+        let _ = self.ask(g, mld::MAC_CONFIG_CMD, 0, &mld::mac_config(mld::ACTION_REMOVE, addr, None), 1000, "MAC_CONFIG_CMD remove");
+        let _ = self.ask(l, mld::PHY_CONTEXT_CMD, 0, &mld::phy_context(mld::ACTION_REMOVE, ch, band24), 1000, "PHY_CONTEXT_CMD remove");
+        // The queues' memory goes back with `link`, which the firmware has now
+        // been told to forget. A part that refused the removes keeps writing
+        // transmit responses, not descriptors, so the heap is safe either way.
+        drop(link);
+    }
+
+    /// Send one 802.11 frame to the access point. Management frames take the
+    /// management queue; everything else the data queue. Fixed at the lowest
+    /// legacy rate, encrypted in software -- `mld.rs` says why.
+    pub fn tx(&mut self, frame: &[u8]) -> Result<(), &'static str> {
+        if self.stopped.is_some() {
+            return Err("the part is stopped");
+        }
+        let (bar0, ant) = (self.bar0, self.facts.tx_ant);
+        let link = self.link.as_mut().ok_or("no access point has been prepared; `prepare_join` first")?;
+        let rate = mld::legacy_rate(link.band24, ant);
+        let flags = mld::TX_FLAGS_CMD_RATE | mld::TX_FLAGS_ENCRYPT_DIS;
+        let q = if mld::is_mgmt(frame) { &mut link.mgmt } else { &mut link.data };
+        // Safety: this part's aperture, alive, not stopped, and the queue was
+        // activated by the firmware's own reply.
+        unsafe { q.send(bar0, frame, rate, flags) }
     }
 
     pub fn bar0(&self) -> u64 {

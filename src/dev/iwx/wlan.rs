@@ -13,12 +13,13 @@
 //! `rx`. That is enough for `wifi scan` and for the network manager to list what
 //! is in the air.
 //!
-//! **It does not join yet.** `prepare_join` is where the PHY context, the MAC
-//! context, the binding, the station and the time event belong, and none is
-//! written -- so it refuses, by name, and `mlme` turns that into a failure the
-//! operator can read rather than an authentication sent into a part that drops
-//! it. `tx` refuses for the same reason: without a station there is no queue a
-//! frame can go out on.
+//! It joins, through `mld.rs`: `prepare_join` puts up the PHY context, the MAC,
+//! the link, the station and two queues, `tx` sends the authentication and
+//! association `mlme` builds through the management queue, `associated` tells
+//! the firmware the id, and `left` takes it all down. **Untested on the part
+//! until the next trip**: every layout is asserted against the headers and
+//! every step is journalled (`iwx` prints it), which is what a trip with no
+//! serial line can bring home.
 
 use crate::dev::radio::{Caps, Radio, Rx};
 
@@ -51,16 +52,18 @@ impl Radio for Air {
     /// Nothing: stopping the station is not stopping the part. `iwx down` is.
     fn stop(&mut self) {}
 
+    /// The part tunes through a PHY context, which `prepare_join` adds; a bare
+    /// channel change has nothing to attach to and is refused by name.
     fn set_channel(&mut self, _ch: u8) -> Result<(), &'static str> {
-        Err("this part tunes only through a scan or a PHY context, and joining is not written")
+        Err("this part tunes only through a scan or a PHY context; join through `prepare_join`")
     }
 
     fn channel(&self) -> u8 {
-        0
+        super::with_held(|h| h.link.as_ref().map(|l| l.target.channel).unwrap_or(0)).unwrap_or(0)
     }
 
-    fn tx(&mut self, _frame: &[u8]) -> Result<(), &'static str> {
-        Err("this part sends frames only for a station it has been told about, and joining is not written")
+    fn tx(&mut self, frame: &[u8]) -> Result<(), &'static str> {
+        super::with_held(|h| h.tx(frame)).unwrap_or(Err("no part is held"))
     }
 
     fn rx(&mut self) -> Option<Rx> {
@@ -94,7 +97,15 @@ impl Radio for Air {
         let _ = super::with_held(|h| h.scan_abort());
     }
 
-    fn prepare_join(&mut self, _t: &crate::dev::radio::JoinTarget) -> Result<(), &'static str> {
-        Err("this driver scans and does not join yet: the station contexts are not written")
+    fn prepare_join(&mut self, t: &crate::dev::radio::JoinTarget) -> Result<(), &'static str> {
+        super::with_held(|h| h.prepare_join(t)).unwrap_or(Err("no part is held"))
+    }
+
+    fn associated(&mut self, aid: u16, t: &crate::dev::radio::JoinTarget) {
+        let _ = super::with_held(|h| h.associated(aid, t));
+    }
+
+    fn left(&mut self) {
+        let _ = super::with_held(|h| h.leave());
     }
 }

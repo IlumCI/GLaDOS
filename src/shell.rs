@@ -5337,8 +5337,39 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             // so they answer before the sweep: a part that has dropped off the
             // bus -- all ones, or gone into D3 -- is exactly the one somebody
             // needs to be able to stop.
-            if step == "rx" || step == "down" {
+            if step == "rx" || step == "down" || step == "journal" {
                 match step {
+                    // What the join path did and what the part answered, newest
+                    // last. The laptop has no serial line, so this is the trip's
+                    // evidence about joining, the way `rx` is about scanning.
+                    "journal" => {
+                        crate::dev::iwx::service();
+                        let shown = crate::dev::iwx::with_held(|h| {
+                            match &h.link {
+                                Some(l) => kprintln!(
+                                    "  link to {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} on channel {}, {}; queues mgmt {} data {}; {} frame(s) sent, {} response(s), {} said sent, last status {}",
+                                    l.target.bssid[0], l.target.bssid[1], l.target.bssid[2], l.target.bssid[3], l.target.bssid[4], l.target.bssid[5],
+                                    l.target.channel,
+                                    match l.assoc { Some(a) => alloc::format!("associated as {}", a), None => "not associated".into() },
+                                    l.mgmt.id.map(|q| alloc::format!("{}", q)).unwrap_or_else(|| "-".into()),
+                                    l.data.id.map(|q| alloc::format!("{}", q)).unwrap_or_else(|| "-".into()),
+                                    l.mgmt.sent + l.data.sent, l.tx_done, l.tx_ok,
+                                    l.tx_last.map(|s| alloc::format!("{:#04x}", s)).unwrap_or_else(|| "-".into())
+                                ),
+                                None => kprintln!("  no link: nothing has been prepared for an access point"),
+                            }
+                            kprintln!("  versions: {:?}", h.facts.vers);
+                            if h.journal.is_empty() {
+                                kprintln!("  the journal is empty");
+                            }
+                            for line in h.journal.iter() {
+                                kprintln!("    {}", line);
+                            }
+                        });
+                        if shown.is_none() {
+                            kprintln!("  nothing is held: `iwx boot` brings a part up");
+                        }
+                    }
                     // What the held part has said that nobody asked for. The first
                     // thing to read on the laptop after `iwx boot`: a part that is
                     // alive and silent and one that is talking into a full ring look

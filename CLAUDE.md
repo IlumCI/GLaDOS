@@ -6488,18 +6488,43 @@ boot does and what is still owed, in order:
 - **`wifi scan`** goes through `Radio::scan_offload` to a SCAN_REQ_UMAC v17, the
   version the image declares; beacons come back through the receive ring as
   `RX_MPDU`. `iwx rx` shows what the inbox holds.
-- **Joining is not written**: PHY/MAC contexts, binding, station, time event,
-  then a TX queue and key install. `prepare_join` refuses by name until then.
+- **Joining is written, through the MLD API, and has not run on the part.**
+  `src/dev/iwx/mld.rs`. The image declares `MLD_API_SUPPORT`, so the contexts
+  are the link-aware `MAC_CONF_GROUP` ones -- `MAC_CONFIG_CMD` v2,
+  `LINK_CONFIG_CMD` v2, `STA_CONFIG_CMD` (absent from the table, so the
+  96-byte v1) -- plus `PHY_CONTEXT_CMD` v4, two queues through
+  `SCD_QUEUE_CONFIG_CMD` v3 (management TID 15, data TID 0; the reply names
+  the queue and the write pointer the ring starts at), `SESSION_PROTECTION_CMD`
+  v2 around the handshake, and `TX_CMD` v10 framed as the firmware fetches it:
+  a twenty-byte first buffer, the rest of the command and the 802.11 header,
+  then the body. Every builder asserts the size the headers compute (mac 64,
+  link 208, phy 32, sta 96, session 24, queue 36) and `Versions::check`
+  refuses an image whose table says a layout moved. 35 claims in `diag iwx`.
+
+  Two things are deliberately not done and are stated there: **rates are fixed
+  at the lowest legacy rate** with `IWL_TX_FLAGS_CMD_RATE`, because letting
+  the firmware choose needs `TLC_MNG_CONFIG_CMD` and a link that works slowly
+  is the rung before one that works fast; and **keys stay in software**
+  (`hw_ccmp` false, `IWL_TX_FLAGS_ENCRYPT_DIS` on every frame).
+
+  **`iwx journal`** is what the trip brings home: every command the join path
+  sent, what the part answered, the queue numbers, and how many transmit
+  responses said a frame went out. Read it after `wifi join` whatever happened.
 
 `Radio` grew hooks for parts like this (`scan_offload`, `prepare_join`,
 `associated`, `left`), every default being the host-driven behaviour; `diag mlme`
 runs the whole path through both, and `wifi rehearse offload` drives it live.
 
-**None of the part-facing half has run on the part yet.** The trip order is the
-checklist: `iwx`, `iwx probe`, `fw`, `iwx boot`, `iwx rx`, `wifi scan`. There is
-no serial line, so `log send <ipv4> [port]` sends the transcript over the wired
-port to a listener (`nc -l 4444 > trip.log`) -- which needs a second machine,
-since the GF63 is also the development host.
+**The part-facing half up to a scan has run on the GF63.** `iwx boot` reached
+ALIVE (ucode 89.3528957251, umac 25.0), read the NVM (28:c5:d2:06:00:72, 38 of
+51 channels usable), sent all nine configuration commands and attached as
+`wlan0`; `wifi scan` listed nineteen networks. The join path above has not.
+The trip order is the checklist: `iwx`, `iwx probe`, `fw`, `iwx boot`,
+`iwx rx`, `wifi scan`, then `wifi join <ssid> <pass>`, `iwx journal`, and
+`dhcp` if the journal says it associated. There is no serial line, so
+`log send <ipv4> [port]` sends the transcript over the wired port to a listener
+(`nc -l 4444 > trip.log`) -- which needs a second machine, since the GF63 is
+also the development host.
 
 ### Skywalker: the Wayland server (`src/sky/`)
 

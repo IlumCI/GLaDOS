@@ -300,6 +300,44 @@ fn radio_nvm() -> Status {
     }
 }
 
+/// Whether a scan has run on the held part and what it heard.
+fn radio_scanned() -> Status {
+    match crate::dev::iwx::with_held(|h| (h.scan_ended.is_some(), h.scanning, h.inbox.frames.len())) {
+        None => Status::Todo,
+        Some((false, true, _)) => Status::Todo,
+        Some((false, false, _)) => Status::Todo,
+        Some((true, _, n)) => ok(alloc::format!("ended, {} frame(s) waiting", n)),
+    }
+}
+
+/// Whether `prepare_join` has put a link up: the five contexts and two queues
+/// of `iwx::mld`. The journal says which step refused, if one did.
+fn radio_prepared() -> Status {
+    match crate::dev::iwx::with_held(|h| match &h.link {
+        Some(l) => Some(alloc::format!("queues {} and {}", l.mgmt.id.unwrap_or(255), l.data.id.unwrap_or(255))),
+        None => h.journal.iter().rev().find(|l| l.contains("failed")).cloned().map(|l| alloc::format!("!{}", l)),
+    }) {
+        None => Status::Todo,
+        Some(None) => Status::Todo,
+        Some(Some(s)) if s.starts_with('!') => Status::Failed(alloc::string::String::from(&s[1..])),
+        Some(Some(s)) => ok(s),
+    }
+}
+
+/// Whether a transmit response has come back saying a frame went out, and
+/// whether the station got as far as an association id.
+fn radio_talked() -> Status {
+    match crate::dev::iwx::with_held(|h| h.link.as_ref().map(|l| (l.mgmt.sent + l.data.sent, l.tx_done, l.tx_ok, l.assoc))) {
+        None | Some(None) => Status::Todo,
+        Some(Some((0, _, _, _))) => Status::Todo,
+        Some(Some((sent, done, okc, assoc))) => ok(alloc::format!(
+            "{} sent, {} answered, {} went out{}",
+            sent, done, okc,
+            match assoc { Some(a) => alloc::format!(", associated as {}", a), None => alloc::string::String::new() }
+        )),
+    }
+}
+
 /// The rate, which is the figure the trip exists to bring back.
 ///
 /// Reads the foreground bench first and the slice counter second, because they
@@ -356,6 +394,9 @@ pub const ITEMS: &[Item] = &[
     Item { what: "its firmware builds a boot descriptor", how: "iwx ctxt <fw>", probe: firmware_ready },
     Item { what: "the firmware boots and says it is alive", how: "iwx boot", probe: radio_alive },
     Item { what: "it answers with its address and bands", how: "(same command)", probe: radio_nvm },
+    Item { what: "a scan hears networks", how: "wifi scan", probe: radio_scanned },
+    Item { what: "the contexts for an access point go up", how: "wifi join <ssid> <pass>", probe: radio_prepared },
+    Item { what: "a frame leaves the part, and the access point answers", how: "iwx journal", probe: radio_talked },
     Item { what: "the payout address checks out", how: "(automatic)", probe: payout_checks },
     Item { what: "yescrypt hashes", how: "mine algo yescrypt / mine bench 8000", probe: hashes },
     Item { what: "a share is found", how: "mine coin 0 t yescrypt", probe: share_found },
