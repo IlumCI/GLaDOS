@@ -2215,6 +2215,12 @@ pub fn poll_mouse() {
     }
     let s = mouse::take();
     if !s.moved {
+        // Nothing new, but a paint may be owed from a turn the pacing refused.
+        if unsafe { *CURSOR_PENDING.get() } {
+            if let Some((x, y)) = unsafe { *POS.get() } {
+                paint_cursor_paced(x, y);
+            }
+        }
         return;
     }
     // Still a precondition even though the framebuffer is no longer touched
@@ -2290,11 +2296,50 @@ pub fn poll_mouse() {
     unsafe { *SHAPE.get() = want };
     // Same claim the pump takes. This runs on the shell task and the pump runs
     // on whichever task is generating, so without it the two interleave in
-    // exactly the way the cursor statics cannot survive.
-    move_cursor(x as u32, y as u32);
+    // exactly the way the cursor statics cannot survive. Paced, not per event
+    // -- see `CURSOR_PAINTED_AT`.
+    paint_cursor_paced(x as u32, y as u32);
 }
 
 static BUTTONS: Racy<(bool, bool)> = Racy::new((false, false));
+/// When the arrow was last painted, in TSC ticks, and whether a move has been
+/// recorded since that is still owed a paint.
+///
+/// **The cursor is coalesced to one paint per `CURSOR_MIN_US`, and it had to
+/// be.** `cursor_show` writes the arrow straight into the aperture and
+/// `cursor_hide` repaints what was under it from the back buffer, so every
+/// paint is an erase and a redraw on the one surface a person is looking at.
+/// While the pointer was read from the shell's idle loop that happened at most
+/// once a tick; read from the compositor's loop it happened once per HID
+/// report, several hundred times a second, and the arrow strobed -- and each
+/// erase copied whatever the back buffer held at that instant, which during a
+/// `draw()` on another task is half a frame, so what the pointer crossed
+/// flickered with it. Every position is still recorded and every press still
+/// acts at once; only the painting waits, and the last position is always
+/// painted on a later turn so the arrow never stops short of the hand.
+static CURSOR_PAINTED_AT: Racy<u64> = Racy::new(0);
+static CURSOR_PENDING: Racy<bool> = Racy::new(false);
+/// Four milliseconds: 250 paints a second, which no hand can tell from
+/// unlimited, and a tenth of what a 1 kHz mouse was asking for.
+const CURSOR_MIN_US: u64 = 4_000;
+
+/// Paint the arrow at `POS` if enough time has passed since the last paint;
+/// otherwise remember that one is owed.
+fn paint_cursor_paced(x: u32, y: u32) {
+    let now = crate::time::rdtsc();
+    let min = crate::time::tsc_mhz().max(1) * CURSOR_MIN_US;
+    let last = unsafe { *CURSOR_PAINTED_AT.get() };
+    if now.wrapping_sub(last) < min {
+        unsafe { *CURSOR_PENDING.get() = true };
+        return;
+    }
+    if move_cursor(x, y) {
+        unsafe {
+            *CURSOR_PAINTED_AT.get() = now;
+            *CURSOR_PENDING.get() = false;
+        }
+    }
+}
 /// The previous press, for double-click detection: milliseconds and place.
 static LAST_CLICK: Racy<(u64, i32, i32)> = Racy::new((0, -100, -100));
 

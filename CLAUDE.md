@@ -4962,6 +4962,20 @@ transfer events a waiter was not asking for are stashed for whoever is -- so
 the two tasks' transfers cannot take each other's completions. Not driven
 under QEMU, which has no USB mouse plugged into it; the trip is the test.
 
+**The trip found that the trackpad is that USB device, and that the cursor
+could not take the rate.** With reports consumed from the compositor's loop
+the arrow strobed and whatever it crossed flickered with it. `cursor_show`
+writes the arrow straight into the aperture and `cursor_hide` repaints what
+was under it from the back buffer, so every paint is an erase and a redraw on
+the surface a person is looking at -- once a tick from the shell's idle loop,
+once per HID report from the compositor's, several hundred times a second.
+And each erase copies the back buffer as it stands, which during a `draw()`
+on another task is half a frame. `paint_cursor_paced` coalesces: every
+position is recorded and every press acts at once, but the arrow is painted
+at most every `CURSOR_MIN_US` (4 ms) and the last position is always painted
+on a later turn. The back-buffer race underneath is older than this and is
+still there; pacing makes it rare rather than gone.
+
 ### Graphics and the desktop
 
 Rendering is composed, then diffed. `desk::draw` repaints everything
