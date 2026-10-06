@@ -74,6 +74,8 @@ pub const SCD_QUEUE_CONFIG_CMD: u8 = 0x17;
 /// Capability bits the join path rests on.
 pub const CAPA_ULTRA_HB_CHANNELS: usize = 48;
 pub const CAPA_MLD_API: usize = 121;
+/// Two LMACs, one per band: 5 GHz contexts live on LMAC 1 on such a part.
+pub const CAPA_CDB_SUPPORT: usize = 40;
 
 pub const ACTION_ADD: u32 = 1;
 pub const ACTION_MODIFY: u32 = 2;
@@ -95,8 +97,10 @@ pub const STA_V2_LEN: usize = 104;
 pub const SPROT_LEN: usize = 24;
 pub const SCD_LEN: usize = 36;
 pub const SCD_RSP_LEN: usize = 8;
-/// The TX command proper, between the wide header and the 802.11 header.
+/// The TX command proper, between the command header and the 802.11 header.
 pub const TX_CMD_LEN: usize = 28;
+/// A transmit frame's command header: `iwl_cmd_header`, cmd, group, sequence.
+pub const TX_HDR: usize = 4;
 
 // --- what the image has to say -----------------------------------------------
 
@@ -113,6 +117,7 @@ pub struct Versions {
     pub sprot: Option<u8>,
     pub ultra_hb: bool,
     pub mld: bool,
+    pub cdb: bool,
 }
 
 impl Versions {
@@ -129,6 +134,7 @@ impl Versions {
             sprot: image.cmd_ver(MAC_CONF_GROUP, SESSION_PROTECTION_CMD),
             ultra_hb: image.has_capa(CAPA_ULTRA_HB_CHANNELS),
             mld: image.has_capa(CAPA_MLD_API),
+            cdb: image.has_capa(CAPA_CDB_SUPPORT),
         }
     }
 
@@ -207,7 +213,9 @@ pub const CTRL_POS_ABOVE: u8 = 0x4;
 ///
 /// `rxchain_info` is reserved in v4 and left zero; v3 read it and firmware at
 /// v3 is not what this part carries.
-pub fn phy_context(action: u32, channel: u8, band24: bool) -> [u8; PHY_LEN] {
+/// `cdb` is the dual-LMAC capability: on such a part the 5 GHz band is LMAC 1,
+/// and a PHY context on the wrong LMAC is accepted and never hears anything.
+pub fn phy_context(action: u32, channel: u8, band24: bool, cdb: bool) -> [u8; PHY_LEN] {
     let mut b = [0u8; PHY_LEN];
     w32(&mut b, 0, ID);
     w32(&mut b, 4, action);
@@ -216,7 +224,7 @@ pub fn phy_context(action: u32, channel: u8, band24: bool) -> [u8; PHY_LEN] {
     b[12] = if band24 { PHY_BAND_24 } else { PHY_BAND_5 };
     b[13] = CHANNEL_MODE20;
     b[14] = 0;
-    w32(&mut b, 16, 0); // lmac_id
+    w32(&mut b, 16, if cdb && !band24 { 1 } else { 0 }); // lmac_id
     w32(&mut b, 20, 0); // rxchain_info, reserved in v4
     w32(&mut b, 24, 0); // dsp_cfg_flags
     b[28] = CTRL_POS_ABOVE; // secondary_ctrl_chnl_loc = ctrl_pos ^ ABOVE
@@ -229,8 +237,12 @@ pub const MAC_TYPE_BSS_STA: u32 = 5;
 pub const FILTER_PROMISC: u32 = 1 << 0;
 pub const FILTER_CONTROL_AND_MGMT: u32 = 1 << 1;
 pub const FILTER_ACCEPT_GRP: u32 = 1 << 2;
-pub const FILTER_ACCEPT_BEACON: u32 = 1 << 6;
-pub const FILTER_ACCEPT_PROBE_REQ: u32 = 1 << 12;
+/// **These are `MAC_CONFIG_CMD`'s bits and not `MAC_CONTEXT_CMD`'s.** The legacy
+/// command put beacons at bit 6 and probe requests at bit 12; this one packs
+/// them at 3 and 5, and a filter written with the old numbers admits nothing.
+pub const FILTER_ACCEPT_BEACON: u32 = 1 << 3;
+pub const FILTER_ACCEPT_BCAST_PROBE_RESP: u32 = 1 << 4;
+pub const FILTER_ACCEPT_PROBE_REQ: u32 = 1 << 5;
 
 /// The station MAC. `assoc` carries the association id once there is one;
 /// before that the filter admits beacons, which is how the host sees the
@@ -490,11 +502,17 @@ pub fn is_mgmt(frame: &[u8]) -> bool {
 /// Lay one frame out as the firmware fetches it, into a slot the caller owns:
 ///
 /// ```text
-///   [0..8)    wide command header   TX_CMD, LONG_GROUP, slot index, queue id
-///   [8..36)   the TX command        len, flags, offload, dram_info, rate
-///   [36..)    the 802.11 header     copied, padded to four
+///   [0..4)    command header        TX_CMD, group 0, slot index, queue id
+///   [4..32)   the TX command        len, flags, offload, dram_info, rate
+///   [32..)    the 802.11 header     copied, padded to four
 ///   body      the rest of the frame
 /// ```
+///
+/// **The header is the four-byte `iwl_cmd_header`, not the eight-byte wide one
+/// the command queue frames with.** Upstream's `iwl_device_tx_cmd` carries the
+/// short header, with the slot index in the low byte of its sequence word and
+/// the queue in the high, and `tx-gen2.c` sizes its second buffer from that.
+/// Written with the wide header first, from memory, and caught by reading.
 ///
 /// Answers `(header bytes, body offset, body length)`. The first transmit
 /// buffer is the first twenty bytes, the second is the rest of the command and
@@ -504,7 +522,7 @@ pub fn tx_slot(slot: &mut [u8], idx: u8, queue: u8, frame: &[u8], rate: u32, fla
     let h = hdr_len(frame);
     let padded = (h + 3) & !3;
     let body = frame.len() - h;
-    let need = cmd::HDR_WIDE + TX_CMD_LEN + padded + body;
+    let need = TX_HDR + TX_CMD_LEN + padded + body;
     if need > slot.len() || frame.len() > 0xffff {
         return None;
     }
@@ -512,12 +530,10 @@ pub fn tx_slot(slot: &mut [u8], idx: u8, queue: u8, frame: &[u8], rate: u32, fla
         *x = 0;
     }
     slot[0] = TX_CMD;
-    slot[1] = cmd::LONG_GROUP;
+    slot[1] = 0; // group: upstream leaves it, and the data path does not read it
     slot[2] = idx;
     slot[3] = queue;
-    // Length and version bytes are the queue's business, not the firmware's,
-    // for a data frame; zero is what upstream leaves.
-    let c = cmd::HDR_WIDE;
+    let c = TX_HDR;
     w16(slot, c, frame.len() as u16);
     w16(slot, c + 2, flags);
     let mut offload = ((h / 2) as u32) << OFFLD_MH_SIZE;
@@ -613,7 +629,7 @@ impl TxQueue {
             tx_slot(s, idx as u8, id, frame, rate, flags).ok_or("the frame does not fit a slot")?
         };
         let padded = (h + 3) & !3;
-        let tb1 = cmd::HDR_WIDE + TX_CMD_LEN + padded - cmd::FIRST_TB;
+        let tb1 = TX_HDR + TX_CMD_LEN + padded - cmd::FIRST_TB;
         let n: u16 = if body > 0 { 3 } else { 2 };
         {
             let at = idx * super::ctxt::TFD_SIZE;
@@ -664,14 +680,16 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     let addr = [0x28, 0xc5, 0xd2, 0x06, 0x00, 0x72];
     let peer = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
 
-    let p = phy_context(ACTION_ADD, 36, false);
+    let p = phy_context(ACTION_ADD, 36, false, false);
     out.push(("mld: a PHY context is 32 bytes with the channel at 8 and the band at 12", p.len() == PHY_LEN && p[8] == 36 && p[12] == PHY_BAND_5));
-    out.push(("mld: 2.4 GHz is band 1 in a PHY context, 5 GHz band 0", phy_context(ACTION_ADD, 6, true)[12] == PHY_BAND_24));
+    out.push(("mld: 2.4 GHz is band 1 in a PHY context, 5 GHz band 0", phy_context(ACTION_ADD, 6, true, false)[12] == PHY_BAND_24));
+    out.push(("mld: on a dual-LMAC part 5 GHz is LMAC 1 and 2.4 GHz LMAC 0; single-LMAC is always 0", phy_context(ACTION_ADD, 36, false, true)[16] == 1 && phy_context(ACTION_ADD, 6, true, true)[16] == 0 && p[16] == 0));
 
     let m = mac_config(ACTION_ADD, addr, Some(7));
     out.push(("mld: a MAC config is 64 bytes and an add never claims association", m.len() == MAC_LEN && m[44] == 0 && m[48] == 0));
     let m = mac_config(ACTION_MODIFY, addr, Some(7));
     out.push(("mld: a MAC modify carries is_assoc and the association id at 44 and 48", m[44] == 1 && m[48] == 7 && m[49] == 0));
+    out.push(("mld: the MLD filter puts beacons at bit 3 and probe requests at bit 5", FILTER_ACCEPT_BEACON == 8 && FILTER_ACCEPT_PROBE_REQ == 32));
     out.push(("mld: an unassociated MAC admits beacons and an associated one does not",
         mac_config(ACTION_ADD, addr, None)[20] & (FILTER_ACCEPT_BEACON as u8) != 0 && m[20] & (FILTER_ACCEPT_BEACON as u8) == 0));
 
@@ -716,21 +734,22 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push(("mld: authentication is management and data is not", is_mgmt(&[0xb0, 0]) && !is_mgmt(&f)));
     let mut slot = [0u8; SLOT];
     let r = tx_slot(&mut slot, 9, 3, &f, 0x4100, TX_FLAGS_CMD_RATE | TX_FLAGS_ENCRYPT_DIS);
-    out.push(("mld: a slot opens with TX_CMD, LONG_GROUP, its index and queue", slot[0] == TX_CMD && slot[1] == cmd::LONG_GROUP && slot[2] == 9 && slot[3] == 3));
-    out.push(("mld: the command carries the frame length, the flags and the rate at 8, 10 and 28",
-        slot[8] == 34 && slot[10] == 3 && u32::from_le_bytes([slot[28], slot[29], slot[30], slot[31]]) == 0x4100));
+    out.push(("mld: a slot opens with the four-byte header: TX_CMD, group 0, its index and queue", slot[0] == TX_CMD && slot[1] == 0 && slot[2] == 9 && slot[3] == 3));
+    out.push(("mld: the command carries the frame length, the flags and the rate at 4, 6 and 24",
+        slot[4] == 34 && slot[6] == 3 && u32::from_le_bytes([slot[24], slot[25], slot[26], slot[27]]) == 0x4100));
     out.push(("mld: offload assist says twelve header words and no pad for a 24-byte header",
-        u32::from_le_bytes([slot[12], slot[13], slot[14], slot[15]]) == 12 << 8));
-    out.push(("mld: the header is copied to 36 and the body follows it", r == Some((24, 60, 10)) && slot[36] == 0x08 && slot[60] == 0xa0 && slot[69] == 0xa9));
+        u32::from_le_bytes([slot[8], slot[9], slot[10], slot[11]]) == 12 << 8));
+    out.push(("mld: the header is copied to 32 and the body follows it", r == Some((24, 56, 10)) && slot[32] == 0x08 && slot[56] == 0xa0 && slot[65] == 0xa9));
+    out.push(("mld: the second transmit buffer is twelve bytes plus the padded header", TX_HDR + TX_CMD_LEN + 24 - cmd::FIRST_TB == 36));
     let mut qf = alloc::vec![0u8; 30];
     qf[0] = 0x88;
     let r = tx_slot(&mut slot, 0, 0, &qf, 0, 0);
-    out.push(("mld: a QoS header is padded to 28 and the pad bit is set", r == Some((26, 64, 4)) && slot[13] & (1 << (OFFLD_PAD - 8)) != 0));
+    out.push(("mld: a QoS header is padded to 28 and the pad bit is set", r == Some((26, 60, 4)) && slot[9] & (1 << (OFFLD_PAD - 8)) != 0));
     out.push(("mld: a frame larger than a slot is refused", tx_slot(&mut slot, 0, 0, &alloc::vec![0u8; SLOT], 0, 0).is_none()));
     out.push(("mld: a transmit status is read at 36", tx_status(&[0u8; 38]).is_some() && tx_status(&[0u8; 36]).is_none()));
 
     // The versions this part reported on the laptop pass; each refusal fires.
-    let real = Versions { phy: Some(4), mac: Some(2), link: Some(2), sta: None, tx: Some(10), tx_notif: Some(7), scd: Some(3), sprot: Some(2), ultra_hb: true, mld: true };
+    let real = Versions { phy: Some(4), mac: Some(2), link: Some(2), sta: None, tx: Some(10), tx_notif: Some(7), scd: Some(3), sprot: Some(2), ultra_hb: true, mld: true, cdb: false };
     out.push(("mld: the GF63's firmware versions are accepted and want a v1 station", real.check().is_ok() && real.sta_len() == STA_V1_LEN));
     out.push(("mld: a non-MLD image is refused by name", Versions { mld: false, ..real }.check().is_err()));
     out.push(("mld: a TX_CMD other than version 10 is refused", Versions { tx: Some(9), ..real }.check().is_err()));

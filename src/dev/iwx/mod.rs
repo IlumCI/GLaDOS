@@ -1493,9 +1493,9 @@ impl Held {
             t.bssid[0], t.bssid[1], t.bssid[2], t.bssid[3], t.bssid[4], t.bssid[5], t.channel, if band24 { "2.4 GHz" } else { "5 GHz" }
         ));
 
-        self.ask(l, mld::PHY_CONTEXT_CMD, 0, &mld::phy_context(mld::ACTION_ADD, t.channel, band24), 2000, "PHY_CONTEXT_CMD add")?;
+        self.ask(l, mld::PHY_CONTEXT_CMD, 0, &mld::phy_context(mld::ACTION_ADD, t.channel, band24, vers.cdb), 2000, "PHY_CONTEXT_CMD add")?;
         if let Err(e) = self.ask(g, mld::MAC_CONFIG_CMD, 0, &mld::mac_config(mld::ACTION_ADD, addr, None), 2000, "MAC_CONFIG_CMD add") {
-            let _ = self.ask(l, mld::PHY_CONTEXT_CMD, 0, &mld::phy_context(mld::ACTION_REMOVE, t.channel, band24), 1000, "PHY_CONTEXT_CMD remove");
+            let _ = self.ask(l, mld::PHY_CONTEXT_CMD, 0, &mld::phy_context(mld::ACTION_REMOVE, t.channel, band24, vers.cdb), 1000, "PHY_CONTEXT_CMD remove");
             return Err(e);
         }
         let params = mld::LinkParams { band24, bi: t.beacon_int, dtim: t.dtim.unwrap_or(0) };
@@ -1564,7 +1564,7 @@ impl Held {
         let _ = self.ask(g, mld::LINK_CONFIG_CMD, 0, &mld::link_modify(addr, false, &params), 1000, "LINK_CONFIG_CMD deactivate");
         let _ = self.ask(g, mld::LINK_CONFIG_CMD, 0, &mld::link_remove(addr), 1000, "LINK_CONFIG_CMD remove");
         let _ = self.ask(g, mld::MAC_CONFIG_CMD, 0, &mld::mac_config(mld::ACTION_REMOVE, addr, None), 1000, "MAC_CONFIG_CMD remove");
-        let _ = self.ask(l, mld::PHY_CONTEXT_CMD, 0, &mld::phy_context(mld::ACTION_REMOVE, ch, band24), 1000, "PHY_CONTEXT_CMD remove");
+        let _ = self.ask(l, mld::PHY_CONTEXT_CMD, 0, &mld::phy_context(mld::ACTION_REMOVE, ch, band24, self.facts.vers.cdb), 1000, "PHY_CONTEXT_CMD remove");
         // The queues' memory goes back with `link`, which the firmware has now
         // been told to forget. A part that refused the removes keeps writing
         // transmit responses, not descriptors, so the heap is safe either way.

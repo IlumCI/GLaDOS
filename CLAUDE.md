@@ -6499,7 +6499,7 @@ boot does and what is still owed, in order:
   a twenty-byte first buffer, the rest of the command and the 802.11 header,
   then the body. Every builder asserts the size the headers compute (mac 64,
   link 208, phy 32, sta 96, session 24, queue 36) and `Versions::check`
-  refuses an image whose table says a layout moved. 35 claims in `diag iwx`.
+  refuses an image whose table says a layout moved. 38 claims in `diag iwx`.
 
   Two things are deliberately not done and are stated there: **rates are fixed
   at the lowest legacy rate** with `IWL_TX_FLAGS_CMD_RATE`, because letting
