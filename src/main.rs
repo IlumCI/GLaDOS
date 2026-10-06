@@ -2138,7 +2138,43 @@ pub fn version_newer(candidate: &str, current: &str) -> bool {
     false
 }
 
+/// Who this machine belongs to, before anything about what it is. The miner
+/// line used to sit here and announced an absence on every ordinary boot; this
+/// is the thing worth announcing instead, and it is the first thing a person
+/// sees on the GF63 with the splash down.
+const APERTURE_MARK: &[&str] = &[
+    "              .,-:;//;:=,",
+    "          . :H@@@MM@M#H/.,+%;,",
+    "       ,/X+ +M@@M@MM%=,-%HMMM@X/,",
+    "     -+@MM; $M@@MH+-,;XMMMM@MMMM@+-",
+    "    ;@M@@M- XM@X;. -+XXXXXHHH@M@M#@/.",
+    "  ,%MM@@MH ,@%=             .---=-=:=,.",
+    "  =@#@@@MX.,                -%HX$$%%%:;",
+    " =-./@M@M$                   .;@MMMM@MM:",
+    " X@/ -$MM/                    . +MM@@@M$",
+    ",@M@H: :@:                    . =X#@@@@-",
+    ",@@@MMX, .                    /H- ;@M@M=",
+    ".H@@@@M@+,                    %MM+..%#$.",
+    " /MMMM@MMH/.                  XM@MH; =;",
+    "  /%+%$XHH@$=              , .H@@@@MX,",
+    "   .=--------.           -%H.,@@@@@MX,",
+    "   .%MM@@@HHHXX$$$%+- .:$MMX =M@@MM%.",
+    "     =XMMM@MM@MM#H;,-+HMM@M+ /MMMX=",
+    "       =%@M@M#@$-.=$@MM@@@M; %M%=",
+    "         ,:+$+-,/H#MMMMMMM@= =,",
+    "               =++%%%%+/:-.",
+];
+
 fn banner(boot: &BootInfo, acpi: &Option<acpi::Acpi>) {
+    // Palette 6 is the amber on this console's palette, which is the colour the
+    // machine speaks in everywhere else.
+    console::set_color(6);
+    kprintln!("Property of APERTURE INSTITUTE FOR CYBERNETIC RESEARCH & ENGINEERING - 2005.");
+    kprintln!("ALL RIGHTS RESERVED.");
+    for line in APERTURE_MARK {
+        kprintln!("{}", line);
+    }
+    kprintln!();
     console::set_color(LTCYAN);
     kprintln!("glados {}", VERSION);
     console::set_color(WHITE);
