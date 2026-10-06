@@ -223,10 +223,14 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
             // the Wi-Fi panel is the one thing on that screen to click.
             crate::mine::wifiui::pointer_poll();
             // USB is polled and not interrupt-driven in this kernel, so a
-            // keyboard on it is only heard from when somebody asks. Here
-            // rather than in the timer tick for the same reason the pointer
-            // is: a keystroke can raise a window.
-            crate::dev::usbhid::poll();
+            // keyboard on it is only heard from when somebody asks. The
+            // compositor asks now, whatever the shell is doing -- a USB mouse
+            // polled only from here froze for the length of every command,
+            // exactly as the pointer did before it moved. This is the fallback
+            // for an image with no compositor, which is the miner.
+            if !crate::gfx::render::enabled() {
+                crate::dev::usbhid::poll();
+            }
             // The pointer is **not** read here any more. It was, and that is
             // precisely why it froze: a click is only noticed while the shell
             // is idle, so any command that took a second took the pointer with

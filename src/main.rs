@@ -915,6 +915,13 @@ fn comp_task() {
             // is not allowed to happen underneath one.
             gfx::render::beat(gfx::render::Phase::Pointer);
             gfx::desk::poll_mouse();
+            // And the USB input devices, for the identical reason: a mouse on
+            // the bus is polled, not interrupt-driven, and polled from the
+            // shell's idle loop it stopped for the length of every command.
+            // After `poll_mouse` on purpose -- a report it delivers lands in
+            // `mouse::apply` and is read on the next turn, a few milliseconds
+            // later, which is well inside what a hand notices.
+            dev::usbhid::poll();
         }
 
         // **Back to `Turn` before the wait, or the resting state lies.**

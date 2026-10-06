@@ -4940,6 +4940,28 @@ so manifests, grants and lineage survive untouched. It runs after every
 namespace init rather than once, because a restored snapshot can be older than
 the rename.
 
+### A USB mouse is polled by the compositor, and was polled by the shell
+
+`dev::usbhid` enumerates boot-protocol keyboards and mice at boot (after the
+network, so a USB Ethernet adapter claims its device first) and the GF63 trip
+read it as "no USB mouse support". There was support; the *poll* was in the
+shell's idle loop, so a USB mouse delivered reports only between commands and
+went dead for the length of every one -- `iwx boot`, `wifi scan`, anything --
+which on a screen where nothing else moves either is indistinguishable from
+the machine freezing. The PS/2 pointer had the identical defect and was moved
+to the compositor's loop for it; `usbhid::poll` runs there now, beside
+`poll_mouse`, and the shell's idle loop polls only when no compositor exists,
+which is the miner image.
+
+That made the device list reachable from two tasks, so `DEVICES` is a `Spin`:
+`probe` holds it across its whole walk of the bus and `poll` takes it with
+`try_lock`, skipping a turn rather than stalling the screen behind an
+enumeration. The controller underneath already tolerated this -- `CONTROLLER`
+is a lock held per operation, command completions are awaited under it, and
+transfer events a waiter was not asking for are stashed for whoever is -- so
+the two tasks' transfers cannot take each other's completions. Not driven
+under QEMU, which has no USB mouse plugged into it; the trip is the test.
+
 ### Graphics and the desktop
 
 Rendering is composed, then diffed. `desk::draw` repaints everything
