@@ -312,7 +312,9 @@ pub fn mac_context(action: u32, addr: [u8; 6], bssid: [u8; 6], p: &MacParams) ->
         filter |= FILTER_IN_BEACON;
     }
     w32(&mut b, 52, filter);
-    w32(&mut b, 56, 0); // qos_flags: not a QoS station
+    // `UPDATE_EDCA` unconditionally, as both upstreams send it: the rows below
+    // are the EDCA, and a flag saying so is what has the firmware read them.
+    w32(&mut b, 56, QOS_UPDATE_EDCA);
     for &(txf, cw_min, cw_max, aifsn, txop) in EDCA.iter() {
         let at = 60 + txf * 8;
         w16(&mut b, at, cw_min);
@@ -719,6 +721,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             let m5 = mac_context(ACTION_ADD, addr, peer, &MacParams { band24: false, ..mp });
             r32(&m5, 32) == 0 && r32(&m5, 48) == MAC_FLG_SHORT_SLOT
         }));
+    out.push(("join: the QoS word says update EDCA, as both upstreams send it unconditionally", r32(&m, 56) == QOS_UPDATE_EDCA && QOS_UPDATE_EDCA == 1));
     out.push(("join: the legacy filter is group plus beacons at bit 6 before association", r32(&m, 52) == FILTER_ACCEPT_GRP | FILTER_IN_BEACON && FILTER_IN_BEACON == 64 && FILTER_IN_PROBE_REQUEST == 4096));
     out.push(("join: the EDCA rows sit at 60 + 8*fifo, BK in FIFO 1 through VO in FIFO 4, each naming its FIFO", m[73] == 1 << 1 && m[81] == 1 << 2 && m[89] == 1 << 3 && m[97] == 1 << 4 && m[60..68] == [0; 8] && m[68..70] == [15, 0] && m[72] == 7));
     out.push(("join: the station data at 100 says not associated, bi 100, DTIM interval 200, listen 10", r32(&m, 100) == 0 && r32(&m, 116) == 100 && r32(&m, 124) == 200 && r32(&m, 132) == 10 && r32(&m, 136) == 0));

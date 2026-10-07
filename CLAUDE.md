@@ -6555,6 +6555,22 @@ boot does and what is still owed, in order:
   (`hw_ccmp` false, `IWL_TX_FLAGS_ENCRYPT_DIS` on every frame). `iwx_run`'s
   `SF_CFG_CMD`, `MCAST_FILTER_CMD` and power command are not sent either.
 
+  **The first trip of that path died at `MAC_CONTEXT_CMD`, and the journal
+  could not say why.** `PHY_CONTEXT_CMD add` and `RLC_CONFIG_CMD` answered,
+  the MAC add read `the part did not answer`, and so did the `PHY_CONTEXT_CMD
+  remove` after it -- two silences from a queue that had just answered twice,
+  which is a firmware that asserted and not one that was slow. Nothing could
+  tell the two apart: the command wait never read `CSR_INT`, and the error
+  tables ALIVE handed over were carried and never read. `src/dev/iwx/err.rs`
+  reads them now, through the `HBUS_TARG_MEM` window under the MAC access
+  lock, whenever a command goes unanswered: the interrupt status, and per
+  table the assertion id by name, the interrupt links, the three data words
+  and **the last host command header the firmware handled** -- which is the
+  command it was parsing when it died. Eight claims against synthetic tables.
+  The one field that differed from upstream, `qos_flags`, now carries
+  `UPDATE_EDCA` as both upstreams send it; whether that was the objection is
+  what the next journal says.
+
   **`iwx journal`** is what the trip brings home: every command the join path
   sent, what the part answered, the queue numbers, and how many transmit
   responses said a frame went out. Read it after `wifi join` whatever happened.

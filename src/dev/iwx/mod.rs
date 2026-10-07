@@ -44,6 +44,7 @@ pub mod scan;
 pub mod wlan;
 pub mod fw;
 pub mod join;
+pub mod err;
 
 use crate::dev::pci::{self, Device};
 use alloc::string::String;
@@ -989,6 +990,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.extend(reg::checks());
     out.extend(scan::checks());
     out.extend(join::checks());
+    out.extend(err::checks());
     out
 }
 
@@ -1469,6 +1471,17 @@ impl Held {
             }
             Err(e) => {
                 self.note(alloc::format!("{} failed: {}", what, e.why()));
+                // A silence is one of two things, and only the part can say
+                // which: a firmware that is slow, or one that has asserted and
+                // will never answer again. Its error tables say so, and name
+                // the command it was handling when it died.
+                if matches!(e, cmd::CmdError::NoReply | cmd::CmdError::Full) {
+                    let alive = self.booted.alive;
+                    // Safety: this part's aperture, alive, not stopped.
+                    for line in unsafe { err::report(self.bar0, &alive) } {
+                        self.note(line);
+                    }
+                }
                 Err(what)
             }
         }
