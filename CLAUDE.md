@@ -6567,9 +6567,26 @@ boot does and what is still owed, in order:
   table the assertion id by name, the interrupt links, the three data words
   and **the last host command header the firmware handled** -- which is the
   command it was parsing when it died. Eight claims against synthetic tables.
-  The one field that differed from upstream, `qos_flags`, now carries
-  `UPDATE_EDCA` as both upstreams send it; whether that was the objection is
-  what the next journal says.
+
+  **The next trip read the firmware's own verdict, and it was not a bad field.**
+  `CSR_INT 0x02000000` (a microcode fault), `lmac0 ... id 0x0071`
+  (`NMI_INTERRUPT_UMAC_FATAL`), `last command group 0x01 code 0x28`
+  (`MAC_CONTEXT_CMD`). So the UMAC took a *generic* fatal NMI parsing the MAC
+  add -- not `BAD_COMMAND` (0x38/0x39), which is what a wrong field would be.
+  Every field of `mac_context` was then checked against OpenBSD's
+  `iwx_mac_ctxt_cmd_common` and matches: the EDCA rows are right (gen2 FIFOs
+  are `BK=1,BE=2,VI=3,VO=4`, so the 1-based rows and `fifos_mask` and the zero
+  `ac[0]` are all correct), the filter is `ACCEPT_GRP | IN_BEACON` for a STA,
+  the rates are `iwx_ack_rates`'s own output (OFDM 0x15, CCK 0xf), the
+  `data_sta` offsets (100/116/124/128/132/136) match the struct, and the RLC
+  `rx_chain_info` is `valid<<1 | 1<<10 | 1<<12` with both chain counts 1, which
+  is `iwx_phy_send_rlc` exactly. The whole command-layout space is ruled out.
+  A UMAC NMI at MAC-add with a byte-correct command is firmware-internal state:
+  a missing `init_hw` command, or a PHY-context field the firmware validates
+  only when the MAC binds to it -- the next rung is to send the rest of
+  `iwx_init_hw` or to dump the error table's `pc`/`blink` (which locate the
+  assert in firmware, undecodable without Intel's symbols). `qos_flags`
+  now carries `UPDATE_EDCA`, which was correct to add and was not the cause.
 
   **`iwx journal`** is what the trip brings home: every command the join path
   sent, what the part answered, the queue numbers, and how many transmit
