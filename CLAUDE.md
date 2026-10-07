@@ -6583,10 +6583,29 @@ boot does and what is still owed, in order:
   is `iwx_phy_send_rlc` exactly. The whole command-layout space is ruled out.
   A UMAC NMI at MAC-add with a byte-correct command is firmware-internal state:
   a missing `init_hw` command, or a PHY-context field the firmware validates
-  only when the MAC binds to it -- the next rung is to send the rest of
-  `iwx_init_hw` or to dump the error table's `pc`/`blink` (which locate the
-  assert in firmware, undecodable without Intel's symbols). `qos_flags`
-  now carries `UPDATE_EDCA`, which was correct to add and was not the cause.
+  only when the MAC binds to it. `qos_flags` now carries `UPDATE_EDCA`, which
+  was correct to add and was not the cause.
+
+  **A deeper pass verified still more and found nothing wrong with the
+  command.** The group is right -- OpenBSD promotes every legacy-group command
+  (PHY 0x8, MAC 0x28) to `LONG_GROUP` via `IWX_WIDE_ID`, so `group 1 code 0x28`
+  is exactly what it sends; `id_and_color` is `id | color<<8` = 0; the PHY
+  context is the **UHB** 32-byte layout (`channel` u32 at 8, band at 12) because
+  the image declares `ULTRA_HB_CHANNELS`, with `rxchain_info` zeroed since RLC
+  is separate, matching `iwx_phy_ctxt_cmd_uhb_v3_v4`; the RLC is the 32-byte
+  `iwx_rlc_config_cmd` with only `phy_id` and `rx_chain_info` set; `ACTION_ADD`
+  is 1; and the legacy path is correct because `sc_use_mld_api` is gated on the
+  absent `MLD_API_SUPPORT`. Two changes came out of it. The error reader now
+  carries `log_pc` (LMAC word 20, the firmware PC that pins the assert), and the
+  `err.rs` field offsets were confirmed right against `iwx_error_event_table`
+  VER_3 rather than off by one as a note had claimed. And `prepare_join` now
+  **drains and aborts an in-flight scan** before the PHY context: the fatal is a
+  *UMAC* fatal and the UMAC owns scanning, so a MAC context added while a scan
+  the completion of which `poll` never saw is still live is a credible cause,
+  and upstream ensures no scan is active before `iwx_auth`. Built
+  (`3a23446b24ca69fc`), `diag iwx` passes, **not flashed** -- the SSD was not
+  connected. The next trip either joins (the scan was it) or prints a clean
+  UMAC `error_id`, `log_pc` and data words that name the real assert.
 
   **`iwx journal`** is what the trip brings home: every command the join path
   sent, what the part answered, the queue numbers, and how many transmit

@@ -1498,6 +1498,15 @@ impl Held {
             self.leave();
         }
         self.facts.vers.check()?;
+        // A MAC context added while the UMAC is still scanning is a UMAC
+        // fatal, and the firmware's scan can finish without `poll` having seen
+        // the completion, so drain first and then call off anything still in
+        // flight. Upstream ensures no scan is active before `iwx_auth`.
+        self.poll();
+        if self.scanning {
+            self.note(String::from("a scan was still in flight; calling it off before the join"));
+            let _ = self.scan_abort();
+        }
         let band24 = matches!(crate::dev::radio::band_of(t.channel), Some(crate::dev::radio::Band::G24));
         let addr = self.facts.mac;
         let vers = self.facts.vers;

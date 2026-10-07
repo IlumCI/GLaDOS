@@ -82,6 +82,11 @@ pub struct Entry {
     /// The last host command header the firmware handled, low byte the
     /// opcode, next the group, then the sequence.
     pub cmd_header: u32,
+    /// Where the firmware was executing when it logged this: the LMAC's
+    /// `log_pc`, the UMAC's `frame_pointer`. Not decodable without Intel's
+    /// symbols, but it is the field that pins an assert to one place, so a
+    /// repeat with a byte-identical command is told apart from a new cause.
+    pub pc: u32,
 }
 
 impl Entry {
@@ -91,7 +96,7 @@ impl Entry {
             "{} error table: valid {:#x} id {:#06x} {} ilink {:#x}/{:#x} data {:#x} {:#x} {:#x}; last command group {:#04x} code {:#04x}",
             which, self.valid, self.error_id, error_name(self.error_id), self.ilink1, self.ilink2,
             self.data1, self.data2, self.data3, grp, op
-        )
+        ) + &alloc::format!(" pc {:#x}", self.pc)
     }
 }
 
@@ -101,7 +106,7 @@ pub fn lmac(w: &[u32]) -> Option<Entry> {
     if w.len() < LMAC_WORDS {
         return None;
     }
-    Some(Entry { valid: w[0], error_id: w[1], ilink1: w[5], ilink2: w[6], data1: w[7], data2: w[8], data3: w[9], cmd_header: w[23] })
+    Some(Entry { valid: w[0], error_id: w[1], ilink1: w[5], ilink2: w[6], data1: w[7], data2: w[8], data3: w[9], cmd_header: w[23], pc: w[20] })
 }
 
 /// `iwl_umac_error_event_table`: valid 0, error_id 1, blink1 2, blink2 3,
@@ -111,7 +116,7 @@ pub fn umac(w: &[u32]) -> Option<Entry> {
     if w.len() < UMAC_WORDS {
         return None;
     }
-    Some(Entry { valid: w[0], error_id: w[1], ilink1: w[4], ilink2: w[5], data1: w[6], data2: w[7], data3: w[8], cmd_header: w[13] })
+    Some(Entry { valid: w[0], error_id: w[1], ilink1: w[4], ilink2: w[5], data1: w[6], data2: w[7], data3: w[8], cmd_header: w[13], pc: w[11] })
 }
 
 /// The interrupt status, and whether either error bit is in it.
@@ -195,7 +200,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     w[9] = 9;
     w[23] = 0x0000_0128; // group 1, MAC_CONTEXT_CMD
     let l = lmac(&w);
-    out.push(("err: the LMAC table's links, data and last command are read from where VER_3 puts them", l == Some(Entry { valid: 1, error_id: 0x2000, ilink1: 0x1111, ilink2: 0x2222, data1: 7, data2: 8, data3: 9, cmd_header: 0x128 })));
+    out.push(("err: the LMAC table's links, data and last command are read from where VER_3 puts them", l == Some(Entry { valid: 1, error_id: 0x2000, ilink1: 0x1111, ilink2: 0x2222, data1: 7, data2: 8, data3: 9, cmd_header: 0x128, pc: 0 })));
     out.push(("err: a short LMAC table is refused rather than read past", lmac(&w[..LMAC_WORDS - 1]).is_none()));
     let mut u = [0u32; UMAC_WORDS];
     u[0] = 1;
@@ -206,7 +211,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     u[7] = 2;
     u[8] = 3;
     u[13] = 0x0000_052b;
-    out.push(("err: the UMAC table's links sit two words earlier and its command header at 13", umac(&u) == Some(Entry { valid: 1, error_id: 0x1000, ilink1: 0xa, ilink2: 0xb, data1: 1, data2: 2, data3: 3, cmd_header: 0x52b })));
+    out.push(("err: the UMAC table's links sit two words earlier and its command header at 13", umac(&u) == Some(Entry { valid: 1, error_id: 0x1000, ilink1: 0xa, ilink2: 0xb, data1: 1, data2: 2, data3: 3, cmd_header: 0x52b, pc: 0 })));
     let r = l.unwrap().render("lmac0");
     out.push(("err: the rendering names the assertion and splits the last command into group and code", r.contains("ADVANCED_SYSASSERT") && r.contains("group 0x01 code 0x28")));
     out.push(("err: the two error bits are the ones alive.rs polls for, and neither is the alive bit", is_error(CSR_INT_BIT_SW_ERR) && is_error(CSR_INT_BIT_HW_ERR) && !is_error(1 << 0) && CSR_INT_BIT_SW_ERR == 0x0200_0000));
