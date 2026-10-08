@@ -588,16 +588,26 @@ impl Framebuffer {
         }
         let n = (src.len() as u32).min(self.width - x) as usize;
         let off = (y as usize) * (self.stride as usize) + (x as usize);
-        // One memcpy rather than `n` serialised volatile stores. This is the
-        // write half of `present`, so at 1920x1080 the old form was up to two
-        // million un-mergeable stores for a frame.
+        // One bulk copy rather than `n` serialised volatile stores. This is
+        // the write half of `present`, so at 1920x1080 the old form was up to
+        // two million un-mergeable stores for a frame.
         //
-        // Safe on this aperture specifically: it is mapped write-back (see
-        // `mem::paging`), and `copy_nonoverlapping` lowers to a memcpy call
-        // rather than to stores the optimiser can prove nobody reads. The
-        // check that it is not elided is empirical and immediate -- `video
-        // bars` paints nothing at all if this stops reaching the screen.
-        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), self.base.add(off), n) };
+        // The aperture is write-combining now (`mem::paging::set_cache`), and
+        // the copy uses non-temporal stores when `STREAM` is on: they go
+        // straight to the combining buffers in whole 64-byte lines and never
+        // allocate a cache line for memory nobody will read. The `sfence`
+        // after is what makes the row visible to the display engine before
+        // anything that follows -- combining buffers drain in no promised
+        // order otherwise. `video stream off` falls back to a plain copy, so
+        // the two can be compared within one boot on the GF63.
+        unsafe {
+            let dst = self.base.add(off);
+            if STREAM.load(core::sync::atomic::Ordering::Relaxed) {
+                stream_copy(dst, src.as_ptr(), n);
+            } else {
+                core::ptr::copy_nonoverlapping(src.as_ptr(), dst, n);
+            }
+        }
     }
 
     #[inline]
@@ -686,6 +696,9 @@ impl Framebuffer {
             return 0;
         }
         let off = (y as usize) * (self.stride as usize) + (x as usize);
+        if self.mmio {
+            render::mmio_read(1);
+        }
         unsafe { core::ptr::read_volatile(self.base.add(off)) }
     }
 
@@ -786,6 +799,9 @@ impl Framebuffer {
         let stride = self.stride as usize;
         let shift = (pixels as usize) * stride;
         let span = (region_h as usize) * stride;
+        if self.mmio {
+            render::mmio_read((span - shift) as u64);
+        }
         unsafe {
             let buf = core::slice::from_raw_parts_mut(self.base, span);
             buf.copy_within(shift..span, 0);
@@ -814,6 +830,9 @@ impl Framebuffer {
         }
 
         let stride = self.stride as usize;
+        if self.mmio {
+            render::mmio_read((h - pixels) as u64 * w as u64);
+        }
         for dy in 0..(h - pixels) {
             let src = ((y + dy + pixels) as usize) * stride + x as usize;
             let dst = ((y + dy) as usize) * stride + x as usize;
@@ -1230,6 +1249,40 @@ impl Framebuffer {
 /// numbers and a person needs the table -- and two measurements of the same
 /// thing is how two answers to "did this regress" come to disagree. One
 /// `measure`, two consumers.
+/// Whether writes to the aperture use non-temporal stores. On by default;
+/// `video stream on|off` switches it for an A/B within one boot.
+pub static STREAM: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+/// Copy `n` pixels to write-combining memory with non-temporal stores.
+///
+/// The head is copied plainly up to a 16-byte boundary, because `movntdq`
+/// faults on an unaligned destination; the body goes four pixels a store; the
+/// tail plainly again. SSE2 is part of the x86-64 baseline and the kernel is
+/// built with it on, so this needs no feature gate.
+///
+/// # Safety
+/// `dst` and `src` must be valid for `n` pixels and must not overlap.
+unsafe fn stream_copy(dst: *mut u32, src: *const u32, n: usize) {
+    use core::arch::x86_64::{__m128i, _mm_loadu_si128, _mm_sfence, _mm_stream_si128};
+    let mut i = 0;
+    unsafe {
+        while i < n && (dst.add(i) as usize) & 15 != 0 {
+            dst.add(i).write(*src.add(i));
+            i += 1;
+        }
+        while i + 4 <= n {
+            let v = _mm_loadu_si128(src.add(i) as *const __m128i);
+            _mm_stream_si128(dst.add(i) as *mut __m128i, v);
+            i += 4;
+        }
+        while i < n {
+            dst.add(i).write(*src.add(i));
+            i += 1;
+        }
+        _mm_sfence();
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Frame {
     pub width: u32,

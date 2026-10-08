@@ -205,6 +205,14 @@ extern "C" fn glados_ap_main() -> ! {
             this_cpu(), wp as u8, nx as u8);
     }
 
+    // And the PAT, which every core must hold identically: the bootstrap
+    // processor put a write-combining type in slot 1 and mapped the
+    // framebuffer through it, and a core still holding write-through there
+    // would read the same entry as a different memory type.
+    if crate::cpu::mtrr::programmed() && !crate::cpu::mtrr::program(false) {
+        crate::kprintln!("[smp] core {} could not load the PAT", this_cpu());
+    }
+
     ONLINE.fetch_add(1, Ordering::SeqCst);
 
     // Descriptor tables, then the interrupt table, then this core's own

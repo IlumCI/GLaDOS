@@ -3013,6 +3013,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 );
                 console::set_color(LTGRAY);
             }
+            let reads = render::mmio_reads();
+            console::set_color(if reads > 0 { YELLOW } else { LTGRAY });
+            kprintln!("    aperture reads {:>5}   pixel(s) read back from write-combining memory since boot", reads);
+            console::set_color(LTGRAY);
             if t.latency.3 > 0 {
                 kprintln!(
                     "    input->screen p50 {} us  p95 {} us  max {} us   ({} events)",
@@ -7163,6 +7167,38 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             }
             if rest.trim() == "cache" {
                 crate::gfx::cache_report();
+                return;
+            }
+            // Switch the aperture's memory type for an A/B within one boot.
+            // Shell-only, and it says what it changed rather than trusting it:
+            // the report below re-reads the page tables and the MTRRs.
+            if let Some(k) = rest.trim().strip_prefix("cache ") {
+                use crate::cpu::mtrr::Kind;
+                let kind = match k.trim() {
+                    "wb" => Kind::Wb,
+                    "wc" => Kind::Wc,
+                    "uc" => Kind::Uc,
+                    _ => {
+                        kprintln!("  usage: video cache [wb|wc|uc]");
+                        return;
+                    }
+                };
+                let len = boot.fb_end - boot.fb_start;
+                if !crate::mem::paging::set_cache(boot.fb_start, len, kind) {
+                    kprintln!("  could not set {} -- is the PAT programmed? ('video cache' says)", kind.short());
+                }
+                crate::gfx::cache_report();
+                return;
+            }
+            if let Some(k) = rest.trim().strip_prefix("stream") {
+                use core::sync::atomic::Ordering;
+                match k.trim() {
+                    "on" => crate::gfx::STREAM.store(true, Ordering::Relaxed),
+                    "off" => crate::gfx::STREAM.store(false, Ordering::Relaxed),
+                    _ => {}
+                }
+                kprintln!("  non-temporal stores to the aperture: {}",
+                    if crate::gfx::STREAM.load(Ordering::Relaxed) { "on" } else { "off" });
                 return;
             }
             if rest.trim() == "bars" {

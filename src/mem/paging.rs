@@ -163,10 +163,15 @@ pub fn build_identity_map(
 
             let mut flags = PRESENT | WRITABLE | HUGE;
 
-            // The framebuffer is device memory, but it is linear and we only
-            // ever write to it, so write-back is both correct (the iGPU snoops)
-            // and far faster than uncacheable would be. Everything else that is
-            // not RAM is a register file and must not be cached.
+            // The framebuffer starts write-back here and is switched to
+            // write-combining by `install_paging` once the PAT has a WC slot
+            // (`paging::set_cache`). Write-back was the whole story for a long
+            // time, on the belief that "the iGPU snoops"; it does not --
+            // Intel's display engine is not coherent with the LLC, which is
+            // why i915 pins scanout uncached and Linux maps the firmware
+            // framebuffer WC -- and on QEMU the MTRRs override it to UC
+            // anyway (`video cache`). Everything else that is not RAM is a
+            // register file and must not be cached.
             let overlaps_fb = phys < fb_end && (phys + LARGE_PAGE_SIZE) > fb_start;
             if !overlaps_fb && !addr_is_ram(phys, mmap, mmap_size, desc_size) {
                 flags |= WRITE_THROUGH | CACHE_DISABLE;
@@ -645,6 +650,48 @@ pub fn pat_slot(addr: u64) -> Option<u8> {
         }
         Some(bits(e1, 1 << 7))
     }
+}
+
+/// Give a range one of three memory types through its leaf entries' PWT and
+/// PCD bits: write-back (slot 0), write-combining (slot 1, once
+/// `cpu::mtrr::program` has made it WC) or uncacheable (slot 3).
+///
+/// For the framebuffer, and that is the only caller it should have: changing
+/// the type of RAM the allocator hands out would alias it against every other
+/// mapping of the same frames, which the manual leaves undefined.
+///
+/// PWT and PCD sit at bits 3 and 4 of an entry at every level, so the same two
+/// bits are right whether the leaf is a 4 KiB, 2 MiB or 1 GiB page -- unlike
+/// the PAT bit, which this never sets. The range is walked a 4 KiB page at a
+/// time so a part of it that `protect` already split is covered too; a large
+/// leaf is simply rewritten more than once with the same value.
+///
+/// Dirty lines are written back first, since a range moving from write-back
+/// to anything else must not leave data behind in the cache that the new type
+/// will never flush. The TLB is reloaded after. Only this core's TLB: the other
+/// cores reload theirs at their next CR3 write, and none of them draws.
+pub fn set_cache(at: u64, len: u64, kind: crate::cpu::mtrr::Kind) -> bool {
+    use crate::cpu::mtrr::Kind;
+    let bits = match kind {
+        Kind::Wb => 0,
+        Kind::Wc if crate::cpu::mtrr::programmed() => WRITE_THROUGH,
+        Kind::Uc => WRITE_THROUGH | CACHE_DISABLE,
+        _ => return false,
+    };
+    crate::cpu::without_interrupts(|| unsafe {
+        core::arch::asm!("wbinvd", options(nostack, preserves_flags));
+        let mut a = at & !(PAGE_SIZE - 1);
+        let mut all = true;
+        while a < at + len {
+            match entry_for(a, false) {
+                Some(e) => *e = (*e & !(WRITE_THROUGH | CACHE_DISABLE)) | bits,
+                None => all = false,
+            }
+            a += PAGE_SIZE;
+        }
+        crate::cpu::write_cr3(crate::cpu::read_cr3());
+        all
+    })
 }
 
 /// Make a range obey `perm`, one 4 KiB page at a time.

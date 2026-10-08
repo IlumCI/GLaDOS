@@ -79,8 +79,8 @@ pub struct BootInfo {
     pub desc_size: usize,
     /// The framebuffer aperture. On this laptop it is a 64-bit BAR at
     /// 0x40_0000_0000 -- 256 GiB, far above the 18 GiB of RAM -- so the map
-    /// limit has to be widened to reach it, and it must not be treated as
-    /// device memory for caching purposes.
+    /// limit has to be widened to reach it. It is mapped write-combining
+    /// once the PAT allows it (see `install_paging`).
     pub fb_start: u64,
     /// One past the last byte of the framebuffer aperture. Our page tables have
     /// to cover this or the first write after `activate` faults.
@@ -1580,6 +1580,23 @@ fn install_paging(boot: &BootInfo, frames: &mut mem::frame::EarlyFrames) {
                 if cpu::wp_on() { 1 } else { 0 },
                 if nx { 1 } else { 0 }
             );
+            // **The framebuffer goes write-combining here**, after our own map
+            // is the live one: a PAT change under the firmware's tables would
+            // be a change to mappings this kernel did not build and cannot
+            // see. Stores to the aperture then gather into 64-byte bursts
+            // instead of going out one at a time uncached, which is what
+            // `efifb` and `simpledrm` do. Nothing reads the aperture once the
+            // compositor exists, which WC requires to be fast.
+            //
+            // A processor without a PAT keeps what it had, and says so.
+            let fb_len = boot.fb_end - boot.fb_start;
+            if cpu::mtrr::program(true)
+                && mem::paging::set_cache(boot.fb_start, fb_len, cpu::mtrr::Kind::Wc)
+            {
+                kprintln!("[boot] framebuffer    write-combining ({} KiB)", fb_len / 1024);
+            } else {
+                kprintln!("[boot] framebuffer    left as the firmware typed it (no PAT WC slot)");
+            }
         }
         None => {
             console::set_color(LTRED);

@@ -278,3 +278,48 @@ pub fn checks(ok: &mut dyn FnMut(&str, bool)) {
     ok("the first megabyte is refused, not guessed",
        mtrr_kind(def, &[wc], 0x8000).is_none());
 }
+
+/// The PAT this kernel runs with: the power-on layout with slot 1 changed from
+/// write-through to write-combining. Linux uses the same slot for the same
+/// purpose (`pat_bp_init`), and that choice is what makes the change safe to
+/// make under a running kernel -- nothing here maps with PWT set and PCD
+/// clear, which is the only bit pattern that selects slot 1, so no existing
+/// mapping changes meaning when the slot does.
+pub const GLADOS_PAT: u64 = 0x0007_0406_0007_0106;
+
+/// Set by the bootstrap processor once its PAT holds `GLADOS_PAT`. Each
+/// application processor programs the same value when it starts; the SDM
+/// requires every core to agree, and a core that disagrees maps the
+/// framebuffer with a type nobody chose.
+static PROGRAMMED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn programmed() -> bool {
+    PROGRAMMED.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Load `GLADOS_PAT` on this core. Answers whether it holds afterwards.
+///
+/// The manual's procedure for a PAT change is the MTRR one: flush the caches,
+/// change the register, flush the TLB, flush again. Slot 1 is unused at the
+/// moment this runs, so a stale translation could only ever select the old
+/// slot 1 for a mapping that does not exist -- the flushes are there because
+/// the manual asks and they cost microseconds once per core per boot.
+///
+/// `bsp` publishes the result for the application processors to follow;
+/// they call this with `false` and only when the bootstrap one succeeded.
+pub fn program(bsp: bool) -> bool {
+    if !pat_supported() {
+        return false;
+    }
+    let ok = super::without_interrupts(|| unsafe {
+        core::arch::asm!("wbinvd", options(nostack, preserves_flags));
+        super::wrmsr(IA32_PAT, GLADOS_PAT);
+        super::write_cr3(super::read_cr3());
+        core::arch::asm!("wbinvd", options(nostack, preserves_flags));
+        super::rdmsr(IA32_PAT) == GLADOS_PAT
+    });
+    if bsp {
+        PROGRAMMED.store(ok, core::sync::atomic::Ordering::Release);
+    }
+    ok
+}

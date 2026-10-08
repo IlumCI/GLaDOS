@@ -304,6 +304,23 @@ pub fn timing() -> Timing {
     }
 }
 
+/// Pixels read back from the aperture.
+///
+/// **It must stay at zero once the compositor exists.** The aperture is
+/// write-combining, and a read from WC memory is uncached and synchronous --
+/// roughly three orders of magnitude slower than a write, by the figure the
+/// Linux DRM maintainers give. Every reader is a bug or a boot-time console,
+/// and this is how the difference is told: `render` prints it.
+static MMIO_READS: AtomicU64 = AtomicU64::new(0);
+
+pub fn mmio_read(pixels: u64) {
+    MMIO_READS.fetch_add(pixels, Ordering::Relaxed);
+}
+
+pub fn mmio_reads() -> u64 {
+    MMIO_READS.load(Ordering::Relaxed)
+}
+
 /// Start a fresh window. Everything below is measured from here.
 ///
 /// **A measurement follows the window; a record of a defect does not.** Those
