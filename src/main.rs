@@ -26,6 +26,7 @@ mod cpu;
 mod crypto;
 mod diag;
 mod dev;
+mod dmi;
 mod edit;
 mod fmt;
 mod gfx;
@@ -212,6 +213,18 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     let rsdp = find_rsdp(st);
     serial_println!("glados: rsdp={:?}", rsdp);
 
+    // --- who this machine is, from SMBIOS + CPUID, while firmware memory is
+    // still valid. The POST intro below and `sysinfo` read what this found,
+    // rather than anything hardcoded about one laptop. ---
+    dmi::init(st);
+    serial_println!(
+        "glados: dmi vendor={:?} product={:?} board={:?}",
+        dmi::vendor(),
+        dmi::product(),
+        dmi::board()
+    );
+    serial_println!("glados: cpu {:?}", dmi::cpu());
+
     // --- Anything that needs a filesystem, while there still is one ---
     //
     // This has to happen before the memory map is sized: allocate_pool for a
@@ -350,6 +363,14 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
             ),
         }
     }
+
+    // The Aperture property screen, drawn on the firmware framebuffer *before*
+    // the weights are read -- the one slow stretch of boot, a minute or two on
+    // the GF63, which would otherwise be a black screen. The splash cannot
+    // cover it because the framebuffer console it needs is not up until after
+    // the read. Everything it shows is already known: `dmi::init` ran above,
+    // and `early_ram` totals the map the exit dance re-reads anyway.
+    gfx::intro::show(&fb, early_ram(bs) / (1024 * 1024));
 
     let model = uefi::read_file(bs, image, MODEL_PATH);
     let tokenizer = uefi::read_file(bs, image, TOKENIZER_PATH);
@@ -2094,6 +2115,7 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
     });
 
     section("text", boot_report::Need::Optional, check_text);
+    section("dmi", boot_report::Need::Optional, dmi::selftest);
     section("mining", boot_report::Need::Optional, check_mining);
     section("miner config", boot_report::Need::Optional, check_miner_config);
 
@@ -2145,40 +2167,14 @@ pub fn version_newer(candidate: &str, current: &str) -> bool {
     false
 }
 
-/// Who this machine belongs to, before anything about what it is. The miner
-/// line used to sit here and announced an absence on every ordinary boot; this
-/// is the thing worth announcing instead, and it is the first thing a person
-/// sees on the GF63 with the splash down.
-const APERTURE_MARK: &[&str] = &[
-    "              .,-:;//;:=,",
-    "          . :H@@@MM@M#H/.,+%;,",
-    "       ,/X+ +M@@M@MM%=,-%HMMM@X/,",
-    "     -+@MM; $M@@MH+-,;XMMMM@MMMM@+-",
-    "    ;@M@@M- XM@X;. -+XXXXXHHH@M@M#@/.",
-    "  ,%MM@@MH ,@%=             .---=-=:=,.",
-    "  =@#@@@MX.,                -%HX$$%%%:;",
-    " =-./@M@M$                   .;@MMMM@MM:",
-    " X@/ -$MM/                    . +MM@@@M$",
-    ",@M@H: :@:                    . =X#@@@@-",
-    ",@@@MMX, .                    /H- ;@M@M=",
-    ".H@@@@M@+,                    %MM+..%#$.",
-    " /MMMM@MMH/.                  XM@MH; =;",
-    "  /%+%$XHH@$=              , .H@@@@MX,",
-    "   .=--------.           -%H.,@@@@@MX,",
-    "   .%MM@@@HHHXX$$$%+- .:$MMX =M@@MM%.",
-    "     =XMMM@MM@MM#H;,-+HMM@M+ /MMMX=",
-    "       =%@M@M#@$-.=$@MM@@@M; %M%=",
-    "         ,:+$+-,/H#MMMMMMM@= =,",
-    "               =++%%%%+/:-.",
-];
-
 fn banner(boot: &BootInfo, acpi: &Option<acpi::Acpi>) {
     // Palette 6 is the amber on this console's palette, which is the colour the
     // machine speaks in everywhere else.
     console::set_color(6);
     kprintln!("Property of APERTURE INSTITUTE FOR CYBERNETIC RESEARCH & ENGINEERING - 2005.");
     kprintln!("ALL RIGHTS RESERVED.");
-    for line in APERTURE_MARK {
+    // One copy of the mark, shared with the pre-splash property screen.
+    for line in gfx::intro::MARK {
         kprintln!("{}", line);
     }
     kprintln!();
@@ -2293,6 +2289,41 @@ fn survey_memory(boot: &BootInfo) -> (u64, usize) {
         }
     }
     (total, count)
+}
+
+/// Usable RAM in bytes from the firmware map, for the property screen -- read
+/// before the model load, when the map `survey_memory` reads does not exist
+/// yet. The exit dance re-reads the map from scratch, so this temporary is
+/// freed rather than kept, and a failure anywhere answers 0 ("not reported")
+/// rather than halting: it is a display line, not a load-bearing figure.
+fn early_ram(bs: &BootServices) -> u64 {
+    let mut size: usize = 0;
+    let mut key: usize = 0;
+    let mut dsz: usize = 0;
+    let mut dver: u32 = 0;
+    // First call fails BUFFER_TOO_SMALL and fills in the size and stride.
+    (bs.get_memory_map)(&mut size, ptr::null_mut(), &mut key, &mut dsz, &mut dver);
+    if size == 0 || dsz == 0 {
+        return 0;
+    }
+    size += dsz * 16; // slack: the allocate_pool below perturbs the map
+    let mut buf: *mut u8 = ptr::null_mut();
+    if is_error((bs.allocate_pool)(MemoryType::LoaderData, size, &mut buf)) {
+        return 0;
+    }
+    let mut sz = size;
+    let s = (bs.get_memory_map)(&mut sz, buf, &mut key, &mut dsz, &mut dver);
+    let mut total = 0u64;
+    if !is_error(s) {
+        for i in 0..(sz / dsz) {
+            let d = unsafe { &*(buf.add(i * dsz) as *const MemoryDescriptor) };
+            if d.is_usable_after_exit() {
+                total += d.num_pages * 4096;
+            }
+        }
+    }
+    let _ = (bs.free_pool)(buf);
+    total
 }
 
 fn find_rsdp(st: &SystemTable) -> *const c_void {

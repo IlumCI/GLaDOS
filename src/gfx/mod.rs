@@ -15,6 +15,7 @@ pub mod oracle;
 pub mod paint;
 pub mod write;
 pub mod splash;
+pub mod intro;
 pub mod font;
 pub mod theme;
 pub mod todo;
@@ -683,6 +684,42 @@ impl Framebuffer {
         }
         let off = (y as usize) * (self.stride as usize) + (x as usize);
         unsafe { core::ptr::read_volatile(self.base.add(off)) }
+    }
+
+    /// Alpha-blend a colour onto what is already on screen.
+    ///
+    /// `a` is 0..=256, where 0 leaves the pixel untouched and 256 replaces it.
+    /// It reads the destination back through `get`, so it is for the few
+    /// painters whose source *is* whatever was already there: the boot
+    /// splash's glow halo and its reflection, where the pixel behind is the
+    /// only thing a mirror or a bloom has to work from. Ordinary opaque
+    /// drawing stays on `put`/`rect`, which never read.
+    #[inline]
+    pub fn blend(&self, x: u32, y: u32, c: Color, a: u16) {
+        if a == 0 || x >= self.width || y >= self.height {
+            return;
+        }
+        if a >= 256 {
+            self.put(x, y, self.encode(c));
+            return;
+        }
+        let raw = self.get(x, y);
+        let (dr, dg, db) = match self.format {
+            Format::Rgbx => (
+                (raw & 0xff) as u16,
+                ((raw >> 8) & 0xff) as u16,
+                ((raw >> 16) & 0xff) as u16,
+            ),
+            Format::Bgrx => (
+                ((raw >> 16) & 0xff) as u16,
+                ((raw >> 8) & 0xff) as u16,
+                (raw & 0xff) as u16,
+            ),
+        };
+        let b = 256 - a;
+        let mix = |d: u16, s: u8| ((d * b + s as u16 * a) >> 8) as u8;
+        let out = Color::new(mix(dr, c.r), mix(dg, c.g), mix(db, c.b));
+        self.put(x, y, self.encode(out));
     }
 
     /// Encode a colour for `put`.

@@ -5010,6 +5010,24 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  {} ticks  ({}.{:02} s at {} Hz)", t, t / hz, (t % hz) * 100 / hz, hz);
             kprintln!("  apic timer calibrated at {} Hz", lapic::timer_hz());
         }
+        // What the firmware says this machine is -- SMBIOS + CPUID, read at
+        // boot. The POST intro draws from the same source, so this is how to
+        // see on any machine what that screen will show before rebooting into
+        // it. An empty field is firmware that published nothing there, not a
+        // bug: QEMU leaves the baseboard blank, the GF63 fills all four.
+        "sysinfo" | "dmi" => {
+            let show = |label: &str, v: &str| {
+                if v.is_empty() {
+                    kprintln!("  {:<10} (not reported)", label);
+                } else {
+                    kprintln!("  {:<10} {}", label, v);
+                }
+            };
+            show("vendor", crate::dmi::vendor());
+            show("product", crate::dmi::product());
+            show("board", crate::dmi::board());
+            show("cpu", crate::dmi::cpu());
+        }
         "battery" | "batt" => crate::dev::battery::report(),
         "ec" => crate::dev::ec::report(),
         // The ACPI path on its own, so it can be exercised without the
@@ -7148,18 +7166,89 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             crate::gfx::splash::stage("held -- try 'fault'");
         }
         "splash" => {
-            // Worth having beyond nostalgia: it is the only way to look at the
-            // boot screen without rebooting, which is how it got laid out.
-            crate::gfx::splash::begin();
-            for s in ["a", "b", "c", "d", "e", "f", "g", "h"] {
-                crate::gfx::splash::stage(s);
-                crate::time::delay_us(120_000);
+            // The only way to look at the boot screen without rebooting, which
+            // is how the clockwise reveal got laid out. `splash` animates the
+            // iris forming then waits for a key; `splash <ms>` holds that long
+            // and returns instead -- the bounded form `port bars` needs, since
+            // the harness cannot deliver the key that would end it. `splash f
+            // <step> [ms]` freezes one frame, for screenshotting the reveal
+            // mid-forming. It runs under `with_screen` so the clock and cursor
+            // stand down, the way any full-screen program here must.
+            let labels = [
+                "starting",
+                "memory map and page tables",
+                "interrupts and keyboard",
+                "self-test",
+                "scheduler",
+                "network",
+                "storage",
+                "namespace",
+                "loading the model",
+                "fitting the router",
+                "ready",
+            ];
+            let t = rest.trim();
+            let a0 = t.split_whitespace().nth(0);
+            let a1 = t.split_whitespace().nth(1);
+            if a0 == Some("release") {
+                // Give the screen back, for the frame-by-frame capture below.
+                crate::gfx::set_exclusive(false);
+                crate::gfx::compose::invalidate();
+                crate::gfx::render::invalidate();
+                kprintln!("  released");
+            } else if a0 == Some("hold") {
+                // Draw one frame and keep the framebuffer held, returning to
+                // the prompt at once -- so a driver can shoot the sequence
+                // frame by frame in a single boot, `@shot` between the holds,
+                // and `splash release` at the end. Exclusive is set so the
+                // clock and cursor do not paint over the held frame.
+                let step: u32 = a1.and_then(|s| s.parse().ok()).unwrap_or(0);
+                crate::gfx::set_exclusive(true);
+                let label = labels.get(step as usize).copied().unwrap_or("ready");
+                crate::gfx::splash::demo_frame(step, label);
+                kprintln!("  frame {}", step);
+            } else {
+                let freeze = if a0 == Some("f") {
+                    a1.and_then(|s| s.parse::<u32>().ok())
+                } else {
+                    None
+                };
+                let hold_ms: u64 = if a0 == Some("f") {
+                    t.split_whitespace().nth(2)
+                } else {
+                    a0
+                }
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+                crate::port::with_screen(|| {
+                    let stages = crate::gfx::splash::stages();
+                    if let Some(step) = freeze {
+                        let label = labels.get(step as usize).copied().unwrap_or("ready");
+                        crate::gfx::splash::demo_frame(step, label);
+                    } else {
+                        for step in 0..=stages {
+                            let label = labels.get(step as usize).copied().unwrap_or("ready");
+                            crate::gfx::splash::demo_frame(step, label);
+                            let until = crate::port::clock::now_ms() + 320;
+                            while crate::port::clock::now_ms() < until {
+                                unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+                            }
+                        }
+                    }
+                    crate::gfx::desk::trace("splash");
+                    let until = crate::port::clock::now_ms() + hold_ms;
+                    loop {
+                        if crate::dev::kbd::pop_any().is_some() {
+                            break;
+                        }
+                        if hold_ms != 0 && crate::port::clock::now_ms() >= until {
+                            break;
+                        }
+                        unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+                    }
+                });
+                kprintln!("  done");
             }
-            crate::gfx::splash::note("press a key");
-            while crate::dev::kbd::pop_any().is_none() {
-                unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
-            }
-            crate::gfx::splash::finish();
         }
         "echo" => kprintln!("  {}", rest),
         "clear" => console::with(|c| c.clear()),
