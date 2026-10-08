@@ -94,6 +94,13 @@ pub fn target() -> Option<Framebuffer> {
 
 /// Copy every changed span from the back buffer to the screen.
 pub fn present() {
+    // A program that draws on the aperture itself owns it outright; anything
+    // written here would land on its picture. The shadow is left alone too, so
+    // it does not claim pixels that never reached the screen -- the lease
+    // forgets it on release anyway.
+    if !super::lease::compositor_may_write() {
+        return;
+    }
     let Some(fb) = super::primary() else { return };
     let Some(c) = (unsafe { (*COMP.get()).as_mut() }) else { return };
     let w = c.w as usize;
@@ -163,6 +170,9 @@ pub fn active() -> bool {
 /// Answers `false` when there is no compositor, which is the caller's signal
 /// to fall back to its own saved pixels.
 pub fn repaint_rect(x: u32, y: u32, rw: u32, rh: u32) -> bool {
+    if !super::lease::compositor_may_write() {
+        return true;
+    }
     let Some(fb) = super::primary() else { return false };
     let Some(c) = (unsafe { (*COMP.get()).as_mut() }) else { return false };
     let w = c.w as usize;
@@ -188,6 +198,13 @@ pub fn repaint_rect(x: u32, y: u32, rw: u32, rh: u32) -> bool {
 /// shell prints, and this makes each one visible immediately instead of at
 /// the next desktop draw.
 pub fn flush_rect(x: u32, y: u32, rw: u32, rh: u32) {
+    // A program that draws on the aperture itself owns it outright; anything
+    // written here would land on its picture. The shadow is left alone too, so
+    // it does not claim pixels that never reached the screen -- the lease
+    // forgets it on release anyway.
+    if !super::lease::compositor_may_write() {
+        return;
+    }
     let Some(fb) = super::primary() else { return };
     let Some(c) = (unsafe { (*COMP.get()).as_mut() }) else { return };
     let w = c.w as usize;

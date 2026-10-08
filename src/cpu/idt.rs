@@ -501,6 +501,7 @@ fn fault(f: &Frame) -> ! {
     // screen. Take it back first, and stop pacing: 1200us a character turns a
     // report into half a second of typewriter, which to somebody watching is
     // indistinguishable from the hang it is explaining.
+    crate::gfx::lease::force_release();
     crate::gfx::splash::abandon();
     console::set_pace(0);
     console::set_color(console::LTRED);

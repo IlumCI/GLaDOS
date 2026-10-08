@@ -1339,6 +1339,12 @@ pub struct Interp {
     /// the second time round. A depth counter would also stop it and would
     /// stop it by failing; this stops it by being finished.
     imported: BTreeSet<String>,
+    /// The screen, once the program has drawn on it with `pixel`, `rect` or
+    /// `text`, until the top-level run ends. Those builtins write the
+    /// aperture directly; without the lease the desktop painted over the
+    /// drawing within a frame and, worse, left fragments of it behind when it
+    /// did not. Dropped at the end of `run`, which gives the desktop back.
+    screen: Option<crate::gfx::lease::Lease>,
 }
 
 impl Default for Interp {
@@ -1361,6 +1367,7 @@ impl Interp {
             notes: BTreeMap::new(),
             recs: BTreeMap::new(),
             imported: BTreeSet::new(),
+            screen: None,
         }
     }
 
@@ -1743,11 +1750,24 @@ impl Interp {
         // here so it cannot sit armed and silently truncate the next block
         // that runs.
         self.returning = None;
-        let mut last = Value::Nil;
+        let mut out = Ok(Value::Nil);
         for s in prog {
-            last = self.stmt(s)?;
+            out = self.stmt(s);
+            if out.is_err() {
+                break;
+            }
         }
-        Ok(last)
+        // Whatever the program drew is its own; the desktop comes back when
+        // the run does, error or not.
+        self.screen = None;
+        out
+    }
+
+    /// Hold the screen for the rest of this run, before a builtin draws.
+    fn take_screen(&mut self) {
+        if self.screen.is_none() {
+            self.screen = crate::gfx::lease::take(crate::gfx::lease::Owner::Aiksi);
+        }
     }
 
     /// Charge one step, and stop if the budget is spent.
@@ -2527,6 +2547,7 @@ impl Interp {
             "height" => Ok(Value::Int(gfx::primary().map(|f| f.height()).unwrap_or(0) as i64)),
             "pixel" => {
                 need(args, 3, "pixel")?;
+                self.take_screen();
                 if let Some(fb) = gfx::primary() {
                     let raw = fb.encode(colour(int(args, 2)?));
                     fb.put(int(args, 0)? as u32, int(args, 1)? as u32, raw);
@@ -2535,6 +2556,7 @@ impl Interp {
             }
             "rect" => {
                 need(args, 5, "rect")?;
+                self.take_screen();
                 if let Some(fb) = gfx::primary() {
                     fb.rect(
                         int(args, 0)? as u32,
@@ -2548,6 +2570,7 @@ impl Interp {
             }
             "text" => {
                 need(args, 4, "text")?;
+                self.take_screen();
                 if let Some(fb) = gfx::primary() {
                     fb.draw_text(
                         int(args, 0)? as u32,

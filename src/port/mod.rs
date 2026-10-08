@@ -72,7 +72,10 @@ impl Program {
 /// flag -- an earlier version of this comment said it was fixed, and it is
 /// not. It is a caller of the lease that replaces the flag.
 pub fn with_screen<R>(f: impl FnOnce() -> R) -> R {
-    crate::gfx::set_exclusive(true);
+    // Refused only if somebody else already holds it, in which case two
+    // programs are drawing full-screen at once and the second one simply
+    // loses the race for pixels, as it did before there was a lease.
+    let lease = crate::gfx::lease::take(crate::gfx::lease::Owner::Port);
     // Blanked on the way in. A frame that does not divide the screen exactly
     // is letterboxed, and what shows in the letterbox is whatever the desktop
     // last composed there -- so a 320x200 frame on a 1920x1080 screen came up
@@ -85,16 +88,13 @@ pub fn with_screen<R>(f: impl FnOnce() -> R) -> R {
         fb.fill(crate::gfx::Color::new(0, 0, 0));
     }
     let out = f();
-    crate::gfx::set_exclusive(false);
     // Whatever was underneath, put back -- and the shadow forgotten first,
-    // which the comment below always said was necessary and the code did not
-    // do. A `Surface` writes the aperture directly, so the compositor still
-    // believes the desktop is on screen; `present` then finds every row
-    // unchanged and repaints none of them, and the game stays on screen with
-    // the terminal drawn over the top of it. Found by looking at a
+    // which dropping the lease does. A `Surface` writes the aperture
+    // directly, so the compositor still believes the desktop is on screen;
+    // without the forgetting `present` finds every row unchanged and the game
+    // stays up with the terminal drawn over it. Found by looking at a
     // screenshot taken after the picture was supposed to be gone.
-    crate::gfx::compose::invalidate();
-    crate::gfx::render::invalidate();
+    drop(lease);
     out
 }
 

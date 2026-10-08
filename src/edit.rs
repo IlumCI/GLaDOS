@@ -689,6 +689,12 @@ pub fn run(path: &str) {
         return;
     };
 
+    // The screen, for as long as the editor runs. Without it the clock, the
+    // pointer and the console all painted over the text, and on the way out
+    // the compositor's shadow still described the desktop, so the editor's
+    // last frame stayed up wherever the next desktop frame did not change a
+    // row. Dropping the lease at the end of this function is the fix for both.
+    let _screen = crate::gfx::lease::take(crate::gfx::lease::Owner::Editor);
     let mut ed = Editor::open(path, &fb);
     fb.fill(BG);
 
@@ -714,7 +720,6 @@ pub fn run(path: &str) {
         }
     }
 
-    // Hand the screen back. `chrome` repaints the desktop and the window as
-    // well as the text; filling with black first would only be undone.
-    crate::gfx::render::invalidate();
+    // The screen goes back when `_screen` drops here, which repaints the
+    // desktop and the window as well as the text.
 }

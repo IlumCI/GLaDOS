@@ -911,6 +911,10 @@ fn comp_task() {
         // looking at the window list. Draining before composing means a window
         // asked for during the last frame appears in this one rather than the
         // next.
+        // USB input first and whoever holds the screen: a full-screen program
+        // reads the keyboard too, and a USB keyboard polled only while the
+        // desktop owned the screen went dead the moment anything else did.
+        dev::usbhid::poll();
         if !gfx::exclusive() {
             // The phase before each call that leaves this file, so a stall
             // names the thing it is stuck inside rather than the loop.
@@ -936,13 +940,11 @@ fn comp_task() {
             // is not allowed to happen underneath one.
             gfx::render::beat(gfx::render::Phase::Pointer);
             gfx::desk::poll_mouse();
-            // And the USB input devices, for the identical reason: a mouse on
-            // the bus is polled, not interrupt-driven, and polled from the
-            // shell's idle loop it stopped for the length of every command.
-            // After `poll_mouse` on purpose -- a report it delivers lands in
-            // `mouse::apply` and is read on the next turn, a few milliseconds
-            // later, which is well inside what a hand notices.
-            dev::usbhid::poll();
+            // The USB devices are polled above, for every owner of the
+            // screen. They are polled rather than interrupt-driven, and polled
+            // from the shell's idle loop they stopped for the length of every
+            // command; a report lands in `mouse::apply` and is read here on
+            // the next turn, a few milliseconds later.
         }
 
         // **Back to `Turn` before the wait, or the resting state lies.**
@@ -2409,6 +2411,9 @@ fn panic(info: &PanicInfo) -> ! {
     if console::is_ready() {
         // A panic behind a progress bar helps nobody, and on the GF63 the
         // framebuffer is the only place a diagnostic can go.
+        // And whoever held the screen loses it: the console is the only
+        // diagnostic left and must be allowed to reach the aperture.
+        gfx::lease::force_release();
         gfx::splash::abandon();
         console::set_color(LTRED);
         console::_print(format_args!("\n*** KERNEL PANIC ***\n{}\n", info));

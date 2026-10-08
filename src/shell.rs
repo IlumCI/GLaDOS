@@ -159,6 +159,10 @@ const KNOWN_COMMANDS: &[&str] = &[
 /// more use than grinding.
 const AUTHOR_STEPS: usize = 8;
 
+/// The `splash hold` demo's grip on the screen, kept across commands until
+/// `splash release`.
+static SPLASH_LEASE: crate::sync::Spin<Option<crate::gfx::lease::Lease>> = crate::sync::Spin::new(None);
+
 pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
     console::set_color(LTCYAN);
     INTERACTIVE.store(true, core::sync::atomic::Ordering::Release);
@@ -7054,7 +7058,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     kprintln!(
                         "  clock {}, screen {}",
                         if crate::port::clock::ready() { "calibrated" } else { "UNCALIBRATED" },
-                        if crate::gfx::exclusive() { "held" } else { "free" }
+                        crate::gfx::lease::holder().map_or("free", |o| o.name())
                     );
                     kprintln!("  'port bars' draws a test frame through the surface");
                 }
@@ -7201,17 +7205,30 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     if crate::gfx::STREAM.load(Ordering::Relaxed) { "on" } else { "off" });
                 return;
             }
-            if rest.trim() == "bars" {
+            if let Some(ms) = rest.trim().strip_prefix("bars") {
                 // Deferred from boot because the splash owned the screen.
                 // Swapped red and blue mean the firmware's reported pixel
                 // format is wrong, which is worth being able to re-check.
+                //
+                // Held for a bounded time, and under a lease: the bars used to
+                // be drawn on the aperture with nothing told, so they lasted
+                // until some unrelated row changed and then left fragments.
+                // Now they stay `ms` milliseconds (3000 by default) and the
+                // desktop comes back whole when the lease drops.
+                let ms: u64 = ms.trim().parse().unwrap_or(3000);
+                let _screen = crate::gfx::lease::take(crate::gfx::lease::Owner::VideoTest);
                 let y = boot.fb.height().saturating_sub(80);
                 let w = boot.fb.width() / 6;
                 use crate::gfx::palette;
                 boot.fb.rect(w, y, w, 40, palette::LTRED);
                 boot.fb.rect(w * 2, y, w, 40, palette::LTGREEN);
                 boot.fb.rect(w * 3, y, w, 40, palette::LTBLUE);
-                kprintln!("  bars drawn: red green blue, left to right");
+                kprintln!("  bars drawn: red green blue, left to right, for {} ms", ms);
+                let mhz = crate::time::tsc_mhz().max(1) as u64;
+                let until = crate::time::rdtsc() + ms * mhz * 1000;
+                while crate::time::rdtsc() < until {
+                    crate::task::yield_now();
+                }
             } else {
                 kprintln!("  'video bars' to check the pixel format");
             }
@@ -7253,9 +7270,9 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             let a1 = t.split_whitespace().nth(1);
             if a0 == Some("release") {
                 // Give the screen back, for the frame-by-frame capture below.
-                crate::gfx::set_exclusive(false);
-                crate::gfx::compose::invalidate();
-                crate::gfx::render::invalidate();
+                // Dropping the lease forgets the shadow and asks for a frame.
+                let held = SPLASH_LEASE.lock_irq().take();
+                drop(held);
                 kprintln!("  released");
             } else if a0 == Some("hold") {
                 // Draw one frame and keep the framebuffer held, returning to
@@ -7264,7 +7281,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // and `splash release` at the end. Exclusive is set so the
                 // clock and cursor do not paint over the held frame.
                 let step: u32 = a1.and_then(|s| s.parse().ok()).unwrap_or(0);
-                crate::gfx::set_exclusive(true);
+                {
+                    let mut l = SPLASH_LEASE.lock_irq();
+                    if l.is_none() {
+                        *l = crate::gfx::lease::take(crate::gfx::lease::Owner::Splash);
+                    }
+                }
                 crate::gfx::compose::invalidate();
                 let label = labels.get(step as usize).copied().unwrap_or("ready");
                 crate::gfx::splash::demo_frame(step, label);

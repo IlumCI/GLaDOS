@@ -541,14 +541,18 @@ fn mine_frame(fb: &Framebuffer, n: &Now) {
 /// Take the display for the life of the image. Idempotent: called when the
 /// address is asked for and again when mining starts.
 ///
-/// `set_exclusive` makes the desktop's periodic painters stand down; the
+/// The `Miner` lease makes the desktop's periodic painters stand down; the
 /// console is reflowed to the full screen (so what it holds is sane if a fault
 /// ever makes it visible) and then made invisible, so nothing it prints --
 /// the shell's echo, its caret, a stray log line -- paints over the frame.
 pub fn take() {
     let Some(fb) = crate::gfx::primary() else { return };
     TAKEN.store(true, Ordering::Relaxed);
-    crate::gfx::set_exclusive(true);
+    // For the life of the image: the lease is never given back, so it is
+    // leaked deliberately rather than stored somewhere nothing reads.
+    if let Some(l) = crate::gfx::lease::take(crate::gfx::lease::Owner::Miner) {
+        core::mem::forget(l);
+    }
     compose::init();
     // **Every console, not the default one.** The miner takes the screen while
     // boot is still on the executive console, and the shell then starts on the

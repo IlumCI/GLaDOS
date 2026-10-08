@@ -6,6 +6,7 @@
 //! are the only output device that exists.
 
 pub mod browse;
+pub mod lease;
 pub mod render;
 pub mod compose;
 pub mod console;
@@ -93,33 +94,11 @@ pub fn set_primary(fb: Framebuffer) {
     unsafe { *PRIMARY.get() = Some(fb) };
 }
 
-/// Whether something owns the whole screen right now.
-///
-/// A full-screen program does not get the machine to itself just by drawing
-/// over it: `desk::paint_clock` runs on the clock task at 10 Hz and
-/// `desk::move_cursor` runs on whichever task is generating, and both write
-/// the framebuffer. So a game frame is stamped over ten times a second, and
-/// the pointer leaves an arrow in the middle of it.
-///
-/// Both of those take a paint claim, which is private to `desk.rs`, so an
-/// exclusive painter cannot serialise against them the way they serialise
-/// against each other. This is the other half of that arrangement: instead of
-/// contending for the claim, the periodic painters stand down entirely.
-///
-/// **`edit::run` does not set this, whatever earlier versions of this comment
-/// said.** It draws straight onto the aperture and never asks for the screen,
-/// so the clock, the cursor and the console all paint over it and the
-/// compositor's shadow still describes the desktop after it exits. The flag is
-/// being replaced by an owned lease (1.4.1 plan, phase 2), and the editor is
-/// one of the callers that lease exists for.
-static EXCLUSIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-
-pub fn set_exclusive(on: bool) {
-    EXCLUSIVE.store(on, core::sync::atomic::Ordering::Release);
-}
-
+/// Whether something other than the desktop owns the screen. The question
+/// `gfx::lease` answers now, with an owner attached; this name stays for the
+/// many places that only need yes or no.
 pub fn exclusive() -> bool {
-    EXCLUSIVE.load(core::sync::atomic::Ordering::Acquire)
+    lease::held()
 }
 
 pub fn primary() -> Option<Framebuffer> {
