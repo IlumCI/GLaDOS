@@ -3378,6 +3378,14 @@ struct Flight {
 
 static FLIGHT: crate::sync::Racy<Option<Flight>> = crate::sync::Racy::new(None);
 
+/// Whether the compositor has work due within the next few milliseconds that
+/// no `invalidate` will announce: a window part-way through arriving, or a
+/// pointer paint the 4 ms pacing deferred. While either is true it must not
+/// sleep a whole timer tick, or the arrival stutters and the arrow lags.
+pub fn busy() -> bool {
+    arriving().is_some() || unsafe { *CURSOR_PENDING.get() }
+}
+
 /// Which window is still on its way, if any.
 fn arriving() -> Option<usize> {
     unsafe { (*FLIGHT.get()).as_ref().map(|f| f.win) }

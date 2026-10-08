@@ -1378,6 +1378,42 @@ pub fn sleep_until(tick: u64) -> bool {
     !woken
 }
 
+/// As `sleep_until`, but give up the sleep as soon as `ready` holds.
+///
+/// `ready` is asked *after* the deadline is recorded and before yielding, and
+/// that order is the point. A sleeper that checks its condition first and
+/// records its deadline second has a window between the two where the event it
+/// waits for can arrive, find nobody asleep, and be lost -- and the task then
+/// sleeps out the whole deadline on a condition that is already true. With
+/// the deadline recorded first, an event in that window either makes `ready`
+/// true when it is asked, or reaches `wake`, which cancels a recorded deadline
+/// even before `schedule` has made it a sleep.
+pub fn sleep_until_or(tick: u64, ready: impl Fn() -> bool) -> bool {
+    let mut woken = false;
+    while crate::dev::lapic::ticks() < tick {
+        if !set_wake(tick) {
+            core::hint::spin_loop();
+            if ready() {
+                woken = true;
+                break;
+            }
+            continue;
+        }
+        if ready() {
+            woken = true;
+            break;
+        }
+        yield_now();
+        if take_woken() || ready() {
+            woken = true;
+            break;
+        }
+    }
+    set_wake(0);
+    let _ = take_woken();
+    !woken
+}
+
 /// Read and clear this task's wake flag.
 fn take_woken() -> bool {
     let me = crate::smp::this_cpu() as usize;
@@ -1415,6 +1451,21 @@ pub fn wake(index: usize) -> bool {
     }
     let mut t = TASKS.lock_irq();
     if t[index].state != State::Asleep {
+        // **A wake that arrives before the sleep is still a wake.** A task
+        // decides to sleep, records its deadline with `set_wake`, and only
+        // then yields -- and `schedule` is what turns that deadline into
+        // `Asleep`. A wake landing between the two used to find the task
+        // still `Running`, answer "nothing to wake", and lose the event: the
+        // task then slept out its whole deadline on a condition that had
+        // already changed. The compositor is the caller that cannot afford
+        // that, since its wake is `render::invalidate`. So a pending deadline
+        // is cancelled and the flag set, and the yield that follows returns
+        // straight away to a `sleep_until` that sees it.
+        if t[index].wake_at != 0 && t[index].state != State::Unused {
+            t[index].wake_at = 0;
+            t[index].woken = true;
+            return true;
+        }
         return false;
     }
     t[index].state = State::Ready;

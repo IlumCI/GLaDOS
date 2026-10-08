@@ -852,12 +852,6 @@ pub fn clock_iterations() -> u64 {
     CLOCK_ITERS.load(Ordering::Relaxed)
 }
 
-/// A second task, deliberately CPU-bound.
-///
-/// It never yields, never sleeps and never blocks -- so if the shell stays
-/// responsive while this runs, that is preemption doing it and nothing else.
-/// The iteration counter is the headless proof: it can only advance while this
-/// task holds the CPU.
 /// Compose a frame when one is owed, and never mind who asked.
 ///
 /// The loop is deliberately dull. It does not know what changed, only that
@@ -958,41 +952,63 @@ fn comp_task() {
         // `Pointer` 13 ms ago, and a 43-second stall reported `Pointer` too.
         gfx::render::beat(gfx::render::Phase::Turn);
 
-        let now = time::rdtsc();
-        if now < next {
-            // **`yield_now` and deliberately not `hlt`.**
-            //
-            // `hlt` is the obvious way to wait for a deadline and it is wrong
-            // here: it halts *the core*, not this task, and the next thing to
-            // run waits for an interrupt -- up to ten milliseconds at 100 Hz,
-            // taken from the shell once per round trip.
-            //
-            // This used to add that the scheduler "has no blocked state". That
-            // stopped being true when `State::Asleep`, `task::sleep_until` and
-            // `task::wake` landed for `nanosleep`. What still holds is that a
-            // sleep is tick-granular, so it suits waiting while idle and not
-            // pacing a 16.6 ms frame; sleeping when idle and waking from
-            // `render::invalidate` is phase 3 of the 1.4.1 plan.
-            task::yield_now();
-            continue;
-        }
-        let mhz = time::tsc_mhz().max(1) as u64;
-        next = now + (mhz * 1_000_000) / FRAME_HZ;
-
         // `render stall` lands here, and nowhere in a shipped path.
         gfx::render::stall_hook();
 
-        // A full-screen program owns the screen outright -- DOOM, the editor,
-        // a guest holding /dev/fb0 -- so the desktop stands down rather than
-        // contending. The repaint is owed for when it gives the screen back,
-        // so the flag goes back too.
+        // A full-screen program owns the screen outright -- the editor, a
+        // guest holding /dev/fb0, a ported program -- so the desktop stands
+        // down rather than contending, and the pending repaint stays pending
+        // for when the lease drops. A tick at a time, because the USB devices
+        // above still need polling for whoever does own the screen.
         if gfx::exclusive() {
-            if gfx::render::take_dirty() {
-                gfx::render::restore_dirty();
-            }
-            task::yield_now();
+            task::sleep_until_or(dev::lapic::ticks() + 1, || false);
             continue;
         }
+
+        // **Sleep when there is nothing to do; compose at once when there is.**
+        //
+        // This loop used to spin to a 60 Hz deadline whether or not anything
+        // had changed, yielding between looks. That cost a core-share all the
+        // time and still added latency: a change arriving just after a frame
+        // waited out the deadline before anyone looked. `render::pace` decides
+        // now, from three numbers:
+        //
+        // - something is dirty and the last frame was more than a frame-time
+        //   ago: compose immediately. After any quiet spell this is the case,
+        //   so the first frame of a burst is never held back;
+        // - dirty, but a frame went out under a frame-time ago: give the core
+        //   away and look again -- bursts coalesce to `FRAME_HZ`;
+        // - nothing dirty: sleep until the nearest periodic job, and
+        //   `render::invalidate` or a pointer packet wakes it early.
+        //
+        // A sleep is tick-granular (10 ms), so the periodic jobs that need
+        // finer timing -- a window arriving, a pointer paint the 4 ms pacing
+        // deferred -- keep the loop in the yielding state instead (`busy`).
+        let now = time::rdtsc();
+        let dirty = gfx::render::is_dirty() || gfx::desk::busy();
+        let ticks = dev::lapic::ticks();
+        // The tray repaints every tenth of a second; polled USB devices want a
+        // look every tick.
+        let tenth = crate::TIMER_HZ as u64 / 10;
+        let wake_in = if dev::usbhid::attached() > 0 { 1 } else { tenth - ticks % tenth };
+        match gfx::render::pace(now, next, dirty, wake_in) {
+            gfx::render::Pace::Wait => {
+                task::yield_now();
+                continue;
+            }
+            gfx::render::Pace::Sleep(t) => {
+                gfx::render::beat(gfx::render::Phase::Tray);
+                gfx::desk::paint_tray(false);
+                gfx::render::beat(gfx::render::Phase::Turn);
+                task::sleep_until_or(ticks + t, || {
+                    gfx::render::is_dirty() || dev::mouse::pending()
+                });
+                continue;
+            }
+            gfx::render::Pace::Compose => {}
+        }
+        let mhz = time::tsc_mhz().max(1) as u64;
+        next = now + (mhz * 1_000_000) / FRAME_HZ;
         let mut composed = false;
         if gfx::render::take_dirty() {
             // `draw` takes the painter's claim itself and refuses if another
@@ -1047,6 +1063,16 @@ fn radio_task() {
     }
 }
 
+/// The clock task: once-a-tick housekeeping.
+///
+/// **It was deliberately CPU-bound, and that stopped being worth it.** It
+/// never yielded, so a responsive shell beside it proved preemption -- a fine
+/// demonstration when preemption was new, and a full ten-millisecond quantum
+/// taken from every other task on core 0, every round, ever since. The
+/// compositor is one of those tasks, and a pointer packet arriving while this
+/// held the core waited for the quantum to end. Preemption has its own
+/// evidence now (`diag migrate`, the guest timer kills), so this sleeps a tick
+/// per turn. The iteration counter still says it is alive.
 fn clock_task() {
     let mut last = u64::MAX;
     loop {
@@ -1158,7 +1184,10 @@ fn clock_task() {
             // instead is the watchdog above -- in words, on a channel the
             // screen cannot take away.
         }
-        core::hint::spin_loop();
+        // One tick. Everything above runs at most ten times a second or is a
+        // poll that a tick of lateness does not hurt -- the wireless state
+        // machine works in hundreds of milliseconds.
+        task::sleep_until(dev::lapic::ticks() + 1);
     }
 }
 

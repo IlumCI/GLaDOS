@@ -98,6 +98,13 @@ pub fn take() -> State {
     out
 }
 
+/// Whether anything has happened since the last `take`, without consuming it.
+/// The compositor's sleep asks this so a packet that lands just before it
+/// goes to sleep is not left waiting a whole tick.
+pub fn pending() -> bool {
+    unsafe { (*STATE.get()).moved }
+}
+
 /// The state as it stands, consuming nothing.
 ///
 /// `take` clears the wheel and the moved flag because those describe what

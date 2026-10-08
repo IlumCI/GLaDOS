@@ -83,8 +83,62 @@ pub fn enabled() -> bool {
 }
 
 /// Say the screen is out of date. Cheap, and safe from anywhere.
+///
+/// It also wakes the compositor, which sleeps whenever nothing is dirty. Only
+/// on the clean-to-dirty edge: a second mark during the same frame wakes
+/// nobody, so a caller that invalidates in a loop costs one swap a call.
 pub fn invalidate() {
-    DIRTY.store(true, Ordering::Release);
+    if !DIRTY.swap(true, Ordering::AcqRel) {
+        wake_compositor();
+    }
+}
+
+/// Bring the compositor round now rather than at its next deadline. Safe from
+/// an interrupt handler: `task::wake` takes the task table with interrupts
+/// masked, so no holder on this core can be interrupted by it.
+pub fn wake_compositor() {
+    let i = COMP_TASK.load(Ordering::Acquire);
+    if i != u64::MAX {
+        crate::task::wake(i as usize);
+    }
+}
+
+/// What the compositor should do with this turn of its loop.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pace {
+    /// Compose now.
+    Compose,
+    /// A frame is wanted but the last one was under a frame-time ago: give
+    /// the core away and come straight back.
+    Wait,
+    /// Nothing is wanted. Sleep this many timer ticks unless woken first.
+    Sleep(u64),
+}
+
+/// Decide the turn, from nothing but numbers -- so every branch is asserted
+/// at `diag render` with no compositor running.
+///
+/// **The first frame after a quiet spell is immediate, and later ones
+/// coalesce to `FRAME_HZ`.** That falls out of one comparison rather than two
+/// timers (SerenityOS keeps an immediate one and a 60 Hz one): `next_frame` is
+/// a frame-time after the last composed frame, so after any pause it is
+/// already in the past and the frame goes at once, while during a burst it is
+/// in the future and the turn waits.
+///
+/// Asleep, the compositor still has periodic work -- the tray every tenth, a
+/// window arriving, polled USB devices -- so the sleep is to the nearest of
+/// those, `wake_in` ticks away, and never zero.
+pub fn pace(now: u64, next_frame: u64, dirty: bool, wake_in: u64) -> Pace {
+    if dirty {
+        if now >= next_frame { Pace::Compose } else { Pace::Wait }
+    } else {
+        Pace::Sleep(wake_in.max(1))
+    }
+}
+
+/// Whether a repaint is pending, without claiming it.
+pub fn is_dirty() -> bool {
+    DIRTY.load(Ordering::Acquire)
 }
 
 /// Claim the pending repaint, if there is one.
@@ -253,6 +307,8 @@ static LATENCY_AT: AtomicU64 = AtomicU64::new(0);
 /// else.
 pub fn input_arrived() {
     let _ = INPUT_AT.compare_exchange(0, crate::time::rdtsc(), Ordering::Relaxed, Ordering::Relaxed);
+    // The compositor sleeps when idle and the pointer is its job.
+    wake_compositor();
 }
 
 /// Something reached the screen. If an input was waiting, its wait is over.
@@ -701,6 +757,12 @@ pub fn selftest() -> bool {
     // stray read reporting "composing a frame" would send somebody into the
     // window manager after a compositor that was never spawned.
     claim("and an unknown one reads as never started", Phase::of(99) == Phase::Cold);
+
+    // Pacing, every branch. Times are arbitrary TSC readings.
+    claim("dirty after a quiet spell composes at once", pace(1000, 400, true, 5) == Pace::Compose);
+    claim("dirty inside a frame-time waits for the deadline", pace(1000, 1200, true, 5) == Pace::Wait);
+    claim("clean sleeps until the nearest periodic job", pace(1000, 400, false, 7) == Pace::Sleep(7));
+    claim("and never for zero ticks, which would be a spin", pace(1000, 400, false, 0) == Pace::Sleep(1));
 
     // The compositor is running while this runs, so it must not be reported as
     // gone. This is the false-alarm check, and it decides whether the alarm is
