@@ -11,6 +11,7 @@ pub mod recover;
 pub mod gdt;
 pub mod idt;
 pub mod port;
+pub mod mtrr;
 
 use core::arch::asm;
 

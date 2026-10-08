@@ -600,6 +600,53 @@ pub fn query(addr: u64) -> Option<Perm> {
     })
 }
 
+/// The PAT slot the leaf entry for `addr` selects, under the current CR3.
+///
+/// Its own walk rather than `entry_for`, because the answer depends on which
+/// level the leaf is at and `entry_for` does not say: the PAT bit is bit 12 of
+/// a 2 MiB or 1 GiB entry and bit 7 of a 4 KiB one -- where bit 7 of a large
+/// entry is the page-size flag. Reading the wrong one reports a slot the
+/// processor is not using.
+pub fn pat_slot(addr: u64) -> Option<u8> {
+    let (i4, i3, i2, i1) = (
+        ((addr >> 39) & 511) as usize,
+        ((addr >> 30) & 511) as usize,
+        ((addr >> 21) & 511) as usize,
+        ((addr >> 12) & 511) as usize,
+    );
+    let bits = |e: u64, pat: u64| {
+        crate::cpu::mtrr::slot(e & WRITE_THROUGH != 0, e & CACHE_DISABLE != 0, e & pat != 0)
+    };
+    unsafe {
+        let pml4 = table(crate::cpu::read_cr3() & ADDR_MASK);
+        if pml4[i4] & PRESENT == 0 {
+            return None;
+        }
+        let pdpt = table(pml4[i4] & ADDR_MASK);
+        let e3 = pdpt[i3];
+        if e3 & PRESENT == 0 {
+            return None;
+        }
+        if e3 & HUGE != 0 {
+            return Some(bits(e3, 1 << 12));
+        }
+        let pd = table(e3 & ADDR_MASK);
+        let e2 = pd[i2];
+        if e2 & PRESENT == 0 {
+            return None;
+        }
+        if e2 & HUGE != 0 {
+            return Some(bits(e2, 1 << 12));
+        }
+        let pt = table(e2 & ADDR_MASK);
+        let e1 = pt[i1];
+        if e1 & PRESENT == 0 {
+            return None;
+        }
+        Some(bits(e1, 1 << 7))
+    }
+}
+
 /// Make a range obey `perm`, one 4 KiB page at a time.
 ///
 /// The range is rounded outward to whole pages, because a permission is a

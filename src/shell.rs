@@ -2998,6 +2998,27 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             console::set_color(if st.max_gap_ms > 1000 { LTRED } else { WHITE });
             kprintln!("    worst gap    {:>6} ms   the longest the screen stood still", st.max_gap_ms);
             console::set_color(LTGRAY);
+            // The distribution, not a rate: what a person notices is the slow
+            // frame and the late response, so those are what is printed.
+            let t = render::timing();
+            if t.frame.3 > 0 {
+                kprintln!(
+                    "    frame time   p50 {} us  p95 {} us  max {} us   ({} frames, present p50 {} us)",
+                    t.frame.0, t.frame.1, t.frame.2, t.frame.3, t.present.0
+                );
+                console::set_color(if t.over_budget > 0 { LTRED } else { LTGRAY });
+                kprintln!(
+                    "    over budget  {:>6}   frame(s) slower than {} us (60 fps)",
+                    t.over_budget, render::BUDGET_US
+                );
+                console::set_color(LTGRAY);
+            }
+            if t.latency.3 > 0 {
+                kprintln!(
+                    "    input->screen p50 {} us  p95 {} us  max {} us   ({} events)",
+                    t.latency.0, t.latency.1, t.latency.2, t.latency.3
+                );
+            }
             // The compositor's own pulse, which is a different question from
             // whether frames landed. An idle desktop composes nothing and is
             // perfectly healthy; a compositor that stopped turning is the
@@ -7138,6 +7159,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             );
             if rest.trim() == "bench" {
                 crate::gfx::bench();
+                return;
+            }
+            if rest.trim() == "cache" {
+                crate::gfx::cache_report();
                 return;
             }
             if rest.trim() == "bars" {

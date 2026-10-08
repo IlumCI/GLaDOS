@@ -106,9 +106,12 @@ pub fn set_primary(fb: Framebuffer) {
 /// against each other. This is the other half of that arrangement: instead of
 /// contending for the claim, the periodic painters stand down entirely.
 ///
-/// `edit::run` has owned the screen this way since it was written and has the
-/// defect today -- the clock paints over the editor. It is fixed by the same
-/// flag.
+/// **`edit::run` does not set this, whatever earlier versions of this comment
+/// said.** It draws straight onto the aperture and never asks for the screen,
+/// so the clock, the cursor and the console all paint over it and the
+/// compositor's shadow still describes the desktop after it exits. The flag is
+/// being replaced by an owned lease (1.4.1 plan, phase 2), and the editor is
+/// one of the callers that lease exists for.
 static EXCLUSIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 pub fn set_exclusive(on: bool) {
@@ -1243,6 +1246,8 @@ pub struct Frame {
     pub fill_present_us: (u64, u64),
     /// The terminal's own cost, which is most of what a full `draw` is.
     pub console_us: (u64, u64),
+    /// One pointer move, through the path a real packet takes.
+    pub cursor_us: (u64, u64),
 }
 
 /// Time the graphics path. `None` when there is no framebuffer to time.
@@ -1283,7 +1288,15 @@ pub fn measure() -> Option<Frame> {
             compose::present();
         }),
         console_us: best_of(&mut || console::redraw()),
+        cursor_us: {
+            let mut step = 0u32;
+            best_of(&mut || {
+                step += 1;
+                desk::bench_cursor(step);
+            })
+        },
     };
+    desk::cursor_home();
     desk::draw();
     Some(out)
 }
@@ -1306,6 +1319,7 @@ pub fn bench() {
         ("present, no change   ", m.present_us),
         ("fill + present, all  ", m.fill_present_us),
         ("console redraw_all   ", m.console_us),
+        ("pointer move         ", m.cursor_us),
     ] {
         kprintln!("  {} {:>7} us  (max {})", what, lo, hi);
     }
@@ -1331,6 +1345,80 @@ pub fn text_selftest() -> bool {
 /// than by looking: a gradient that is one shade wrong is invisible in a
 /// screenshot and a shadow that bleeds one channel into the next is a colour
 /// nobody would think to check.
+/// The memory-type decoding behind `video cache`, against synthetic registers.
+pub fn pat_selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    crate::cpu::mtrr::checks(&mut |what, good| {
+        if !good {
+            ok = false;
+        }
+        kprintln!("  {}  {}", if good { "ok " } else { "FAIL" }, what);
+    });
+    ok
+}
+
+/// What the processor really does with a store to the framebuffer.
+///
+/// Walks the aperture a 2 MiB step at a time, because the page tables map it
+/// in 2 MiB entries and the MTRRs may split it anywhere, and prints each run
+/// of identical answers once. Under a hypervisor the registers are virtual and
+/// the emulator does not model caches, so the answer is about the guest's
+/// configuration and says nothing about speed -- which is printed rather than
+/// left to be remembered.
+pub fn cache_report() {
+    use crate::cpu::mtrr;
+    use crate::kprintln;
+    let Some(fb) = primary() else {
+        kprintln!("  no framebuffer");
+        return;
+    };
+    let Some(snap) = mtrr::read() else {
+        kprintln!("  this processor does not report a PAT and MTRRs; nothing to decode");
+        return;
+    };
+    let base = fb.addr();
+    let len = fb.stride() as u64 * fb.height() as u64 * 4;
+    kprintln!("  aperture  {:#x} .. {:#x}  ({} KiB)", base, base + len, len / 1024);
+    kprintln!("  PAT       {:#018x}{}", snap.pat,
+              if snap.pat == mtrr::PAT_POWER_ON { "  (power-on layout: no WC slot)" } else { "" });
+    kprintln!("  MTRRs     {}, default {}, {} variable range(s), WC {}",
+              if snap.def_type & (1 << 11) != 0 { "enabled" } else { "DISABLED" },
+              mtrr::Kind::from_mtrr((snap.def_type & 0xFF) as u8).short(),
+              snap.ranges.iter().filter(|r| r.valid()).count(),
+              if snap.wc_supported { "supported" } else { "not supported" });
+
+    let step = 2 * 1024 * 1024u64;
+    let mut at = base & !(step - 1);
+    let mut run: Option<(u64, u8, mtrr::Kind, mtrr::Kind)> = None;
+    let flush = |r: (u64, u8, mtrr::Kind, mtrr::Kind), end: u64| {
+        let (from, slot, p, m) = r;
+        kprintln!("    {:#x}..{:#x}  page slot {} = {:<3}  mtrr {:<3}  -> {}",
+                  from, end, slot, p.short(), m.short(), mtrr::effective(p, m).name());
+    };
+    while at < base + len {
+        let probe = at.max(base);
+        let slot = crate::mem::paging::pat_slot(probe).unwrap_or(0xFF);
+        let p = if slot == 0xFF { mtrr::Kind::Reserved(0xFF) } else { mtrr::pat_kind(snap.pat, slot) };
+        let m = mtrr::mtrr_kind(snap.def_type, &snap.ranges, probe).unwrap_or(mtrr::Kind::Reserved(0xFE));
+        match run {
+            Some(r) if r.1 == slot && r.2 == p && r.3 == m => {}
+            Some(r) => {
+                flush(r, probe);
+                run = Some((probe, slot, p, m));
+            }
+            None => run = Some((probe, slot, p, m)),
+        }
+        at += step;
+    }
+    if let Some(r) = run {
+        flush(r, base + len);
+    }
+    if let Some(name) = crate::cpu::hypervisor_name() {
+        kprintln!("  running under {}: these are its registers, and it does not model caches", name);
+    }
+}
+
 pub fn paint_selftest() -> bool {
     use crate::kprintln;
     let mut ok = true;

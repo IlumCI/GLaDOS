@@ -155,6 +155,9 @@ pub fn apply(dx: i32, dy: i32, left: bool, right: bool, wheel: i32) {
     if left != s.left || right != s.right {
         s.moved = true;
     }
+    if s.moved {
+        crate::gfx::render::input_arrived();
+    }
     // Both states, because evdev reports transitions and this is handed
     // state: a packet arrives for every movement, so emitting a press per
     // packet would give a guest a hundred clicks a second. Placed here for

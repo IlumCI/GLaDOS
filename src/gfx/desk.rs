@@ -2190,6 +2190,27 @@ fn move_cursor(x: u32, y: u32) -> bool {
     })
 }
 
+/// One pointer move, for `video bench` and the `video.cursor_move` rail.
+///
+/// Alternates between two spots a few pixels apart so every call really moves
+/// the arrow, and puts it back where the hand left it afterwards. Measured
+/// through `move_cursor`, the same path a real packet takes, so the number is
+/// what a person dragging the mouse pays per update -- today a hide and a show
+/// straight on the aperture, and after phase 6 a re-present of two small
+/// rectangles.
+pub fn bench_cursor(step: u32) {
+    let Some(fb) = super::primary() else { return };
+    let (x, y) = (fb.width() / 2 + (step & 1) * 7, fb.height() / 2 + (step & 1) * 5);
+    move_cursor(x, y);
+}
+
+/// Put the arrow back where the pointer says it is, after `bench_cursor`.
+pub fn cursor_home() {
+    if let Some((x, y)) = unsafe { *POS.get() } {
+        move_cursor(x, y);
+    }
+}
+
 pub fn poll_mouse() {
     use crate::dev::mouse;
     if !mouse::present() || !ready() {
@@ -4282,6 +4303,7 @@ pub fn draw() {
     let Some(_claim) = Claim::take() else {
         return;
     };
+    let started = crate::time::rdtsc();
     let screen = screen_rect(&real);
     // Lift the pointer before presenting, or the pixels saved under it are
     // stale the moment anything below moves, and putting them back paints a
@@ -4580,12 +4602,14 @@ pub fn draw() {
         }
     });
     super::render::drew();
+    let presenting = crate::time::rdtsc();
     super::compose::present();
     // Put the pointer back where it was. Without this every keystroke that
     // repaints would blink the arrow out until the mouse next moved.
     if let Some((px, py)) = unsafe { *POS.get() } {
         cursor_show(&real, px, py);
     }
+    super::render::frame_timed(started, presenting, crate::time::rdtsc());
 }
 
 fn dropdown<'a>(

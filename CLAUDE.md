@@ -929,8 +929,8 @@ mismatch made three hours and one commit earlier. The check answers that in a
 second where reading the diff does not answer it at all.
 
 **Rails are what "better" refers to.** `bench report` emits one machine-readable
-block, `[rail] v1`, one rail per line as `name value unit want`. Fourteen of
-them: five graphics, four interpreter, `ai.matmul`, `ai.bpb`, `ai.answer`, and
+block, `[rail] v1`, one rail per line as `name value unit want`. Fifteen of
+them: six graphics (`video.cursor_move` joined in 1.4.1), four interpreter, `ai.matmul`, `ai.bpb`, `ai.answer`, and
 two memory bandwidth. `bench::DECLARED` is the list and the report walks it, so
 that count is checkable rather than remembered -- which is the only reason this
 sentence can be trusted after the last three times a number in this file went

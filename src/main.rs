@@ -961,19 +961,16 @@ fn comp_task() {
             // **`yield_now` and deliberately not `hlt`.**
             //
             // `hlt` is the obvious way to wait for a deadline and it is wrong
-            // here, because this scheduler has no blocked state: `State` is
-            // `Unused`, `Ready` and `Running`, and a task cannot stop being
-            // runnable. So `hlt` halts *the core*, not this task -- and the
-            // next thing to run does not run until an interrupt arrives, which
-            // at 100 Hz is up to ten milliseconds. That is ten milliseconds
-            // taken from the shell, once per round trip, during exactly the
-            // long foreground commands this whole change exists to fix.
+            // here: it halts *the core*, not this task, and the next thing to
+            // run waits for an interrupt -- up to ten milliseconds at 100 Hz,
+            // taken from the shell once per round trip.
             //
-            // Yielding costs a `rdtsc` and a compare per visit and hands the
-            // core to whoever is actually ready. Real sleeping needs a blocked
-            // state and a wake from `render::invalidate`, which is surgery on
-            // the most delicate loop in the tree and buys nothing while there
-            // is always a shell wanting the core.
+            // This used to add that the scheduler "has no blocked state". That
+            // stopped being true when `State::Asleep`, `task::sleep_until` and
+            // `task::wake` landed for `nanosleep`. What still holds is that a
+            // sleep is tick-granular, so it suits waiting while idle and not
+            // pacing a 16.6 ms frame; sleeping when idle and waking from
+            // `render::invalidate` is phase 3 of the 1.4.1 plan.
             task::yield_now();
             continue;
         }

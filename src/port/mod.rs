@@ -68,8 +68,9 @@ impl Program {
 /// therefore unavailable here. Without this the clock stamps itself over a
 /// game frame ten times a second.
 ///
-/// `edit::run` has owned the screen the same way since it was written and has
-/// this defect today -- which is how it was found.
+/// `edit::run` draws the same way and still does not call this or set the
+/// flag -- an earlier version of this comment said it was fixed, and it is
+/// not. It is a caller of the lease that replaces the flag.
 pub fn with_screen<R>(f: impl FnOnce() -> R) -> R {
     crate::gfx::set_exclusive(true);
     // Blanked on the way in. A frame that does not divide the screen exactly

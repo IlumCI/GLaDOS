@@ -46,13 +46,16 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 /// and eighty-seven times. The compositor fixes *that*, because it repaints on
 /// its own account whether or not anybody asked.
 ///
-/// What it did not do is remove the other writers. `desk.rs` still calls
-/// `draw()` directly in **fifty** places, so the push model is intact
-/// alongside the pull one and any task that runs one of those sites composes a
-/// frame. Measured: `composers` reads 1 after a `render probe` and 3 after
-/// opening a single window, because `focus_terminal` ends with a `draw()` and
-/// the shell calls it after every command. The two things that measure
-/// `composers` open no windows, which is why it read 1 for so long.
+/// It then took a second pass to remove the other writers. This said `desk.rs`
+/// called `draw()` directly in fifty places, which was true when written and
+/// is not now: those sites call `invalidate`, and the only callers of
+/// `desk::draw` left are the compositor (`main.rs`) and `gfx::measure` for
+/// `video bench`. `composers` reading more than 1 is therefore a bug, where it
+/// used to be expected after opening a window.
+///
+/// The writers that remain are not `draw` at all: the console flushes its own
+/// cells, the cursor writes the aperture, and three programs draw on the
+/// aperture directly. Those are what the 1.4.1 lease and scene phases remove.
 ///
 /// Marking is free and idempotent and the compositor decides when. A caller
 /// that marks twice costs one frame, and a caller that forgets is the bug this
@@ -171,6 +174,7 @@ pub fn tray_painted() {
 
 pub fn cursor_painted() {
     CURSORS.fetch_add(1, Ordering::Relaxed);
+    input_shown();
 }
 
 pub fn refused() {
@@ -186,6 +190,7 @@ pub fn presented(rows: u64) {
     let now = crate::time::rdtsc();
     PRESENTS.fetch_add(1, Ordering::Relaxed);
     if rows > 0 {
+        input_shown();
         WROTE.fetch_add(1, Ordering::Relaxed);
         ROWS.fetch_add(rows, Ordering::Relaxed);
     }
@@ -195,6 +200,107 @@ pub fn presented(rows: u64) {
     if prev != 0 && now > prev {
         let gap = now - prev;
         MAX_GAP.fetch_max(gap, Ordering::Relaxed);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What a frame costs, and how long a hand waits for the screen
+// ---------------------------------------------------------------------------
+
+/// The last `RING` composed frames, in microseconds: the whole of `desk::draw`
+/// and, separately, the present at the end of it.
+///
+/// **A distribution, because the mean is the wrong number twice over.** A
+/// desktop that composes in 2 ms nine frames in ten and 40 ms the tenth feels
+/// broken, and its mean reads 5.8 ms; and the budget a frame has to meet is
+/// 16.6 ms whatever the average did. So this keeps the samples and answers
+/// percentiles, plus a count of frames over budget. One writer (the
+/// compositor), so atomics are enough to make a reader on another task safe.
+const RING: usize = 128;
+static FRAME_US: [core::sync::atomic::AtomicU32; RING] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; RING];
+static PRESENT_US: [core::sync::atomic::AtomicU32; RING] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; RING];
+static FRAME_AT: AtomicU64 = AtomicU64::new(0);
+/// Frames whose compose plus present overran 16.6 ms.
+static OVER_BUDGET: AtomicU64 = AtomicU64::new(0);
+pub const BUDGET_US: u64 = 16_667;
+
+/// Record one composed frame. `start`, `presenting` and `end` are `rdtsc`
+/// readings: before composing, before presenting, and after.
+pub fn frame_timed(start: u64, presenting: u64, end: u64) {
+    let mhz = crate::time::tsc_mhz().max(1) as u64;
+    let total = end.saturating_sub(start) / mhz;
+    let present = end.saturating_sub(presenting) / mhz;
+    let i = FRAME_AT.fetch_add(1, Ordering::Relaxed) as usize % RING;
+    FRAME_US[i].store(total.min(u32::MAX as u64) as u32, Ordering::Relaxed);
+    PRESENT_US[i].store(present.min(u32::MAX as u64) as u32, Ordering::Relaxed);
+    if total > BUDGET_US {
+        OVER_BUDGET.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// `rdtsc` when an input event arrived that the screen has not shown yet.
+/// Zero means nothing is waiting. Only the *first* unanswered event is kept:
+/// what a person feels is how long the oldest movement went unanswered.
+static INPUT_AT: AtomicU64 = AtomicU64::new(0);
+static LATENCY_US: [core::sync::atomic::AtomicU32; RING] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; RING];
+static LATENCY_AT: AtomicU64 = AtomicU64::new(0);
+
+/// A pointer packet arrived. Called from `mouse::apply`, which is reached
+/// from an interrupt handler, so this does one compare-and-swap and nothing
+/// else.
+pub fn input_arrived() {
+    let _ = INPUT_AT.compare_exchange(0, crate::time::rdtsc(), Ordering::Relaxed, Ordering::Relaxed);
+}
+
+/// Something reached the screen. If an input was waiting, its wait is over.
+///
+/// Called on every present and every cursor paint. That slightly flatters
+/// a present that did not include the movement -- it measures "the screen was
+/// updated after the input", which is an upper bound on responsiveness only
+/// once every input produces a present, which is what the compositor is for.
+fn input_shown() {
+    let t = INPUT_AT.swap(0, Ordering::Relaxed);
+    if t == 0 {
+        return;
+    }
+    let mhz = crate::time::tsc_mhz().max(1) as u64;
+    let us = crate::time::rdtsc().saturating_sub(t) / mhz;
+    let i = LATENCY_AT.fetch_add(1, Ordering::Relaxed) as usize % RING;
+    LATENCY_US[i].store(us.min(u32::MAX as u64) as u32, Ordering::Relaxed);
+}
+
+/// p50, p95 and max over a ring, and how many samples there were.
+fn percentiles(ring: &[core::sync::atomic::AtomicU32; RING], count: u64) -> (u32, u32, u32, usize) {
+    let n = (count as usize).min(RING);
+    if n == 0 {
+        return (0, 0, 0, 0);
+    }
+    let mut v: alloc::vec::Vec<u32> = ring[..n].iter().map(|a| a.load(Ordering::Relaxed)).collect();
+    v.sort_unstable();
+    let at = |q: usize| v[((n - 1) * q) / 100];
+    (at(50), at(95), v[n - 1], n)
+}
+
+pub struct Timing {
+    /// Compose + present, microseconds: p50, p95, max, samples.
+    pub frame: (u32, u32, u32, usize),
+    /// The present alone.
+    pub present: (u32, u32, u32, usize),
+    /// Input to the next update of the screen.
+    pub latency: (u32, u32, u32, usize),
+    pub over_budget: u64,
+}
+
+pub fn timing() -> Timing {
+    let frames = FRAME_AT.load(Ordering::Relaxed);
+    Timing {
+        frame: percentiles(&FRAME_US, frames),
+        present: percentiles(&PRESENT_US, frames),
+        latency: percentiles(&LATENCY_US, LATENCY_AT.load(Ordering::Relaxed)),
+        over_budget: OVER_BUDGET.load(Ordering::Relaxed),
     }
 }
 
@@ -211,7 +317,7 @@ pub fn presented(rows: u64) {
 /// this file knows, and `render reset` is typed casually.
 pub fn reset() {
     for c in [&DRAWS, &PRESENTS, &WROTE, &ROWS, &CLOCKS, &CURSORS, &REFUSED, &MAX_GAP,
-              &COMPOSERS, &WORST_BEAT] {
+              &COMPOSERS, &WORST_BEAT, &FRAME_AT, &OVER_BUDGET, &LATENCY_AT, &INPUT_AT] {
         c.store(0, Ordering::Relaxed);
     }
     // Not the identity -- resetting that would count the next frame as a new
