@@ -1629,6 +1629,11 @@ fn install_paging(boot: &BootInfo, frames: &mut mem::frame::EarlyFrames) {
 /// dangerous of the two everywhere a wrong answer still looks like an answer.
 fn section(name: &'static str, need: boot_report::Need, f: fn() -> bool) {
     use cpu::recover::Caught;
+    // Move the boot screen's travelling light on by one step. The selftests are
+    // the longest thing the splash is shown for and they run before preemption,
+    // so this is the only driver the sweep has through them -- one pump per
+    // section, off the real clock. A no-op once the splash is down.
+    gfx::splash::tick();
     // Recorded whether it passes or not, because a repair already applied to
     // this subsystem has to be re-testable: passing with a repair holding it up
     // and passing because the bug was fixed look the same from anywhere else.
@@ -2086,6 +2091,7 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
     // is a change to how the tables are held and belongs in its own argument.
     // Until then a fault in either is fatal, the way every check here used to
     // be.
+    gfx::splash::tick();
     kprintln!("
 [selftest] acpi tables:");
     if !acpi::selftest(acpi_ref) {
@@ -2094,6 +2100,7 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
         console::set_color(LTGRAY_IDX);
     }
 
+    gfx::splash::tick();
     kprintln!("
 [selftest] aml:");
     if !acpi::aml_selftest(acpi_ref) {

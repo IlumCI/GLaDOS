@@ -7204,6 +7204,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // clock and cursor do not paint over the held frame.
                 let step: u32 = a1.and_then(|s| s.parse().ok()).unwrap_or(0);
                 crate::gfx::set_exclusive(true);
+                crate::gfx::compose::invalidate();
                 let label = labels.get(step as usize).copied().unwrap_or("ready");
                 crate::gfx::splash::demo_frame(step, label);
                 kprintln!("  frame {}", step);
@@ -7221,6 +7222,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
                 crate::port::with_screen(|| {
+                    // The splash composes into the back buffer now, and
+                    // `with_screen` blanked the screen straight to the aperture,
+                    // so the shadow is stale -- forget it, or the first frame's
+                    // diff would leave the blanked pixels where splash happens
+                    // to match the old desktop.
+                    crate::gfx::compose::invalidate();
                     let stages = crate::gfx::splash::stages();
                     if let Some(step) = freeze {
                         let label = labels.get(step as usize).copied().unwrap_or("ready");
