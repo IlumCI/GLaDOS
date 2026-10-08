@@ -367,6 +367,18 @@ pub struct Framebuffer {
     /// volatile price there made every rectangle in the interface cost one
     /// un-mergeable store per pixel.
     mmio: bool,
+    /// The part of the surface writes may land in: `[sx0, sx1) x [sy0, sy1)`.
+    ///
+    /// The whole surface unless a caller narrowed it with `clipped`. This is
+    /// what lets a damage-limited compositor repaint one rectangle by calling
+    /// the *same* painters that draw a whole frame -- every write path goes
+    /// through `clip`, so a painter that draws a window, a gradient or a line
+    /// of text simply loses whatever falls outside, with no painter knowing
+    /// there was a rectangle at all.
+    sx0: u32,
+    sy0: u32,
+    sx1: u32,
+    sy1: u32,
 }
 
 // Single core, ring 0, one owner. There is no other CPU to race with yet.
@@ -384,7 +396,8 @@ impl Framebuffer {
         stride: u32,
         format: Format,
     ) -> Self {
-        Self { base: base as *mut u32, width, height, stride, format, mmio: true }
+        Self { base: base as *mut u32, width, height, stride, format, mmio: true,
+               sx0: 0, sy0: 0, sx1: width, sy1: height }
     }
 
     /// A framebuffer over memory this program owns.
@@ -402,7 +415,85 @@ impl Framebuffer {
         stride: u32,
         format: Format,
     ) -> Self {
-        Self { base: base as *mut u32, width, height, stride, format, mmio: false }
+        Self { base: base as *mut u32, width, height, stride, format, mmio: false,
+               sx0: 0, sy0: 0, sx1: width, sy1: height }
+    }
+
+    /// The same surface with writes confined to a rectangle, in the same
+    /// coordinates. Narrowing an already narrowed one intersects the two, so a
+    /// scissor can only ever shrink -- a painter handed a clipped surface
+    /// cannot widen its way back out.
+    pub fn clipped(&self, x: u32, y: u32, w: u32, h: u32) -> Framebuffer {
+        let mut f = *self;
+        f.sx0 = self.sx0.max(x);
+        f.sy0 = self.sy0.max(y);
+        f.sx1 = self.sx1.min(x.saturating_add(w));
+        f.sy1 = self.sy1.min(y.saturating_add(h));
+        if f.sx1 < f.sx0 {
+            f.sx1 = f.sx0;
+        }
+        if f.sy1 < f.sy0 {
+            f.sy1 = f.sy0;
+        }
+        f
+    }
+
+    /// A rectangle of this surface as a surface of its own, with `(0, 0)` at
+    /// the rectangle's corner -- for something that draws in its own
+    /// coordinates, an application's client area most of all. The base
+    /// pointer moves and the stride stays, so every primitive works unchanged
+    /// and clips to the rectangle by clipping to its own size. The parent's
+    /// scissor carries over, translated. `None` when the rectangle is off the
+    /// surface.
+    ///
+    /// A shape installed with `with_shape` is in absolute coordinates of
+    /// whatever surface it is used on; inside a view, pass it local ones.
+    pub fn view(&self, x: u32, y: u32, w: u32, h: u32) -> Option<Framebuffer> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let w = w.min(self.width - x);
+        let h = h.min(self.height - y);
+        let off = (y as usize) * (self.stride as usize) + x as usize;
+        Some(Framebuffer {
+            base: unsafe { self.base.add(off) },
+            width: w,
+            height: h,
+            stride: self.stride,
+            format: self.format,
+            mmio: self.mmio,
+            sx0: self.sx0.saturating_sub(x).min(w),
+            sy0: self.sy0.saturating_sub(y).min(h),
+            sx1: self.sx1.saturating_sub(x).min(w),
+            sy1: self.sy1.saturating_sub(y).min(h),
+        })
+    }
+
+    /// Whether anything drawn in this rectangle could land: it meets the
+    /// scissor. For skipping whole layers outside the area being repainted.
+    pub fn touches(&self, x: u32, y: u32, w: u32, h: u32) -> bool {
+        x < self.sx1 && y < self.sy1
+            && x.saturating_add(w) > self.sx0 && y.saturating_add(h) > self.sy0
+    }
+
+    /// Whether writes reach every pixel, i.e. nothing has narrowed the scissor.
+    fn unclipped(&self) -> bool {
+        self.sx0 == 0 && self.sy0 == 0 && self.sx1 == self.width && self.sy1 == self.height
+    }
+
+    /// The part of a run on row `y` that may be written: the scissor, then any
+    /// shape installed with `with_shape`. Every write path asks this.
+    #[inline]
+    fn clip(&self, y: u32, x: u32, w: u32) -> Option<(u32, u32)> {
+        if y < self.sy0 || y >= self.sy1 {
+            return None;
+        }
+        let lo = x.max(self.sx0);
+        let hi = (x as u64 + w as u64).min(self.sx1 as u64) as u32;
+        if hi <= lo {
+            return None;
+        }
+        clip_run(y, lo, hi - lo)
     }
 
     /// One row as a slice, clipped to the surface.
@@ -443,7 +534,7 @@ impl Framebuffer {
     pub fn shade_span(&self, x: u32, y: u32, w: u32, num: u32) {
         // Clipped first, for symmetry with `fill_span` and `blit_span`: a
         // shadow drawn under a shaped window has the same right to be cut.
-        let Some((x, w)) = clip_run(y, x, w) else { return };
+        let Some((x, w)) = self.clip(y, x, w) else { return };
         let Some(dst) = self.row_mut(y, x, w) else { return };
         let num = num.min(256);
         for px in dst.iter_mut() {
@@ -490,7 +581,7 @@ impl Framebuffer {
     ///
     /// RAM surfaces only, exactly as `shade_span`.
     pub fn tint_span(&self, x: u32, y: u32, w: u32, c: Color, num: u32) {
-        let Some((x, w)) = clip_run(y, x, w) else { return };
+        let Some((x, w)) = self.clip(y, x, w) else { return };
         let num = num.min(256);
         let keep = 256 - num;
         let src = self.encode(c);
@@ -550,7 +641,7 @@ impl Framebuffer {
     pub fn blit_span(&self, x: u32, y: u32, src: &[u32]) {
         // A shaped blit has to drop the same pixels from the source as from
         // the destination, so the offset into `src` moves with the clip.
-        let (x, src) = match clip_run(y, x, src.len() as u32) {
+        let (x, src) = match self.clip(y, x, src.len() as u32) {
             None => return,
             Some((cx, cw)) => {
                 let skip = (cx - x) as usize;
@@ -641,7 +732,7 @@ impl Framebuffer {
         if x >= self.width || y >= self.height {
             return;
         }
-        if clip_run(y, x, 1).is_none() {
+        if self.clip(y, x, 1).is_none() {
             return;
         }
         let off = (y as usize) * (self.stride as usize) + (x as usize);
@@ -725,7 +816,9 @@ impl Framebuffer {
 
     pub fn fill(&self, c: Color) {
         let raw = self.encode(c);
-        if raw == 0 {
+        // The memset covers `height * stride`, which on a view or a clipped
+        // surface is pixels that are not this surface's to write.
+        if raw == 0 && self.unclipped() && self.width == self.stride {
             // The overwhelmingly common case, since the console background is
             // black. `write_bytes` lowers to memset, which is an opaque call
             // the optimiser cannot discard -- so it needs none of the volatile
@@ -757,8 +850,10 @@ impl Framebuffer {
     ///
     /// This *reads* video memory, which was once the reason the console
     /// re-rendered from its character grid instead of scrolling -- reads across
-    /// an uncached MMIO aperture are ruinous. That is no longer the situation:
-    /// `build_identity_map` gives the framebuffer aperture a write-back
+    /// an uncached MMIO aperture are ruinous. They are again: the aperture is
+    /// write-combining since 1.4.1 and `render` counts every read. What
+    /// follows describes the write-back mapping that preceded that, when
+    /// `build_identity_map` gave the framebuffer aperture a write-back
     /// mapping, so these are ordinary cached reads of stolen DRAM.
     ///
     /// `region_h` exists because the panel height is rarely a whole number of
@@ -826,7 +921,7 @@ impl Framebuffer {
     }
 
     fn fill_span(&self, x: u32, y: u32, w: u32, raw: u32) {
-        let Some((x, w)) = clip_run(y, x, w) else { return };
+        let Some((x, w)) = self.clip(y, x, w) else { return };
         // Clip once for the whole run rather than once per pixel, which is
         // what going through `put` used to cost.
         if let Some(dst) = self.row_mut(y, x, w) {
@@ -1477,6 +1572,46 @@ pub fn paint_selftest() -> bool {
     fb.rect(0, 0, W, H, Color::new(0xFF, 0xFF, 0xFF));
     fb.shade_span(0, 0, W, 0);
     claim("and by 0 takes it to black", buf[0] == 0);
+
+    // --- clipping and views -------------------------------------------------
+    // The property damage-limited repaint rests on: a painter handed a
+    // clipped surface draws whatever it likes and only the rectangle changes.
+    let black = fb.encode(Color::new(0, 0, 0));
+    let red = Color::new(0xFF, 0, 0);
+    let red_raw = fb.encode(red);
+    fb.rect(0, 0, W, H, Color::new(0, 0, 0));
+    let c = fb.clipped(4, 4, 6, 5);
+    c.rect(0, 0, W, H, red);
+    let inside = (4..10).all(|x| (4..9).all(|y| buf[(y * W + x) as usize] == red_raw));
+    let outside = (0..W).all(|x| (0..H).all(|y| {
+        (4..10).contains(&x) && (4..9).contains(&y) || buf[(y * W + x) as usize] == black
+    }));
+    claim("a clipped surface fills exactly its rectangle", inside);
+    claim("and leaves every pixel outside it alone", outside);
+    claim("clipping twice intersects rather than widening",
+          !c.clipped(0, 0, W, H).touches(0, 0, 4, 4) && c.clipped(0, 0, W, H).touches(5, 5, 1, 1));
+    fb.rect(0, 0, W, H, Color::new(0, 0, 0));
+    if let Some(v) = fb.view(3, 2, 5, 4) {
+        v.put(0, 0, red_raw);
+        v.rect(0, 0, 100, 100, red);
+        claim("a view's (0,0) is its corner on the parent", buf[(2 * W + 3) as usize] == red_raw);
+        let only = (0..W).all(|x| (0..H).all(|y| {
+            (3..8).contains(&x) && (2..6).contains(&y) || buf[(y * W + x) as usize] == black
+        }));
+        claim("and a view cannot draw past its own edge, whatever it asks for", only);
+        claim("a view knows its own size", v.width() == 5 && v.height() == 4);
+        // A red neighbour first, so a fill that ran past the view would show.
+        fb.put(2, 2, red_raw);
+        fb.put(8, 2, red_raw);
+        v.fill(Color::new(0, 0, 0));
+        claim("filling a view black clears the view and nothing beside it",
+              buf[(2 * W + 3) as usize] == black
+                  && buf[(2 * W + 2) as usize] == red_raw
+                  && buf[(2 * W + 8) as usize] == red_raw);
+    } else {
+        claim("a view of an on-surface rectangle exists", false);
+    }
+    claim("a view off the surface is refused", fb.view(W, 0, 1, 1).is_none());
 
     fb.rect(0, 0, W, H, Color::new(0xFF, 0xFF, 0xFF));
     fb.shade_span(0, 0, W, 128);
