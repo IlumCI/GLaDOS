@@ -3444,7 +3444,9 @@ pub fn refresh_status() {
 ///
 /// In the three pixels between the well and the grid, which were margin. So
 /// this adds no chrome and takes no space from the console.
-fn prompt_gutter(fb: &super::Framebuffer, well: Rect, grid: Rect) {
+/// Which rows of the main terminal begin with a prompt, the row height and
+/// the grid's top: everything the gutter reads, for its painter and its stamp.
+fn gutter_marks() -> ([bool; 96], u32, u32) {
     let mut starts = [false; 96];
     let mut row_h = 0u32;
     let mut oy = 0u32;
@@ -3452,6 +3454,28 @@ fn prompt_gutter(fb: &super::Framebuffer, well: Rect, grid: Rect) {
         row_h = c.rows_starting(crate::shell::PROMPT, &mut starts);
         oy = c.origin().1;
     });
+    (starts, row_h, oy)
+}
+
+/// The gutter's and the strip's inputs as this frame's scene saw them.
+///
+/// Taken once, in `layers`, and read by the painters, so the stamp, the
+/// incremental paint and `render verify`'s reference paint all draw the same
+/// readings. Read live, a prompt the shell printed between the paint and the
+/// reference made the two disagree about one gutter tick, and the verifier
+/// reported a difference that was its own race.
+static FRAME_INPUTS: Racy<Option<(([bool; 96], u32, u32), (String, String, bool))>> = Racy::new(None);
+
+fn frame_marks() -> ([bool; 96], u32, u32) {
+    unsafe { (*FRAME_INPUTS.get()).as_ref().map(|f| f.0) }.unwrap_or_else(gutter_marks)
+}
+
+fn frame_status() -> (String, String, bool) {
+    unsafe { (*FRAME_INPUTS.get()).as_ref().map(|f| f.1.clone()) }.unwrap_or_else(status_text)
+}
+
+fn prompt_gutter(fb: &super::Framebuffer, well: Rect, grid: Rect) {
+    let (starts, row_h, oy) = frame_marks();
     if row_h == 0 {
         return;
     }
@@ -3497,13 +3521,24 @@ fn terminal_status(fb: &super::Framebuffer, r: Rect) {
     fb.rect(r.x, r.y, r.w, 1, theme::TRAY_EDGE);
     let ty = r.y + (r.h.saturating_sub(theme::text_h_at(1))) / 2;
 
+    let (left, right, engine) = frame_status();
+    theme::text_over_at(fb, r.x + 6, ty, &left, theme::TITLE_TEXT, 1);
+    // Right-aligned, and laid out from the right edge inwards so a long
+    // model line runs out of room before it can overwrite the state --
+    // which is the half that changes and therefore the half worth seeing.
+    let w = theme::text_w_at(right.chars().count(), 1);
+    if r.w > w + 24 {
+        let x = r.x + r.w - w - 6;
+        let tone = if engine { theme::APERTURE } else { theme::TITLE_TEXT };
+        theme::text_over_at(fb, x, ty, &right, tone, 1);
+    }
+}
+
+/// The strip's two lines and whether the engine is held: everything its
+/// painter reads, so the scene can stamp the strip with it.
+fn status_text() -> (String, String, bool) {
     crate::ai::glance::with_glance(|g| {
         let left = crate::ai::glance::model_line(g);
-        theme::text_over_at(fb, r.x + 6, ty, &left, theme::TITLE_TEXT, 1);
-
-        // Right-aligned, and laid out from the right edge inwards so a long
-        // model line runs out of room before it can overwrite the state --
-        // which is the half that changes and therefore the half worth seeing.
         let engine = crate::ai::glance::engine_line(g);
         let mind = if g.mind_on { "mind on" } else { "mind off" };
         // A terminal showing something other than its last line has to say so.
@@ -3515,13 +3550,8 @@ fn terminal_status(fb: &super::Framebuffer, r: Rect) {
         } else {
             alloc::format!("{}  |  {}", engine, mind)
         };
-        let w = theme::text_w_at(right.chars().count(), 1);
-        if r.w > w + 24 {
-            let x = r.x + r.w - w - 6;
-            let tone = if g.engine.is_some() { theme::APERTURE } else { theme::TITLE_TEXT };
-            theme::text_over_at(fb, x, ty, &right, tone, 1);
-        }
-    });
+        (left, right, g.engine.is_some())
+    })
 }
 
 /// A window on its way in, and how far along it is.
@@ -3543,10 +3573,6 @@ struct Flight {
 
 static FLIGHT: crate::sync::Racy<Option<Flight>> = crate::sync::Racy::new(None);
 
-/// Whether the compositor has work due within the next few milliseconds that
-/// no `invalidate` will announce: a window part-way through arriving, or a
-/// pointer paint the 4 ms pacing deferred. While either is true it must not
-/// sleep a whole timer tick, or the arrival stutters and the arrow lags.
 /// The shortest period, in milliseconds, at which an open program asked for
 /// its stamp to be looked at (`DeskApp::wake_ms`), as of the last frame; 0 for
 /// none. Read by the compositor's pacing.
@@ -3559,6 +3585,10 @@ pub fn app_wake_ms() -> Option<u32> {
     }
 }
 
+/// Whether the compositor has work due within the next few milliseconds that
+/// no `invalidate` will announce: a window part-way through arriving, or a
+/// pointer paint the 4 ms pacing deferred. While either is true it must not
+/// sleep a whole timer tick, or the arrival stutters and the arrow lags.
 pub fn busy() -> bool {
     arriving().is_some() || unsafe { *CURSOR_PENDING.get() }
 }
@@ -4516,9 +4546,8 @@ pub fn draw() {
     };
     let started = crate::time::rdtsc();
     let screen = screen_rect(&real);
-    // Lift the pointer before presenting, or the pixels saved under it are
-    // stale the moment anything below moves, and putting them back paints a
-    // rectangle of the previous frame onto the new one.
+    // A no-op with a compositor, where the pointer is a plane and never in
+    // the back buffer; without one it lifts the arrow drawn on the aperture.
     cursor_hide(&real);
     // Compose into the back buffer when there is one; the screen then gets
     // only the rows that changed. Without one (no heap yet, or its
@@ -4541,12 +4570,30 @@ pub fn draw() {
             _ => damage.add(whole),
         }
         damage.clip_to(whole);
+        // `render flash`: what this frame repaints because something changed,
+        // before the last frame's outlines are added to it -- those are
+        // repainted to erase them and are not themselves outlined, or every
+        // frame would outline the frame before it forever.
+        let shown = damage;
+        let flashing = FLASH.load(core::sync::atomic::Ordering::Relaxed);
+        let lit = unsafe { &mut *FLASHED.get() };
+        for r in lit.iter() {
+            damage.add(r);
+        }
+        damage.clip_to(whole);
+        *lit = super::region::Region::new();
         place_consoles(d, screen);
         for r in damage.iter() {
             paint_scene(&fb.clipped(r.x, r.y, r.w, r.h), d, screen);
         }
         if verifying() {
             verify_frame(&fb, d, screen);
+        }
+        if flashing {
+            for r in shown.iter() {
+                outline(&fb, r, FLASH_COLOUR);
+                lit.add(r);
+            }
         }
         *prev = Some(next);
     });
@@ -4560,6 +4607,35 @@ pub fn draw() {
         cursor_show(&real, px, py);
     }
     super::render::frame_timed(started, presenting, crate::time::rdtsc());
+}
+
+/// `render flash`: outline every rectangle a frame repaints, so damage can
+/// be watched rather than inferred. The outlines are drawn into the back
+/// buffer after the verifier has looked, and erased by the next frame, which
+/// the tray guarantees within a tenth of a second -- long enough to see.
+static FLASH: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// What the last frame outlined, to repaint away. Under the paint claim.
+static FLASHED: Racy<super::region::Region> = Racy::new(super::region::Region::new());
+const FLASH_COLOUR: Color = Color::new(0xFF, 0x20, 0xC0);
+
+pub fn set_flash(on: bool) {
+    FLASH.store(on, core::sync::atomic::Ordering::Relaxed);
+    super::render::invalidate();
+}
+
+pub fn flashing() -> bool {
+    FLASH.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// A one-pixel frame just inside `r`.
+fn outline(fb: &Framebuffer, r: Rect, c: Color) {
+    if r.w == 0 || r.h == 0 {
+        return;
+    }
+    fb.rect(r.x, r.y, r.w, 1, c);
+    fb.rect(r.x, r.y + r.h - 1, r.w, 1, c);
+    fb.rect(r.x, r.y, 1, r.h, c);
+    fb.rect(r.x + r.w - 1, r.y, 1, r.h, c);
 }
 
 /// The last frame's layers, for `scene::diff`. Only the compositor's frame
@@ -4651,6 +4727,7 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
     let (w, h) = (fb.width(), fb.height());
     let mut out = Vec::new();
     let mut wake = u32::MAX;
+    let inputs = (gutter_marks(), status_text());
     out.push(Layer { id: LayerId::Wallpaper, bounds: Rect::new(0, 0, w, h), stamp: Stamp::of((w, h)), parts: Vec::new() });
 
     let icons = icon_rects(fb);
@@ -4740,22 +4817,24 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
                     // itself as it prints.
                     core::hash::Hasher::write_u64(&mut st, Stamp::of((well, grid)));
                     // The gutter marks where prompts start and the strip reads
-                    // the machine's state, and neither is in anything this
-                    // can fingerprint: repainted whenever a frame is composed.
-                    parts.push((Rect::new(well.x + 1, grid.y, 2, grid.h), seq));
+                    // the machine's state, each stamped with exactly what its
+                    // painter reads. The gutter belongs to the main terminal
+                    // alone, as its painter does.
+                    if *ch == super::console::USER {
+                        parts.push((Rect::new(well.x + 1, grid.y, 2, grid.h), Stamp::of(inputs.0)));
+                    }
                     if let Some(strip) = strip {
-                        parts.push((strip, seq));
+                        parts.push((strip, Stamp::of(&inputs.1)));
                     }
                 }
-                Content::Panel(_) => {
+                Content::Panel(p) => {
                     let hov = match d.hover {
                         Hover::Widget { win, idx } if win == i => Some(idx),
                         _ => None,
                     };
-                    let _ = hov;
-                    parts.push((client, seq));
+                    parts.push((client, Stamp::of((p.stamp(), active, hov))));
                 }
-                Content::Browser(_) => parts.push((client, seq)),
+                Content::Browser(b) => parts.push((client, Stamp::of((b.stamp(), active)))),
                 Content::App(a) => {
                     if let Some(ms) = a.wake_ms() {
                         wake = wake.min(ms.max(1));
@@ -4808,6 +4887,7 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
         }
         out.push(Layer { id: LayerId::Overlay, bounds: b, stamp: core::hash::Hasher::finish(&st), parts: Vec::new() });
     }
+    unsafe { *FRAME_INPUTS.get() = Some(inputs) };
     APP_WAKE.store(if wake == u32::MAX { 0 } else { wake }, core::sync::atomic::Ordering::Relaxed);
     out
 }

@@ -63,7 +63,7 @@ const STATUS_COL: usize = 14;
 /// things a panel can do is exactly the set of things that can be typed --
 /// which keeps the GUI from becoming a second, smaller system with its own
 /// capabilities.
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub enum Action {
     Run(String),
     /// Run this command with the panel's field text appended. `Apply("window")`
@@ -80,7 +80,7 @@ pub enum Action {
 }
 
 /// How a status line should read at a glance.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tone {
     /// Working.
     Ok,
@@ -129,6 +129,7 @@ pub fn note(text: &str) -> Widget {
     Widget::Note(lines)
 }
 
+#[derive(Hash)]
 pub enum Widget {
     Label(String),
     Sep,
@@ -215,6 +216,12 @@ pub struct Panel {
 }
 
 impl Panel {
+    /// Everything `draw_in` reads besides focus and hover, which the desktop
+    /// adds: the scene stamps a panel's client area with it.
+    pub fn stamp(&self) -> u64 {
+        super::scene::Stamp::of((self.title.as_str(), &self.widgets, self.focus))
+    }
+
     pub fn new(title: &str, widgets: Vec<Widget>) -> Self {
         let mut p = Self { title: String::from(title), widgets, focus: 0 };
         if !p.widgets.get(0).map(|w| w.focusable()).unwrap_or(false) {

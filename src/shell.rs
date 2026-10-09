@@ -2933,6 +2933,19 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
                 return;
             }
+            // Outline what each frame repaints, for as long as it is on.
+            if let Some(v) = rest.trim().strip_prefix("flash") {
+                match v.trim() {
+                    "on" => crate::gfx::desk::set_flash(true),
+                    "off" => crate::gfx::desk::set_flash(false),
+                    _ => {}
+                }
+                kprintln!(
+                    "  damage outlines {}",
+                    if crate::gfx::desk::flashing() { "on -- each repainted rectangle is framed in magenta" } else { "off" }
+                );
+                return;
+            }
             if rest.trim() == "reset" {
                 render::reset();
                 kprintln!("  counting from here");

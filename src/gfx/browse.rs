@@ -55,6 +55,9 @@ pub struct Browser {
     page_rows: Cell<usize>,
     /// Redirects followed for the current navigation.
     hops: u8,
+    /// Bumped whenever a page is laid in, so the scene can tell a new page
+    /// from the old one without hashing the whole of it.
+    loads: u64,
 }
 
 const HOME: &str = "https://example.com/";
@@ -74,6 +77,7 @@ impl Browser {
             rows_seen: Cell::new(0),
             page_rows: Cell::new(20),
             hops: 0,
+            loads: 0,
         }
     }
 
@@ -179,6 +183,7 @@ impl Browser {
                 self.status.push_str(if n == 1 { " link" } else { " links" });
                 }
                 self.page = Some(page);
+                self.loads += 1;
                 if let Some(prev) = self.here.take() {
                     self.history.push(prev);
                 }
@@ -390,6 +395,23 @@ impl Browser {
     }
 
     // --- drawing ----------------------------------------------------------
+
+    /// Everything `draw_in` reads besides focus: the scene stamps the client
+    /// area with it. `rows_seen` and `page_rows` are written by the paint
+    /// itself, from the size, which the stamp already covers.
+    pub fn stamp(&self) -> u64 {
+        super::scene::Stamp::of((
+            self.loads,
+            self.links.len(),
+            self.history.len(),
+            self.scroll,
+            self.sel,
+            self.status.as_str(),
+            self.addr.as_str(),
+            self.editing,
+            self.hops,
+        ))
+    }
 
     pub fn draw_in(&self, fb: &Framebuffer, client: Rect, focused: bool) {
         theme::panel(fb, client);
