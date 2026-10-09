@@ -7338,19 +7338,26 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             }
             // The anti-aliased geometry, for the eye: drawn into memory and
             // shown under a lease for `ms` milliseconds, like `video bars`.
-            if let Some(ms) = rest.trim().strip_prefix("shapes") {
+            let sheet = if let Some(ms) = rest.trim().strip_prefix("shapes") {
+                Some((ms, crate::gfx::shape::proof as fn(&crate::gfx::Framebuffer), "shapes"))
+            } else if let Some(ms) = rest.trim().strip_prefix("gradients") {
+                Some((ms, crate::gfx::grad::proof as fn(&crate::gfx::Framebuffer), "gradients"))
+            } else {
+                None
+            };
+            if let Some((ms, draw, what)) = sheet {
                 let ms: u64 = ms.trim().parse().unwrap_or(3000);
                 let (w, h) = (boot.fb.width(), boot.fb.height());
                 let mut px = alloc::vec![0u32; (w * h) as usize];
                 let ram = unsafe {
                     crate::gfx::Framebuffer::over_ram(px.as_mut_ptr() as u64, w, h, w, boot.fb.format())
                 };
-                crate::gfx::shape::proof(&ram);
+                draw(&ram);
                 let _screen = crate::gfx::lease::take(crate::gfx::lease::Owner::VideoTest);
                 // Where the sheet is in memory, so the host can read the exact
                 // pixels (QEMU `pmemsave`) rather than a photograph of a screen.
-                kprintln!("  shapes drawn, for {} ms; image at {:#x}, {}x{}, 4 bytes a pixel",
-                    ms, px.as_ptr() as u64, w, h);
+                kprintln!("  {} drawn, for {} ms; image at {:#x}, {}x{}, 4 bytes a pixel",
+                    what, ms, px.as_ptr() as u64, w, h);
                 // Re-laid every tenth of a second rather than once. Not for the
                 // machine: QEMU's picture of its own video memory goes stale a
                 // few seconds after the guest stops writing it -- measured, the

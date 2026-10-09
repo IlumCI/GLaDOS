@@ -12,6 +12,7 @@ pub mod render;
 pub mod blend;
 pub mod scene;
 pub mod shape;
+pub mod grad;
 pub mod text;
 
 /// The time a frame is about, in milliseconds since boot (TSC), taken once
