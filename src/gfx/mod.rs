@@ -9,6 +9,7 @@ pub mod browse;
 pub mod lease;
 pub mod region;
 pub mod render;
+pub mod blend;
 pub mod scene;
 pub mod text;
 

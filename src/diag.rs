@@ -165,6 +165,11 @@ pub const SUITES: &[Suite] = &[
         run: crate::gfx::region::selftest,
     },
     Suite {
+        name: "blend",
+        about: "premultiplied alpha: division by 255 exact, AVX2 equal to scalar at every width",
+        run: crate::gfx::blend::selftest,
+    },
+    Suite {
         name: "fonts",
         about: "the outline faces parse and draw, the kerning reads back, the licences ship",
         run: crate::gfx::text::selftest,
@@ -705,7 +710,7 @@ fn web_selftest() -> bool {
 /// says it exists to prevent. A `static` cannot be read in a const context, so
 /// the array cannot be measured directly; naming its length is the next best
 /// thing and it is now the only place the number appears.
-const SLOTS: usize = 80;
+const SLOTS: usize = 81;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.
