@@ -264,6 +264,15 @@ static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 /// Whether the byte `pop` last returned had already been routed.
 static ROUTED: AtomicBool = AtomicBool::new(false);
 
+/// Routing stood down, for a selftest that feeds the ring keys nobody
+/// pressed and reads them back: routed, an injected Super-D would minimise
+/// every window on the screen in the middle of `diag`.
+static PAUSED: AtomicBool = AtomicBool::new(false);
+
+pub fn pause_routing(on: bool) {
+    PAUSED.store(on, Ordering::Release);
+}
+
 /// Whether the key last read was one the desktop has already declined, so the
 /// shell must not offer it to the desktop a second time.
 pub fn last_was_routed() -> bool {
@@ -287,6 +296,9 @@ pub fn last_was_routed() -> bool {
 /// desktop's own claim -- so `IN_FLIGHT` is what stops the shell reading a
 /// key behind the one being routed.
 pub fn route(mut offer: impl FnMut(u8) -> Option<u8>) {
+    if PAUSED.load(Ordering::Acquire) {
+        return;
+    }
     loop {
         let k = {
             let _ring = RING.lock_irq();

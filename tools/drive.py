@@ -529,6 +529,15 @@ def main():
     resend = "--resend" in argv
     if resend:
         argv.remove("--resend")
+    # `--qemu-late` goes after the machine's own devices rather than before
+    # them, for a device that hangs off one: `-device usb-kbd,bus=xhci.0`
+    # given early is refused because the controller does not exist yet.
+    qemu_late = []
+    if "--qemu-late" in argv:
+        i = argv.index("--qemu-late")
+        import shlex
+        qemu_late = shlex.split(argv[i + 1])
+        del argv[i:i + 2]
     qemu_extra = []
     if "--qemu-extra" in argv:
         i = argv.index("--qemu-extra")
@@ -973,6 +982,7 @@ def main():
         *(["-vga", "none", "-device", f"VGA,xres={res[0]},yres={res[1]}"] if res else
           ["-vga", "none", "-device", "VGA,xres=1920,yres=1080"] if hd else []),
         "-no-reboot",
+        *qemu_late,
     ]
 
     held = ports_held()

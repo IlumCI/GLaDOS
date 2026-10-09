@@ -4334,6 +4334,9 @@ configuration of zero was written back -- keyboard interrupt off, for the life
 of every boot. `kbd` showed it as one keyboard interrupt and config `0x02`.
 Nothing on this path depends on the emulator, so whether it ever bit on the
 GF63 is unknown; boot now prints the configuration as the mouse left it.
+`--qemu-late "-device usb-kbd,bus=xhci.0"` puts a USB keyboard on the bus
+instead, and `sendkey` then drives that: `--qemu-extra` comes before the
+machine's own devices, where the xhci bus does not exist yet.
 
 **`@send <text>` types raw into whatever has the keyboard**, with `\e` for
 Escape and `\r` for Enter, and does not wait for a prompt -- it is how a

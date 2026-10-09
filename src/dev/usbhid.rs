@@ -346,15 +346,21 @@ pub fn poll() {
 /// latch on and never let go. `decode` already treats an extended right
 /// control as a left one for the same reason; this keeps the release working
 /// too.
-const MODIFIERS: [u8; 8] = [
-    0x1D, // left control
-    0x2A, // left shift
-    0x38, // left alt
-    0x00, // left GUI, which this kernel has no key for
-    0x1D, // right control
-    0x36, // right shift
-    0x38, // right alt
-    0x00, // right GUI
+///
+/// The GUI keys are the exception, sent as their real `E0 5B`/`E0 5C`: that is
+/// Super, and `decode` handles their releases on the extended path because
+/// releasing Super alone is the gesture that opens Start. They were zero --
+/// "no key for" -- so a USB keyboard had no Super at all, while the same key
+/// on PS/2 had one. Entries carry `emit`'s `0x100` prefix flag.
+const MODIFIERS: [u16; 8] = [
+    0x1D,  // left control
+    0x2A,  // left shift
+    0x38,  // left alt
+    0x15B, // left GUI: Super
+    0x1D,  // right control
+    0x36,  // right shift
+    0x38,  // right alt
+    0x15C, // right GUI: Super
 ];
 
 fn keyboard(h: &mut Hid, report: &[u8; 8]) {
@@ -373,8 +379,7 @@ fn keyboard(h: &mut Hid, report: &[u8; 8]) {
             if before == after || MODIFIERS[bit] == 0 {
                 continue;
             }
-            let sc = MODIFIERS[bit];
-            super::kbd::inject_scancode(if after { sc } else { sc | 0x80 });
+            emit(MODIFIERS[bit], after);
         }
     }
 
@@ -542,6 +547,9 @@ pub fn selftest() -> bool {
         last: [0; 8],
         reports: 0,
     };
+    // The compositor would otherwise route what this injects, as keystrokes.
+    crate::dev::kbd::pause_routing(true);
+    while crate::dev::kbd::pop().is_some() {}
     let held = [0u8, 0, 0x04, 0, 0, 0, 0, 0];
     let before = crate::dev::kbd::pending();
     keyboard(&mut h, &held);
@@ -556,6 +564,31 @@ pub fn selftest() -> bool {
     let rollover = [0u8, 0, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01];
     keyboard(&mut h, &rollover);
     claim(&mut ok, h.last == held, "a rollover report is ignored rather than believed");
+
+    // Super, through the modifier byte: bit 3 is the left GUI key.
+    keyboard(&mut h, &[0; 8]);
     while crate::dev::kbd::pop().is_some() {}
+    keyboard(&mut h, &[0x08, 0, 0x07, 0, 0, 0, 0, 0]); // Super, then 'd'
+    keyboard(&mut h, &[0x08, 0, 0, 0, 0, 0, 0, 0]);
+    keyboard(&mut h, &[0; 8]);
+    let mut got = alloc::vec::Vec::new();
+    while let Some(b) = crate::dev::kbd::pop() {
+        got.push(b);
+    }
+    claim(
+        &mut ok,
+        got == [crate::dev::kbd::super_chord(b'd', false).unwrap_or(0)],
+        "the GUI modifier is Super: Super-D arrives as its chord and nothing else",
+    );
+    keyboard(&mut h, &[0x80, 0, 0, 0, 0, 0, 0, 0]); // right GUI, alone
+    keyboard(&mut h, &[0; 8]);
+    let tap = crate::dev::kbd::pop();
+    claim(
+        &mut ok,
+        tap == Some(crate::dev::kbd::KEY_STARTMENU) && crate::dev::kbd::pop().is_none(),
+        "and Super tapped alone opens Start",
+    );
+    while crate::dev::kbd::pop().is_some() {}
+    crate::dev::kbd::pause_routing(false);
     ok
 }
