@@ -668,8 +668,29 @@ pub fn pat_slot(addr: u64) -> Option<u8> {
 ///
 /// Dirty lines are written back first, since a range moving from write-back
 /// to anything else must not leave data behind in the cache that the new type
-/// will never flush. The TLB is reloaded after. Only this core's TLB: the other
-/// cores reload theirs at their next CR3 write, and none of them draws.
+/// will never flush. The TLB is reloaded after. Only this core's TLB, and the
+/// other cores are **not** guaranteed to catch up: `schedule` skips the CR3
+/// write when both roots are the kernel's, so a core that only ever runs
+/// kernel tasks may keep the old type for the aperture indefinitely. That is
+/// safe for one reason, which must stay true: nothing on another core touches
+/// the aperture. Guests holding `/dev/fb0` are pinned to core 0, and work split
+/// across cores (`smp::parallel_split`) writes the back buffer, never the
+/// screen. A shootdown is what this needs the day either stops being so.
+///
+/// **A second mapping of the aperture with another type can exist, in one
+/// narrow case**, found by reading rather than by a claim. Every guest root
+/// is built by `Space::sharing_kernel`, which copies the kernel's PML4
+/// entries -- pointers to the same PDPTs -- so ordinarily the aperture's leaf
+/// exists once and every root walks it. But `map_low` privatises tables on its
+/// way down (`Space::step`), so a guest that places a fixed image in the same
+/// gigabyte as the aperture gets a private copy of the aperture's page
+/// directory, carrying the cache bits current *when it was copied*. If this
+/// function then changes the type, that guest's root keeps the old one: the
+/// aliasing the paragraph above forbids for RAM. It needs `video cache` (a
+/// test verb) run while such a guest is alive and that guest writing
+/// `/dev/fb0`; boot sets the type before any space exists, and `video cache`
+/// refuses while any guest is alive. That refusal is the whole defence, so a
+/// second runtime caller must either keep it or walk every live space.
 pub fn set_cache(at: u64, len: u64, kind: crate::cpu::mtrr::Kind) -> bool {
     use crate::cpu::mtrr::Kind;
     let bits = match kind {

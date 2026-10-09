@@ -809,6 +809,7 @@ impl Framebuffer {
     /// caller: the mouse pointer saves what it covers so it can be lifted
     /// without repainting the desktop underneath it.
     #[inline]
+    #[track_caller]
     pub fn get(&self, x: u32, y: u32) -> u32 {
         if x >= self.width || y >= self.height {
             return 0;
@@ -907,6 +908,7 @@ impl Framebuffer {
     /// `region_h` exists because the panel height is rarely a whole number of
     /// text rows -- 1080 is not divisible by 16 -- and scrolling the leftover
     /// strip at the bottom would drag it up into the last row.
+    #[track_caller]
     pub fn scroll_up(&self, region_h: u32, pixels: u32, bg: Color) {
         let region_h = region_h.min(self.height);
         if pixels == 0 || region_h == 0 {
@@ -937,6 +939,7 @@ impl Framebuffer {
     /// is inset into a window: it would drag the frame and anything beside it
     /// upwards too. This copies row by row within the rectangle, which is more
     /// work per line and the only thing that is correct.
+    #[track_caller]
     pub fn scroll_rect(&self, x: u32, y: u32, w: u32, h: u32, pixels: u32, bg: Color) {
         if pixels == 0 || w == 0 || h == 0 || x >= self.width || y >= self.height {
             return;

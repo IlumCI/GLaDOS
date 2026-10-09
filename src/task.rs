@@ -378,6 +378,31 @@ static JOINED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::ne
 /// mining slices stuck `ready` for ever while `tasks` showed them as healthy.
 static COUNT: AtomicUsize = AtomicUsize::new(1);
 static SWITCHES: AtomicU64 = AtomicU64::new(0);
+
+/// A task to prefer at the next switch, once (`run_next`).
+static RUN_NEXT: AtomicUsize = AtomicUsize::new(NONE);
+
+/// Ask the next switch on a core allowed to run `index` to run it, ahead of
+/// the round-robin order. One-shot, and only a preference: a task that is not
+/// `Ready` by then is simply not chosen and the hint is gone.
+///
+/// For the compositor when the pointer has just woken it. Round-robin would
+/// otherwise give every other ready task its turn first, and the pointer's
+/// latency would be a property of how busy the machine happened to be.
+pub fn run_next(index: usize) {
+    RUN_NEXT.store(index, Ordering::Release);
+}
+
+/// Switch now, from an interrupt handler that has already sent its EOI --
+/// what the timer does at the end of every tick, offered to a handler whose
+/// event has made a task worth running at once. Interrupts are off for the
+/// whole handler (an interrupt gate), which is the condition `schedule` needs.
+pub fn preempt_from_interrupt() {
+    if ENABLED.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    schedule();
+}
 static ENABLED: AtomicUsize = AtomicUsize::new(0);
 
 /// Adopt the currently running thread of execution as task 0.
@@ -1512,7 +1537,21 @@ fn schedule() {
         // `Ready` is the only claimable state. `Running` belongs to a core,
         // and `Handoff` is a stack whose pointer has not landed yet.
         let mut next = NONE;
+        let hint = RUN_NEXT.load(Ordering::Acquire);
+        if hint < n && hint != cur {
+            if t[hint].pin >= 0 && t[hint].pin != me as i16 {
+                // Another core's to run; left for it.
+            } else {
+                RUN_NEXT.store(NONE, Ordering::Release);
+                if t[hint].state == State::Ready {
+                    next = hint;
+                }
+            }
+        }
         for pass in 0..2 {
+            if next != NONE {
+                break;
+            }
             let start = cur + 1;
             for k in 0..n {
                 let i = (start + k) % n;

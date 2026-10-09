@@ -333,4 +333,7 @@ extern "x86-interrupt" fn mouse_isr(_frame: idt::InterruptStackFrame) {
 
     apply(dx, dy, flags & 0x01 != 0, flags & 0x02 != 0, wheel);
     lapic::eoi();
+    // After the EOI, as the timer does: the switch may not come back for a
+    // while and the controller must not be left waiting on this vector.
+    crate::gfx::render::preempt_for_input();
 }

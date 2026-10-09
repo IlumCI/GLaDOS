@@ -386,7 +386,35 @@ static LATENCY_AT: AtomicU64 = AtomicU64::new(0);
 pub fn input_arrived() {
     let _ = INPUT_AT.compare_exchange(0, crate::time::rdtsc(), Ordering::Relaxed, Ordering::Relaxed);
     // The compositor sleeps when idle and the pointer is its job.
-    wake_compositor();
+    let i = COMP_TASK.load(Ordering::Acquire);
+    if i != u64::MAX && crate::task::wake(i as usize) {
+        WOKE_FOR_INPUT.store(true, Ordering::Release);
+    }
+}
+
+/// Set when an input event woke the compositor and nothing has acted on it.
+static WOKE_FOR_INPUT: AtomicBool = AtomicBool::new(false);
+
+/// For an input interrupt, after its EOI: if the event it delivered woke the
+/// compositor, run the compositor now rather than at the end of the quantum.
+///
+/// Measured before this existed, with a foreground command on the same core
+/// that never yields (`render probe`): input-to-screen p50 3.5 ms, p95 7.0 ms,
+/// against 0.6 ms on an idle machine -- the event waited out the busy task's
+/// timer quantum. Only on core 0, where the compositor is pinned; on another
+/// core `schedule` would skip it anyway.
+pub fn preempt_for_input() {
+    if !WOKE_FOR_INPUT.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let i = COMP_TASK.load(Ordering::Acquire);
+    // Interrupting the compositor itself: it is already running, and a switch
+    // here would take the core away from the one task that wanted it.
+    if i == u64::MAX || crate::smp::this_cpu() != 0 || crate::task::current() == i as usize {
+        return;
+    }
+    crate::task::run_next(i as usize);
+    crate::task::preempt_from_interrupt();
 }
 
 /// Something reached the screen. If an input was waiting, its wait is over.
@@ -503,8 +531,38 @@ pub fn damage_totals() -> (u64, u64) {
 /// and this is how the difference is told: `render` prints it.
 static MMIO_READS: AtomicU64 = AtomicU64::new(0);
 
+/// The source lines that read the aperture, by pixels read: the `asked by`
+/// instrument pointed at the one cost that must be zero.
+static READERS: crate::sync::Spin<[(Option<&'static core::panic::Location<'static>>, u64); 8]> =
+    crate::sync::Spin::new([(None, 0); 8]);
+
+#[track_caller]
 pub fn mmio_read(pixels: u64) {
     MMIO_READS.fetch_add(pixels, Ordering::Relaxed);
+    let at = core::panic::Location::caller();
+    let Some(mut t) = READERS.try_lock() else { return };
+    for slot in t.iter_mut() {
+        match slot.0 {
+            Some(l) if l.file() == at.file() && l.line() == at.line() => {
+                slot.1 += pixels;
+                return;
+            }
+            None => {
+                *slot = (Some(at), pixels);
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Who read the aperture since boot, most pixels first.
+pub fn mmio_readers() -> alloc::vec::Vec<(&'static str, u32, u64)> {
+    let t = READERS.lock_irq();
+    let mut v: alloc::vec::Vec<(&'static str, u32, u64)> =
+        t.iter().filter_map(|(l, n)| l.map(|l| (l.file(), l.line(), *n))).collect();
+    v.sort_by(|a, b| b.2.cmp(&a.2));
+    v
 }
 
 pub fn mmio_reads() -> u64 {

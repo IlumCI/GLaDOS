@@ -3086,6 +3086,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             let reads = render::mmio_reads();
             console::set_color(if reads > 0 { YELLOW } else { LTGRAY });
             kprintln!("    aperture reads {:>5}   pixel(s) read back from write-combining memory since boot", reads);
+            if reads > 0 {
+                kprint!("      read by  ");
+                for (f, l, n) in render::mmio_readers().iter().take(4) {
+                    kprint!(" {}:{} x{}", f.rsplit('/').next().unwrap_or(f), l, n);
+                }
+                kprintln!();
+            }
             console::set_color(LTGRAY);
             if t.latency.3 > 0 {
                 kprintln!(
@@ -7267,6 +7274,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         return;
                     }
                 };
+                // A live guest may hold a private copy of the aperture's page
+                // directory, which this would leave on the old type -- the
+                // alias `paging::set_cache` describes. Refused rather than
+                // walked, since the only caller is this test verb.
+                if crate::linux::syscall::live_guests() > 0 {
+                    kprintln!("  a Linux guest is alive; its page tables may hold the old type -- end it first");
+                    return;
+                }
                 let len = boot.fb_end - boot.fb_start;
                 if !crate::mem::paging::set_cache(boot.fb_start, len, kind) {
                     kprintln!("  could not set {} -- is the PAT programmed? ('video cache' says)", kind.short());

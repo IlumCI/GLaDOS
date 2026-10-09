@@ -654,7 +654,17 @@ fn render_core(flare_px: Option<i32>) {
         Color::new(190, 214, 240),
     );
 
-    glow(&fb, &l, blades);
+    // The glow, the sweep and the reflection read pixels back, and before the
+    // heap exists there is no back buffer to read: `canvas` falls back to the
+    // aperture, which is uncached under the firmware's MTRRs and
+    // write-combining under ours. Measured, the first two frames of a boot --
+    // `begin` and the stage before paging -- read 542,283 pixels off it, every
+    // pixel a synchronous round trip. They show an iris with no blades formed,
+    // so the effects have next to nothing to light; drawn only on a RAM canvas.
+    let readable = compose::active();
+    if readable {
+        glow(&fb, &l, blades);
+    }
     aperture_with(
         &fb,
         l.cx as i32,
@@ -668,8 +678,10 @@ fn render_core(flare_px: Option<i32>) {
         },
     );
     occlude_unformed(&fb, &l, blades);
-    sweep(&fb, &l, blades);
-    reflection(&fb, &l);
+    if readable {
+        sweep(&fb, &l, blades);
+        reflection(&fb, &l);
+    }
 
     centred_text(
         &fb,
