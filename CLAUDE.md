@@ -4325,6 +4325,14 @@ the firmware banner and the boot sequence first. `.qemu/qemu-stderr.log` says
 `Failed to find an available port`. Check for a running QEMU before launching,
 especially when the first run is in the background.
 
+**`@send <text>` types raw into whatever has the keyboard**, with `\e` for
+Escape and `\r` for Enter, and does not wait for a prompt -- it is how a
+program that owns the screen until told to stop is driven at all:
+`"@send edit /tmp/e.txt\r" "@wait 1" "@send ihello\e:wq\r" "@wait 2"`. Send
+the *command* that starts such a program with `@send` too, since a plain line
+waits for a prompt that will not come until the program exits -- and so does
+any plain line sent while it is running.
+
 **`@mouse <monitor command>` and `@shot <png>` are beats in the command list**,
 like `@wait`: `--mouse` sends its events only after every command and
 `--screenshot` photographs only the end, so click, type, click could not be

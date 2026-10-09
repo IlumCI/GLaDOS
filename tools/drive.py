@@ -1149,6 +1149,20 @@ def main():
                         time.sleep(0.4)
                         force_send = True
                         continue
+                    # `@send <text>` types into a program that owns the
+                    # screen and will not give the prompt back until it is
+                    # told to stop -- the editor waits for `:q`, and the next
+                    # command cannot be sent "when a prompt appears" because
+                    # none will until that keystroke has gone. Sent raw, with
+                    # `\e` for Escape and `\r` for Enter, and followed by a
+                    # beat rather than a wait for a prompt.
+                    if line.startswith("@send "):
+                        raw = line[len("@send "):].replace("\\e", "\x1b").replace("\\r", "\r")
+                        sock.sendall(raw.encode())
+                        print(f"[drive] typed: {line[len('@send '):]}")
+                        time.sleep(1.0)
+                        force_send = True
+                        continue
                     if line.startswith("@wait "):
                         try:
                             secs = float(line.split(None, 1)[1])
