@@ -249,6 +249,13 @@ struct Window {
 }
 
 impl crate::gfx::DeskApp for Window {
+    /// The commit count: a new picture is a new commit, and nothing else in
+    /// this window changes.
+    fn stamp(&self) -> Option<u64> {
+        let f = self.frame.lock_irq();
+        Some(crate::gfx::scene::Stamp::of((f.commits, f.w, f.h)))
+    }
+
     fn draw_in(&self, fb: &crate::gfx::Framebuffer, client: crate::gfx::theme::Rect, _focused: bool) {
         let f = self.frame.lock_irq();
         fb.rect(client.x, client.y, client.w, client.h, crate::gfx::Color::new(0, 0, 0));

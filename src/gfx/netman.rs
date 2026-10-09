@@ -34,7 +34,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 
 use super::theme::{self, Rect};
 use super::{DeskApp, Framebuffer};
@@ -49,6 +49,68 @@ pub struct NetMan {
     said: String,
     /// Which button is under the pointer's last press, for the pressed look.
     held: Cell<usize>,
+    /// What the radio said the last time it could be asked (`View`).
+    view: RefCell<View>,
+}
+
+/// Everything this window reads from the station, taken in one go.
+///
+/// **Taken with `try_claim_wifi`, and kept when the claim is busy.** The
+/// station is the clock task's too, and the painter used to take the claim
+/// with `claim_wifi` -- which waits -- for the whole of a paint. A paint runs
+/// on the compositor, so a radio mid-handshake stalled every window on the
+/// screen behind it. A window a moment out of date is the honest price; a
+/// screen that stops is not one anybody agreed to pay.
+///
+/// One snapshot for the painter, the stamp and the keys, so a row index the
+/// operator selected is an index into the list they were looking at.
+#[derive(Clone, Hash, Default)]
+struct View {
+    radio: bool,
+    adapter: &'static str,
+    state: &'static str,
+    secure: bool,
+    mac: String,
+    ssid: Option<String>,
+    ip: Option<String>,
+    joined: Option<crate::net::Mac>,
+    nets: Vec<Network>,
+}
+
+impl View {
+    /// `None` when another task holds the station right now.
+    fn take() -> Option<View> {
+        let _claim = crate::net::try_claim_wifi()?;
+        let (radio, adapter, state, secure) = match crate::net::wlan() {
+            Some(w) => {
+                let (s, sec) = w.status();
+                (true, crate::net::wlan_name().unwrap_or("wireless"), s, sec)
+            }
+            None => (false, "none", "no radio", false),
+        };
+        let mac = crate::net::ifaces()[crate::net::WLAN0]
+            .nic
+            .as_ref()
+            .map(|n| {
+                let m = n.mac();
+                alloc::format!(
+                    "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    m[0], m[1], m[2], m[3], m[4], m[5]
+                )
+            })
+            .unwrap_or_else(|| String::from("--"));
+        Some(View {
+            radio,
+            adapter,
+            state,
+            secure,
+            mac,
+            ssid: crate::net::wlan_ssid(),
+            ip: NetMan::own_ip(),
+            joined: crate::net::wlan_ap(),
+            nets: wifi::scan().unwrap_or_default(),
+        })
+    }
 }
 
 impl NetMan {
@@ -59,6 +121,7 @@ impl NetMan {
             pass: String::new(),
             said: String::new(),
             held: Cell::new(usize::MAX),
+            view: RefCell::new(View::take().unwrap_or_default()),
         }
     }
 
@@ -114,8 +177,12 @@ impl NetMan {
         ]
     }
 
-    fn nets() -> Vec<Network> {
-        wifi::scan().unwrap_or_default()
+    /// Bring the snapshot up to date if the station is free, and answer it.
+    fn view(&self) -> View {
+        if let Some(v) = View::take() {
+            *self.view.borrow_mut() = v;
+        }
+        self.view.borrow().clone()
     }
 
     /// The address this machine holds on `wlan0`, once it has one.
@@ -125,17 +192,6 @@ impl NetMan {
             return None;
         }
         Some(alloc::format!("{}.{}.{}.{}", w.ip[0], w.ip[1], w.ip[2], w.ip[3]))
-    }
-
-    /// The access point we are actually on, if any.
-    ///
-    /// **The access point and not the network.** The rehearsal room carries
-    /// `glados` on two of them on purpose, and matching by name marked both
-    /// rows as joined and printed this machine's address against each -- which
-    /// is precisely the confusion the BSSID column exists to end, committed by
-    /// the window that shows the column.
-    fn joined() -> Option<crate::net::Mac> {
-        crate::net::wlan_ap()
     }
 
     fn act(&mut self, which: &str) {
@@ -160,7 +216,9 @@ impl NetMan {
                 }
             },
             "Join" => {
-                let nets = Self::nets();
+                // The list the operator chose from, not a fresh one: a scan
+                // that landed in between would renumber the rows.
+                let nets = self.view.borrow().nets.clone();
                 let Some(n) = nets.get(self.sel.get()) else {
                     self.said = String::from("nothing selected");
                     return;
@@ -194,6 +252,24 @@ impl NetMan {
 }
 
 impl DeskApp for NetMan {
+    /// The station as last seen and everything the operator has done here.
+    fn stamp(&self) -> Option<u64> {
+        Some(super::scene::Stamp::of((
+            self.view(),
+            self.sel.get(),
+            self.scroll.get(),
+            self.pass.as_str(),
+            self.said.as_str(),
+            self.held.get(),
+        )))
+    }
+
+    /// A scan fills in and a handshake moves on the clock task; looked at
+    /// twice a second.
+    fn wake_ms(&self) -> Option<u32> {
+        Some(500)
+    }
+
     fn min_size(&self) -> (u32, u32) {
         // A table of six columns plus a row of buttons has a floor, and under
         // it the access point column is the first thing to go -- which is the
@@ -207,27 +283,10 @@ impl DeskApp for NetMan {
         let lh = theme::text_h_at(1);
         let rh = Self::row_h();
 
-        // The station is the clock task's too; held for the whole paint.
-        let _claim = crate::net::claim_wifi();
-        // --- what we are, and what we are on --------------------------
-        let (adapter, state, secure) = match crate::net::wlan() {
-            Some(w) => {
-                let (s, sec) = w.status();
-                (crate::net::wlan_name().unwrap_or("wireless"), s, sec)
-            }
-            None => ("none", "no radio", false),
-        };
-        let mac = crate::net::ifaces()[crate::net::WLAN0]
-            .nic
-            .as_ref()
-            .map(|n| {
-                let m = n.mac();
-                alloc::format!(
-                    "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                    m[0], m[1], m[2], m[3], m[4], m[5]
-                )
-            })
-            .unwrap_or_else(|| String::from("--"));
+        // The station is the clock task's too: read once, and never waited
+        // for (`View`).
+        let v = self.view();
+        let (adapter, state, secure, mac) = (v.adapter, v.state, v.secure, v.mac.as_str());
         theme::text_over_at(
             fb,
             head.x,
@@ -243,7 +302,7 @@ impl DeskApp for NetMan {
         } else {
             theme::TEXT_DIM
         };
-        let line2 = match (crate::net::wlan_ssid(), Self::own_ip()) {
+        let line2 = match (v.ssid.clone(), v.ip.clone()) {
             (Some(ssid), Some(ip)) => alloc::format!(
                 "{} on {}   {}   {}",
                 state,
@@ -281,8 +340,8 @@ impl DeskApp for NetMan {
         }
         theme::panel(fb, table);
         let inner = table.shrink(3);
-        let joined = Self::joined();
-        let ip = Self::own_ip();
+        let joined = v.joined;
+        let ip = v.ip.clone();
 
         // Columns, measured in characters and converted once, so the header
         // and the rows cannot disagree about where a column starts.
@@ -321,12 +380,12 @@ impl DeskApp for NetMan {
         let body = Rect::new(inner.x, inner.y + lh + 3, inner.w, inner.h.saturating_sub(lh + 3));
         let rows = (body.h / rh.max(1)) as usize;
 
-        let nets = Self::nets();
+        let nets = &v.nets;
         if nets.is_empty() {
-            let why = match crate::net::wlan() {
-                None => "no wireless part in this machine. 'wifi' says what is fitted; 'wifi rehearse' puts a synthetic room behind this window.",
-                Some(_) if state == "scanning" => "scanning every channel -- this takes a few seconds",
-                Some(_) => "nothing heard. Rescan, or the room is empty.",
+            let why = match v.radio {
+                false => "no wireless part in this machine. 'wifi' says what is fitted; 'wifi rehearse' puts a synthetic room behind this window.",
+                true if state == "scanning" => "scanning every channel -- this takes a few seconds",
+                true => "nothing heard. Rescan, or the room is empty.",
             };
             for (k, line) in wrap(why, (body.w / cw.max(1)) as usize).iter().enumerate() {
                 theme::text_over_at(fb, body.x, body.y + (k as u32) * (lh + 2), line, theme::TEXT_DIM, 1);
@@ -388,7 +447,7 @@ impl DeskApp for NetMan {
 
     fn key(&mut self, k: u8) -> bool {
         use crate::dev::kbd;
-        let n = Self::nets().len();
+        let n = self.view.borrow().nets.len();
         match k {
             kbd::KEY_UP => {
                 self.sel.set(self.sel.get().saturating_sub(1));
@@ -436,7 +495,7 @@ impl DeskApp for NetMan {
             if y >= body_y as i32 {
                 let row = ((y - body_y as i32).max(0) as u32 / Self::row_h()) as usize;
                 let i = self.scroll.get() + row;
-                if i < Self::nets().len() {
+                if i < self.view.borrow().nets.len() {
                     self.sel.set(i);
                 }
             }

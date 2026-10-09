@@ -881,6 +881,7 @@ fn comp_task() {
     // that should have caught it divided the error straight back out.
     // Anything measuring an interval uses the TSC.
     let mut next = time::rdtsc();
+    let mut app_due = 0u64;
     loop {
         // **The heartbeat, at the top and unconditionally.**
         //
@@ -985,12 +986,24 @@ fn comp_task() {
         // finer timing -- a window arriving, a pointer paint the 4 ms pacing
         // deferred -- keep the loop in the yielding state instead (`busy`).
         let now = time::rdtsc();
-        let dirty = gfx::render::is_dirty() || gfx::desk::busy();
         let ticks = dev::lapic::ticks();
         // The tray repaints every tenth of a second; polled USB devices want a
         // look every tick.
         let tenth = crate::TIMER_HZ as u64 / 10;
-        let wake_in = if dev::usbhid::attached() > 0 { 1 } else { tenth - ticks % tenth };
+        let mut wake_in = if dev::usbhid::attached() > 0 { 1 } else { tenth - ticks % tenth };
+        // A program with a timer (`DeskApp::wake_ms`): a frame when its period
+        // is up, which costs nothing past the diff if its stamp did not move.
+        // The period is a property of what is open and the last frame said
+        // what that was; a program closed since then costs one empty frame.
+        if let Some(ms) = gfx::desk::app_wake_ms() {
+            let period = (ms as u64 * crate::TIMER_HZ as u64 / 1000).max(1);
+            if ticks >= app_due {
+                gfx::render::invalidate();
+                app_due = ticks + period;
+            }
+            wake_in = wake_in.min(app_due.saturating_sub(ticks).max(1));
+        }
+        let dirty = gfx::render::is_dirty() || gfx::desk::busy();
         match gfx::render::pace(now, next, dirty, wake_in) {
             gfx::render::Pace::Wait => {
                 task::yield_now();
@@ -998,7 +1011,7 @@ fn comp_task() {
             }
             gfx::render::Pace::Sleep(t) => {
                 gfx::render::beat(gfx::render::Phase::Tray);
-                gfx::desk::paint_tray(false);
+                gfx::desk::paint_tray();
                 gfx::render::beat(gfx::render::Phase::Turn);
                 task::sleep_until_or(ticks + t, || {
                     gfx::render::is_dirty() || dev::mouse::pending()
@@ -1009,7 +1022,6 @@ fn comp_task() {
         }
         let mhz = time::tsc_mhz().max(1) as u64;
         next = now + (mhz * 1_000_000) / FRAME_HZ;
-        let mut composed = false;
         if gfx::render::take_dirty() {
             // `draw` takes the painter's claim itself and refuses if another
             // task holds it, which is the right answer: that task is painting
@@ -1020,8 +1032,6 @@ fn comp_task() {
             gfx::desk::draw();
             if gfx::render::stats().draws == before {
                 gfx::render::restore_dirty();
-            } else {
-                composed = true;
             }
         }
 
@@ -1032,19 +1042,17 @@ fn comp_task() {
         // before it. This ran as a blocking loop on whichever task opened the
         // window, calling `draw` itself six times -- so every task that opened
         // a window was a compositor for a tenth of a second.
-        if gfx::desk::flourish_step() {
-            composed = true;
-        }
+        gfx::desk::flourish_step();
 
-        // The taskbar's two readouts, after the frame rather than before it.
-        //
-        // `draw` paints the *well* they sit in and not the text inside it, so
-        // a composed frame erases them and they have to go back on top. Doing
-        // it in the other order leaves the tray blank until the next tenth of
-        // a second ticks, which is the flicker that had no name while the
-        // clock task owned this and could only repaint on its own schedule.
+        // The taskbar's two readouts. They are a part of the taskbar layer now,
+        // so a composed frame paints them rather than erasing them, and all
+        // this does is notice a new tenth of a second. It used to be told
+        // "after a frame, repaint whatever the time" -- right while the tray
+        // was written straight to the aperture over the frame, and a feedback
+        // loop once it became a layer: each frame asked for the next, and an
+        // empty desktop composed fifty frames a second to move four digits.
         gfx::render::beat(gfx::render::Phase::Tray);
-        gfx::desk::paint_tray(composed);
+        gfx::desk::paint_tray();
 
         // **A turn after every frame, whatever `pace` would say.** A frame
         // that takes longer than a frame-time finds the next deadline already

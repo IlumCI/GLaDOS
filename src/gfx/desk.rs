@@ -154,6 +154,122 @@ pub struct Window {
     /// window across frames by this rather than by its index, which shifts
     /// whenever a window below it closes or one is raised.
     pub serial: u64,
+    /// An application's own pixels, kept between frames.
+    ///
+    /// An application used to redraw itself into the desktop on every frame
+    /// that touched its window -- including frames where nothing about it had
+    /// changed, because another window moved across it or the clock ticked.
+    /// Kept, it is redrawn only when its key moves (`app_key`), and a frame
+    /// that merely exposes or moves it is a row copy. Interior mutability
+    /// because the painter holds the desktop shared.
+    pub app_surface: core::cell::RefCell<Option<AppSurface>>,
+}
+
+/// What `Window::app_surface` holds: the pixels, their size, and the key they
+/// were drawn under.
+pub struct AppSurface {
+    px: Vec<u32>,
+    w: u32,
+    h: u32,
+    key: u64,
+}
+
+/// How many events each application has been handed -- a key, a press, a
+/// drag, a release, a wheel notch -- keyed by the address of the program
+/// (its `Box` does not move while the window lives). Part of that program's
+/// key, so input always redraws the program that received it, without it
+/// having to say what the input changed, and redraws nothing else.
+///
+/// By address rather than by window because every caller holds the program
+/// borrowed out of `d.windows[i].content`, and the window beside it cannot be
+/// reached through the same index while that borrow lives. A closed window's
+/// slot is taken by whichever program lands at its address next, which costs
+/// that program nothing: its surface is new either way.
+static APP_INPUT: crate::sync::Spin<[(usize, u64); 16]> = crate::sync::Spin::new([(0, 0); 16]);
+
+fn app_addr(a: &dyn DeskApp) -> usize {
+    a as *const dyn DeskApp as *const u8 as usize
+}
+
+fn app_input(a: &dyn DeskApp) {
+    let at = app_addr(a);
+    let mut t = APP_INPUT.lock_irq();
+    match t.iter().position(|e| e.0 == at) {
+        Some(k) => t[k].1 = t[k].1.wrapping_add(1),
+        None => {
+            // Evict the least-touched row; a program that loses its row gets
+            // a count of zero, which differs from what it had, so it redraws.
+            let k = (0..t.len()).min_by_key(|&k| t[k].1).unwrap_or(0);
+            t[k] = (at, 1);
+        }
+    }
+}
+
+fn inputs_to(a: &dyn DeskApp) -> u64 {
+    let at = app_addr(a);
+    APP_INPUT.lock_irq().iter().find(|e| e.0 == at).map_or(0, |e| e.1)
+}
+
+/// The key an application's surface is drawn under: the program's own stamp
+/// if it offers one, plus focus, size and input. A program with no stamp is
+/// redrawn once per composed frame, which is what every program got before
+/// there were stamps.
+fn app_key(a: &dyn DeskApp, active: bool, client: Rect, seq: u64) -> u64 {
+    match a.stamp() {
+        Some(st) => super::scene::Stamp::of((
+            st,
+            active,
+            client.w,
+            client.h,
+            inputs_to(a),
+        )),
+        None => super::scene::Stamp::of((seq, 0xA99u32)),
+    }
+}
+
+/// Bring a window's application surface up to date and lay it into `fb`.
+fn paint_app(win: &Window, a: &dyn DeskApp, fb: &Framebuffer, client: Rect, active: bool) {
+    let seq = FRAME_SEQ.load(core::sync::atomic::Ordering::Relaxed);
+    let key = app_key(a, active, client, seq);
+    let mut slot = win.app_surface.borrow_mut();
+    let stale = match slot.as_ref() {
+        Some(sf) => sf.w != client.w || sf.h != client.h || sf.key != key,
+        None => true,
+    };
+    if stale {
+        let n = client.w as usize * client.h as usize;
+        let mut px = match slot.take() {
+            Some(sf) if sf.px.len() == n => sf.px,
+            _ => {
+                let mut v = Vec::new();
+                if v.try_reserve_exact(n).is_err() {
+                    // No room for a surface: draw straight into the frame, as
+                    // every application did before there were surfaces.
+                    drop(slot);
+                    if let Some(v) = fb.view(client.x, client.y, client.w, client.h) {
+                        a.draw_in(&v, Rect::new(0, 0, client.w, client.h), active);
+                    }
+                    return;
+                }
+                v.resize(n, 0);
+                v
+            }
+        };
+        let view = unsafe { Framebuffer::over_ram(px.as_mut_ptr() as u64, client.w, client.h, client.w, fb.format()) };
+        // The window's face first: programs paint over the ground
+        // `theme::window` laid, and do not all fill their whole client area.
+        view.rect(0, 0, client.w, client.h, theme::FACE);
+        let t0 = crate::time::rdtsc();
+        a.draw_in(&view, Rect::new(0, 0, client.w, client.h), active);
+        super::render::cost(super::render::Cost::AppRender, crate::time::rdtsc().saturating_sub(t0));
+        *slot = Some(AppSurface { px, w: client.w, h: client.h, key });
+    }
+    let Some(sf) = slot.as_ref() else { return };
+    let (_, y0, _, y1) = fb.scissor();
+    for y in y0.max(client.y)..y1.min(client.y + client.h) {
+        let r = (y - client.y) as usize * sf.w as usize;
+        fb.blit_span(client.x, y, &sf.px[r..r + sf.w as usize]);
+    }
 }
 
 static NEXT_SERIAL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
@@ -477,6 +593,7 @@ pub fn with_ref<R>(f: impl FnOnce(&Desktop) -> R) -> Option<R> {
     unsafe { (*DESK.get()).as_ref().map(f) }
 }
 
+#[track_caller]
 pub fn with<R>(f: impl FnOnce(&mut Desktop) -> R) -> Option<R> {
     let claim = Claim::wait();
     // **Reaching the desktop from outside a frame marks the screen dirty**,
@@ -970,6 +1087,7 @@ fn make_terminal(screen: Rect) -> Window {
     let term_w = (screen.x + screen.w).saturating_sub(term_x + MARGIN);
     Window {
         serial: next_serial(),
+        app_surface: Default::default(),
         title: String::from("GLaDOS Terminal"),
         icon: ICO_TERM,
         rect: Rect::new(term_x, screen.y, term_w, screen.h),
@@ -1200,6 +1318,7 @@ pub fn open(title: &str, panel: Panel) {
             .min(screen.y + screen.h.saturating_sub(h));
         d.windows.push(Window {
             serial: next_serial(),
+            app_surface: Default::default(),
             title: String::from(title),
             // `open` is reached through `win open <name>` with the panel's
             // name as the title, so the name is what there is to go by.
@@ -1264,6 +1383,7 @@ pub fn open_app(title: &str, icon: usize, app: Box<dyn DeskApp>, w: u32, h: u32)
             .min(screen.y + screen.h.saturating_sub(h));
         d.windows.push(Window {
             serial: next_serial(),
+            app_surface: Default::default(),
             title: String::from(title),
             icon,
             rect: Rect::new(x, y, w, h),
@@ -1473,6 +1593,7 @@ pub fn open_browser(url: &str) {
         let y = screen.y + (screen.h.saturating_sub(h)) / 3;
         d.windows.push(Window {
             serial: next_serial(),
+            app_surface: Default::default(),
             title,
             icon: ICO_NET,
             rect: Rect::new(x, y, w, h),
@@ -2139,19 +2260,13 @@ static TRAY_AT: Racy<Option<u64>> = Racy::new(None);
 /// stopped screen looks stopped. What still reports liveness is the watchdog,
 /// which says so in words on a channel the screen cannot take away.
 ///
-/// **Straight to the aperture and deliberately not folded into the frame.**
-/// Composing them would mean a whole frame every tenth of a second -- 2,143 us
-/// measured, so about 2% of a core with nothing happening at all -- to move
-/// four digits. The objection that made the old version wrong was never that
-/// it wrote a small rectangle; it was that a second *task* did. Writing
-/// through `compose::target` keeps the shadow honest, which is the half that
-/// actually mattered.
-///
-/// `after_frame` forces a repaint because `draw` paints the well these sit in
-/// and not the text inside it, so a composed frame erases them. They were
-/// blank for up to a tenth of a second after every frame before this, which is
-/// the flicker nobody had a name for.
-pub fn paint_tray(after_frame: bool) {
+/// **A part of the taskbar layer, stamped by the text it shows.** This only
+/// notices that a tenth of a second has passed and asks for a frame; the
+/// scene diff then finds the clock part's stamp moved and repaints that well
+/// alone. It is asked once per tenth and never "after a frame": the tray is
+/// in the frame, so a frame cannot erase it, and asking unconditionally after
+/// every frame made each frame request the next.
+pub fn paint_tray() {
     // The boot screen owns the framebuffer while it is up, and an uptime in
     // the corner of a splash is the tell that something is drawing behind the
     // curtain.
@@ -2166,7 +2281,7 @@ pub fn paint_tray(after_frame: bool) {
     // DOOM and swamp the counter that exists to say a full-screen program was
     // running. One per tenth is the same fact at the tray's own rate.
     let tenths = crate::dev::lapic::ticks() * 10 / crate::TIMER_HZ as u64;
-    if !after_frame && unsafe { *TRAY_AT.get() } == Some(tenths) {
+    if unsafe { *TRAY_AT.get() } == Some(tenths) {
         return;
     }
     // A full-screen program owns the screen outright, and the tray is not on
@@ -2181,7 +2296,7 @@ pub fn paint_tray(after_frame: bool) {
     super::render::tray_painted();
     // A new tenth: the taskbar layer's clock part has a new stamp, so the
     // next frame repaints that well and nothing else.
-    let _ = (fb, after_frame);
+    let _ = fb;
     super::render::invalidate();
 }
 
@@ -2518,6 +2633,7 @@ fn make_executive(screen: Rect) -> Window {
     let term_w = (screen.x + screen.w).saturating_sub(term_x + MARGIN);
     Window {
         serial: next_serial(),
+        app_surface: Default::default(),
         title: String::from("Executive"),
         icon: ICO_TERM,
         rect: Rect::new(
@@ -2569,7 +2685,7 @@ static OUTLINE: Racy<Option<super::Shape>> = Racy::new(None);
 
 /// Paint `f` clipped to this window's outline, or straight through when the
 /// window is an ordinary rectangle.
-fn with_window_shape<R>(w: &Window, frame: Rect, f: impl FnOnce() -> R) -> R {
+fn with_window_shape<R>(fb: &Framebuffer, w: &Window, frame: Rect, f: impl FnOnce() -> R) -> R {
     // A maximised window has square corners and nothing behind it to show
     // through them. XP squares them too.
     if w.round == 0 || w.state == WinState::Maximised {
@@ -2591,7 +2707,7 @@ fn with_window_shape<R>(w: &Window, frame: Rect, f: impl FnOnce() -> R) -> R {
     let Some(shape) = (unsafe { (*OUTLINE.get()).as_ref() }) else {
         return f();
     };
-    super::with_shape(shape, frame.x as i32, frame.y as i32, f)
+    super::with_shape(fb, shape, frame.x as i32, frame.y as i32, f)
 }
 
 /// Which borders the pointer is over, if any.
@@ -2823,7 +2939,8 @@ fn press_at(x: i32, y: i32) {
             }
         }
         Content::App(a) => {
-            if a.press(client, x, y) {
+            app_input(a.as_ref());
+            if a.press(Rect::new(0, 0, client.w, client.h), x - client.x as i32, y - client.y as i32) {
                 // The press begins a gesture: until the button lifts, motion
                 // belongs to this program. That is what a brush stroke is.
                 unsafe { *APP_PRESS.get() = true };
@@ -2854,7 +2971,10 @@ fn app_drag_to(x: i32, y: i32) {
         let has_menus = !d.windows[f].menus.is_empty();
         let (_, _, client) = chrome(frame, has_menus);
         match &mut d.windows[f].content {
-            Content::App(a) => a.drag(client, x, y),
+            Content::App(a) => {
+                app_input(a.as_ref());
+                a.drag(Rect::new(0, 0, client.w, client.h), x - client.x as i32, y - client.y as i32)
+            }
             _ => false,
         }
     })
@@ -2868,7 +2988,10 @@ fn app_release() {
     let changed = with(|d| {
         let Some(f) = d.focus() else { return false };
         match &mut d.windows[f].content {
-            Content::App(a) => a.release(),
+            Content::App(a) => {
+                app_input(a.as_ref());
+                a.release()
+            }
             _ => false,
         }
     })
@@ -3424,6 +3547,18 @@ static FLIGHT: crate::sync::Racy<Option<Flight>> = crate::sync::Racy::new(None);
 /// no `invalidate` will announce: a window part-way through arriving, or a
 /// pointer paint the 4 ms pacing deferred. While either is true it must not
 /// sleep a whole timer tick, or the arrival stutters and the arrow lags.
+/// The shortest period, in milliseconds, at which an open program asked for
+/// its stamp to be looked at (`DeskApp::wake_ms`), as of the last frame; 0 for
+/// none. Read by the compositor's pacing.
+static APP_WAKE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+pub fn app_wake_ms() -> Option<u32> {
+    match APP_WAKE.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        ms => Some(ms),
+    }
+}
+
 pub fn busy() -> bool {
     arriving().is_some() || unsafe { *CURSOR_PENDING.get() }
 }
@@ -3860,7 +3995,8 @@ fn right_click_at(x: i32, y: i32) {
                 let (_, _, client) = chrome(frame, has_menus);
                 match &mut d.windows[f].content {
                     Content::App(a) if contains(client, x, y) => {
-                        a.right_press(client, x, y)
+                        app_input(a.as_ref());
+                        a.right_press(Rect::new(0, 0, client.w, client.h), x - client.x as i32, y - client.y as i32)
                     }
                     _ => false,
                 }
@@ -3887,7 +4023,10 @@ fn wheel_at(x: i32, y: i32, notches: i32) {
         // Over a panel the wheel walks the first list, which is what a wheel
         // over a launcher or a checklist means.
         Content::Panel(p) => p.wheel(notches),
-        Content::App(a) => a.wheel(notches),
+        Content::App(a) => {
+            app_input(a.as_ref());
+            a.wheel(notches)
+        }
         // Up is back, which is the direction every terminal has agreed on.
         // Three rows a notch, matching the log windows.
         Content::Terminal(ch) => super::console::scroll_view(*ch, (notches * 3) as isize),
@@ -4469,22 +4608,30 @@ fn terminal_geometry(client: Rect, ch: usize) -> (Rect, Rect, Option<Rect>) {
 /// prevents that, and nothing is lost: an invisible console still updates its
 /// shadow grid, and its window repaints the whole log when it comes back.
 fn place_consoles(d: &Desktop, screen: Rect) {
-    for ch in 0..super::console::NCONSOLE {
-        super::console::with_ch(ch, |c| c.set_visible(false));
-    }
+    // Decided first and applied once per console. It hid every console and
+    // then showed the placed ones, every frame -- and a composed console only
+    // reports damage while visible, so a line printed by another task in the
+    // gap between the two reported nothing, and its cell stayed stale until
+    // something else repainted that part of the terminal.
+    let mut placed: [Option<Rect>; super::console::NCONSOLE] = [None; super::console::NCONSOLE];
     for (i, win) in d.windows.iter().enumerate() {
         if arriving() == Some(i) || win.state == WinState::Minimised {
             continue;
         }
         let Content::Terminal(ch) = win.content else { continue };
         let client = theme::chrome(win.frame(screen), !win.menus.is_empty()).client;
-        if client.is_empty() {
+        if client.is_empty() || ch >= placed.len() {
             continue;
         }
-        let (_, grid, _) = terminal_geometry(client, ch);
-        super::console::with_ch(ch, |c| {
-            c.set_visible(true);
-            c.reflow(grid.x, grid.y, grid.w, grid.h);
+        placed[ch] = Some(terminal_geometry(client, ch).1);
+    }
+    for (ch, grid) in placed.iter().enumerate() {
+        super::console::with_ch(ch, |c| match grid {
+            Some(g) => {
+                c.set_visible(true);
+                c.reflow(g.x, g.y, g.w, g.h);
+            }
+            None => c.set_visible(false),
         });
     }
 }
@@ -4503,6 +4650,7 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
     let seq = FRAME_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let (w, h) = (fb.width(), fb.height());
     let mut out = Vec::new();
+    let mut wake = u32::MAX;
     out.push(Layer { id: LayerId::Wallpaper, bounds: Rect::new(0, 0, w, h), stamp: Stamp::of((w, h)), parts: Vec::new() });
 
     let icons = icon_rects(fb);
@@ -4607,7 +4755,13 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
                     let _ = hov;
                     parts.push((client, seq));
                 }
-                Content::Browser(_) | Content::App(_) => parts.push((client, seq)),
+                Content::Browser(_) => parts.push((client, seq)),
+                Content::App(a) => {
+                    if let Some(ms) = a.wake_ms() {
+                        wake = wake.min(ms.max(1));
+                    }
+                    parts.push((client, app_key(a.as_ref(), active, client, seq)))
+                }
             }
         }
         out.push(Layer {
@@ -4654,6 +4808,7 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
         }
         out.push(Layer { id: LayerId::Overlay, bounds: b, stamp: core::hash::Hasher::finish(&st), parts: Vec::new() });
     }
+    APP_WAKE.store(if wake == u32::MAX { 0 } else { wake }, core::sync::atomic::Ordering::Relaxed);
     out
 }
 
@@ -4813,9 +4968,18 @@ fn verify_frame(back: &Framebuffer, d: &Desktop, screen: Rect) {
 /// repainted underneath it in the same pass.
 fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
     let fb = *target;
+    use super::render::{cost, Cost};
+    let mut t = crate::time::rdtsc();
+    let lap = |what: Cost, t: &mut u64| {
+        let now = crate::time::rdtsc();
+        cost(what, now.saturating_sub(*t));
+        *t = now;
+    };
     {
         wallpaper_cached(&fb);
+        lap(Cost::Wallpaper, &mut t);
         draw_icons(&fb, d.hover);
+        lap(Cost::Icons, &mut t);
         let focus = d.focus();
         let sel = match d.mode {
             Mode::Taskbar { item } => Some(item),
@@ -4823,6 +4987,7 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
         };
         taskbar(&fb, d, sel);
         paint_tray_text(&fb);
+        lap(Cost::Taskbar, &mut t);
 
         for (i, win) in d.windows.iter().enumerate() {
             // A window that exists and has not arrived yet. `open_flourish`
@@ -4889,7 +5054,7 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
             // window costs a load and a branch for the whole frame; a shaped
             // one simply does not write outside itself, and whatever the
             // back-to-front repaint already put there shows through.
-            with_window_shape(win, frame, || {
+            with_window_shape(&fb, win, frame, || {
                 let c = theme::window(
                     &fb,
                     frame,
@@ -4972,13 +5137,19 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
                         p.draw_in(&fb, client, active, hov);
                     }
                     Content::Browser(b) => b.draw_in(&fb, client, active),
-                    Content::App(a) => a.draw_in(&fb, client, active),
+                    Content::App(a) => paint_app(win, a.as_ref(), &fb, client, active),
                 }
             });
             }
 
         // Over the windows, because the bar is drawn under them and a tip
         // stands above the bar.
+        lap(Cost::Windows, &mut t);
+        // A window on its way in, above the windows it opens over and under
+        // the popups. It sat at the end of this function until a search for
+        // that end matched `dropdown`'s instead and put it inside that loop,
+        // where it painted only while a menu was open -- once per menu row.
+        paint_flourish(&fb);
         taskbar_tip(&fb, d);
 
         // Popups last, over everything, because that is what a popup is.
@@ -4989,19 +5160,22 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
                     if let Some(m) = d.windows[f].menus.get(menu) {
                         let inner = frame.shrink(theme::FRAME);
                         let bar = Rect::new(inner.x, inner.y + theme::TITLE_H + 2, inner.w, MENU_H);
-                        let Some(lr) =
+                        // A label that cannot be placed skips its dropdown and
+                        // nothing else. This was a `return` out of the whole
+                        // painter, which ended the frame's overlays and its
+                        // cost accounting along with it.
+                        if let Some(lr) =
                             theme::menu_labels(bar, d.windows[f].menus.iter().map(|p| p.label.as_str()))
                                 .nth(menu)
-                        else {
-                            return;
-                        };
-                        dropdown(
-                            &fb,
-                            lr.x,
-                            inner.y + theme::TITLE_H + 2 + MENU_H,
-                            m.items.iter().map(|i| i.label.as_str()),
-                            item,
-                        );
+                        {
+                            dropdown(
+                                &fb,
+                                lr.x,
+                                inner.y + theme::TITLE_H + 2 + MENU_H,
+                                m.items.iter().map(|i| i.label.as_str()),
+                                item,
+                            );
+                        }
                     }
                 }
                 Mode::Sys { item } => {
@@ -5018,9 +5192,10 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
                     // A hint, because a mode with no indication that it is on is
                     // a keyboard that has stopped working.
                     let msg = if matches!(d.mode, Mode::Move { .. }) { MOVE_HINT } else { SIZE_HINT };
-                    let Some(r) = hint_rect(&fb, d) else { return };
-                    theme::panel(&fb, r);
-                    theme::text(&fb, r.x, r.y + 5, msg, theme::TEXT, theme::FACE);
+                    if let Some(r) = hint_rect(&fb, d) {
+                        theme::panel(&fb, r);
+                        theme::text(&fb, r.x, r.y + 5, msg, theme::TEXT, theme::FACE);
+                    }
                 }
                 // The taskbar draws its own selection, and it is not a popup
                 // over the focused window -- it is a fixture with the keyboard.
@@ -5065,7 +5240,9 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
                     fb.rect(cx, row.y + 4, 2, theme::text_h(), theme::TEXT);
                 }
             }
-        }    }
+        }
+        lap(Cost::Overlay, &mut t);
+    }
 }
 
 fn dropdown<'a>(
@@ -5089,7 +5266,6 @@ fn dropdown<'a>(
     }
     for (i, label) in items.iter().enumerate() {
         theme::list_row(fb, p.row(i), label, i == sel, true);
-        paint_flourish(&fb);
     }
 }
 
@@ -5317,6 +5493,7 @@ pub fn key(k: u8) -> Route {
                         if b.key(k) { ui::Step::Redraw } else { ui::Step::Idle }
                     }
                     Content::App(a) => {
+                        app_input(a.as_ref());
                         if a.key(k) { ui::Step::Redraw } else { ui::Step::Idle }
                     }
                     _ => ui::Step::Idle,
@@ -5324,7 +5501,7 @@ pub fn key(k: u8) -> Route {
                 None => ui::Step::Idle,
             });
             match step {
-                Some(ui::Step::Redraw) => draw(),
+                Some(ui::Step::Redraw) => super::render::invalidate(),
                 Some(ui::Step::Close) => close_focused(),
                 Some(ui::Step::Do(Action::Run(cmd))) => {
                     focus_terminal();

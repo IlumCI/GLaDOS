@@ -465,7 +465,7 @@ pub fn run(w: &mut Work, script: &[Action], budget: usize) -> Report {
 /// staring at a window has -- a run is minutes long and holds the model for
 /// the whole of it, so a machine that looks identical to a hung one is a
 /// machine somebody reboots.
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub struct Progress {
     pub name: String,
     pub step: usize,
@@ -495,7 +495,10 @@ impl Progress {
     }
 }
 
-static PROGRESS: crate::sync::Racy<Option<Progress>> = crate::sync::Racy::new(None);
+/// Locked, because the agent task publishes while the compositor clones it
+/// for the "Writing" window, and preemption between the two is a clone of a
+/// `String` being replaced.
+static PROGRESS: crate::sync::Spin<Option<Progress>> = crate::sync::Spin::new(None);
 
 // Stopping is `agent::request_abort`, not a flag of our own.
 //
@@ -505,22 +508,21 @@ static PROGRESS: crate::sync::Racy<Option<Progress>> = crate::sync::Racy::new(No
 // an operator ends up pressing the wrong one and watching nothing happen.
 
 pub fn progress() -> Option<Progress> {
-    unsafe { (*PROGRESS.get()).clone() }
+    PROGRESS.lock_irq().clone()
 }
 
 fn publish(w: &Work, budget: usize, running: bool) {
     let (met, total) = tally(w);
-    unsafe {
-        *PROGRESS.get() = Some(Progress {
-            name: w.name.clone(),
-            step: w.steps,
-            budget,
-            met,
-            total,
-            last: w.last.clone().unwrap_or_else(|| String::from("nothing wrong so far")),
-            running,
-        });
-    }
+    let p = Progress {
+        name: w.name.clone(),
+        step: w.steps,
+        budget,
+        met,
+        total,
+        last: w.last.clone().unwrap_or_else(|| String::from("nothing wrong so far")),
+        running,
+    };
+    *PROGRESS.lock_irq() = Some(p);
 }
 
 /// Clauses met, and how many there are.

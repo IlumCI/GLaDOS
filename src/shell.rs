@@ -2902,6 +2902,18 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 );
                 return;
             }
+            // Where frames spent their time, by painter, since `render reset`.
+            if rest.trim() == "top" {
+                let st = render::stats();
+                kprintln!("  over {} frame(s), time spent painting, per frame:", st.draws);
+                for (name, us, n) in render::costs() {
+                    if n == 0 {
+                        continue;
+                    }
+                    kprintln!("    {:<14} {:>6} us   ({} pass(es))", name, us / st.draws.max(1), n);
+                }
+                return;
+            }
             // Compare every damage-limited frame against a full repaint.
             if let Some(v) = rest.trim().strip_prefix("verify") {
                 match v.trim() {
@@ -3038,12 +3050,25 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             }
             let (drects, dpix) = render::damage_totals();
             if st.draws > 0 {
+                // Tenths, because the average is usually between one and two
+                // rectangles and integer division printed "0 rect(s)" beside a
+                // nonzero pixel count, which read as a broken counter.
+                let tenths = drects * 10 / st.draws;
                 kprintln!(
-                    "    repainted    {} rect(s), {} px per frame on average (a whole screen is {})",
-                    drects / st.draws,
+                    "    repainted    {}.{} rect(s), {} px per frame on average (a whole screen is {})",
+                    tenths / 10,
+                    tenths % 10,
                     dpix / st.draws,
                     boot.fb.width() as u64 * boot.fb.height() as u64
                 );
+            }
+            let ask = render::askers();
+            if !ask.is_empty() {
+                kprint!("    asked by    ");
+                for (f, l, n) in ask.iter().take(4) {
+                    kprint!(" {}:{} x{}", f.rsplit('/').next().unwrap_or(f), l, n);
+                }
+                kprintln!();
             }
             let reads = render::mmio_reads();
             console::set_color(if reads > 0 { YELLOW } else { LTGRAY });
@@ -3078,6 +3103,15 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // task that leaks it never notices.
                 if let Some(h) = crate::gfx::desk::claim_holder() {
                     kprintln!("    the paint claim is held by task {}", h);
+                }
+            }
+            // The screen itself, when a full-screen program has it: a desktop
+            // that composes nothing because the editor owns the screen and one
+            // that composes nothing because it is broken look the same.
+            if let Some(o) = crate::gfx::lease::holder() {
+                match crate::gfx::lease::holder_task() {
+                    Some(t) => kprintln!("    the screen is leased to {}, taken by task {}", o.name(), t),
+                    None => kprintln!("    the screen is leased to {}", o.name()),
                 }
             }
             // **The worst quiet prints whether or not it crossed the bar.**

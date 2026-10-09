@@ -1143,10 +1143,6 @@ pub fn redraw() {
     with(|c| c.redraw_all());
 }
 
-pub fn redraw_ch(ch: usize) {
-    with_ch(ch, |c| c.redraw_all());
-}
-
 /// Lay a composed console's surface into `target`, for the frame.
 pub fn blit_ch(ch: usize, target: &Framebuffer) {
     with_ch(ch, |c| c.blit_into(target));

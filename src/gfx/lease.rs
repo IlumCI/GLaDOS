@@ -139,7 +139,7 @@ impl Drop for Lease {
             return;
         }
         let prev = DEPTH
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |d| Some(d.saturating_sub(1)))
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |d| Some(d.saturating_sub(1)))
             .unwrap_or(0);
         if prev <= 1 && HOLDER.swap(0, Ordering::AcqRel) != 0 {
             given_back();

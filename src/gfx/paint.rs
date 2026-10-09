@@ -278,6 +278,22 @@ fn swatch_rects(client: Rect) -> Vec<(Rect, u8)> {
 }
 
 impl DeskApp for Paint {
+    /// Everything but the canvas. The canvas changes only through this
+    /// window's own input, which redraws it anyway, and hashing 120,000 bytes
+    /// a frame to learn that would cost more than the redraw it saves.
+    fn stamp(&self) -> Option<u64> {
+        Some(super::scene::Stamp::of((
+            self.color,
+            self.tool_char(),
+            self.brush,
+            self.pen,
+            self.pen_down,
+            self.anchor,
+            self.last,
+            self.status.as_str(),
+        )))
+    }
+
     /// The canvas is a fixed pixel buffer and the palette sits beside it,
     /// so neither shrinks. Dragging under this would hide the drawing behind
     /// the frame.

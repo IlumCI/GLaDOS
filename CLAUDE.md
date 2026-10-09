@@ -929,8 +929,10 @@ mismatch made three hours and one commit earlier. The check answers that in a
 second where reading the diff does not answer it at all.
 
 **Rails are what "better" refers to.** `bench report` emits one machine-readable
-block, `[rail] v1`, one rail per line as `name value unit want`. Fifteen of
-them: six graphics (`video.cursor_move` joined in 1.4.1), four interpreter, `ai.matmul`, `ai.bpb`, `ai.answer`, and
+block, `[rail] v1`, one rail per line as `name value unit want`. Eighteen of
+them: nine graphics (`video.cursor_move`, `idle_turn`, `small_damage` and
+`window_move` joined in 1.4.1, and `video.draw` is a forced *whole* frame
+since frames became damage-limited), four interpreter, `ai.matmul`, `ai.bpb`, `ai.answer`, and
 two memory bandwidth. `bench::DECLARED` is the list and the report walks it, so
 that count is checkable rather than remembered -- which is the only reason this
 sentence can be trusted after the last three times a number in this file went
@@ -1897,11 +1899,9 @@ through `port::with_screen`, `port bars` is the bounded full-screen fixture,
 and `port::mouse` is the relative, unclamped pointer that `dev::mouse` cannot
 be because it tracks a cursor that stops at the edge of the screen.
 
-**`gfx::exclusive` is how a full-screen program keeps the screen.** Owning the
-framebuffer is not enough: the taskbar readouts and the pointer are painted by
-the compositor on its own schedule, so instead of contending for the paint
-claim they stand down while the flag is set. `port::with_screen` sets it,
-blanks the screen, and invalidates on the way out.
+**A full-screen program holds a lease on the screen** (`gfx::lease`, see
+"Graphics and the desktop"). `port::with_screen` takes one, blanks the
+screen, and dropping it gives the screen back with a full repaint.
 
 **A full-screen program needs a bounded form or nothing can test it.**
 `drive.py` sends the next command when it sees a prompt, so a program that
@@ -3685,10 +3685,9 @@ absent one, which sends a program down a fallback it already has.
 identity-mapped, so virtual is physical and `smem_start` can be the aperture's
 own address rather than a lie about a buffer somewhere else; a frame the guest
 writes is on screen as it writes it, with no copy anywhere. The price is that
-the desktop must stand down while that is true, which is `gfx::exclusive` --
-the same flag `port::with_screen` sets for the editor, split into two
-halves here because a guest holds the screen across many syscalls rather than
-for the length of one call. It is taken on the first write or mapping rather
+the desktop must stand down while that is true, which is a `gfx::lease` held
+in the guest's state rather than on a stack, because a guest holds the screen
+across many syscalls rather than for the length of one call. It is taken on the first write or mapping rather
 than at `open`, since a program that merely `stat`s the device has not asked
 for the machine, and released in `teardown` **unconditionally**, because a
 guest that took the display and then faulted is exactly the case that matters.
@@ -4351,15 +4350,14 @@ commands unsent. Hence `port bars <ms>`: the interactive form waits for a key,
 the bounded form returns on its own, and only the second one is ever driven.
 Anything full-screen that follows needs the same.
 
-**`gfx::exclusive` is how a full-screen program keeps the screen.** Owning the
-framebuffer is not enough: `desk::paint_clock` runs on the clock task at 10 Hz
-and `desk::move_cursor` runs on whichever task is generating, and both write
-the framebuffer under a paint claim that is private to `desk.rs` and therefore
-unreachable from outside it. So instead of contending for the claim, the two
-periodic painters stand down while the flag is set. `port::with_screen` sets
-it, blanks the screen and calls `desk::draw()` on the way out. `edit::run` has
-owned the screen the same way since it was written and had this defect the
-whole time -- the clock painted over the editor.
+**A full-screen program takes a `gfx::lease`.** It was a bare
+`gfx::exclusive` bool, which said nobody who held it, could not be reentered,
+and was never set at all by three of the programs that drew on the aperture --
+the editor, the Aiksi `pixel`/`rect`/`text` builtins and `video bars` -- each
+of which left the compositor's shadow describing a desktop no longer on screen.
+A lease is RAII: dropping it gives the screen back and forces a full repaint,
+which is the step those three forgot. `lease::force_release` is the fault and
+panic path, and `render` names the holder.
 
 **Boot selftest output is easy to skip past and it does catch real bugs.** An
 ECDSA break was visible in `[selftest] crypto` for a whole debugging cycle
@@ -4963,29 +4961,51 @@ the two tasks' transfers cannot take each other's completions. Not driven
 under QEMU, which has no USB mouse plugged into it; the trip is the test.
 
 **The trip found that the trackpad is that USB device, and that the cursor
-could not take the rate.** With reports consumed from the compositor's loop
-the arrow strobed and whatever it crossed flickered with it. `cursor_show`
-writes the arrow straight into the aperture and `cursor_hide` repaints what
-was under it from the back buffer, so every paint is an erase and a redraw on
-the surface a person is looking at -- once a tick from the shell's idle loop,
-once per HID report from the compositor's, several hundred times a second.
-And each erase copies the back buffer as it stands, which during a `draw()`
-on another task is half a frame. `paint_cursor_paced` coalesces: every
-position is recorded and every press acts at once, but the arrow is painted
-at most every `CURSOR_MIN_US` (4 ms) and the last position is always painted
-on a later turn. The back-buffer race underneath is older than this and is
-still there; pacing makes it rare rather than gone.
+could not take the rate.** The arrow was written straight into the aperture
+and erased from the back buffer, so it strobed, and an erase during a `draw()`
+on another task copied half a frame. It is a plane now (1.4.1, phase 6, the
+Haiku arrangement): the arrow never enters the back buffer, `compose` lays it
+over each row on its way out, and a move re-presents the rows where it was
+and where it is -- 3 us a move measured, against a frame. `paint_cursor_paced`
+still coalesces to `CURSOR_MIN_US`.
 
 ### Graphics and the desktop
 
-Rendering is composed, then diffed. `desk::draw` repaints everything
-(wallpaper, icons, every window back to front) into `gfx::compose`'s heap back
-buffer, and `present()` writes to the framebuffer only the row spans that
-differ from the shadow of what is already on screen. Total repaint keeps the
-window manager obviously correct; the diff is why nothing flashes and why hover
-feedback on pointer motion is affordable. The console bypasses the next present
-through `compose::flush_rect` so shell output stays immediate; both paths
-update the shadow, so they cannot disagree about what is on screen.
+**1.4.1 replaced this renderer, and the paragraph that used to stand here
+described one where every frame repainted everything.** What it is now, in
+the order a frame happens:
+
+- **Only the compositor writes the screen.** `comp_task` composes when
+  something is dirty and sleeps otherwise (`render::pace`), woken by
+  `render::invalidate`, a pointer packet, the tray's tenth of a second, or a
+  program's `DeskApp::wake_ms`. An idle desktop composes ten frames a second,
+  which is the clock, and each writes about a dozen rows.
+- **A frame is a diff of two scenes.** `desk::layers` lists what is on
+  screen -- wallpaper, icons, taskbar, each window, overlays -- as layers with
+  a fingerprint of exactly what their painter reads (`gfx::scene`), and
+  `scene::diff` against the last frame's list is the damage: a `Region` of at
+  most sixteen rectangles. Each is repainted by the same painters through a
+  clipped `Framebuffer`, and `compose::present_region` writes those rows.
+- **A program's pixels are kept** (`Window.app_surface`) and redrawn only when
+  its `DeskApp::stamp`, focus, size or its own input changes. A program with
+  no stamp is redrawn every frame, which is correct and costs time. A program
+  draws and is handed input in its own coordinates.
+- **The console paints its own surface** and reports damage; direct mode is
+  kept for faults and panics only (`console::emergency_direct`).
+- **The pointer is a plane** laid over rows on their way out, never in the
+  back buffer.
+- **The aperture is write-combining** through a PAT this kernel programs
+  (`cpu::mtrr`), and present uses streaming stores. `video cache` reports the
+  memory type the hardware actually applies.
+- **A full-screen program holds a `gfx::lease`.**
+
+`render verify on` composes a full reference frame after every incremental
+one and compares them; a stamp that misses some state shows up there as a
+mismatch, before it shows up in a screenshot as a stale pixel. `render top`
+splits frame time by what was painted, and `render`'s "asked by" names the
+source lines that requested the frames -- which is how an idle desktop
+composing fifty frames a second was traced to the tray asking for a frame
+after every frame.
 
 The pointer's whole vocabulary lives in `desk::press_at`, and every layout it
 hit-tests (`task_layout`, `chrome`, `Panel::rects`, `Browser::metrics`,

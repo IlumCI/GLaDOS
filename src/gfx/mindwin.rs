@@ -258,6 +258,18 @@ impl Improve {
 }
 
 impl DeskApp for Improve {
+    /// The four readings in the header and the two that key the ledger cache
+    /// -- a new trial or a new head is exactly when the ledger is re-read.
+    fn stamp(&self) -> Option<u64> {
+        let g = with_glance(|g| (g.godel_on, g.adoptions, g.trials, g.head, g.test));
+        Some(super::scene::Stamp::of((g, self.scroll.get())))
+    }
+
+    /// A trial lands on another task; looked at once a second.
+    fn wake_ms(&self) -> Option<u32> {
+        Some(1000)
+    }
+
     fn draw_in(&self, fb: &Framebuffer, client: Rect, focused: bool) {
         theme::panel(fb, client);
         let (head, body, feet) = Improve::layout(client);
@@ -490,6 +502,21 @@ impl Flows {
 }
 
 impl DeskApp for Flows {
+    /// The run list, the selection, the plan's scroll, and the selected run's
+    /// content address -- which moves whenever a step of it is written, the
+    /// same key the plan cache is held under.
+    fn stamp(&self) -> Option<u64> {
+        let runs = with_glance(|g| g.runs.clone());
+        let sel = self.sel.get().min(runs.len().saturating_sub(1));
+        let root = runs.get(sel).and_then(|r| crate::ai::work::root(r));
+        Some(super::scene::Stamp::of((runs, sel, self.pscroll.get(), root)))
+    }
+
+    /// A run advances on another task; looked at once a second.
+    fn wake_ms(&self) -> Option<u32> {
+        Some(1000)
+    }
+
     fn draw_in(&self, fb: &Framebuffer, client: Rect, focused: bool) {
         theme::panel(fb, client);
         let (list, plan, feet) = Flows::layout(client);
@@ -670,6 +697,20 @@ impl Ask {
 }
 
 impl DeskApp for Ask {
+    /// The conversation, the scroll and what is being typed.
+    fn stamp(&self) -> Option<u64> {
+        Some(super::scene::Stamp::of((
+            crate::ai::companion::log_snapshot(),
+            self.scroll.get(),
+            self.typed.as_str(),
+        )))
+    }
+
+    /// An answer arrives from another task; looked at twice a second.
+    fn wake_ms(&self) -> Option<u32> {
+        Some(500)
+    }
+
     fn draw_in(&self, fb: &Framebuffer, client: Rect, focused: bool) {
         theme::panel(fb, client);
         let (body, field, btn) = Ask::layout(client);

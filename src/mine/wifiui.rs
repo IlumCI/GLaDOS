@@ -202,7 +202,7 @@ pub fn overlay(fb: &Framebuffer, k: u32) {
     // Solid under the glass: the mining view behind is all large type, and
     // through a translucent pane it read as part of the panel.
     let shape = crate::gfx::Shape::round_rect(pw, ph, 14);
-    crate::gfx::with_shape(&shape, px as i32, py as i32, || fb.rect(px, py, pw, ph, PANEL));
+    crate::gfx::with_shape(fb, &shape, px as i32, py as i32, || fb.rect(px, py, pw, ph, PANEL));
     pane(fb, px, py, pw, ph, 14, Some(GOLD));
     // Recorded before the panel's buttons, which `hit_at` finds first because
     // it searches newest first: outside the panel a click closes it, inside it

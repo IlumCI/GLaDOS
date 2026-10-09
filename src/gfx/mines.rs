@@ -254,7 +254,40 @@ fn count_color(n: u8) -> Color {
     }
 }
 
+impl Mines {
+    /// What the timer shows. One function for the painter and the stamp.
+    fn secs(&self) -> i64 {
+        match self.state {
+            _ if !self.laid => 0,
+            State::Playing => (now_ms().saturating_sub(self.t0) / 1000) as i64,
+            _ => (self.t_end.saturating_sub(self.t0) / 1000) as i64,
+        }
+    }
+}
+
 impl DeskApp for Mines {
+    /// Everything `draw_in` reads: every cell's visible state, the face, the
+    /// selection and the timer's whole seconds. A mine that is not open is
+    /// still hashed, because a lost game reveals them all.
+    fn stamp(&self) -> Option<u64> {
+        let mut h = super::scene::Stamp::new();
+        use core::hash::{Hash, Hasher};
+        for c in &self.cells {
+            h.write_u8(c.mine as u8 | (c.open as u8) << 1 | (c.flag as u8) << 2 | c.n << 3);
+        }
+        (self.state as u8, self.sel, self.laid, self.secs()).hash(&mut h);
+        Some(h.finish())
+    }
+
+    /// The timer moves once a second while a game is running, and nothing
+    /// else moves without input. Looked at four times a second rather than
+    /// once, because the second boundary is the game's and not the clock's:
+    /// a one-second poll out of phase with it shows each digit up to a
+    /// second late. A look that finds the same second repaints nothing.
+    fn wake_ms(&self) -> Option<u32> {
+        (self.laid && self.state == State::Playing).then_some(250)
+    }
+
     /// The board does not reflow: nine cells of thirty pixels plus the
     /// header is the whole program, and anything narrower crops it.
     fn min_size(&self) -> (u32, u32) {
@@ -294,11 +327,7 @@ impl DeskApp for Mines {
         theme::well(fb, lr, theme::SCREEN);
         theme::text(fb, lr.x + 4, lr.y + (well_h - theme::text_h()) / 2, &digits(left), theme::APERTURE, theme::SCREEN);
 
-        let secs = match self.state {
-            _ if !self.laid => 0,
-            State::Playing => (now_ms().saturating_sub(self.t0) / 1000) as i64,
-            _ => (self.t_end.saturating_sub(self.t0) / 1000) as i64,
-        };
+        let secs = self.secs();
         let tr = Rect::new(client.x + client.w - PAD - 2 - lw, ly, lw, well_h);
         theme::well(fb, tr, theme::SCREEN);
         theme::text(fb, tr.x + 4, tr.y + (well_h - theme::text_h()) / 2, &digits(secs), theme::APERTURE, theme::SCREEN);

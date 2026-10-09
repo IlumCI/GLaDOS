@@ -84,6 +84,33 @@ pub trait DeskApp {
     fn tag(&self) -> u64 {
         0
     }
+
+    /// A fingerprint of everything this program draws from *other than input*
+    /// -- its log's length, its data's generation, a running clock's second.
+    ///
+    /// The desktop keeps each program's pixels between frames and redraws them
+    /// only when this, the focus, the size or an input event changes. `None`,
+    /// the default, means "redraw on every composed frame", which is what
+    /// every program got before there were stamps, so a program that does not
+    /// answer loses nothing; a program that answers wrongly shows stale pixels
+    /// until its next input, which `render verify` reports.
+    ///
+    /// Programs draw and are handed input in their own coordinates: `client`
+    /// is `(0, 0, w, h)` in `draw_in`, `press`, `drag` and `right_press`, and
+    /// the pointer is relative to it. Layout cached while drawing therefore
+    /// means the same thing when a press reads it back.
+    fn stamp(&self) -> Option<u64> {
+        None
+    }
+
+    /// How often a program with a stamp wants its stamp looked at when
+    /// nothing else is happening -- a timer, a clock, an animation. `None`,
+    /// the default, means only on input or when something else composes.
+    /// The desktop wakes the compositor at the shortest period any open
+    /// program asks for; a frame whose stamps did not move repaints nothing.
+    fn wake_ms(&self) -> Option<u32> {
+        None
+    }
 }
 
 use crate::sync::Racy;
@@ -287,12 +314,23 @@ impl Shape {
 /// The pointer is borrowed for the duration of that paint and never outlives
 /// it; `with_shape` is the only way to set it and restores the previous value,
 /// so a nested paint cannot leave someone else's outline installed.
-static CLIP: Racy<Option<(*const Shape, i32, i32)>> = Racy::new(None);
+///
+/// **It applies to one surface, the one it was installed for**, keyed by that
+/// surface's base address. It was global, and two things showed why it cannot
+/// be: `diag paint`, running on the shell task, drew its 16x16 test surface
+/// through whatever window outline the compositor had installed when it was
+/// preempted, and failed a dozen claims at random; and an application drawing
+/// into its own surface inside a window's paint was clipped by that window's
+/// outline in *screen* coordinates against its own *local* ones. A clipped
+/// surface keeps its base, so a damage-limited repaint of the back buffer is
+/// still shaped; a view or another buffer is not.
+static CLIP: Racy<Option<(*const Shape, i32, i32, usize)>> = Racy::new(None);
 
-/// Draw `f` confined to `shape`, positioned with its top-left at `(x, y)`.
-pub fn with_shape<R>(shape: &Shape, x: i32, y: i32, f: impl FnOnce() -> R) -> R {
+/// Draw `f` with writes to `on` confined to `shape`, positioned with its
+/// top-left at `(x, y)` in `on`'s coordinates.
+pub fn with_shape<R>(on: &Framebuffer, shape: &Shape, x: i32, y: i32, f: impl FnOnce() -> R) -> R {
     let prev = unsafe { *CLIP.get() };
-    unsafe { *CLIP.get() = Some((shape as *const Shape, x, y)) };
+    unsafe { *CLIP.get() = Some((shape as *const Shape, x, y, on.base as usize)) };
     let r = f();
     unsafe { *CLIP.get() = prev };
     r
@@ -305,10 +343,13 @@ pub fn with_shape<R>(shape: &Shape, x: i32, y: i32, f: impl FnOnce() -> R) -> R 
 /// is a load and a branch, which is what keeps it off the cost of the span
 /// fills everything else depends on.
 #[inline]
-fn clip_run(y: u32, x: u32, w: u32) -> Option<(u32, u32)> {
-    let Some((sp, ox, oy)) = (unsafe { *CLIP.get() }) else {
+fn clip_run(base: usize, y: u32, x: u32, w: u32) -> Option<(u32, u32)> {
+    let Some((sp, ox, oy, on)) = (unsafe { *CLIP.get() }) else {
         return Some((x, w));
     };
+    if on != base {
+        return Some((x, w));
+    }
     let ly = (y as i64) - (oy as i64);
     if ly < 0 {
         return None;
@@ -500,7 +541,7 @@ impl Framebuffer {
         if hi <= lo {
             return None;
         }
-        clip_run(y, lo, hi - lo)
+        clip_run(self.base as usize, y, lo, hi - lo)
     }
 
     /// One row as a slice, clipped to the surface.
@@ -1382,6 +1423,13 @@ pub struct Frame {
     pub console_us: (u64, u64),
     /// One pointer move, through the path a real packet takes.
     pub cursor_us: (u64, u64),
+    /// A frame where nothing changed: building and diffing the scene, and the
+    /// parts that repaint whenever a frame is composed at all.
+    pub idle_us: (u64, u64),
+    /// A 64x64 change -- a hover, a caret -- composed and presented.
+    pub small_us: (u64, u64),
+    /// An 800x600 window moved ten pixels: where it was and where it is.
+    pub move_us: (u64, u64),
 }
 
 /// Time the graphics path. `None` when there is no framebuffer to time.
@@ -1409,19 +1457,48 @@ pub fn measure() -> Option<Frame> {
         (lo, hi)
     };
 
+    // The compositor stands down for the length of the measurement. It runs
+    // on its own task, and every `damage` below wakes it: left running it
+    // composed the forced whole frame itself, and the `draw` being timed
+    // either found nothing left to do or lost the paint claim and returned at
+    // once -- `video.draw` read 0 us. Turning it off and waiting for the claim
+    // to be free means the frame timed is the frame asked for.
+    let was = render::enabled();
+    render::set_enabled(false);
+    while desk::claim_holder().is_some() {
+        crate::task::yield_now();
+    }
     let target = compose::target().unwrap_or_else(|| fb.clone());
     let (w, h) = (target.width(), target.height());
     let out = Frame {
         width: w,
         height: h,
         rect_us: best_of(&mut || target.rect(0, 0, w, h, theme::DESKTOP)),
-        draw_us: best_of(&mut || desk::draw()),
+        // A whole frame, forced. Since frames became damage-limited a bare
+        // `draw` composes only what changed -- nothing, here -- and this rail
+        // kept its name while measuring that instead, which made every
+        // comparison across that change a comparison of two different things.
+        draw_us: best_of(&mut || {
+            render::damage_all();
+            desk::draw()
+        }),
         present_us: best_of(&mut || compose::present()),
         fill_present_us: best_of(&mut || {
             target.rect(0, 0, w, h, theme::APERTURE);
             compose::present();
         }),
         console_us: best_of(&mut || console::redraw()),
+        idle_us: best_of(&mut || desk::draw()),
+        small_us: best_of(&mut || {
+            render::damage(theme::Rect::new(w / 2, h / 2, 64, 64));
+            desk::draw()
+        }),
+        move_us: best_of(&mut || {
+            let (mw, mh) = (800.min(w), 600.min(h));
+            render::damage(theme::Rect::new(w / 4, h / 4, mw, mh));
+            render::damage(theme::Rect::new(w / 4 + 10, h / 4, mw, mh));
+            desk::draw()
+        }),
         cursor_us: {
             let mut step = 0u32;
             best_of(&mut || {
@@ -1431,7 +1508,9 @@ pub fn measure() -> Option<Frame> {
         },
     };
     desk::cursor_home();
+    render::damage_all();
     desk::draw();
+    render::set_enabled(was);
     Some(out)
 }
 
@@ -1454,6 +1533,9 @@ pub fn bench() {
         ("fill + present, all  ", m.fill_present_us),
         ("console redraw_all   ", m.console_us),
         ("pointer move         ", m.cursor_us),
+        ("frame, nothing moved ", m.idle_us),
+        ("frame, 64x64 changed ", m.small_us),
+        ("frame, window moved  ", m.move_us),
     ] {
         kprintln!("  {} {:>7} us  (max {})", what, lo, hi);
     }
@@ -1483,12 +1565,28 @@ pub fn text_selftest() -> bool {
 pub fn pat_selftest() -> bool {
     use crate::kprintln;
     let mut ok = true;
-    crate::cpu::mtrr::checks(&mut |what, good| {
+    let mut claim = |what: &str, good: bool| {
         if !good {
             ok = false;
         }
         kprintln!("  {}  {}", if good { "ok " } else { "FAIL" }, what);
-    });
+    };
+    crate::cpu::mtrr::checks(&mut claim);
+    // And the live machine: every core that came up holds the same PAT, and it
+    // is the one the framebuffer's mapping was chosen against.
+    if crate::cpu::mtrr::programmed() {
+        let seen = crate::cpu::mtrr::per_core();
+        claim(
+            "every online core holds the PAT the bootstrap processor programmed",
+            seen.iter().all(|v| *v == crate::cpu::mtrr::GLADOS_PAT),
+        );
+        if let Some(fb) = primary() {
+            let slot = crate::mem::paging::pat_slot(fb.addr());
+            claim("the framebuffer's leaf selects the write-combining slot", slot == Some(1));
+        }
+    } else {
+        kprintln!("  ....  the PAT was not programmed on this machine, so 2 claim(s) about it did not run");
+    }
     ok
 }
 

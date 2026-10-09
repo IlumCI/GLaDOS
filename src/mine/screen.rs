@@ -214,7 +214,7 @@ pub(super) fn fit(s: &str, w: u32, max: u32) -> u32 {
 /// A rounded pane of glass: lighter at the top, thinner at the foot.
 pub(super) fn pane(fb: &Framebuffer, x: u32, y: u32, w: u32, h: u32, r: u32, edge: Option<Color>) {
     let shape = Shape::round_rect(w, h, r);
-    crate::gfx::with_shape(&shape, x as i32, y as i32, || {
+    crate::gfx::with_shape(fb, &shape, x as i32, y as i32, || {
         fb.glass(x, y, w, h, WHITE, &[(0, 34), (255, 14)]);
         if let Some(c) = edge {
             fb.tint_rect(x, y, w, 2, c, 200);

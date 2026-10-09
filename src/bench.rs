@@ -87,6 +87,9 @@ pub const DECLARED: &[(&str, &str, Want)] = &[
     ("video.fill_present", "us", Want::Lower),
     ("video.console", "us", Want::Lower),
     ("video.cursor_move", "us", Want::Lower),
+    ("video.idle_turn", "us", Want::Lower),
+    ("video.small_damage", "us", Want::Lower),
+    ("video.window_move", "us", Want::Lower),
     ("core.new", "ns", Want::Lower),
     ("core.step", "ps", Want::Lower),
     ("core.vote", "ns", Want::Lower),
@@ -131,10 +134,14 @@ pub fn rails() -> Vec<Rail> {
             ));
             out.push(Rail::got("video.console", "us", Want::Lower, m.console_us.0 as f64));
             out.push(Rail::got("video.cursor_move", "us", Want::Lower, m.cursor_us.0 as f64));
+            out.push(Rail::got("video.idle_turn", "us", Want::Lower, m.idle_us.0 as f64));
+            out.push(Rail::got("video.small_damage", "us", Want::Lower, m.small_us.0 as f64));
+            out.push(Rail::got("video.window_move", "us", Want::Lower, m.move_us.0 as f64));
         }
         None => {
             for n in ["video.rect", "video.draw", "video.present", "video.fill_present", "video.console",
-                      "video.cursor_move"] {
+                      "video.cursor_move", "video.idle_turn", "video.small_damage",
+                      "video.window_move"] {
                 out.push(Rail::absent(n, "us", Want::Lower, "no framebuffer"));
             }
         }

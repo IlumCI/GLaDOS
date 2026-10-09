@@ -138,8 +138,23 @@ pub struct Fit {
 
 static FIT: crate::sync::Spin<Option<Fit>> = crate::sync::Spin::new(None);
 
+/// Bumped by every write to anything in this module, so a window drawing
+/// from it can tell "nothing new" from a comparison of one integer rather
+/// than of everything recorded.
+static GEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn touched() {
+    GEN.fetch_add(1, core::sync::atomic::Ordering::Release);
+}
+
+/// How many times anything here has been written.
+pub fn generation() -> u64 {
+    GEN.load(core::sync::atomic::Ordering::Acquire)
+}
+
 pub fn record_fit(f: Fit) {
     *FIT.lock_irq() = Some(f);
+    touched();
 }
 
 pub fn last_fit() -> Option<Fit> {
@@ -183,6 +198,8 @@ pub fn begin(
     if n > KEEP {
         r.drain(0..n - KEEP);
     }
+    drop(r);
+    touched();
 }
 
 /// Complete the last record with what the council said.
@@ -214,6 +231,8 @@ pub fn settle(
     d.agreement = agreement;
     d.rule = rule;
     d.settled = true;
+    drop(r);
+    touched();
 }
 
 /// The decisions, oldest first.
@@ -324,6 +343,7 @@ static STACK: crate::sync::Spin<Option<Stack>> = crate::sync::Spin::new(None);
 
 pub fn record_stack(s: Stack) {
     *STACK.lock_irq() = Some(s);
+    touched();
 }
 
 pub fn last_stack() -> Option<Stack> {

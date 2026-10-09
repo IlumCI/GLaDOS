@@ -160,12 +160,6 @@ impl Region {
         }
     }
 
-    pub fn add_region(&mut self, o: &Region) {
-        for r in o.iter() {
-            self.add(r);
-        }
-    }
-
     /// Everything so far, and `r`, as one bounding box.
     fn collapse_with(&mut self, r: Rect) {
         let b = self.bbox().map_or(r, |b| union_box(b, r));

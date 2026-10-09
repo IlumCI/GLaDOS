@@ -321,5 +321,24 @@ pub fn program(bsp: bool) -> bool {
     if bsp {
         PROGRAMMED.store(ok, core::sync::atomic::Ordering::Release);
     }
+    // What this core's PAT actually reads, kept for `diag pat`. Slot 0 is the
+    // bootstrap processor, which runs this before anything can name a core.
+    let core = if bsp { 0 } else { crate::smp::this_cpu() as usize };
+    if core < SEEN.len() {
+        SEEN[core].store(unsafe { super::rdmsr(IA32_PAT) }, core::sync::atomic::Ordering::Release);
+    }
     ok
+}
+
+/// The PAT each core read back after `program`, zero for a core that never
+/// ran it. The manual requires every core to hold the same value, and a core
+/// that does not maps the framebuffer as a type nobody chose -- the failure
+/// would look like corruption on whichever core happened to draw.
+static SEEN: [core::sync::atomic::AtomicU64; crate::task::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; crate::task::MAX_CPUS];
+
+/// Every online core's PAT, as `program` left it.
+pub fn per_core() -> alloc::vec::Vec<u64> {
+    let n = crate::smp::online().clamp(1, SEEN.len());
+    (0..n).map(|i| SEEN[i].load(core::sync::atomic::Ordering::Acquire)).collect()
 }

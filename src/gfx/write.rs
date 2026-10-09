@@ -201,6 +201,23 @@ impl Writer {
 }
 
 impl DeskApp for Writer {
+    /// The view and the state around the text. The text itself changes only
+    /// through this window's input, which redraws it regardless, so its
+    /// length stands in for it rather than a hash of the whole document.
+    fn stamp(&self) -> Option<u64> {
+        Some(super::scene::Stamp::of((
+            self.path.as_str(),
+            self.text.len(),
+            self.cursor,
+            self.scroll.get(),
+            self.cols.get(),
+            self.follow.get(),
+            self.editing_path,
+            self.dirty,
+            self.status.as_str(),
+        )))
+    }
+
     /// Text reflows, so this is only a floor against losing the window.
     fn min_size(&self) -> (u32, u32) {
         (280, 160)

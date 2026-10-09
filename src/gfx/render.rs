@@ -87,10 +87,51 @@ pub fn enabled() -> bool {
 /// It also wakes the compositor, which sleeps whenever nothing is dirty. Only
 /// on the clean-to-dirty edge: a second mark during the same frame wakes
 /// nobody, so a caller that invalidates in a loop costs one swap a call.
+#[track_caller]
 pub fn invalidate() {
     if !DIRTY.swap(true, Ordering::AcqRel) {
+        asked_by(core::panic::Location::caller());
         wake_compositor();
     }
+}
+
+/// Who asked for frames, by source location, counted on the clean-to-dirty
+/// edge -- the asks that actually caused a frame. A desktop composing when
+/// nothing changed is somebody asking, and the line that asks is the answer;
+/// this is how a 50 Hz idle repaint is traced to its caller rather than
+/// guessed at. Sixteen slots, first come; a full table drops new callers and
+/// says so in the count.
+static ASKERS: crate::sync::Spin<[(Option<&'static core::panic::Location<'static>>, u64); 16]> =
+    crate::sync::Spin::new([(None, 0); 16]);
+
+fn asked_by(at: &'static core::panic::Location<'static>) {
+    let Some(mut t) = ASKERS.try_lock() else { return };
+    for slot in t.iter_mut() {
+        match slot.0 {
+            Some(l) if l.file() == at.file() && l.line() == at.line() => {
+                slot.1 += 1;
+                return;
+            }
+            None => {
+                *slot = (Some(at), 1);
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The callers that asked for frames, most first.
+pub fn askers() -> alloc::vec::Vec<(&'static str, u32, u64)> {
+    let t = ASKERS.lock_irq();
+    let mut v: alloc::vec::Vec<(&'static str, u32, u64)> =
+        t.iter().filter_map(|(l, n)| l.map(|l| (l.file(), l.line(), *n))).collect();
+    v.sort_by(|a, b| b.2.cmp(&a.2));
+    v
+}
+
+pub fn reset_askers() {
+    *ASKERS.lock_irq() = [(None, 0); 16];
 }
 
 /// Bring the compositor round now rather than at its next deadline. Safe from
@@ -151,12 +192,14 @@ static DAMAGE: crate::sync::Spin<super::region::Region> =
 static FULL: AtomicBool = AtomicBool::new(true);
 
 /// Repaint this rectangle at the next frame whatever the scene says.
+#[track_caller]
 pub fn damage(r: super::theme::Rect) {
     DAMAGE.lock_irq().add(r);
     invalidate();
 }
 
 /// Repaint the whole screen at the next frame.
+#[track_caller]
 pub fn damage_all() {
     FULL.store(true, Ordering::Release);
     invalidate();
@@ -395,6 +438,48 @@ pub fn timing() -> Timing {
     }
 }
 
+/// Where a frame's time went, by kind of painter, summed since `reset`.
+///
+/// The plan's rule is that nothing is optimised unless this points at it: a
+/// frame time says a frame was slow and nothing about which layer made it so.
+/// `AppRender` is counted *inside* `Windows` -- it is the part of a window's
+/// cost spent redrawing an application's own surface, so the two say whether
+/// a slow window is chrome or content.
+#[derive(Clone, Copy)]
+pub enum Cost {
+    Wallpaper,
+    Icons,
+    Taskbar,
+    Windows,
+    AppRender,
+    Overlay,
+}
+
+const COSTS: usize = 6;
+static COST_CYCLES: [AtomicU64; COSTS] = [const { AtomicU64::new(0) }; COSTS];
+static COST_COUNT: [AtomicU64; COSTS] = [const { AtomicU64::new(0) }; COSTS];
+
+pub fn cost(what: Cost, cycles: u64) {
+    let i = what as usize;
+    COST_CYCLES[i].fetch_add(cycles, Ordering::Relaxed);
+    COST_COUNT[i].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Each kind's name, its total microseconds and how many times it ran.
+pub fn costs() -> [(&'static str, u64, u64); COSTS] {
+    let mhz = crate::time::tsc_mhz().max(1) as u64;
+    let names = ["wallpaper", "icons", "taskbar", "windows", "  app redraws", "overlays"];
+    let mut out = [("", 0, 0); COSTS];
+    for i in 0..COSTS {
+        out[i] = (
+            names[i],
+            COST_CYCLES[i].load(Ordering::Relaxed) / mhz,
+            COST_COUNT[i].load(Ordering::Relaxed),
+        );
+    }
+    out
+}
+
 /// How much each composed frame repainted: rectangles and pixels, summed,
 /// so `render` can say what a frame cost against what a whole screen costs.
 static DAMAGE_RECTS: AtomicU64 = AtomicU64::new(0);
@@ -443,11 +528,15 @@ pub fn reset() {
               &DAMAGE_RECTS, &DAMAGE_PIXELS] {
         c.store(0, Ordering::Relaxed);
     }
+    for c in COST_CYCLES.iter().chain(COST_COUNT.iter()) {
+        c.store(0, Ordering::Relaxed);
+    }
     // Not the identity -- resetting that would count the next frame as a new
     // composer and report two where there is one.
     COMPOSER.store(u64::MAX, Ordering::Relaxed);
     LAST.store(0, Ordering::Relaxed);
     SINCE.store(crate::time::rdtsc(), Ordering::Relaxed);
+    reset_askers();
 }
 
 pub struct Stats {
