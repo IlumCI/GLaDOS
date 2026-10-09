@@ -240,14 +240,24 @@ pub struct Console {
     visible: bool,
     /// Half-decoded multi-byte character, if the last byte was inside one.
     utf8: Utf8,
-    /// Whether painted cells are pushed straight to the screen.
+    /// The console's own pixels, once the desktop exists: a surface the size
+    /// of its grid that every cell is painted into, placed on screen by the
+    /// compositor at `at` under whatever covers it.
     ///
-    /// Set when `fb` is the compositor's back buffer: the console prints on
-    /// the shell's schedule, between desktop draws, and a cell that waited for
-    /// the next `present` would make typing invisible. False before the
-    /// compositor exists, when `fb` *is* the screen and there is nothing to
-    /// push to.
-    flush: bool,
+    /// **This is why the terminal stopped writing over windows.** It used to
+    /// paint into the compositor's back buffer at its grid's position and push
+    /// each cell to the screen itself -- over any window in front of it, which
+    /// the desktop then repaired between commands, and when it scrolled it
+    /// moved the back buffer's pixels up a row, window included, leaving a
+    /// ghost that climbed through the text. Painting into its own surface, it
+    /// cannot reach anything else; it reports what changed as damage and the
+    /// compositor lays it in, back to front.
+    ///
+    /// Empty in direct mode: before the desktop, on the miner image, and on
+    /// the fault path, where `fb` is the screen itself.
+    surface: alloc::vec::Vec<u32>,
+    /// Where the surface sits on screen.
+    at: (u32, u32),
 }
 
 impl Console {
@@ -279,20 +289,96 @@ impl Console {
             oy: y,
             visible: true,
             utf8: Utf8::IDLE,
-            flush: false,
+            surface: alloc::vec::Vec::new(),
+            at: (0, 0),
         }
     }
 
-    /// Repoint the console at a different buffer.
-    ///
-    /// Called once, when the compositor comes up: from then on the console
-    /// paints into the back buffer like everything else, and pushes each cell
-    /// through itself. The shadow grid is untouched -- the text survives, and
-    /// the next full draw repaints it wherever the terminal window is.
-    pub fn retarget(&mut self, fb: Framebuffer, flush: bool) {
-        self.fb = fb;
-        self.flush = flush;
+    /// Whether this console paints into a surface of its own.
+    fn composed(&self) -> bool {
+        !self.surface.is_empty()
     }
+
+    /// Whether painting should happen at all. A composed console always keeps
+    /// its surface current -- it is not on the screen until the compositor
+    /// lays it there, so hidden costs nothing -- and a direct one paints only
+    /// while it owns the screen.
+    fn paints(&self) -> bool {
+        self.visible || self.composed()
+    }
+
+    /// Tell whoever presents that this rectangle of the grid changed.
+    /// Coordinates are the grid's own, as everything in this impl uses.
+    fn push(&self, x: u32, y: u32, w: u32, h: u32) {
+        if self.composed() {
+            if self.visible {
+                super::render::damage(super::theme::Rect::new(
+                    self.at.0 + x.saturating_sub(self.ox),
+                    self.at.1 + y.saturating_sub(self.oy),
+                    w,
+                    h,
+                ));
+            }
+        }
+        // Direct: `fb` is the screen, and the pixels are already there.
+    }
+
+    /// Become a composed console: own a surface, and let the compositor place
+    /// it. Called once, when the desktop comes up; `reflow` sizes the surface
+    /// to the grid's window and repaints the whole log into it.
+    pub fn compose_mode(&mut self) {
+        if self.composed() {
+            return;
+        }
+        // A one-pixel placeholder until the first reflow gives it a size, so
+        // `composed()` is true from here on.
+        self.surface = alloc::vec![0; 1];
+        if let Some(f) = super::primary() {
+            self.fb = unsafe { Framebuffer::over_ram(self.surface.as_mut_ptr() as u64, 1, 1, 1, f.format()) };
+        }
+        self.at = (self.ox, self.oy);
+        self.ox = 0;
+        self.oy = 0;
+    }
+
+    /// Back to painting the screen directly, for the fault path: the
+    /// compositor may be the thing that failed, and the console is the only
+    /// diagnostic channel there is. Writes without reading where it can.
+    pub fn direct_mode(&mut self, show: bool) {
+        self.visible = show;
+        if !self.composed() {
+            if show {
+                self.redraw_all();
+            }
+            return;
+        }
+        let Some(f) = super::primary() else { return };
+        self.ox = self.at.0;
+        self.oy = self.at.1;
+        self.fb = f;
+        self.surface = alloc::vec::Vec::new();
+        if show {
+            self.redraw_all();
+        }
+    }
+
+    /// Lay the surface into `target` -- the back buffer clipped to a damaged
+    /// rectangle, or `render verify`'s scratch frame. Rows only, so a
+    /// repaint of part of the terminal copies part of the surface.
+    pub fn blit_into(&self, target: &Framebuffer) {
+        if !self.composed() {
+            return;
+        }
+        let (w, h) = (self.fb.width(), self.fb.height());
+        let (_, y0, _, y1) = target.scissor();
+        let from = y0.max(self.at.1);
+        let to = y1.min(self.at.1 + h);
+        for y in from..to {
+            let r = (y - self.at.1) as usize * w as usize;
+            target.blit_span(self.at.0, y, &self.surface[r..r + w as usize]);
+        }
+    }
+
 
     /// Move the grid into a new rectangle, keeping its contents.
     ///
@@ -300,6 +386,40 @@ impl Console {
     /// window. Text written during boot is in the shadow grid and is repainted
     /// at the new origin, so the log survives the move.
     pub fn reflow(&mut self, x: u32, y: u32, w: u32, h: u32) {
+        if self.composed() {
+            self.reflow_composed(x, y, w, h);
+            return;
+        }
+        self.reflow_grid(x, y, w, h);
+    }
+
+    /// A composed console's surface follows its window. Moving costs nothing
+    /// -- the surface is placed, not repainted -- and resizing reallocates it
+    /// and repaints the log into it once. An unchanged geometry is a no-op,
+    /// which matters because the desktop places every console every frame.
+    fn reflow_composed(&mut self, x: u32, y: u32, w: u32, h: u32) {
+        let cols = ((w / (font::GLYPH_W * self.scale)) as usize).min(MAX_COLS);
+        let rows = ((h / (font::GLYPH_H * self.scale)) as usize).min(MAX_ROWS);
+        let pw = cols as u32 * font::GLYPH_W * self.scale;
+        let ph = rows as u32 * font::GLYPH_H * self.scale;
+        self.at = (x, y);
+        if (self.fb.width(), self.fb.height()) == (pw.max(1), ph.max(1)) && cols == self.cols && rows == self.rows {
+            return;
+        }
+        self.reflow_grid(0, 0, w, h);
+        let n = (pw.max(1) * ph.max(1)) as usize;
+        let mut v = alloc::vec::Vec::new();
+        if v.try_reserve_exact(n).is_err() {
+            return;
+        }
+        v.resize(n, 0u32);
+        self.surface = v;
+        let fmt = self.fb.format();
+        self.fb = unsafe { Framebuffer::over_ram(self.surface.as_mut_ptr() as u64, pw.max(1), ph.max(1), pw.max(1), fmt) };
+        self.redraw_all();
+    }
+
+    fn reflow_grid(&mut self, x: u32, y: u32, w: u32, h: u32) {
         let cols = ((w / (font::GLYPH_W * self.scale)) as usize).min(MAX_COLS);
         let rows = ((h / (font::GLYPH_H * self.scale)) as usize).min(MAX_ROWS);
         // Keep the tail rather than the head: the interesting part of a boot
@@ -356,14 +476,12 @@ impl Console {
         self.row = 0;
         self.view = 0;
         self.drop_caret();
-        if self.visible {
+        if self.paints() {
             // The grid's own rectangle, not the panel: clearing the screen must
             // not erase the window around it.
             let (w, h) = self.pixel_size();
             self.fb.rect(self.ox, self.oy, w, h, self.bg);
-            if self.flush {
-                super::compose::flush_rect(self.ox, self.oy, w, h);
-            }
+            self.push(self.ox, self.oy, w, h);
         }
     }
 
@@ -411,7 +529,7 @@ impl Console {
     }
 
     fn paint_caret(&self) {
-        if !self.visible {
+        if !self.paints() {
             return;
         }
         let Some((r, c)) = self.caret else { return };
@@ -428,14 +546,12 @@ impl Console {
         let oy = self.oy + r as u32 * font::GLYPH_H * s;
         let w = s.max(1);
         self.fb.rect(ox, oy, w, font::GLYPH_H * s, super::theme::APERTURE);
-        if self.flush {
-            super::compose::flush_rect(ox, oy, font::GLYPH_W * s, font::GLYPH_H * s);
-        }
+        self.push(ox, oy, font::GLYPH_W * s, font::GLYPH_H * s);
     }
 
     /// Paint one cell, and tell the compositor about it.
     fn draw_cell(&self, r: usize, c: usize) {
-        if !self.visible || self.view > 0 {
+        if !self.paints() || self.view > 0 {
             // Scrolled back, the live grid is below the bottom of the window.
             // The cell is in the grid either way -- `redraw_all` will paint it
             // when the view comes home -- and painting it *here* would put it
@@ -444,12 +560,10 @@ impl Console {
             return;
         }
         self.paint_cell(r, c);
-        if self.flush {
-            let s = self.scale;
-            let ox = self.ox + c as u32 * font::GLYPH_W * s;
-            let oy = self.oy + r as u32 * font::GLYPH_H * s;
-            super::compose::flush_rect(ox, oy, font::GLYPH_W * s, font::GLYPH_H * s);
-        }
+        let s = self.scale;
+        let ox = self.ox + c as u32 * font::GLYPH_W * s;
+        let oy = self.oy + r as u32 * font::GLYPH_H * s;
+        self.push(ox, oy, font::GLYPH_W * s, font::GLYPH_H * s);
     }
 
     /// The pixels alone. Split out because `redraw_all` flushes the whole
@@ -461,7 +575,7 @@ impl Console {
         // shadow grid and simply is not painted. Nothing is lost: `redraw_all`
         // brings the whole log back the moment the splash hands over, so the
         // boot output is there to read exactly as it always was.
-        if !self.visible {
+        if !self.paints() {
             return;
         }
         self.paint_at(r, c, self.cells[r][c]);
@@ -475,7 +589,7 @@ impl Console {
     /// into, and a paint path that indexed the grid directly would silently
     /// draw the live tail underneath the view.
     fn paint_at(&self, r: usize, c: usize, cell: Cell) {
-        if !self.visible {
+        if !self.paints() {
             return;
         }
         let rows = font::rows(cell.glyph());
@@ -532,7 +646,7 @@ impl Console {
     /// Painting its own background also makes this correct standalone, where
     /// before it depended on whoever called it having filled the area first.
     pub fn redraw_all(&self) {
-        if !self.visible {
+        if !self.paints() {
             return;
         }
         // The same rectangle `clear` uses, from the same helper, so the two
@@ -555,9 +669,7 @@ impl Console {
         // One flush for the whole console rather than one per cell. The
         // per-cell path stays for `draw_cell` on its own, which is what a
         // single typed character takes.
-        if self.flush {
-            super::compose::flush_rect(self.ox, self.oy, w, h);
-        }
+        self.push(self.ox, self.oy, w, h);
     }
 
     fn scroll(&mut self) {
@@ -604,12 +716,10 @@ impl Console {
             // Nothing moved on screen. See above.
         } else if self.view > 0 {
             self.redraw_all();
-        } else if self.visible {
+        } else if self.paints() {
             let (w, h) = self.pixel_size();
             self.fb.scroll_rect(self.ox, self.oy, w, h, cell_h, self.bg);
-            if self.flush {
-                super::compose::flush_rect(self.ox, self.oy, w, h);
-            }
+            self.push(self.ox, self.oy, w, h);
         }
     }
 
@@ -1037,24 +1147,24 @@ pub fn redraw_ch(ch: usize) {
     with_ch(ch, |c| c.redraw_all());
 }
 
-/// Repaint a console onto `target` -- the back buffer clipped to a damaged
-/// rectangle, normally, or a scratch frame for `render verify` -- and do not
-/// push anything to the screen.
-///
-/// Not flushing is the point. `redraw_ch` ends by flushing its whole grid to
-/// the aperture, which inside a frame put the terminal on screen *before* the
-/// windows in front of it had been repainted over it: a flash of terminal
-/// through whatever covered it, once per frame. Inside a frame the compositor
-/// presents, once, after everything is painted.
-pub fn redraw_ch_on(ch: usize, target: Framebuffer) {
-    with_ch(ch, |c| {
-        let (fb, flush) = (c.fb, c.flush);
-        c.fb = target;
-        c.flush = false;
-        c.redraw_all();
-        c.fb = fb;
-        c.flush = flush;
-    });
+/// Lay a composed console's surface into `target`, for the frame.
+pub fn blit_ch(ch: usize, target: &Framebuffer) {
+    with_ch(ch, |c| c.blit_into(target));
+}
+
+/// Every console onto the screen directly, for a fault or a panic: the
+/// compositor may be what failed, and the console is the only diagnostic left.
+/// The caller has already released the console locks if the faulting code may
+/// have held them.
+pub fn emergency_direct() {
+    // Only the console the report is about to print to is shown. The others
+    // keep their text but stay off the screen: the boot log's grid is the
+    // whole screen, and repainting it as well put a screenful of selftest
+    // output underneath the report.
+    let speaking = channel();
+    for ch in 0..NCONSOLE {
+        with_ch(ch, |c| c.direct_mode(ch == speaking));
+    }
 }
 
 pub fn set_color(fg: u8) {

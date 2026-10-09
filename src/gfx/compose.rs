@@ -290,9 +290,6 @@ fn flush_counted(x: u32, y: u32, rw: u32, rh: u32) -> u64 {
     wrote
 }
 
-pub fn flush_rect(x: u32, y: u32, rw: u32, rh: u32) {
-    flush_counted(x, y, rw, rh);
-}
 
 /// Present only the damaged area: the rows of each rectangle, compared
 /// against the shadow and written as one span per row where they differ.

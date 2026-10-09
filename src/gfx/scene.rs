@@ -40,6 +40,8 @@ pub enum LayerId {
     Window(u64),
     /// Tips, menus, the move hint and the Start menu.
     Overlay,
+    /// A window's chrome on its way to its full size.
+    Flourish,
 }
 
 #[derive(Clone, Debug)]

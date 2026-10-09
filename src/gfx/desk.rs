@@ -938,13 +938,15 @@ pub fn init() {
             query: String::new(),
         })
     };
-    // The compositor needs the heap, which exists by now; the console then
-    // paints into the back buffer and pushes its own cells through, so shell
-    // output stays immediate between desktop draws.
+    // The compositor needs the heap, which exists by now; each console then
+    // paints into a surface of its own, reports what changed as damage, and
+    // is laid into the frame under whatever covers it. Typing stays immediate
+    // because the compositor composes the first frame after a quiet spell at
+    // once (`render::pace`).
     super::compose::init();
-    if let Some(back) = super::compose::target() {
+    if super::compose::active() {
         for ch in [super::console::USER, super::console::EXEC] {
-            super::console::with_ch(ch, |c| c.retarget(back.clone(), true));
+            super::console::with_ch(ch, |c| c.compose_mode());
         }
     }
     super::render::invalidate();
@@ -2177,19 +2179,35 @@ pub fn paint_tray(after_frame: bool) {
     }
     unsafe { *TRAY_AT.get() = Some(tenths) };
     super::render::tray_painted();
+    // A new tenth: the taskbar layer's clock part has a new stamp, so the
+    // next frame repaints that well and nothing else.
+    let _ = (fb, after_frame);
+    super::render::invalidate();
+}
 
-    let cs = theme::CHROME_SCALE;
+/// The two readouts' text, right now. One function for the scene's stamp and
+/// the painter, so they cannot disagree about what is shown.
+fn tray_strings() -> (alloc::string::String, Option<alloc::string::String>) {
+    let tenths = crate::dev::lapic::ticks() * 10 / crate::TIMER_HZ as u64;
     // Short, because the taskbar reserves a fixed well for it and every
     // character of that well is a character the task buttons do not get.
-    let text = alloc::format!(" up {}.{}s ", tenths / 10, tenths % 10);
-    let c = clock_rect(&fb);
-    tray_text(&fb, c, &text, cs);
-
+    let clock = alloc::format!(" up {}.{}s ", tenths / 10, tenths % 10);
     // The charge, in its own well beside the clock. The reading behind it is
     // cached, so asking ten times a second costs a comparison rather than a
     // run of the firmware's bytecode.
-    if let (Some(b), Some(t)) = (battery_rect(&fb), battery_text()) {
-        tray_text(&fb, b, &t, cs);
+    (clock, battery_text())
+}
+
+/// Paint both readouts into the frame.
+fn paint_tray_text(fb: &Framebuffer) {
+    if super::splash::active() {
+        return;
+    }
+    let cs = theme::CHROME_SCALE;
+    let (clock, battery) = tray_strings();
+    tray_text(fb, clock_rect(fb), &clock, cs);
+    if let (Some(b), Some(t)) = (battery_rect(fb), battery) {
+        tray_text(fb, b, &t, cs);
     }
 }
 
@@ -2211,12 +2229,9 @@ fn tray_text(fb: &Framebuffer, well: Rect, text: &str, scale: u32) {
     // that were no longer there, and a later `present` comparing the two found
     // them equal and wrote nothing -- so the compositor could never erase the
     // clock, and digits stayed on screen the desktop had decided to cover.
-    let target = super::compose::target().unwrap_or(*fb);
     // Light ink on the tray's own ground, and the background stays opaque: it
-    // is what erases the digit that was there a tenth of a second ago, and
-    // nothing else presents this rectangle on the tray's behalf.
-    target.draw_text(x, y, text, theme::TITLE_TEXT, theme::TRAY, scale);
-    super::compose::flush_rect(x, y, width, super::font::GLYPH_H * scale);
+    // is what erases the digit that was there a tenth of a second ago.
+    fb.draw_text(x, y, text, theme::TITLE_TEXT, theme::TRAY, scale);
 }
 
 /// Put the arrow somewhere, without letting anything else paint while it does.
@@ -3289,40 +3304,11 @@ pub fn refresh_status() {
     if super::exclusive() {
         return;
     }
-    let Some(real) = super::primary() else { return };
-    let screen = screen_rect(&real);
-    // Into the back buffer and then flushed, like every other painter. This
-    // painted the aperture directly, so the screen showed the new strip while
-    // the back buffer and the shadow still held the old one -- the next frame
-    // that touched the area put the stale strip back, and `render verify`
-    // flagged the gutter on every command. The geometry is `terminal_geometry`
-    // for the same reason: this computed its own, two pixels off the frame's,
-    // so the two painters drew their gutters in different columns.
-    let fb = super::compose::target().unwrap_or(real);
-    let mut geom = None;
-    with(|d| {
-        let Some(w) = d
-            .windows
-            .iter()
-            .find(|w| matches!(w.content, Content::Terminal(c) if c == super::console::USER))
-        else {
-            return;
-        };
-        if w.state == WinState::Minimised {
-            return;
-        }
-        let client = theme::chrome(w.frame(screen), !w.menus.is_empty()).client;
-        if !client.is_empty() {
-            geom = Some(terminal_geometry(client, super::console::USER));
-        }
-    });
-    let Some((well, grid, strip)) = geom else { return };
-    prompt_gutter(&fb, well, grid);
-    super::compose::flush_rect(well.x, grid.y, 4, grid.h);
-    if let Some(strip) = strip {
-        terminal_status(&fb, strip);
-        super::compose::flush_rect(strip.x, strip.y, strip.w, strip.h);
-    }
+    // The gutter and the status strip are parts of the terminal's layer,
+    // repainted by any composed frame. Asking for one is all this needs to do;
+    // it used to paint them itself, into the aperture and then the back
+    // buffer, with geometry of its own.
+    super::render::invalidate();
 }
 
 /// A tick in the margin beside every row that starts a command.
@@ -3541,36 +3527,38 @@ pub fn flourish_step() -> bool {
     let done = {
         let held = unsafe { &mut *FLIGHT.get() };
         let Some(f) = held.as_mut() else { return false };
-        match super::primary() {
-            // A full-screen program owns the screen, so the arrival is not on
-            // it. Abandoned rather than paused: it is a tenth of a second of
-            // decoration, and holding a flight across a DOOM session would
-            // keep its window out of every frame until the program exited.
-            _ if super::exclusive() => true,
-            None => true,
-            Some(_) if f.step >= OPEN_STEPS.saturating_sub(1) => true,
-            Some(fb) => {
-                let r = open_rect(f.to, f.step, OPEN_STEPS);
-                f.step += 1;
-                let back = super::compose::target().unwrap_or(fb);
-                theme::window(&back, r, &f.title, true, false, false, None);
-                super::compose::flush_rect(
-                    r.x.saturating_sub(theme::SHADOW_W),
-                    r.y.saturating_sub(theme::SHADOW_W),
-                    r.w + theme::SHADOW_W * 2,
-                    r.h + theme::SHADOW_W * 2,
-                );
-                false
-            }
+        // A full-screen program owns the screen, so the arrival is not on it.
+        // Abandoned rather than paused: it is a tenth of a second of
+        // decoration, and holding a flight across a long-running program
+        // would keep its window out of every frame until the program exited.
+        if super::exclusive() || f.step >= OPEN_STEPS.saturating_sub(1) {
+            true
+        } else {
+            f.step += 1;
+            false
         }
     };
-    // Dropped before the write, because `arriving()` reads this and the frame
-    // asked for below is the one that has to see the window arrive.
+    // The frame paints the arrival: it is a layer of the scene now
+    // (`LayerId::Flourish`), whose bounds are this step's rectangle, so each
+    // step damages where the last one was and where this one is and the
+    // desktop under it is repainted by the same pass. It used to paint the
+    // chrome into the back buffer here and flush it itself, after the frame.
     if done {
         unsafe { *FLIGHT.get() = None };
     }
     super::render::invalidate();
     !done
+}
+
+/// Where the arriving window's chrome is this step, if one is arriving.
+fn flourish_rect() -> Option<(Rect, u32)> {
+    unsafe { (*FLIGHT.get()).as_ref().map(|f| (open_rect(f.to, f.step, OPEN_STEPS), f.step)) }
+}
+
+fn paint_flourish(fb: &Framebuffer) {
+    let Some(f) = (unsafe { (*FLIGHT.get()).as_ref() }) else { return };
+    let r = open_rect(f.to, f.step, OPEN_STEPS);
+    theme::window(fb, r, &f.title, true, false, false, None);
 }
 
 /// How close to a screen edge a move has to end to count as a snap.
@@ -4548,11 +4536,18 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
         focus.hash(&mut st);
         d.mode.hash(&mut st);
         d.hover.hash(&mut st);
+        // The readouts are parts of the bar: a new tenth of a second repaints
+        // the clock's well and nothing else.
+        let (clock, battery) = tray_strings();
+        let mut parts = alloc::vec![(clock_rect(fb), Stamp::of(clock.as_str()))];
+        if let Some(b) = battery_rect(fb) {
+            parts.push((b, Stamp::of(battery.as_deref())));
+        }
         out.push(Layer {
             id: LayerId::Taskbar,
             bounds: taskbar_rect(fb),
             stamp: core::hash::Hasher::finish(&st),
-            parts: Vec::new(),
+            parts,
         });
     }
 
@@ -4626,6 +4621,10 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
     // Everything drawn over the windows: the taskbar tip, menus, the move and
     // size hint, the Start menu. One layer, because they come and go together
     // with the mode and the hover, and its bounds are their union.
+    if let Some((r, step)) = flourish_rect() {
+        out.push(Layer { id: LayerId::Flourish, bounds: r, stamp: Stamp::of(step), parts: Vec::new() });
+    }
+
     let mut over: Option<Rect> = None;
     let mut grow = |r: Rect| {
         over = Some(match over {
@@ -4741,12 +4740,6 @@ pub fn verify_report() -> (u64, u64, u64, Option<Rect>) {
 /// after the frame, on its own tenth-of-a-second schedule, so the frame never
 /// contains them and the back buffer usually does.
 fn verify_frame(back: &Framebuffer, d: &Desktop, screen: Rect) {
-    // A window on its way in is painted by `flourish_step` straight into the
-    // back buffer and left out of the scene until it lands, so the two would
-    // disagree by design for those six frames.
-    if arriving().is_some() {
-        return;
-    }
     let (w, h) = (back.width(), back.height());
     let n = w as usize * h as usize;
     let mut px = Vec::new();
@@ -4829,6 +4822,7 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
             _ => None,
         };
         taskbar(&fb, d, sel);
+        paint_tray_text(&fb);
 
         for (i, win) in d.windows.iter().enumerate() {
             // A window that exists and has not arrived yet. `open_flourish`
@@ -4958,11 +4952,10 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
                         // different sizes and hold different text, so asking
                         // for "the console" here would paint one of them
                         // twice and the other never.
-                        // Placed and made visible before the frame, by
-                        // `place_consoles`; painted here, into this pass's
-                        // clip, and not flushed -- the frame presents.
+                        // Placed before the frame by `place_consoles`; its
+                        // own surface laid in here, inside this pass's clip.
                         let _ = grid;
-                        super::console::redraw_ch_on(*ch, fb);
+                        super::console::blit_ch(*ch, &fb);
                         if *ch == super::console::USER {
                             prompt_gutter(&fb, well, grid);
                         }
@@ -5096,6 +5089,7 @@ fn dropdown<'a>(
     }
     for (i, label) in items.iter().enumerate() {
         theme::list_row(fb, p.row(i), label, i == sel, true);
+        paint_flourish(&fb);
     }
 }
 
@@ -5643,27 +5637,12 @@ pub fn redraw_over_terminal() {
         })
     })
     .unwrap_or(false);
-    // The console painted its text straight into the back buffer over
-    // whatever covers it, and **scrolled it**: `scroll_rect` moves the pixels
-    // of its grid up a row, and a window painted over the grid moves with
-    // them. So the damage is not only where the windows above are now, it is
-    // anywhere in the terminal a dragged copy of one may have been left --
-    // the whole terminal, which the frame then repaints from the bottom up.
-    // Damaging only the windows above left a ghost of the ToDo window
-    // scrolling up through the terminal; `render verify` and a screenshot
-    // found it.
-    if overlapped {
-        let screen = super::primary().map(|f| screen_rect(&f));
-        let term: Option<Rect> = with(|d| {
-            let screen = screen?;
-            d.windows.iter()
-                .find(|w| matches!(w.content, Content::Terminal(c) if c == super::console::USER))
-                .map(|w| w.frame(screen))
-        }).flatten();
-        if let Some(r) = term {
-            super::render::damage(r);
-        }
-    }
+    // Nothing to repair any more. The console painted its text straight into
+    // the back buffer over whatever covered it, and scrolled those pixels --
+    // window included -- up a row at a time, so this repainted the terminal
+    // between commands. It paints into a surface of its own now, which cannot
+    // reach anything else, so the overlap is drawn correctly by every frame.
+    let _ = overlapped;
 }
 
 pub fn take_pending() -> Option<String> {

@@ -1124,10 +1124,13 @@ fn clock_task() {
                 // blocks, and it is already awake once a second.
                 //
                 // `kprintln!` and not `serial_println!`, because it reaches
-                // all three sinks. The console paints through
-                // `compose::flush_rect` and takes no desktop claim, so it is
-                // the one painter that still works while the compositor holds
-                // the claim and is stuck inside a frame.
+                // all three sinks. **Only two of them while the compositor is
+                // the thing stuck**: since 1.4.1 the console paints into a
+                // surface the compositor places, so a stalled compositor shows
+                // nothing new on screen and this report reaches serial and the
+                // log. It used to flush its own cells to the aperture and was
+                // the one painter that kept working; that same flushing is
+                // what painted it over every window in front of it.
                 match gfx::render::watch() {
                     Some(gfx::render::Verdict::Stalled(h)) => {
                         console::on_channel(console::EXEC, || {
@@ -2453,6 +2456,7 @@ fn panic(info: &PanicInfo) -> ! {
         // And whoever held the screen loses it: the console is the only
         // diagnostic left and must be allowed to reach the aperture.
         gfx::lease::force_release();
+        console::emergency_direct();
         gfx::splash::abandon();
         console::set_color(LTRED);
         console::_print(format_args!("\n*** KERNEL PANIC ***\n{}\n", info));
