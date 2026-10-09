@@ -2902,6 +2902,25 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 );
                 return;
             }
+            // Compare every damage-limited frame against a full repaint.
+            if let Some(v) = rest.trim().strip_prefix("verify") {
+                match v.trim() {
+                    "on" => crate::gfx::desk::set_verify(true),
+                    "off" => crate::gfx::desk::set_verify(false),
+                    _ => {}
+                }
+                let (runs, bad, console_only, first) = crate::gfx::desk::verify_report();
+                kprintln!("  verified {} frame(s) against a full repaint, {} differed", runs, bad);
+                if console_only > 0 {
+                    kprintln!("  and {} differed only inside a terminal's grid, which the console paints itself", console_only);
+                }
+                if let Some(r) = first {
+                    console::set_color(LTRED);
+                    kprintln!("  the first difference was inside {}x{} at ({}, {})", r.w, r.h, r.x, r.y);
+                    console::set_color(LTGRAY);
+                }
+                return;
+            }
             if rest.trim() == "reset" {
                 render::reset();
                 kprintln!("  counting from here");
@@ -3016,6 +3035,15 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     t.over_budget, render::BUDGET_US
                 );
                 console::set_color(LTGRAY);
+            }
+            let (drects, dpix) = render::damage_totals();
+            if st.draws > 0 {
+                kprintln!(
+                    "    repainted    {} rect(s), {} px per frame on average (a whole screen is {})",
+                    drects / st.draws,
+                    dpix / st.draws,
+                    boot.fb.width() as u64 * boot.fb.height() as u64
+                );
             }
             let reads = render::mmio_reads();
             console::set_color(if reads > 0 { YELLOW } else { LTGRAY });
@@ -6467,7 +6495,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // its Enter presses whatever the panel had focused. That is
                 // how the first test of an application deleted the item it had
                 // just added.
-                "term" => desk::focus_terminal(),
+                // Opens it as the desktop icon does -- creating it on a clean
+                // desktop, restoring it if minimised -- because typing this is
+                // asking for the terminal, and a verb that only raised one
+                // that already showed left a headless driver no way to put a
+                // terminal on screen at all.
+                "term" => desk::open_terminal(),
                 // Clearing the screen, and clearing the screen around one
                 // thing. Neither is the other with an argument, so they are
                 // two verbs. Minimised and not closed -- the terminal and the
@@ -7304,12 +7337,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
-                crate::port::with_screen(|| {
-                    // The splash composes into the back buffer now, and
-                    // `with_screen` blanked the screen straight to the aperture,
-                    // so the shadow is stale -- forget it, or the first frame's
-                    // diff would leave the blanked pixels where splash happens
-                    // to match the old desktop.
+                {
+                    // A `Splash` lease rather than `port::with_screen`: the
+                    // splash composes through the compositor, and the lease a
+                    // ported program takes keeps the compositor off the screen
+                    // entirely, which would hide every frame. The shadow is
+                    // forgotten so the first frame writes every row.
+                    let _screen = crate::gfx::lease::take(crate::gfx::lease::Owner::Splash);
                     crate::gfx::compose::invalidate();
                     let stages = crate::gfx::splash::stages();
                     if let Some(step) = freeze {
@@ -7336,7 +7370,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         }
                         unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
                     }
-                });
+                }
                 kprintln!("  done");
             }
         }

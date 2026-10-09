@@ -152,7 +152,7 @@ impl Drop for Lease {
 fn given_back() {
     TASK.store(usize::MAX, Ordering::Release);
     super::compose::invalidate();
-    super::render::invalidate();
+    super::render::damage_all();
 }
 
 /// Who holds the screen, if anybody.

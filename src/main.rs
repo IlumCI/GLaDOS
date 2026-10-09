@@ -1045,6 +1045,16 @@ fn comp_task() {
         // clock task owned this and could only repaint on its own schedule.
         gfx::render::beat(gfx::render::Phase::Tray);
         gfx::desk::paint_tray(composed);
+
+        // **A turn after every frame, whatever `pace` would say.** A frame
+        // that takes longer than a frame-time finds the next deadline already
+        // past and would compose again at once -- and the paint claim is held
+        // for the whole of each frame, so a task waiting on `desk::with` only
+        // ever got the core while the claim was taken and gave it straight
+        // back. Found with `render verify on`, which makes every frame slow
+        // and froze the shell on its first `open`; a slow frame on hardware
+        // would have done the same.
+        task::yield_now();
     }
 }
 

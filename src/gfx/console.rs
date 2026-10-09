@@ -1037,6 +1037,26 @@ pub fn redraw_ch(ch: usize) {
     with_ch(ch, |c| c.redraw_all());
 }
 
+/// Repaint a console onto `target` -- the back buffer clipped to a damaged
+/// rectangle, normally, or a scratch frame for `render verify` -- and do not
+/// push anything to the screen.
+///
+/// Not flushing is the point. `redraw_ch` ends by flushing its whole grid to
+/// the aperture, which inside a frame put the terminal on screen *before* the
+/// windows in front of it had been repainted over it: a flash of terminal
+/// through whatever covered it, once per frame. Inside a frame the compositor
+/// presents, once, after everything is painted.
+pub fn redraw_ch_on(ch: usize, target: Framebuffer) {
+    with_ch(ch, |c| {
+        let (fb, flush) = (c.fb, c.flush);
+        c.fb = target;
+        c.flush = false;
+        c.redraw_all();
+        c.fb = fb;
+        c.flush = flush;
+    });
+}
+
 pub fn set_color(fg: u8) {
     with(|c| c.set_color(fg));
 }

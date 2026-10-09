@@ -150,6 +150,16 @@ pub struct Window {
     pub content: Content,
     pub menus: Vec<Menu>,
     pub closable: bool,
+    /// Who this window is, for as long as it is open. The scene pairs a
+    /// window across frames by this rather than by its index, which shifts
+    /// whenever a window below it closes or one is raised.
+    pub serial: u64,
+}
+
+static NEXT_SERIAL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+fn next_serial() -> u64 {
+    NEXT_SERIAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
 }
 
 impl Window {
@@ -167,7 +177,7 @@ impl Window {
 /// A mode rather than a pile of booleans: the states are mutually exclusive by
 /// nature -- a window cannot be both being moved and being resized -- and an
 /// enum makes that unrepresentable instead of merely unlikely.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mode {
     Normal,
     /// A menu-bar menu is open.
@@ -197,7 +207,7 @@ pub enum Mode {
 /// Only things that draw differently when pointed at. Kept on the desktop and
 /// compared per packet: a repaint happens when the *target* changes, not when
 /// the pointer moves, so sliding across one button costs one redraw.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Hover {
     None,
     /// A taskbar slot, apps and windows in one flat index.
@@ -957,6 +967,7 @@ fn make_terminal(screen: Rect) -> Window {
     let term_x = screen.x.max(icons_w);
     let term_w = (screen.x + screen.w).saturating_sub(term_x + MARGIN);
     Window {
+        serial: next_serial(),
         title: String::from("GLaDOS Terminal"),
         icon: ICO_TERM,
         rect: Rect::new(term_x, screen.y, term_w, screen.h),
@@ -1186,6 +1197,7 @@ pub fn open(title: &str, panel: Panel) {
         let y = (screen.y + screen.h / 3 + off)
             .min(screen.y + screen.h.saturating_sub(h));
         d.windows.push(Window {
+            serial: next_serial(),
             title: String::from(title),
             // `open` is reached through `win open <name>` with the panel's
             // name as the title, so the name is what there is to go by.
@@ -1249,6 +1261,7 @@ pub fn open_app(title: &str, icon: usize, app: Box<dyn DeskApp>, w: u32, h: u32)
         let y = (screen.y + (screen.h.saturating_sub(h)) / 3 + off)
             .min(screen.y + screen.h.saturating_sub(h));
         d.windows.push(Window {
+            serial: next_serial(),
             title: String::from(title),
             icon,
             rect: Rect::new(x, y, w, h),
@@ -1457,6 +1470,7 @@ pub fn open_browser(url: &str) {
         let x = screen.x + (screen.w.saturating_sub(w)) / 2;
         let y = screen.y + (screen.h.saturating_sub(h)) / 3;
         d.windows.push(Window {
+            serial: next_serial(),
             title,
             icon: ICO_NET,
             rect: Rect::new(x, y, w, h),
@@ -2446,6 +2460,7 @@ fn make_executive(screen: Rect) -> Window {
     let term_x = screen.x.max(icons_w);
     let term_w = (screen.x + screen.w).saturating_sub(term_x + MARGIN);
     Window {
+        serial: next_serial(),
         title: String::from("Executive"),
         icon: ICO_TERM,
         rect: Rect::new(
@@ -3232,9 +3247,17 @@ pub fn refresh_status() {
     if super::exclusive() {
         return;
     }
-    let Some(fb) = super::primary() else { return };
-    let screen = screen_rect(&fb);
-    let mut well = None;
+    let Some(real) = super::primary() else { return };
+    let screen = screen_rect(&real);
+    // Into the back buffer and then flushed, like every other painter. This
+    // painted the aperture directly, so the screen showed the new strip while
+    // the back buffer and the shadow still held the old one -- the next frame
+    // that touched the area put the stale strip back, and `render verify`
+    // flagged the gutter on every command. The geometry is `terminal_geometry`
+    // for the same reason: this computed its own, two pixels off the frame's,
+    // so the two painters drew their gutters in different columns.
+    let fb = super::compose::target().unwrap_or(real);
+    let mut geom = None;
     with(|d| {
         let Some(w) = d
             .windows
@@ -3246,24 +3269,15 @@ pub fn refresh_status() {
         if w.state == WinState::Minimised {
             return;
         }
-        let (_, _, client) = chrome(w.frame(screen), !w.menus.is_empty());
+        let client = theme::chrome(w.frame(screen), !w.menus.is_empty()).client;
         if !client.is_empty() {
-            well = Some(client.shrink(2).shrink(2));
+            geom = Some(terminal_geometry(client, super::console::USER));
         }
     });
-    let Some(w) = well else { return };
-    // The gutter too, and for the same reason the strip is here: `clear` is a
-    // console-only repaint, so without this the marks it cannot reach survive
-    // the screen they described.
-    if let Some(strip) = terminal_strip(w) {
-        let grid = Rect::new(
-            w.x + 3,
-            w.y + 3,
-            w.w.saturating_sub(6),
-            w.h.saturating_sub(6 + strip.h),
-        );
-        prompt_gutter(&fb, w, grid);
-        super::compose::flush_rect(w.x, grid.y, 4, grid.h);
+    let Some((well, grid, strip)) = geom else { return };
+    prompt_gutter(&fb, well, grid);
+    super::compose::flush_rect(well.x, grid.y, 4, grid.h);
+    if let Some(strip) = strip {
         terminal_status(&fb, strip);
         super::compose::flush_rect(strip.x, strip.y, strip.w, strip.h);
     }
@@ -4159,28 +4173,48 @@ fn taskbar(fb: &Framebuffer, d: &Desktop, sel: Option<usize>) {
 
 /// The hovered task button's window title, standing above the bar.
 
+/// Where the taskbar's hover tip goes, if one is showing. One formula for the
+/// painter and the scene.
+fn tip_rect(fb: &Framebuffer, d: &Desktop) -> Option<Rect> {
+    let Hover::Task(i) = d.hover else { return None };
+    let (r, _, _) = task_layout(fb, d).into_iter().nth(i)?;
+    let title = d.windows.get(i).map(|w| w.title.as_str())?;
+    let tw = theme::text_w_of(title);
+    let box_w = tw + 12;
+    let box_h = theme::text_h() + 8;
+    // Clamped to the screen rather than centred blindly: the last button on a
+    // full bar sits against the clock, and a tip centred on it would hang off
+    // the edge.
+    let want = r.x + r.w / 2 - (box_w / 2).min(r.x + r.w / 2);
+    let x = want.min(fb.width().saturating_sub(box_w + 2)).max(2);
+    let y = r.y.saturating_sub(box_h + 4);
+    Some(Rect::new(x, y, box_w, box_h))
+}
+
 fn taskbar_tip(fb: &Framebuffer, d: &Desktop) {
     let Hover::Task(i) = d.hover else { return };
-    let Some((r, _, _)) = task_layout(fb, d).into_iter().nth(i) else { return };
-    {
-        if let Some(title) = d.windows.get(i).map(|w| w.title.as_str()) {
-            let tw = theme::text_w_of(title);
-            let box_w = tw + 12;
-            let box_h = theme::text_h() + 8;
-            // Clamped to the screen rather than centred blindly: the last
-            // button on a full bar sits against the clock, and a tip centred
-            // on it would hang off the edge.
-            let want = r.x + r.w / 2 - (box_w / 2).min(r.x + r.w / 2);
-            let x = want.min(fb.width().saturating_sub(box_w + 2)).max(2);
-            let y = r.y.saturating_sub(box_h + 4);
-            let tr = Rect::new(x, y, box_w, box_h);
-            fb.shade_rect(tr.x + 2, tr.y + 2, tr.w, tr.h, 96);
-            fb.vgrad(tr.x, tr.y, tr.w, tr.h, &theme::TITLE_OFF);
-            theme::outline(fb, tr, theme::EDGE);
-            theme::text_over(fb, tr.x + 6, tr.y + 4, title, theme::TEXT);
-        }
-    }
+    let Some(tr) = tip_rect(fb, d) else { return };
+    let Some(title) = d.windows.get(i).map(|w| w.title.as_str()) else { return };
+    fb.shade_rect(tr.x + 2, tr.y + 2, tr.w, tr.h, 96);
+    fb.vgrad(tr.x, tr.y, tr.w, tr.h, &theme::TITLE_OFF);
+    theme::outline(fb, tr, theme::EDGE);
+    theme::text_over(fb, tr.x + 6, tr.y + 4, title, theme::TEXT);
 }
+
+/// The Move/Size hint, when the keyboard is moving or sizing a window.
+fn hint_rect(fb: &Framebuffer, d: &Desktop) -> Option<Rect> {
+    d.focus()?;
+    let msg = match d.mode {
+        Mode::Move { .. } => MOVE_HINT,
+        Mode::Size { .. } => SIZE_HINT,
+        _ => return None,
+    };
+    let w = theme::text_w_of(msg);
+    Some(Rect::new((fb.width().saturating_sub(w)) / 2, MARGIN, w, MENU_H))
+}
+
+const MOVE_HINT: &str = " Move: arrows, Enter to place, Esc to cancel ";
+const SIZE_HINT: &str = " Size: arrows, Enter to keep, Esc to cancel ";
 
 /// The rest of the bar: the recesses, and what did not fit.
 fn taskbar_tail(fb: &Framebuffer, d: &Desktop) {
@@ -4321,19 +4355,431 @@ pub fn draw() {
     // only the rows that changed. Without one (no heap yet, or its
     // allocation failed) this is the direct draw it always was.
     let fb = super::compose::target().unwrap_or(real);
+    let (reported, full) = super::render::take_damage();
+    let whole = Rect::new(0, 0, real.width(), real.height());
+    let mut damage = super::region::Region::new();
     with_ref(|d| {
-        // The terminal is an application, not the screen itself. While its
-        // window is minimised the shell keeps running -- it still reads serial,
-        // still answers, and its output still lands in the console's shadow
-        // grid -- but nothing may reach the framebuffer, or the prompt paints
-        // straight over the desktop it is supposed to be behind. That leak is
-        // what drew a prompt and a black bar across the wallpaper.
+        let next = layers(d, &real, screen);
+        let prev = unsafe { &mut *PREV.get() };
+        // Everything when asked for, when there is no previous frame to
+        // compare with, and when there is no back buffer -- drawing straight
+        // to the aperture has no shadow to make a partial repaint safe.
+        match prev.as_ref() {
+            Some(p) if !full && super::compose::active() => {
+                damage = reported;
+                super::scene::diff(p, &next, &mut damage);
+            }
+            _ => damage.add(whole),
+        }
+        damage.clip_to(whole);
+        place_consoles(d, screen);
+        for r in damage.iter() {
+            paint_scene(&fb.clipped(r.x, r.y, r.w, r.h), d, screen);
+        }
+        if verifying() {
+            verify_frame(&fb, d, screen);
+        }
+        *prev = Some(next);
+    });
+    super::render::drew();
+    let presenting = crate::time::rdtsc();
+    super::render::damaged(damage.len() as u64, damage.area());
+    super::compose::present_region(&damage);
+    // Put the pointer back where it was. Without this every keystroke that
+    // repaints would blink the arrow out until the mouse next moved.
+    if let Some((px, py)) = unsafe { *POS.get() } {
+        cursor_show(&real, px, py);
+    }
+    super::render::frame_timed(started, presenting, crate::time::rdtsc());
+}
+
+/// The last frame's layers, for `scene::diff`. Only the compositor's frame
+/// reads or writes it, under the paint claim.
+static PREV: Racy<Option<Vec<super::scene::Layer>>> = Racy::new(None);
+
+/// Counts composed frames, for the parts of the scene whose content changes
+/// without anything the scene can fingerprint -- an application drawing from
+/// its own state, a status strip reading the machine. Stamping them with this
+/// repaints them whenever a frame is composed at all, which is what happened to
+/// the whole screen before damage existed; phase 8 gives applications stamps
+/// of their own.
+static FRAME_SEQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Where a terminal's well, grid and strip are inside its client area. One
+/// formula for the painter, the scene and `place_consoles`, which must agree
+/// about where the text goes or it is painted in one place and hit-tested,
+/// reflowed or damaged in another.
+fn terminal_geometry(client: Rect, ch: usize) -> (Rect, Rect, Option<Rect>) {
+    let well = client.shrink(2);
+    let inner = well.shrink(3);
+    let strip = if ch == super::console::USER { terminal_strip(well) } else { None };
+    let grid = match strip {
+        Some(s) => Rect::new(inner.x, inner.y, inner.w, inner.h - s.h),
+        None => inner,
+    };
+    (well, grid, strip)
+}
+
+/// Put each console where its window is, and hide the ones nobody can see,
+/// before any painting.
+///
+/// This was part of the paint pass: every console was hidden at the top of a
+/// frame and made visible again when its window was drawn. Once a frame only
+/// repaints what changed, a frame that does not touch the terminal would leave
+/// it hidden -- and a hidden console's output reaches nothing -- so where each
+/// console is and whether it shows is decided here, from the window list,
+/// whatever the frame repaints.
+///
+/// A minimised window's console was never reflowed *and* never told it was
+/// hidden: it kept its old origin and visibility, and the next line written to
+/// it went straight to the framebuffer at that stale position -- over the
+/// desktop, outside any window. The Executive does this on its own schedule,
+/// so minimising it and waiting produced `[mind t16] disabled` painted on the
+/// wallpaper. Hiding every console first and showing only placed ones is what
+/// prevents that, and nothing is lost: an invisible console still updates its
+/// shadow grid, and its window repaints the whole log when it comes back.
+fn place_consoles(d: &Desktop, screen: Rect) {
+    for ch in 0..super::console::NCONSOLE {
+        super::console::with_ch(ch, |c| c.set_visible(false));
+    }
+    for (i, win) in d.windows.iter().enumerate() {
+        if arriving() == Some(i) || win.state == WinState::Minimised {
+            continue;
+        }
+        let Content::Terminal(ch) = win.content else { continue };
+        let client = theme::chrome(win.frame(screen), !win.menus.is_empty()).client;
+        if client.is_empty() {
+            continue;
+        }
+        let (_, grid, _) = terminal_geometry(client, ch);
+        super::console::with_ch(ch, |c| {
+            c.set_visible(true);
+            c.reflow(grid.x, grid.y, grid.w, grid.h);
+        });
+    }
+}
+
+/// What this frame contains, as the scene sees it. Pure over the desktop: it
+/// paints nothing, and two calls over an unchanged desktop answer the same
+/// list -- apart from the parts stamped with `FRAME_SEQ`, on purpose.
+///
+/// **Each stamp has to cover everything its painter reads.** That is the whole
+/// contract, and the way it fails is a pixel that does not update when it
+/// should. `render verify on` composes a whole reference frame every frame and
+/// compares, which is how a missing input is found rather than guessed at.
+fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Layer> {
+    use super::scene::{Layer, LayerId, Stamp};
+    use core::hash::Hash;
+    let seq = FRAME_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let (w, h) = (fb.width(), fb.height());
+    let mut out = Vec::new();
+    out.push(Layer { id: LayerId::Wallpaper, bounds: Rect::new(0, 0, w, h), stamp: Stamp::of((w, h)), parts: Vec::new() });
+
+    let icons = icon_rects(fb);
+    if let Some(b) = icons.iter().map(|(r, _)| *r).reduce(|a, b| {
+        let x0 = a.x.min(b.x);
+        let y0 = a.y.min(b.y);
+        Rect::new(x0, y0, (a.x + a.w).max(b.x + b.w) - x0, (a.y + a.h).max(b.y + b.h) - y0)
+    }) {
+        // Hover moves the highlight between icons, and only the icons read it
+        // among the things under the windows.
         //
-        // Cleared here and set again only if the terminal is actually drawn
-        // below, so visibility is *derived* from whether it was painted rather
-        // than tracked alongside the window state and able to disagree with it.
-        super::console::with(|c| c.set_visible(false));
-        wallpaper(&fb);
+        // Padded, because the painter draws outside the cells: a hovered
+        // label's highlight is six pixels wider than the label and a long
+        // label is as wide as its cell, so the highlight spilled a pixel past
+        // each side and a repaint clipped to the cells left those columns
+        // stale. `render verify` found it on the first hover over Terminal.
+        let pad = 8;
+        let b = Rect::new(b.x.saturating_sub(pad), b.y.saturating_sub(pad), b.w + 2 * pad, b.h + 2 * pad);
+        out.push(Layer { id: LayerId::Icons, bounds: b, stamp: Stamp::of(d.hover), parts: Vec::new() });
+    }
+
+    let focus = d.focus();
+    {
+        let mut st = Stamp::new();
+        for win in &d.windows {
+            win.title.hash(&mut st);
+            win.icon.hash(&mut st);
+            (win.state == WinState::Minimised).hash(&mut st);
+            (win.state == WinState::Maximised).hash(&mut st);
+        }
+        focus.hash(&mut st);
+        d.mode.hash(&mut st);
+        d.hover.hash(&mut st);
+        out.push(Layer {
+            id: LayerId::Taskbar,
+            bounds: taskbar_rect(fb),
+            stamp: core::hash::Hasher::finish(&st),
+            parts: Vec::new(),
+        });
+    }
+
+    for (i, win) in d.windows.iter().enumerate() {
+        if arriving() == Some(i) || win.state == WinState::Minimised {
+            continue;
+        }
+        let active = Some(i) == focus;
+        let frame = win.frame(screen);
+        let bounds = if win.state == WinState::Maximised {
+            frame
+        } else {
+            Rect::new(frame.x, frame.y, frame.w + theme::SHADOW_W, frame.h + theme::SHADOW_W)
+        };
+        let hot = match d.hover {
+            Hover::Caption { win, which } if win == i => Some(which),
+            _ => None,
+        };
+        let menu_hover = match d.hover {
+            Hover::MenuLabel { win, menu } if win == i => Some(menu),
+            _ => None,
+        };
+        let open_menu = match d.mode {
+            Mode::Menu { menu, .. } if active => Some(menu),
+            _ => None,
+        };
+        let mut st = Stamp::new();
+        (frame, win.title.as_str(), active, win.state == WinState::Maximised).hash(&mut st);
+        (hot, menu_hover, open_menu, win.round).hash(&mut st);
+        for m in &win.menus {
+            m.label.hash(&mut st);
+        }
+        let chrome = theme::chrome(frame, !win.menus.is_empty());
+        let client = chrome.client;
+        let mut parts = Vec::new();
+        if !client.is_empty() {
+            match &win.content {
+                Content::Terminal(ch) => {
+                    let (well, grid, strip) = terminal_geometry(client, *ch);
+                    // The well's border and the grid's own background are
+                    // fixed by the geometry; the console repaints its text
+                    // itself as it prints.
+                    core::hash::Hasher::write_u64(&mut st, Stamp::of((well, grid)));
+                    // The gutter marks where prompts start and the strip reads
+                    // the machine's state, and neither is in anything this
+                    // can fingerprint: repainted whenever a frame is composed.
+                    parts.push((Rect::new(well.x + 1, grid.y, 2, grid.h), seq));
+                    if let Some(strip) = strip {
+                        parts.push((strip, seq));
+                    }
+                }
+                Content::Panel(_) => {
+                    let hov = match d.hover {
+                        Hover::Widget { win, idx } if win == i => Some(idx),
+                        _ => None,
+                    };
+                    let _ = hov;
+                    parts.push((client, seq));
+                }
+                Content::Browser(_) | Content::App(_) => parts.push((client, seq)),
+            }
+        }
+        out.push(Layer {
+            id: LayerId::Window(win.serial),
+            bounds,
+            stamp: core::hash::Hasher::finish(&st),
+            parts,
+        });
+    }
+
+    // Everything drawn over the windows: the taskbar tip, menus, the move and
+    // size hint, the Start menu. One layer, because they come and go together
+    // with the mode and the hover, and its bounds are their union.
+    let mut over: Option<Rect> = None;
+    let mut grow = |r: Rect| {
+        over = Some(match over {
+            None => r,
+            Some(a) => {
+                let x0 = a.x.min(r.x);
+                let y0 = a.y.min(r.y);
+                Rect::new(x0, y0, (a.x + a.w).max(r.x + r.w) - x0, (a.y + a.h).max(r.y + r.h) - y0)
+            }
+        });
+    };
+    if let Some(t) = tip_rect(fb, d) {
+        // The tip's shadow is offset two pixels.
+        grow(Rect::new(t.x, t.y, t.w + 2, t.h + 2));
+    }
+    if let Some(p) = dropdown_rows(fb, d, screen) {
+        grow(p.panel);
+    }
+    if let Some(r) = hint_rect(fb, d) {
+        grow(r);
+    }
+    if let Some(b) = over {
+        let mut st = Stamp::new();
+        (d.mode, d.hover, d.query.as_str(), focus).hash(&mut st);
+        if let Hover::Task(t) = d.hover {
+            d.windows.get(t).map(|w| w.title.as_str()).hash(&mut st);
+        }
+        out.push(Layer { id: LayerId::Overlay, bounds: b, stamp: core::hash::Hasher::finish(&st), parts: Vec::new() });
+    }
+    out
+}
+
+/// The wallpaper, painted once per screen size into memory of its own.
+///
+/// `wallpaper` draws a gradient sky, a lattice, a dial, three ellipses of
+/// Bresenham chords and seven bubbles -- several thousand primitives -- and it
+/// was doing so sixty times a second whenever anything moved. With damage it
+/// would do so once per damaged rectangle, mostly to throw the result away.
+/// Painted once and kept, a repaint of any part of it is a row copy.
+///
+/// 8 MB at 1920x1080. When that allocation fails the procedural painter runs
+/// as it always did, which is slower and identical.
+static WALL: Racy<Option<(Vec<u32>, u32, u32)>> = Racy::new(None);
+
+fn wallpaper_cached(fb: &Framebuffer) {
+    let (w, h) = (fb.width(), fb.height());
+    let cache = unsafe { &mut *WALL.get() };
+    if cache.as_ref().map(|c| (c.1, c.2)) != Some((w, h)) {
+        *cache = None;
+        let n = w as usize * h as usize;
+        let mut px = Vec::new();
+        if px.try_reserve_exact(n).is_ok() {
+            px.resize(n, 0u32);
+            let surf = unsafe { Framebuffer::over_ram(px.as_mut_ptr() as u64, w, h, w, fb.format()) };
+            wallpaper(&surf);
+            *cache = Some((px, w, h));
+        }
+    }
+    match cache.as_ref() {
+        Some((px, w, _)) => {
+            let (x0, y0, x1, y1) = fb.scissor();
+            for y in y0..y1 {
+                let row = &px[(y * w) as usize..((y + 1) * w) as usize];
+                fb.blit_span(x0, y, &row[x0 as usize..x1 as usize]);
+            }
+        }
+        None => wallpaper(fb),
+    }
+}
+
+/// Compose a whole reference frame every frame and compare it with what the
+/// damage-limited one produced. A debugging aid, off by default and costly
+/// when on; `render verify on|off`.
+static VERIFY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static VERIFY_BAD: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Frames that differed only inside a terminal's grid. Counted apart because
+/// until phase 7 the console paints its own cells, caret included, straight
+/// into the back buffer between frames, and a full repaint reproduces the text
+/// but not every trace of the caret -- a known difference with a known owner,
+/// which must not drown a scene bug in the same count.
+static VERIFY_CONSOLE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static VERIFY_RUNS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static VERIFY_FIRST: Racy<Option<Rect>> = Racy::new(None);
+
+pub fn set_verify(on: bool) {
+    VERIFY.store(on, core::sync::atomic::Ordering::Relaxed);
+    if on {
+        VERIFY_BAD.store(0, core::sync::atomic::Ordering::Relaxed);
+        VERIFY_CONSOLE.store(0, core::sync::atomic::Ordering::Relaxed);
+        VERIFY_RUNS.store(0, core::sync::atomic::Ordering::Relaxed);
+        unsafe { *VERIFY_FIRST.get() = None };
+    }
+}
+
+fn verifying() -> bool {
+    VERIFY.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Frames checked, frames that differed outside any terminal grid, frames
+/// that differed only inside one, and the first scene difference seen.
+pub fn verify_report() -> (u64, u64, u64, Option<Rect>) {
+    (
+        VERIFY_RUNS.load(core::sync::atomic::Ordering::Relaxed),
+        VERIFY_BAD.load(core::sync::atomic::Ordering::Relaxed),
+        VERIFY_CONSOLE.load(core::sync::atomic::Ordering::Relaxed),
+        unsafe { *VERIFY_FIRST.get() },
+    )
+}
+
+/// Paint the whole frame into scratch memory and compare it with `back`.
+///
+/// The tray readouts are left out of the comparison: `paint_tray` writes them
+/// after the frame, on its own tenth-of-a-second schedule, so the frame never
+/// contains them and the back buffer usually does.
+fn verify_frame(back: &Framebuffer, d: &Desktop, screen: Rect) {
+    // A window on its way in is painted by `flourish_step` straight into the
+    // back buffer and left out of the scene until it lands, so the two would
+    // disagree by design for those six frames.
+    if arriving().is_some() {
+        return;
+    }
+    let (w, h) = (back.width(), back.height());
+    let n = w as usize * h as usize;
+    let mut px = Vec::new();
+    if px.try_reserve_exact(n).is_err() {
+        return;
+    }
+    px.resize(n, 0u32);
+    let scratch = unsafe { Framebuffer::over_ram(px.as_mut_ptr() as u64, w, h, w, back.format()) };
+    paint_scene(&scratch, d, screen);
+    VERIFY_RUNS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let skip = [clock_rect(back), battery_rect(back).unwrap_or(Rect::new(0, 0, 0, 0))];
+    let grids: Vec<Rect> = d.windows.iter().enumerate()
+        .filter(|(i, w)| arriving() != Some(*i) && w.state != WinState::Minimised)
+        .filter_map(|(_, w)| match w.content {
+            Content::Terminal(ch) => {
+                let client = theme::chrome(w.frame(screen), !w.menus.is_empty()).client;
+                Some(terminal_geometry(client, ch).1)
+            }
+            _ => None,
+        })
+        .collect();
+    let inside = |rs: &[Rect], x: u32, y: u32| rs.iter().any(|r| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h);
+    let base = back.addr() as *const u32;
+    let mut bad: Option<Rect> = None;
+    let mut console_only = false;
+    for y in 0..h {
+        for x in 0..w {
+            if inside(&skip, x, y) {
+                continue;
+            }
+            let a = unsafe { *base.add((y * back.stride() + x) as usize) };
+            if a != px[(y * w + x) as usize] && inside(&grids, x, y) {
+                console_only = true;
+                continue;
+            }
+            if a != px[(y * w + x) as usize] {
+                bad = Some(match bad {
+                    None => Rect::new(x, y, 1, 1),
+                    Some(r) => {
+                        let x0 = r.x.min(x);
+                        let y0 = r.y.min(y);
+                        Rect::new(x0, y0, (r.x + r.w).max(x + 1) - x0, (r.y + r.h).max(y + 1) - y0)
+                    }
+                });
+            }
+        }
+    }
+    if bad.is_none() && console_only {
+        VERIFY_CONSOLE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(r) = bad {
+        VERIFY_BAD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let first = unsafe { &mut *VERIFY_FIRST.get() };
+        // Recorded, not printed: a line from the compositor lands in the
+        // middle of whatever the shell is printing, and the first one landed
+        // on the prompt, which hid it from `drive.py` and looked exactly like
+        // a hung shell. `render verify` reports it.
+        if first.is_none() {
+            *first = Some(r);
+        }
+    }
+}
+
+/// Paint the desktop onto `target`: everything, in order, back to front.
+///
+/// This is what `draw` used to do inline, unchanged except that it is now run
+/// once per damaged rectangle with `target` clipped to it -- so every painter
+/// below draws exactly what it always drew and loses whatever falls outside
+/// the rectangle. Windows wholly outside it are skipped. The order is the
+/// order, so a translucent shadow or glass band always blends over pixels
+/// repainted underneath it in the same pass.
+fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
+    let fb = *target;
+    {
+        wallpaper_cached(&fb);
         draw_icons(&fb, d.hover);
         let focus = d.focus();
         let sel = match d.mode {
@@ -4342,23 +4788,6 @@ pub fn draw() {
         };
         taskbar(&fb, d, sel);
 
-        // Every console starts this pass unpainted, and the loop below turns
-        // back on the ones it actually draws.
-        //
-        // A minimised window is skipped by the `continue` below, so its console
-        // was never reflowed *and* never told it was hidden: it kept the origin
-        // and the visible flag from the last time it was drawn, and the next
-        // line written to it went straight to the framebuffer at that stale
-        // position -- over the desktop, outside any window. The Executive does
-        // this on its own schedule, so minimising it and waiting produced
-        // `[mind t16] disabled` painted on the wallpaper.
-        //
-        // Nothing is lost by hiding one. An invisible console still updates its
-        // shadow grid, and `redraw_ch` repaints the whole log when its window
-        // comes back.
-        for ch in 0..super::console::NCONSOLE {
-            super::console::with_ch(ch, |c| c.set_visible(false));
-        }
         for (i, win) in d.windows.iter().enumerate() {
             // A window that exists and has not arrived yet. `open_flourish`
             // paints its chrome itself, at a rectangle that is on its way to
@@ -4372,6 +4801,10 @@ pub fn draw() {
             }
             let active = Some(i) == focus;
             let frame = win.frame(screen);
+            // Nothing of this window falls in the area being repainted.
+            if !fb.touches(frame.x, frame.y, frame.w + theme::SHADOW_W, frame.h + theme::SHADOW_W) {
+                continue;
+            }
             let hot = match d.hover {
                 Hover::Caption { win, which } if win == i => Some(which),
                 _ => None,
@@ -4483,11 +4916,11 @@ pub fn draw() {
                         // different sizes and hold different text, so asking
                         // for "the console" here would paint one of them
                         // twice and the other never.
-                        super::console::with_ch(*ch, |c| {
-                            c.set_visible(true);
-                            c.reflow(grid.x, grid.y, grid.w, grid.h);
-                        });
-                        super::console::redraw_ch(*ch);
+                        // Placed and made visible before the frame, by
+                        // `place_consoles`; painted here, into this pass's
+                        // clip, and not flushed -- the frame presents.
+                        let _ = grid;
+                        super::console::redraw_ch_on(*ch, fb);
                         if *ch == super::console::USER {
                             prompt_gutter(&fb, well, grid);
                         }
@@ -4549,18 +4982,8 @@ pub fn draw() {
                 Mode::Move { .. } | Mode::Size { .. } => {
                     // A hint, because a mode with no indication that it is on is
                     // a keyboard that has stopped working.
-                    let msg = if matches!(d.mode, Mode::Move { .. }) {
-                        " Move: arrows, Enter to place, Esc to cancel "
-                    } else {
-                        " Size: arrows, Enter to keep, Esc to cancel "
-                    };
-                    let w = theme::text_w_of(msg);
-                    let r = Rect::new(
-                        (fb.width().saturating_sub(w)) / 2,
-                        MARGIN,
-                        w,
-                        MENU_H,
-                    );
+                    let msg = if matches!(d.mode, Mode::Move { .. }) { MOVE_HINT } else { SIZE_HINT };
+                    let Some(r) = hint_rect(&fb, d) else { return };
                     theme::panel(&fb, r);
                     theme::text(&fb, r.x, r.y + 5, msg, theme::TEXT, theme::FACE);
                 }
@@ -4607,17 +5030,7 @@ pub fn draw() {
                     fb.rect(cx, row.y + 4, 2, theme::text_h(), theme::TEXT);
                 }
             }
-        }
-    });
-    super::render::drew();
-    let presenting = crate::time::rdtsc();
-    super::compose::present();
-    // Put the pointer back where it was. Without this every keystroke that
-    // repaints would blink the arrow out until the mouse next moved.
-    if let Some((px, py)) = unsafe { *POS.get() } {
-        cursor_show(&real, px, py);
-    }
-    super::render::frame_timed(started, presenting, crate::time::rdtsc());
+        }    }
 }
 
 fn dropdown<'a>(
@@ -5188,8 +5601,26 @@ pub fn redraw_over_terminal() {
         })
     })
     .unwrap_or(false);
+    // The console painted its text straight into the back buffer over
+    // whatever covers it, and **scrolled it**: `scroll_rect` moves the pixels
+    // of its grid up a row, and a window painted over the grid moves with
+    // them. So the damage is not only where the windows above are now, it is
+    // anywhere in the terminal a dragged copy of one may have been left --
+    // the whole terminal, which the frame then repaints from the bottom up.
+    // Damaging only the windows above left a ghost of the ToDo window
+    // scrolling up through the terminal; `render verify` and a screenshot
+    // found it.
     if overlapped {
-        super::render::invalidate();
+        let screen = super::primary().map(|f| screen_rect(&f));
+        let term: Option<Rect> = with(|d| {
+            let screen = screen?;
+            d.windows.iter()
+                .find(|w| matches!(w.content, Content::Terminal(c) if c == super::console::USER))
+                .map(|w| w.frame(screen))
+        }).flatten();
+        if let Some(r) = term {
+            super::render::damage(r);
+        }
     }
 }
 

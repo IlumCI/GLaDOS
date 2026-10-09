@@ -136,6 +136,41 @@ pub fn pace(now: u64, next_frame: u64, dirty: bool, wake_in: u64) -> Pace {
     }
 }
 
+/// Damage reported by somebody who wrote pixels the scene cannot see.
+///
+/// Almost all damage is found by `scene::diff` comparing two frames, which
+/// needs nobody to report anything. These are for the writes that happen
+/// outside the scene: the console painting over a window that covers it, a
+/// program giving the screen back, a theme change. `full` is the bluntest of
+/// them -- everything, back buffer and screen both.
+static DAMAGE: crate::sync::Spin<super::region::Region> =
+    crate::sync::Spin::new(super::region::Region::new());
+/// The whole screen. An atomic rather than a field under the lock, because
+/// `lease::force_release` asks for it from the fault path, where a lock held
+/// by the code that faulted is one nobody will release.
+static FULL: AtomicBool = AtomicBool::new(true);
+
+/// Repaint this rectangle at the next frame whatever the scene says.
+pub fn damage(r: super::theme::Rect) {
+    DAMAGE.lock_irq().add(r);
+    invalidate();
+}
+
+/// Repaint the whole screen at the next frame.
+pub fn damage_all() {
+    FULL.store(true, Ordering::Release);
+    invalidate();
+}
+
+/// Take what was reported, for the frame about to be composed.
+pub fn take_damage() -> (super::region::Region, bool) {
+    let full = FULL.swap(false, Ordering::AcqRel);
+    let mut d = DAMAGE.lock_irq();
+    let out = *d;
+    d.clear();
+    (out, full)
+}
+
 /// Whether a repaint is pending, without claiming it.
 pub fn is_dirty() -> bool {
     DIRTY.load(Ordering::Acquire)
@@ -360,6 +395,20 @@ pub fn timing() -> Timing {
     }
 }
 
+/// How much each composed frame repainted: rectangles and pixels, summed,
+/// so `render` can say what a frame cost against what a whole screen costs.
+static DAMAGE_RECTS: AtomicU64 = AtomicU64::new(0);
+static DAMAGE_PIXELS: AtomicU64 = AtomicU64::new(0);
+
+pub fn damaged(rects: u64, pixels: u64) {
+    DAMAGE_RECTS.fetch_add(rects, Ordering::Relaxed);
+    DAMAGE_PIXELS.fetch_add(pixels, Ordering::Relaxed);
+}
+
+pub fn damage_totals() -> (u64, u64) {
+    (DAMAGE_RECTS.load(Ordering::Relaxed), DAMAGE_PIXELS.load(Ordering::Relaxed))
+}
+
 /// Pixels read back from the aperture.
 ///
 /// **It must stay at zero once the compositor exists.** The aperture is
@@ -390,7 +439,8 @@ pub fn mmio_reads() -> u64 {
 /// this file knows, and `render reset` is typed casually.
 pub fn reset() {
     for c in [&DRAWS, &PRESENTS, &WROTE, &ROWS, &CLOCKS, &CURSORS, &REFUSED, &MAX_GAP,
-              &COMPOSERS, &WORST_BEAT, &FRAME_AT, &OVER_BUDGET, &LATENCY_AT, &INPUT_AT] {
+              &COMPOSERS, &WORST_BEAT, &FRAME_AT, &OVER_BUDGET, &LATENCY_AT, &INPUT_AT,
+              &DAMAGE_RECTS, &DAMAGE_PIXELS] {
         c.store(0, Ordering::Relaxed);
     }
     // Not the identity -- resetting that would count the next frame as a new

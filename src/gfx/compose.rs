@@ -197,16 +197,17 @@ pub fn repaint_rect(x: u32, y: u32, rw: u32, rh: u32) -> bool {
 /// The console's path. Its cells are painted into the back buffer as the
 /// shell prints, and this makes each one visible immediately instead of at
 /// the next desktop draw.
-pub fn flush_rect(x: u32, y: u32, rw: u32, rh: u32) {
+fn flush_counted(x: u32, y: u32, rw: u32, rh: u32) -> u64 {
     // A program that draws on the aperture itself owns it outright; anything
     // written here would land on its picture. The shadow is left alone too, so
     // it does not claim pixels that never reached the screen -- the lease
     // forgets it on release anyway.
     if !super::lease::compositor_may_write() {
-        return;
+        return 0;
     }
-    let Some(fb) = super::primary() else { return };
-    let Some(c) = (unsafe { (*COMP.get()).as_mut() }) else { return };
+    let Some(fb) = super::primary() else { return 0 };
+    let Some(c) = (unsafe { (*COMP.get()).as_mut() }) else { return 0 };
+    let mut wrote = 0;
     let w = c.w as usize;
     let x0 = (x as usize).min(w);
     let x1 = ((x + rw) as usize).min(w);
@@ -234,5 +235,28 @@ pub fn flush_rect(x: u32, y: u32, rw: u32, rh: u32) {
                 .unwrap_or(0);
         fb.blit_span((x0 + a) as u32, row as u32, &back[a..b]);
         seen[a..b].copy_from_slice(&back[a..b]);
+        wrote += 1;
     }
+    wrote
+}
+
+pub fn flush_rect(x: u32, y: u32, rw: u32, rh: u32) {
+    flush_counted(x, y, rw, rh);
+}
+
+/// Present only the damaged area: the rows of each rectangle, compared
+/// against the shadow and written as one span per row where they differ.
+///
+/// `present` compares the whole screen, 8 MB at 1080p, to find the handful of
+/// rows a hover changed; this compares only where the frame painted. The
+/// shadow comparison stays even so, because damage is allowed to be
+/// conservative -- a rectangle collapsed to its bounding box, or a window
+/// repainted identically -- and the shadow turns over-reporting into no
+/// writes rather than into traffic to write-combining memory.
+pub fn present_region(r: &super::region::Region) {
+    let mut wrote = 0;
+    for rect in r.iter() {
+        wrote += flush_counted(rect.x, rect.y, rect.w, rect.h);
+    }
+    super::render::presented(wrote);
 }

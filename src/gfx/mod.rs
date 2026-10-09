@@ -7,7 +7,9 @@
 
 pub mod browse;
 pub mod lease;
+pub mod region;
 pub mod render;
+pub mod scene;
 pub mod compose;
 pub mod console;
 pub mod mines;
@@ -474,6 +476,11 @@ impl Framebuffer {
     pub fn touches(&self, x: u32, y: u32, w: u32, h: u32) -> bool {
         x < self.sx1 && y < self.sy1
             && x.saturating_add(w) > self.sx0 && y.saturating_add(h) > self.sy0
+    }
+
+    /// The writable rectangle as `(x0, y0, x1, y1)`, exclusive at the far edge.
+    pub fn scissor(&self) -> (u32, u32, u32, u32) {
+        (self.sx0, self.sy0, self.sx1, self.sy1)
     }
 
     /// Whether writes reach every pixel, i.e. nothing has narrowed the scissor.

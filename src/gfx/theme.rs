@@ -438,7 +438,7 @@ pub const MENU_H: u32 = font::GLYPH_H * CHROME_SCALE + 6;
 /// there was an edge here to grab.
 pub const FRAME: u32 = 3;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct Rect {
     pub x: u32,
     pub y: u32,
