@@ -813,6 +813,7 @@ pub fn selftest() -> bool {
     claim("dirty inside a frame-time waits for the deadline", pace(1000, 1200, true, 5) == Pace::Wait);
     claim("clean sleeps until the nearest periodic job", pace(1000, 400, false, 7) == Pace::Sleep(7));
     claim("and never for zero ticks, which would be a spin", pace(1000, 400, false, 0) == Pace::Sleep(1));
+    super::compose::cursor_checks(&mut claim);
 
     // The compositor is running while this runs, so it must not be reported as
     // gone. This is the false-alarm check, and it decides whether the alarm is

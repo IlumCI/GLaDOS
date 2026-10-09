@@ -1515,8 +1515,8 @@ const CURSOR: [&str; 17] = [
     "     X..X  ",
     "      XX   ",
 ];
-const CUR_W: u32 = 11;
-const CUR_H: u32 = 17;
+const CUR_W: u32 = super::compose::CUR_W;
+const CUR_H: u32 = super::compose::CUR_H;
 
 /// What the pointer is currently saying it will do.
 ///
@@ -1987,7 +1987,45 @@ pub fn selftest() -> bool {
     ok
 }
 
+/// The pointer's pixels for a shape, encoded, `None` where it is clear. The
+/// arrow carries its outline in the bitmap; the resize glyphs are solid
+/// figures given a dark halo here, so each reads on both a dark title bar and
+/// the light wall.
+fn cursor_image(fb: &Framebuffer, shape: u8) -> [Option<u32>; (CUR_W * CUR_H) as usize] {
+    let bits = bitmap(shape);
+    let set = |r: i32, c: i32| -> bool {
+        if r < 0 || c < 0 || r >= CUR_H as i32 || c >= CUR_W as i32 {
+            return false;
+        }
+        matches!(bits[r as usize].as_bytes().get(c as usize), Some(b'X') | Some(b'.'))
+    };
+    let mut out = [None; (CUR_W * CUR_H) as usize];
+    for row in 0..CUR_H {
+        let line = bits[row as usize].as_bytes();
+        for col in 0..CUR_W {
+            let i = (row * CUR_W + col) as usize;
+            out[i] = match line.get(col as usize) {
+                Some(b'X') if shape == SHAPE_ARROW => Some(fb.raw(theme::TEXT)),
+                Some(b'.') | Some(b'X') => Some(fb.raw(theme::HILIGHT)),
+                _ if shape != SHAPE_ARROW => {
+                    let (r, c) = (row as i32, col as i32);
+                    let near = (-1..=1).any(|dr| (-1..=1).any(|dc| (dr, dc) != (0, 0) && set(r + dr, c + dc)));
+                    near.then(|| fb.raw(theme::TEXT))
+                }
+                _ => None,
+            };
+        }
+    }
+    out
+}
+
 pub fn cursor_hide(fb: &Framebuffer) {
+    // With a compositor the pointer is a plane over the back buffer and is
+    // never painted into anything, so there is nothing to lift: a frame
+    // repaints under it and the present lays it back over whatever changed.
+    if super::compose::cursor_plane() {
+        return;
+    }
     let Some((x, y)) = (unsafe { *SHOWN.get() }) else { return };
     // Ask the compositor for those pixels back, rather than trusting a copy
     // taken earlier.
@@ -2013,8 +2051,12 @@ pub fn cursor_hide(fb: &Framebuffer) {
 }
 
 pub fn cursor_show(fb: &Framebuffer, x: u32, y: u32) {
-    cursor_hide(fb);
     let shape = unsafe { *SHAPE.get() };
+    if super::compose::cursor_plane() {
+        super::compose::set_cursor(Some((x, y)), &cursor_image(fb, shape));
+        return;
+    }
+    cursor_hide(fb);
     let bits = bitmap(shape);
     // Only needed when there is no compositor to ask. With one, this loop is
     // 187 uncached reads off the aperture per mouse move -- on the path that

@@ -43,6 +43,58 @@ struct Compositor {
     shadow: Vec<u32>,
     w: u32,
     h: u32,
+    /// One row of scratch, where a span crossing the pointer is assembled
+    /// before it is compared and written. Owned here so a present allocates
+    /// nothing.
+    row: Vec<u32>,
+}
+
+/// The pointer, as a plane over the back buffer rather than pixels in it.
+///
+/// **This is Haiku's arrangement** (`HWInterface::_DrawCursor`): the back
+/// buffer never contains the pointer, and the pointer is blended into each
+/// row on its way to the screen. It replaced the cursor being painted straight
+/// onto the aperture and erased by copying the back buffer back over it --
+/// every move an erase and a redraw on the surface a person is looking at,
+/// with the erase reading back a buffer another task might be halfway
+/// through composing. That was the strobing arrow. Now a move re-presents
+/// two eleven-by-seventeen rectangles, and nothing composes.
+///
+/// The shadow includes the pointer, because the shadow describes the screen;
+/// so a frame that repaints the area under the pointer still compares equal
+/// wherever only the pointer was, and writes nothing there.
+pub const CUR_W: u32 = 11;
+pub const CUR_H: u32 = 17;
+struct Cursor {
+    at: Option<(u32, u32)>,
+    /// Encoded pixels, `None` where the pointer is transparent.
+    image: [Option<u32>; (CUR_W * CUR_H) as usize],
+}
+static CURSOR: Racy<Cursor> = Racy::new(Cursor { at: None, image: [None; (CUR_W * CUR_H) as usize] });
+
+/// Where the pointer is and what it looks like. Re-presents where it was and
+/// where it is now; the back buffer is untouched. `None` hides it.
+pub fn set_cursor(at: Option<(u32, u32)>, image: &[Option<u32>; (CUR_W * CUR_H) as usize]) {
+    let cur = unsafe { &mut *CURSOR.get() };
+    let was = cur.at;
+    let changed_image = cur.image != *image;
+    if was == at && !changed_image {
+        return;
+    }
+    cur.at = at;
+    cur.image = *image;
+    if let Some((x, y)) = was {
+        flush_counted(x, y, CUR_W, CUR_H);
+    }
+    if let Some((x, y)) = at {
+        flush_counted(x, y, CUR_W, CUR_H);
+    }
+}
+
+/// Whether the pointer plane is in use, so the desktop knows not to draw an
+/// arrow of its own.
+pub fn cursor_plane() -> bool {
+    active()
 }
 
 static COMP: Racy<Option<Compositor>> = Racy::new(None);
@@ -66,7 +118,13 @@ pub fn init() {
     // whatever the firmware had there.
     shadow.resize(n, 0xFFFF_FFFF);
     unsafe {
-        *COMP.get() = Some(Compositor { back, shadow, w: fb.width(), h: fb.height() })
+        *COMP.get() = Some(Compositor {
+            back,
+            shadow,
+            w: fb.width(),
+            h: fb.height(),
+            row: alloc::vec![0; fb.width() as usize],
+        })
     };
 }
 
@@ -94,40 +152,11 @@ pub fn target() -> Option<Framebuffer> {
 
 /// Copy every changed span from the back buffer to the screen.
 pub fn present() {
-    // A program that draws on the aperture itself owns it outright; anything
-    // written here would land on its picture. The shadow is left alone too, so
-    // it does not claim pixels that never reached the screen -- the lease
-    // forgets it on release anyway.
-    if !super::lease::compositor_may_write() {
-        return;
-    }
-    let Some(fb) = super::primary() else { return };
-    let Some(c) = (unsafe { (*COMP.get()).as_mut() }) else { return };
-    let w = c.w as usize;
-    // Counted so a freeze is a number. See `gfx::render`: what matters is not
-    // how often this runs but the longest anybody waited for it.
-    let mut wrote = 0u64;
-    for y in 0..c.h as usize {
-        let row = &c.back[y * w..(y + 1) * w];
-        let seen = &mut c.shadow[y * w..(y + 1) * w];
-        if row == seen {
-            continue;
-        }
-        // One contiguous span per row, from the first difference to the last.
-        // A row usually changes in one place -- a button, a run of text -- and
-        // finding multiple spans would spend more time comparing than the
-        // extra writes cost.
-        let a = row.iter().zip(seen.iter()).position(|(b, s)| b != s).unwrap_or(0);
-        let b = w - row
-            .iter()
-            .rev()
-            .zip(seen.iter().rev())
-            .position(|(b, s)| b != s)
-            .unwrap_or(0);
-        fb.blit_span(a as u32, y as u32, &row[a..b]);
-        seen[a..b].copy_from_slice(&row[a..b]);
-        wrote += 1;
-    }
+    // Through the same row path as everything else, so the pointer plane is
+    // laid over every row it crosses here too. The comparison against the
+    // shadow is per row and cheap where nothing changed.
+    let Some((w, h)) = (unsafe { (*COMP.get()).as_ref().map(|c| (c.w, c.h)) }) else { return };
+    let wrote = flush_counted(0, 0, w, h);
     super::render::presented(wrote);
 }
 
@@ -213,9 +242,30 @@ fn flush_counted(x: u32, y: u32, rw: u32, rh: u32) -> u64 {
     let x1 = ((x + rw) as usize).min(w);
     let y0 = (y as usize).min(c.h as usize);
     let y1 = ((y + rh) as usize).min(c.h as usize);
+    let cur = unsafe { &*CURSOR.get() };
     for row in y0..y1 {
         let base = row * w;
-        let back = &c.back[base + x0..base + x1];
+        let mut back = &c.back[base + x0..base + x1];
+        // A row the pointer crosses is assembled in scratch first: the back
+        // buffer's pixels with the pointer's laid over them. That is what the
+        // screen should show, so that is what is compared and written.
+        if let Some((cx, cy)) = cur.at {
+            let cy = cy as usize;
+            if row >= cy && row < cy + CUR_H as usize {
+                let (cx0, cx1) = (cx as usize, cx as usize + CUR_W as usize);
+                if cx1 > x0 && cx0 < x1 {
+                    let scratch = &mut c.row[x0..x1];
+                    scratch.copy_from_slice(back);
+                    let line = (row - cy) * CUR_W as usize;
+                    for px in cx0.max(x0)..cx1.min(x1) {
+                        if let Some(v) = cur.image[line + (px - cx0)] {
+                            scratch[px - x0] = v;
+                        }
+                    }
+                    back = &c.row[x0..x1];
+                }
+            }
+        }
         let seen = &mut c.shadow[base + x0..base + x1];
         if back == seen {
             continue;
@@ -259,4 +309,36 @@ pub fn present_region(r: &super::region::Region) {
         wrote += flush_counted(rect.x, rect.y, rect.w, rect.h);
     }
     super::render::presented(wrote);
+}
+
+/// The pointer plane's promises, against the live compositor: moving the
+/// pointer writes the screen and the shadow and never the back buffer, and
+/// hiding it puts the shadow back to exactly what the back buffer holds.
+pub fn cursor_checks(claim: &mut dyn FnMut(&str, bool)) {
+    let Some(c) = (unsafe { (*COMP.get()).as_ref() }) else {
+        crate::kprintln!("  ....  no compositor, so 3 claim(s) about the pointer plane did not run");
+        return;
+    };
+    if !super::lease::compositor_may_write() {
+        crate::kprintln!("  ....  the screen is leased, so 3 claim(s) about the pointer plane did not run");
+        return;
+    }
+    let (w, h) = (c.w as usize, c.h as usize);
+    let (x, y) = (w / 3, h / 3);
+    let span = |v: &Vec<u32>| -> Vec<u32> {
+        (0..CUR_H as usize).flat_map(|r| v[(y + r) * w + x..(y + r) * w + x + CUR_W as usize].to_vec()).collect()
+    };
+    let saved = unsafe { (*CURSOR.get()).at };
+    let image_saved = unsafe { (*CURSOR.get()).image };
+    let back_before = span(&c.back);
+    let mut image = [None; (CUR_W * CUR_H) as usize];
+    image[0] = Some(0x00AB_CDEF);
+    set_cursor(Some((x as u32, y as u32)), &image);
+    let c = unsafe { (*COMP.get()).as_ref().unwrap() };
+    claim("moving the pointer leaves the back buffer exactly as it was", span(&c.back) == back_before);
+    claim("and the shadow describes the screen, pointer included", c.shadow[y * w + x] == 0x00AB_CDEF);
+    set_cursor(None, &image);
+    let c = unsafe { (*COMP.get()).as_ref().unwrap() };
+    claim("hiding it puts the shadow back to the back buffer", span(&c.shadow) == span(&c.back));
+    set_cursor(saved, &image_saved);
 }
