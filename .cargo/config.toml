@@ -80,3 +80,14 @@ rustflags = [
     "-C", "target-feature=+sse,+sse2,-soft-float",
     "-C", "link-arg=/MAP:target/glados.map",
 ]
+
+# **Crates come from `vendor/` and from nowhere else.** The exact sources that
+# were read and licence-checked are the ones compiled, a build needs no
+# network, and an update is a reviewable diff of `vendor/` rather than a
+# version number moving. See the policy in Cargo.toml. Harmless to `pool/` and
+# `miner/`, which walk up to this file and have no crates.io dependencies.
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"

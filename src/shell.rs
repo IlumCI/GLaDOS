@@ -6263,6 +6263,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             }
         }
         "plan" => crate::ai::aixi::report(),
+        // The OFL asks that the licence travel with every copy of the fonts,
+        // and the kernel image is a copy. Printed whole, as written.
+        "licences" | "licenses" => {
+            kprintln!("{}", crate::gfx::text::OFL_NOTO);
+            kprintln!("{}", crate::gfx::text::OFL_CASCADIA);
+            kprintln!("  crates and their licences: NOTICE.md in the source tree");
+        }
         "kbd" => {
             let (irqs, ring, shell, routed) = crate::dev::kbd::stats();
             kprintln!("  {} keyboard interrupt(s), {} routed by the compositor", irqs, routed);

@@ -1,12 +1,46 @@
 # Third-party notices
 
-Everything compiled into the kernel image is this tree's own work, with one
-exception and one attribution.
+Everything compiled into the kernel image is this tree's own work except what
+this file names: Rust `core`, the crates and fonts below (from 1.4.1), and one
+attribution for hardware register definitions.
 
-## The exception: Rust `core`
+## Rust `core`
 
 `core` is linked in, under the Apache-2.0 OR MIT terms the Rust project
 distributes it under.
+
+## Crates (from 1.4.1)
+
+Outline fonts are rasterised by `fontdue`. Every crate is vendored in `vendor/`
+exactly as published, and `deny.toml` admits MIT, Apache-2.0 and Zlib only.
+Each carries its full licence text in its own directory under `vendor/`.
+
+| crate | version | licence (as declared) |
+|---|---|---|
+| fontdue | 0.9.4 | MIT OR Apache-2.0 OR Zlib |
+| ttf-parser | 0.25.1 | MIT OR Apache-2.0 |
+| hashbrown | 0.15.5 | MIT OR Apache-2.0 |
+| allocator-api2 | 0.2.21 | MIT OR Apache-2.0 |
+| equivalent | 1.0.2 | Apache-2.0 OR MIT |
+| foldhash | 0.1.5 | Zlib |
+| core_maths | 0.1.1 | MIT |
+| libm | 0.2.16 | MIT |
+
+## Fonts (from 1.4.1)
+
+Embedded in the kernel image from `assets/fonts/`, built by
+`tools/fontsubset.py` from sources pinned by digest in `assets/fonts/fonts.txt`.
+Both are licensed under the **SIL Open Font License, Version 1.1**; the full
+licence for each, with its copyright notice, is in `assets/fonts/`.
+
+- **Noto Sans** Regular and SemiBold, version 2.015. Copyright 2022 The Noto
+  Project Authors (https://github.com/notofonts/latin-greek-cyrillic).
+  Subset to the Latin, Greek and Cyrillic ranges and their punctuation; the
+  font declares no Reserved Font Name. `assets/fonts/OFL-NotoSans.txt`.
+- **Cascadia Code** Regular, version 2407.024. Copyright (c) 2019 - Present,
+  Microsoft Corporation, with Reserved Font Name Cascadia Code. Distributed
+  **unmodified**, so the reserved name is kept as it must be.
+  `assets/fonts/OFL-CascadiaCode.txt`.
 
 ## The attribution: Intel wireless register definitions
 

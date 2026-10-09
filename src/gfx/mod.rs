@@ -10,6 +10,7 @@ pub mod lease;
 pub mod region;
 pub mod render;
 pub mod scene;
+pub mod text;
 
 /// The time a frame is about, in milliseconds since boot (TSC), taken once
 /// when the frame's scene is built; outside a frame, the time now.
