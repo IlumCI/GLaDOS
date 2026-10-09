@@ -3089,6 +3089,16 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             let reads = render::mmio_reads();
             console::set_color(if reads > 0 { YELLOW } else { LTGRAY });
             kprintln!("    aperture reads {:>5}   pixel(s) read back from write-combining memory since boot", reads);
+            let intr = render::intruders();
+            if !intr.is_empty() {
+                console::set_color(LTRED);
+                kprint!("    wrote a leased screen");
+                for (f, l, n) in intr.iter().take(4) {
+                    kprint!(" {}:{} x{}", f.rsplit('/').next().unwrap_or(f), l, n);
+                }
+                kprintln!();
+                console::set_color(LTGRAY);
+            }
             if reads > 0 {
                 kprint!("      read by  ");
                 for (f, l, n) in render::mmio_readers().iter().take(4) {
@@ -7324,6 +7334,40 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
                 kprintln!("  non-temporal stores to the aperture: {}",
                     if crate::gfx::STREAM.load(Ordering::Relaxed) { "on" } else { "off" });
+                return;
+            }
+            // The anti-aliased geometry, for the eye: drawn into memory and
+            // shown under a lease for `ms` milliseconds, like `video bars`.
+            if let Some(ms) = rest.trim().strip_prefix("shapes") {
+                let ms: u64 = ms.trim().parse().unwrap_or(3000);
+                let (w, h) = (boot.fb.width(), boot.fb.height());
+                let mut px = alloc::vec![0u32; (w * h) as usize];
+                let ram = unsafe {
+                    crate::gfx::Framebuffer::over_ram(px.as_mut_ptr() as u64, w, h, w, boot.fb.format())
+                };
+                crate::gfx::shape::proof(&ram);
+                let _screen = crate::gfx::lease::take(crate::gfx::lease::Owner::VideoTest);
+                // Where the sheet is in memory, so the host can read the exact
+                // pixels (QEMU `pmemsave`) rather than a photograph of a screen.
+                kprintln!("  shapes drawn, for {} ms; image at {:#x}, {}x{}, 4 bytes a pixel",
+                    ms, px.as_ptr() as u64, w, h);
+                // Re-laid every tenth of a second rather than once. Not for the
+                // machine: QEMU's picture of its own video memory goes stale a
+                // few seconds after the guest stops writing it -- measured, the
+                // monitor's `xp` read the bars in memory while `screendump`
+                // showed the desktop -- so a sheet drawn once cannot be
+                // photographed. Real hardware scans the memory out.
+                let mhz = crate::time::tsc_mhz().max(1) as u64;
+                let until = crate::time::rdtsc() + ms * mhz * 1000;
+                while crate::time::rdtsc() < until {
+                    for y in 0..h {
+                        boot.fb.blit_span(0, y, &px[(y * w) as usize..((y + 1) * w) as usize]);
+                    }
+                    let next = crate::time::rdtsc() + 100 * mhz * 1000;
+                    while crate::time::rdtsc() < next.min(until) {
+                        crate::task::yield_now();
+                    }
+                }
                 return;
             }
             if let Some(ms) = rest.trim().strip_prefix("bars") {

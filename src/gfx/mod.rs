@@ -11,6 +11,7 @@ pub mod region;
 pub mod render;
 pub mod blend;
 pub mod scene;
+pub mod shape;
 pub mod text;
 
 /// The time a frame is about, in milliseconds since boot (TSC), taken once
@@ -720,6 +721,81 @@ impl Framebuffer {
     /// The fast path under `present`, which used to write the changed span of
     /// every row a pixel at a time through `put` -- two bounds checks and a
     /// volatile store each, for something that is a memcpy.
+    /// Note a write to the screen itself made while a program holds it and
+    /// by a task other than that program's: `render`'s "wrote a leased
+    /// screen". A lease promises the program the aperture to itself, and the
+    /// only way to find out who breaks that is to catch them at the write.
+    #[track_caller]
+    #[inline]
+    fn intrusion(&self) {
+        if !self.mmio || lease::compositor_may_write() {
+            return;
+        }
+        if lease::holder_task() == Some(crate::task::current()) {
+            return;
+        }
+        render::intruded(core::panic::Location::caller());
+    }
+
+    /// The writable part of row `y` from `x` for `w` pixels, through the
+    /// scissor and any installed shape, and how far into the request it starts
+    /// -- so a caller can take the matching part of its own mask or source.
+    /// RAM surfaces only (see `row_mut`).
+    fn blend_target(&self, x: u32, y: u32, w: u32) -> Option<(&mut [u32], usize)> {
+        let (cx, cw) = self.clip(y, x, w)?;
+        let row = self.row_mut(y, cx, cw)?;
+        Some((row, (cx - x) as usize))
+    }
+
+    /// Lay premultiplied `src` over row `y` from `x` (`gfx::blend::over`).
+    pub fn over_row(&self, x: u32, y: u32, src: &[u32]) {
+        if let Some((row, skip)) = self.blend_target(x, y, src.len() as u32) {
+            let n = row.len();
+            blend::over(row, &src[skip..skip + n]);
+        } else if self.mmio {
+            // The screen itself is never read; an opaque source still lands.
+            for (i, &p) in src.iter().enumerate() {
+                if p >> 24 == 0xFF {
+                    self.put(x + i as u32, y, p & 0x00FF_FFFF);
+                }
+            }
+        }
+    }
+
+    /// Lay a premultiplied `color` over row `y` through a coverage `mask`.
+    pub fn over_mask_row(&self, x: u32, y: u32, mask: &[u8], color: u32) {
+        if let Some((row, skip)) = self.blend_target(x, y, mask.len() as u32) {
+            let n = row.len();
+            blend::over_mask(row, &mask[skip..skip + n], color);
+        } else if self.mmio {
+            // No back buffer -- early boot, a fault report -- so no reading:
+            // a mask is thresholded rather than blended.
+            for (i, &m) in mask.iter().enumerate() {
+                if m >= 128 {
+                    self.put(x + i as u32, y, color & 0x00FF_FFFF);
+                }
+            }
+        }
+    }
+
+    /// A translucent fill of `w` pixels of row `y` (`gfx::blend::over_solid`).
+    pub fn over_span(&self, x: u32, y: u32, w: u32, color: u32) {
+        if let Some((row, _)) = self.blend_target(x, y, w) {
+            blend::over_solid(row, color);
+        } else if self.mmio && color >> 24 >= 128 {
+            self.fill_span(x, y, w, color & 0x00FF_FFFF);
+        }
+    }
+
+    /// Every channel of `w` pixels of row `y` times `factor`, over 255: a dim.
+    /// Nothing happens on the screen itself, which cannot be read.
+    pub fn multiply_span(&self, x: u32, y: u32, w: u32, factor: u32) {
+        if let Some((row, _)) = self.blend_target(x, y, w) {
+            blend::multiply(row, factor);
+        }
+    }
+
+    #[track_caller]
     pub fn blit_span(&self, x: u32, y: u32, src: &[u32]) {
         // A shaped blit has to drop the same pixels from the source as from
         // the destination, so the offset into `src` moves with the clip.
@@ -738,6 +814,7 @@ impl Framebuffer {
         if y >= self.height || x >= self.width {
             return;
         }
+        self.intrusion();
         let n = (src.len() as u32).min(self.width - x) as usize;
         let off = (y as usize) * (self.stride as usize) + (x as usize);
         // One bulk copy rather than `n` serialised volatile stores. This is
@@ -810,6 +887,7 @@ impl Framebuffer {
     }
 
     #[inline]
+    #[track_caller]
     pub fn put(&self, x: u32, y: u32, raw: u32) {
         if x >= self.width || y >= self.height {
             return;
@@ -831,6 +909,7 @@ impl Framebuffer {
         // full terminal redraw is around 1.2 million of them. Every one was an
         // un-mergeable volatile store into RAM.
         if self.mmio {
+            self.intrusion();
             unsafe { write_volatile(self.base.add(off), raw) }
         } else {
             unsafe { *self.base.add(off) = raw }
@@ -897,7 +976,9 @@ impl Framebuffer {
         self.encode(c)
     }
 
+    #[track_caller]
     pub fn fill(&self, c: Color) {
+        self.intrusion();
         let raw = self.encode(c);
         // The memset covers `height * stride`, which on a view or a clipped
         // surface is pixels that are not this surface's to write.
@@ -914,6 +995,7 @@ impl Framebuffer {
     }
 
     /// Paint `count` scan lines, starting at `y`, in an already-encoded colour.
+    #[track_caller]
     fn fill_rows(&self, y: u32, count: u32, raw: u32) {
         let end = y.saturating_add(count).min(self.height);
         for row in y..end {
@@ -944,6 +1026,7 @@ impl Framebuffer {
     /// strip at the bottom would drag it up into the last row.
     #[track_caller]
     pub fn scroll_up(&self, region_h: u32, pixels: u32, bg: Color) {
+        self.intrusion();
         let region_h = region_h.min(self.height);
         if pixels == 0 || region_h == 0 {
             return;
@@ -975,6 +1058,7 @@ impl Framebuffer {
     /// work per line and the only thing that is correct.
     #[track_caller]
     pub fn scroll_rect(&self, x: u32, y: u32, w: u32, h: u32, pixels: u32, bg: Color) {
+        self.intrusion();
         if pixels == 0 || w == 0 || h == 0 || x >= self.width || y >= self.height {
             return;
         }
@@ -1005,6 +1089,7 @@ impl Framebuffer {
         }
     }
 
+    #[track_caller]
     fn fill_span(&self, x: u32, y: u32, w: u32, raw: u32) {
         let Some((x, w)) = self.clip(y, x, w) else { return };
         // Clip once for the whole run rather than once per pixel, which is
@@ -1016,6 +1101,7 @@ impl Framebuffer {
         if y >= self.height || x >= self.width {
             return;
         }
+        self.intrusion();
         let n = w.min(self.width - x) as usize;
         let off = (y as usize) * (self.stride as usize) + (x as usize);
         for i in 0..n {
@@ -1023,6 +1109,7 @@ impl Framebuffer {
         }
     }
 
+    #[track_caller]
     pub fn rect(&self, x: u32, y: u32, w: u32, h: u32, c: Color) {
         let raw = self.encode(c);
         let end = y.saturating_add(h).min(self.height);

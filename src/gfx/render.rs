@@ -565,6 +565,35 @@ pub fn mmio_read(pixels: u64) {
     }
 }
 
+/// Writes to a leased screen by somebody other than its holder, by source line.
+static INTRUDERS: crate::sync::Spin<[(Option<&'static core::panic::Location<'static>>, u64); 8]> =
+    crate::sync::Spin::new([(None, 0); 8]);
+
+pub fn intruded(at: &'static core::panic::Location<'static>) {
+    let Some(mut t) = INTRUDERS.try_lock() else { return };
+    for slot in t.iter_mut() {
+        match slot.0 {
+            Some(l) if l.file() == at.file() && l.line() == at.line() => {
+                slot.1 += 1;
+                return;
+            }
+            None => {
+                *slot = (Some(at), 1);
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn intruders() -> alloc::vec::Vec<(&'static str, u32, u64)> {
+    let t = INTRUDERS.lock_irq();
+    let mut v: alloc::vec::Vec<(&'static str, u32, u64)> =
+        t.iter().filter_map(|(l, n)| l.map(|l| (l.file(), l.line(), *n))).collect();
+    v.sort_by(|a, b| b.2.cmp(&a.2));
+    v
+}
+
 /// Who read the aperture since boot, most pixels first.
 pub fn mmio_readers() -> alloc::vec::Vec<(&'static str, u32, u64)> {
     let t = READERS.lock_irq();
