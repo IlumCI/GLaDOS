@@ -53,6 +53,12 @@ pub const WL_SHM: &str = "wl_shm";
 pub const WL_SHM_POOL: &str = "wl_shm_pool";
 pub const WL_BUFFER: &str = "wl_buffer";
 pub const WL_CALLBACK: &str = "wl_callback";
+
+/// Damage rectangles kept per commit before it is treated as all of it.
+const DAMAGE_CAP: usize = 16;
+/// How long a frame callback for an unpainted window waits before it fires
+/// anyway (`Client::fire_frames`).
+const HIDDEN_MS: u64 = 1000;
 pub const XDG_WM_BASE: &str = "xdg_wm_base";
 pub const XDG_POSITIONER: &str = "xdg_positioner";
 pub const XDG_SURFACE: &str = "xdg_surface";
@@ -98,6 +104,13 @@ pub struct Frame {
     pub title: String,
     /// Commits so far, so a reader can tell a new picture from the last one.
     pub commits: u64,
+    /// The commit the desktop last painted. Frame callbacks wait for it
+    /// (`Client::fire_frames`): "draw your next frame now" is only true once
+    /// the last one has been shown.
+    pub presented: u64,
+    /// Pixels copied out of client buffers over this window's life, which a
+    /// claim reads to tell a damage-limited commit from a whole one.
+    pub copied: u64,
 }
 
 pub type Shared = Arc<Spin<Frame>>;
@@ -153,6 +166,11 @@ struct Surface {
     /// detach, which is different from not having been told anything.
     pending: Option<Option<u32>>,
     frames: Vec<u32>,
+    /// What `damage`/`damage_buffer` said since the last commit, in buffer
+    /// pixels (one output, scale one, untransformed, so the two agree). More
+    /// than `DAMAGE_CAP` rectangles, or one that does not fit, is everything.
+    damage: Vec<(u32, u32, u32, u32)>,
+    damage_all: bool,
     /// The xdg_surface that gave this its role, if one has.
     xdg: Option<u32>,
 }
@@ -182,8 +200,10 @@ pub struct Scene {
     surfaces: BTreeMap<u32, Surface>,
     xdg: BTreeMap<u32, XdgSurface>,
     toplevels: BTreeMap<u32, Toplevel>,
-    /// Frame callbacks committed and not yet fired.
-    due: Vec<u32>,
+    /// Frame callbacks committed and not yet fired: the callback, the window
+    /// whose painting it waits for (none for a surface with no window), the
+    /// commit it followed, and when it was committed.
+    due: Vec<(u32, Option<Shared>, u64, u64)>,
     pub effects: Vec<Effect>,
 }
 
@@ -290,13 +310,22 @@ impl Client {
                 }
                 Ok(())
             }
-            // damage, damage_buffer: the whole window is copied at commit, so
-            // which part changed is a question with no use here.
+            // damage, damage_buffer: what changed, which is all a commit then
+            // copies. With one output at scale one and no transform, surface
+            // and buffer coordinates are the same pixels.
             2 | 9 => {
-                for _ in 0..4 {
-                    r.int()?;
+                let (x, y, w, h) = (r.int()?, r.int()?, r.int()?, r.int()?);
+                done(&r)?;
+                if let Some(s) = self.scene.surfaces.get_mut(&id) {
+                    if x < 0 || y < 0 || w <= 0 || h <= 0 || s.damage.len() >= DAMAGE_CAP {
+                        // Negative origins and INT32_MAX extents are how clients
+                        // say "all of it"; more than the cap is as good as.
+                        s.damage_all |= w > 0 && h > 0 || s.damage.len() >= DAMAGE_CAP;
+                    } else {
+                        s.damage.push((x as u32, y as u32, w as u32, h as u32));
+                    }
                 }
-                done(&r)
+                Ok(())
             }
             // frame
             3 => {
@@ -335,11 +364,24 @@ impl Client {
 
     /// The moment everything said about a surface takes effect.
     fn commit(&mut self, id: u32) -> Result<(), Error> {
+        let now = crate::net::now_ms();
         let Some(s) = self.scene.surfaces.get_mut(&id) else { return Err(Error::NoObject) };
         let pending = s.pending.take();
         let frames = core::mem::take(&mut s.frames);
+        let damage = core::mem::take(&mut s.damage);
+        let damage_all = core::mem::take(&mut s.damage_all);
         let xdg = s.xdg;
-        self.scene.due.extend(frames);
+        let window = xdg
+            .and_then(|x| self.scene.xdg.get(&x))
+            .and_then(|x| x.toplevel)
+            .and_then(|t| self.scene.toplevels.get(&t))
+            .and_then(|tl| tl.window.as_ref().map(|(_, f)| Arc::clone(f)));
+        // Each callback waits for this commit to be painted, so it is queued
+        // against the count this commit will leave -- one more if it carries
+        // a buffer, the same if it does not.
+        let next = window.as_ref().map_or(0, |f| f.lock_irq().commits)
+            + matches!(pending, Some(Some(_))) as u64;
+        self.scene.due.extend(frames.into_iter().map(|cb| (cb, window.clone(), next, now)));
 
         let Some(attached) = pending else { return Ok(()) };
         let toplevel = xdg.and_then(|x| self.scene.xdg.get(&x)).and_then(|x| {
@@ -362,43 +404,88 @@ impl Client {
             return Err(Error::NotConfigured);
         }
         let b = self.scene.buffers.get(&buffer).cloned().ok_or(Error::NoObject)?;
-        let px = copy_pixels(&b)?;
-        // Copied, so the client may have its buffer back now.
-        self.post(Writer::new(buffer, 0));
-        let Some((t, _)) = toplevel else { return Ok(()) };
+        let Some((t, _)) = toplevel else {
+            self.post(Writer::new(buffer, 0));
+            return Ok(());
+        };
         let Some(tl) = self.scene.toplevels.get_mut(&t) else { return Ok(()) };
         match &tl.window {
+            // Same size and told what changed: only that is copied. A commit
+            // that said nothing about damage is taken as all of it -- the
+            // protocol's word for that is "nothing changed", and believing a
+            // client that forgot is a window that never updates.
+            Some((_, f)) if !damage_all && !damage.is_empty() && {
+                let g = f.lock_irq();
+                g.w == b.w && g.h == b.h
+            } => {
+                let mut g = f.lock_irq();
+                let mut n = 0u64;
+                for d in &damage {
+                    n += copy_rect(&b, &mut g.px, *d)?;
+                }
+                g.copied += n;
+                g.commits += 1;
+            }
             Some((_, f)) => {
+                let px = copy_pixels(&b)?;
                 let mut f = f.lock_irq();
                 f.w = b.w;
                 f.h = b.h;
+                f.copied += px.len() as u64;
                 f.px = px;
                 f.commits += 1;
             }
             None => {
+                let px = copy_pixels(&b)?;
                 let key = NEXT_KEY.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                let frame = Arc::new(Spin::new(Frame { w: b.w, h: b.h, px, title: tl.title.clone(), commits: 1 }));
+                let n = px.len() as u64;
+                let frame = Arc::new(Spin::new(Frame {
+                    w: b.w,
+                    h: b.h,
+                    px,
+                    title: tl.title.clone(),
+                    commits: 1,
+                    presented: 0,
+                    copied: n,
+                }));
                 tl.window = Some((key, Arc::clone(&frame)));
                 self.scene.effects.push(Effect::Open { key, title: tl.title.clone(), frame });
             }
         }
+        // Copied, so the client may have its buffer back now.
+        self.post(Writer::new(buffer, 0));
         Ok(())
     }
 
-    /// Fire every frame callback committed so far. The desktop paints when it
-    /// is told something changed, so "the frame was presented" is "the commit
-    /// was taken", paced by the caller.
-    pub fn fire_frames(&mut self, time_ms: u32) {
+    /// Fire the frame callbacks whose commit the desktop has painted.
+    ///
+    /// "Done" means the frame was shown and now is a good time to draw the
+    /// next. It fired as soon as the commit was *taken*, so a client
+    /// animating to callbacks rendered as fast as the server could read, and
+    /// every frame past the screen's rate was drawn, copied and discarded.
+    ///
+    /// A window that is never painted -- minimised, or not yet opened -- would
+    /// then never hear back, and a client blocked on its callback would stop.
+    /// Wayland compositors throttle a hidden surface rather than freeze it, so
+    /// after `HIDDEN_MS` a callback fires anyway: once a second.
+    pub fn fire_frames(&mut self, now_ms: u64) {
         let due = core::mem::take(&mut self.scene.due);
-        for cb in due {
+        let mut keep = Vec::new();
+        for (cb, window, commit, at) in due {
             if self.objects.get(cb).is_none() {
                 continue;
             }
+            let shown = window.as_ref().map_or(true, |f| f.lock_irq().presented >= commit);
+            if !shown && now_ms.saturating_sub(at) < HIDDEN_MS {
+                keep.push((cb, window, commit, at));
+                continue;
+            }
             let mut w = Writer::new(cb, 0);
-            w.uint(time_ms);
+            w.uint(now_ms as u32);
             self.post(w);
             let _ = self.forget(cb);
         }
+        self.scene.due = keep;
     }
 
     pub fn frames_due(&self) -> bool {
@@ -726,6 +813,31 @@ fn check_buffer(offset: i32, w: i32, h: i32, stride: i32, pool: usize) -> Result
 
 /// The buffer's pixels, as `0x00RRGGBB`, checked again against the memory as
 /// it is now rather than as it was when the buffer was made.
+/// One damaged rectangle of the buffer into `px`, which is the window's
+/// picture at the buffer's own size. Clamped to the buffer, since damage is a
+/// hint and a client may describe more than it has. Answers pixels copied.
+fn copy_rect(b: &Buffer, px: &mut [u32], (x, y, w, h): (u32, u32, u32, u32)) -> Result<u64, Error> {
+    let need = b.offset + b.stride * (b.h as usize - 1) + b.w as usize * 4;
+    let x1 = x.saturating_add(w).min(b.w);
+    let y1 = y.saturating_add(h).min(b.h);
+    if x >= x1 || y >= y1 || px.len() < (b.w * b.h) as usize {
+        return Ok(0);
+    }
+    b.mem.with(|bytes| {
+        if need > bytes.len() {
+            return Err(Error::BadBuffer);
+        }
+        for row in y as usize..y1 as usize {
+            let src = b.offset + row * b.stride;
+            for col in x as usize..x1 as usize {
+                let p = &bytes[src + col * 4..src + col * 4 + 4];
+                px[row * b.w as usize + col] = u32::from_le_bytes([p[0], p[1], p[2], 0]);
+            }
+        }
+        Ok((x1 - x) as u64 * (y1 - y) as u64)
+    })
+}
+
 fn copy_pixels(b: &Buffer) -> Result<Vec<u32>, Error> {
     // Both formats are little-endian 0xAARRGGBB words; alpha is dropped.
     let _ = b.format;
@@ -873,6 +985,43 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push((
         "a later commit updates the window it already has",
         c.take_effects().is_empty() && opened.as_ref().is_some_and(|(_, f)| f.lock_irq().commits == 2),
+    ));
+    // Damage: one pixel said to have changed is one pixel copied.
+    let copied = |o: &Option<(String, Shared)>| o.as_ref().map_or(0, |(_, f)| f.lock_irq().copied);
+    let before = copied(&opened);
+    send(&mut c, request(7, 1, |w| { w.object(8); w.int(0); w.int(0); }));
+    send(&mut c, request(7, 2, |w| { w.int(1); w.int(0); w.int(1); w.int(1); }));
+    send(&mut c, request(7, 3, |w| { w.new_id(12); }));
+    send(&mut c, request(7, 6, |_| {}));
+    out.push((
+        "a commit that names its damage copies that and nothing else",
+        copied(&opened) == before + 1
+            && opened.as_ref().is_some_and(|(_, f)| f.lock_irq().commits == 3),
+    ));
+    let _ = c.take_out();
+    c.fire_frames(crate::net::now_ms());
+    out.push((
+        "and its frame callback waits for the desktop to paint it",
+        count_events(&c.take_out(), 12, 0) == 0,
+    ));
+    if let Some((_, f)) = opened.as_ref() {
+        let mut f = f.lock_irq();
+        f.presented = f.commits;
+    }
+    c.fire_frames(crate::net::now_ms());
+    out.push(("then fires once it has been", count_events(&c.take_out(), 12, 0) == 1));
+
+    // A window nobody paints still hears back, a second later.
+    send(&mut c, request(7, 1, |w| { w.object(8); w.int(0); w.int(0); }));
+    send(&mut c, request(7, 3, |w| { w.new_id(13); }));
+    send(&mut c, request(7, 6, |_| {}));
+    let _ = c.take_out();
+    c.fire_frames(crate::net::now_ms());
+    let held = count_events(&c.take_out(), 13, 0) == 0;
+    c.fire_frames(crate::net::now_ms() + HIDDEN_MS);
+    out.push((
+        "a window that is not painted gets its callback anyway, once a second",
+        held && count_events(&c.take_out(), 13, 0) == 1,
     ));
     send(&mut c, request(10, 0, |_| {}));
     out.push((

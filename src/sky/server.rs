@@ -160,7 +160,7 @@ fn turn(s: &mut Session, now: u64, changed: &mut bool) -> bool {
     // Frame callbacks, paced.
     if s.client.frames_due() && now.saturating_sub(s.last_frame) >= FRAME_MS {
         s.last_frame = now;
-        s.client.fire_frames(now as u32);
+        s.client.fire_frames(now);
     }
 
     for e in s.client.take_effects() {
@@ -205,7 +205,7 @@ fn turn(s: &mut Session, now: u64, changed: &mut bool) -> bool {
 
 fn end(s: Session) {
     for (key, _) in s.client.windows() {
-        crate::gfx::desk::close_tagged(key);
+        crate::gfx::desk::post(crate::gfx::desk::Op::Close { tag: key });
     }
     unix::close(&s.pipe, s.side);
 }
@@ -219,6 +219,10 @@ pub fn reap() {
     }
 }
 
+/// What a client asked of the desktop, posted rather than done. This runs
+/// inside the *guest's* syscalls, on the guest's task, and the window list is
+/// the compositor's: `open_app` here was a `Vec::push` on a list the
+/// compositor may have been walking for the frame it was painting.
 fn apply(e: Effect) {
     use crate::gfx::{desk, theme};
     match e {
@@ -227,18 +231,16 @@ fn apply(e: Effect) {
                 let f = frame.lock_irq();
                 (f.w, f.h)
             };
-            desk::open_app(
-                &title,
-                desk::ICO_PROGRAMS,
-                Box::new(Window { key, frame }),
-                w + theme::FRAME * 2,
-                h + theme::TITLE_H + theme::FRAME * 2,
-            );
+            desk::post(desk::Op::OpenTagged {
+                title,
+                icon: desk::ICO_PROGRAMS,
+                app: Box::new(Window { key, frame }),
+                w: w + theme::FRAME * 2,
+                h: h + theme::TITLE_H + theme::FRAME * 2,
+            });
         }
-        Effect::Retitle { key, title } => desk::retitle_tagged(key, &title),
-        Effect::Close { key } => {
-            desk::close_tagged(key);
-        }
+        Effect::Retitle { key, title } => desk::post(desk::Op::Retitle { tag: key, title }),
+        Effect::Close { key } => desk::post(desk::Op::Close { tag: key }),
     }
 }
 
@@ -257,10 +259,22 @@ impl crate::gfx::DeskApp for Window {
     }
 
     fn draw_in(&self, fb: &crate::gfx::Framebuffer, client: crate::gfx::theme::Rect, _focused: bool) {
-        let f = self.frame.lock_irq();
-        fb.rect(client.x, client.y, client.w, client.h, crate::gfx::Color::new(0, 0, 0));
+        let mut f = self.frame.lock_irq();
+        // Painted is shown: the desktop lays this surface into the frame it
+        // is composing and presents it before it next looks at a client.
+        f.presented = f.commits;
         let w = f.w.min(client.w) as usize;
         let h = f.h.min(client.h) as usize;
+        // Black only where the picture does not reach -- a window the client
+        // drew smaller than the frame around it. It was the whole client
+        // area, every time, under a picture that covers nearly all of it.
+        let black = crate::gfx::Color::new(0, 0, 0);
+        if (w as u32) < client.w {
+            fb.rect(client.x + w as u32, client.y, client.w - w as u32, client.h, black);
+        }
+        if (h as u32) < client.h {
+            fb.rect(client.x, client.y + h as u32, w as u32, client.h - h as u32, black);
+        }
         // The client's words are 0x00RRGGBB. A BGRX screen stores exactly that;
         // an RGBX one stores it with red and blue exchanged.
         let swap = fb.encode(crate::gfx::Color::new(1, 2, 3)) != 0x01_0203;

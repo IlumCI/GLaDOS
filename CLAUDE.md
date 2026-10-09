@@ -6688,7 +6688,12 @@ copies the client's pixels straight into a desktop window (`surface::Frame`)
 and releases the buffer.
 
 Served: the bootstrap, `wl_compositor`, `wl_surface`, `wl_region`, `wl_shm`
-(pools, buffers, ARGB8888/XRGB8888), frame callbacks paced at 60 Hz,
+(pools, buffers, ARGB8888/XRGB8888), damage (a commit copies only the
+rectangles it names; one that names none is taken as all of it), frame
+callbacks that fire only once the desktop has painted the commit they followed
+-- a minimised window's fire once a second instead, so a client is throttled
+rather than frozen -- and windows opened, retitled and closed through
+`desk::post`, never from the guest's task,
 `xdg_wm_base`/`xdg_surface`/`xdg_toplevel`; popups are dismissed at once.
 Closing the window from its title bar sends `xdg_toplevel.close`. Not yet:
 `wl_seat` (no input reaches a client), `wl_output`, and a client running

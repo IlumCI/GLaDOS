@@ -358,7 +358,10 @@ pub struct Desktop {
 }
 
 static DESK: Racy<Option<Desktop>> = Racy::new(None);
-static PENDING: Racy<Vec<String>> = Racy::new(Vec::new());
+/// Locked: the shell drains it while the compositor (a key, a click) and
+/// other tasks push. It was a `Racy`, which was a promise that only one task
+/// ever touched it, and the compositor routing keys made that untrue.
+static PENDING: crate::sync::Spin<Vec<String>> = crate::sync::Spin::new(Vec::new());
 
 /// How many queued commands are kept.
 ///
@@ -382,12 +385,18 @@ const PENDING_CAP: usize = 8;
 /// Full drops the *newest* and says so. The alternative -- pushing the oldest
 /// out -- is the bug this replaces, arriving one command later.
 pub fn queue_command(cmd: &str) {
-    let q = unsafe { &mut *PENDING.get() };
-    if q.len() >= PENDING_CAP {
+    let full = {
+        let mut q = PENDING.lock_irq();
+        let full = q.len() >= PENDING_CAP;
+        if !full {
+            q.push(String::from(cmd));
+        }
+        full
+    };
+    // Said outside the lock: printing takes the console's.
+    if full {
         crate::kprintln!("  (queue full -- '{}' dropped)", cmd);
-        return;
     }
-    q.push(String::from(cmd));
 }
 
 /// Desktop changes asked for by a task that does not own the desktop.
@@ -418,9 +427,25 @@ pub enum Op {
     /// `AuthorWin::new` is the agent's business and this queue's job is to
     /// carry it, not to know about it.
     OpenApp { title: &'static str, icon: usize, app: alloc::boxed::Box<dyn super::DeskApp>, w: u32, h: u32 },
+    /// A program's window by tag, the shape Skywalker's clients need: a
+    /// title the client chose, and no "already open" check, since two
+    /// windows of one client are two windows.
+    OpenTagged { title: String, icon: usize, app: alloc::boxed::Box<dyn super::DeskApp>, w: u32, h: u32 },
+    Retitle { tag: u64, title: String },
+    Close { tag: u64 },
 }
 
-static OPS: Racy<Vec<Op>> = Racy::new(Vec::new());
+/// Locked, because posting from any task is the point of it: a `Racy` here
+/// made "safe from any task" true only of the task that drains it.
+static OPS: crate::sync::Spin<Vec<Posted>> = crate::sync::Spin::new(Vec::new());
+
+/// An op in transit. `Send` by assertion: a `Box<dyn DeskApp>` is not, because
+/// programs keep `Cell`s, but posting *moves* the box -- the poster keeps no
+/// reference to it, so it is only ever touched by one task at a time, which
+/// is all `Send` asks. A program that kept an `Rc` shared with its poster
+/// would break this, and none does; Skywalker's window shares an `Arc<Spin>`.
+struct Posted(Op);
+unsafe impl Send for Posted {}
 
 /// Small for the same reason `PENDING_CAP` is: this covers a burst, not a
 /// backlog. Nothing posts more than one of these per episode.
@@ -431,12 +456,18 @@ const OPS_CAP: usize = 8;
 /// Safe from any task. Full drops the newest and says so, exactly as
 /// `queue_command` does -- pushing the oldest out is the bug that replaces.
 pub fn post(op: Op) {
-    let q = unsafe { &mut *OPS.get() };
-    if q.len() >= OPS_CAP {
+    let full = {
+        let mut q = OPS.lock_irq();
+        let full = q.len() >= OPS_CAP;
+        if !full {
+            q.push(Posted(op));
+        }
+        full
+    };
+    if full {
         crate::kprintln!("  (desktop queue full -- an op was dropped)");
         return;
     }
-    q.push(op);
     super::render::invalidate();
 }
 
@@ -448,11 +479,11 @@ pub fn post(op: Op) {
 pub fn drain_ops() {
     loop {
         let op = {
-            let q = unsafe { &mut *OPS.get() };
+            let mut q = OPS.lock_irq();
             if q.is_empty() {
                 return;
             }
-            q.remove(0)
+            q.remove(0).0
         };
         match op {
             Op::OpenApp { title, icon, app, w, h } => {
@@ -463,13 +494,18 @@ pub fn drain_ops() {
                 clear_of_terminal();
                 focus_terminal();
             }
+            Op::OpenTagged { title, icon, app, w, h } => open_app(&title, icon, app, w, h),
+            Op::Retitle { tag, title } => retitle_tagged(tag, &title),
+            Op::Close { tag } => {
+                close_tagged(tag);
+            }
         }
     }
 }
 
 /// How many ops are waiting. For the selftest.
 pub fn ops_len() -> usize {
-    unsafe { (*OPS.get()).len() }
+    OPS.lock_irq().len()
 }
 
 const MARGIN: u32 = 8;
@@ -6012,7 +6048,7 @@ pub fn redraw_over_terminal() {
 }
 
 pub fn take_pending() -> Option<String> {
-    let q = unsafe { &mut *PENDING.get() };
+    let mut q = PENDING.lock_irq();
     if q.is_empty() {
         return None;
     }
@@ -6022,5 +6058,5 @@ pub fn take_pending() -> Option<String> {
 /// How many commands are waiting. For the selftest, and for anything that
 /// wants to know whether a press landed.
 pub fn pending_len() -> usize {
-    unsafe { (*PENDING.get()).len() }
+    PENDING.lock_irq().len()
 }
