@@ -60,12 +60,10 @@ pub struct Mines {
     seed: u64,
 }
 
+/// `gfx::now_ms`: the frame's time while a frame is drawn, so the timer's
+/// stamp and its paint read one clock.
 fn now_ms() -> u64 {
-    let mhz = crate::time::tsc_mhz();
-    if mhz == 0 {
-        return 0;
-    }
-    crate::time::rdtsc() / (mhz * 1000)
+    super::now_ms()
 }
 
 impl Mines {

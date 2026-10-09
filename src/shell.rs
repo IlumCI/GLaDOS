@@ -257,7 +257,10 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
         // that ends up in a menu can never leave one: the bytes that would
         // dismiss it are eaten by it. `win keys` remains the way to drive the
         // desktop headlessly, and it comes through here as a command.
-        let key = if crate::dev::kbd::last_was_serial() {
+        // And a key the compositor already offered the desktop (`kbd::route`)
+        // is the shell's by that desktop's own answer; offering it again
+        // would ask the question twice against a focus that may have moved.
+        let key = if crate::dev::kbd::last_was_serial() || crate::dev::kbd::last_was_routed() {
             raw
         } else {
             match crate::gfx::desk::key(raw) {
@@ -6260,6 +6263,22 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             }
         }
         "plan" => crate::ai::aixi::report(),
+        "kbd" => {
+            let (irqs, ring, shell, routed) = crate::dev::kbd::stats();
+            kprintln!("  {} keyboard interrupt(s), {} routed by the compositor", irqs, routed);
+            kprintln!("  {} byte(s) waiting in the ring, {} handed to the shell", ring, shell);
+            match crate::dev::kbd::controller_config() {
+                Some(c) => kprintln!(
+                    "  controller config {:#04x}: irq1 {}  port-1 clock {}  irq12 {}  translate {}",
+                    c,
+                    if c & 0x01 != 0 { "on" } else { "OFF" },
+                    if c & 0x10 == 0 { "on" } else { "OFF" },
+                    if c & 0x02 != 0 { "on" } else { "off" },
+                    if c & 0x40 != 0 { "on" } else { "off" },
+                ),
+                None => kprintln!("  the controller did not answer a config read"),
+            }
+        }
         // `rng` -- bytes from the kernel generator, and what it thinks of
         // itself. The status line is the interesting half: an estimate below
         // the threshold means `fill_secret` is refusing, which is what a TLS

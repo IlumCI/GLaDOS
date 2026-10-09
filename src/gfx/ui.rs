@@ -627,6 +627,31 @@ pub fn parse_keys(spec: &str) -> Vec<u8> {
     let mut out = Vec::new();
     for part in spec.split(',') {
         let p = part.trim();
+        // `super-<key>` and `super-shift-<arrow>`: the chord byte the decoder
+        // makes, from the same function, so a driven chord is the chord.
+        if let Some(rest) = p.strip_prefix("super-") {
+            let (shift, rest) = match rest.strip_prefix("shift-") {
+                Some(r) => (true, r),
+                None => (false, rest),
+            };
+            let key = match rest {
+                "enter" | "return" => Some(b'\n'),
+                "tab" => Some(b'\t'),
+                "left" => Some(kbd::KEY_LEFT),
+                "right" => Some(kbd::KEY_RIGHT),
+                "up" => Some(kbd::KEY_UP),
+                "down" => Some(kbd::KEY_DOWN),
+                one if one.len() == 1 && one.as_bytes()[0].is_ascii_alphabetic() => {
+                    Some(one.as_bytes()[0].to_ascii_lowercase())
+                }
+                _ => None,
+            };
+            match key.and_then(|k| kbd::super_chord(k, shift)) {
+                Some(c) => out.push(c),
+                None => crate::kprintln!("  no such Super chord: {}", p),
+            }
+            continue;
+        }
         let k = match p {
             "tab" => b'\t',
             "backtab" | "shift-tab" => kbd::KEY_BACKTAB,
@@ -637,7 +662,7 @@ pub fn parse_keys(spec: &str) -> Vec<u8> {
             "taskbar" | "ctrl-esc" => kbd::KEY_TASKBAR,
             // "start" moved here from the taskbar, where it was a lie: it
             // focused the bar, and anybody typing it means the menu.
-            "start" | "startmenu" | "win" => kbd::KEY_STARTMENU,
+            "start" | "startmenu" | "win" | "super" => kbd::KEY_STARTMENU,
             "up" => kbd::KEY_UP,
             "down" => kbd::KEY_DOWN,
             "left" => kbd::KEY_LEFT,

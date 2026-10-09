@@ -10,6 +10,38 @@ pub mod lease;
 pub mod region;
 pub mod render;
 pub mod scene;
+
+/// The time a frame is about, in milliseconds since boot (TSC), taken once
+/// when the frame's scene is built; outside a frame, the time now.
+///
+/// For programs that draw from the clock -- the Mines timer, Oracle's
+/// animation. Their stamp, their paint and `render verify`'s reference paint
+/// happen at three different moments, and a program reading the live clock in
+/// each could see a second turn over between them: the stamp said one digit,
+/// the paint drew another, and the verifier reported a difference that was the
+/// clock's. One reading per frame makes all three agree.
+pub fn now_ms() -> u64 {
+    match FRAME_MS.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => live_ms(),
+        t => t,
+    }
+}
+
+fn live_ms() -> u64 {
+    let mhz = crate::time::tsc_mhz() as u64;
+    if mhz == 0 {
+        return 0;
+    }
+    crate::time::rdtsc() / (mhz * 1000)
+}
+
+static FRAME_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Called by the desktop as it builds a frame's scene, and with `false` when
+/// the frame is done.
+pub(crate) fn frame_clock(on: bool) {
+    FRAME_MS.store(if on { live_ms().max(1) } else { 0 }, core::sync::atomic::Ordering::Relaxed);
+}
 pub mod compose;
 pub mod console;
 pub mod mines;

@@ -935,6 +935,19 @@ fn comp_task() {
             // is not allowed to happen underneath one.
             gfx::render::beat(gfx::render::Phase::Pointer);
             gfx::desk::poll_mouse();
+            // **Keystrokes, here and not in the shell's idle loop.** The
+            // desktop's keys -- Alt-Tab, Super, a menu, every key for a window
+            // that is not the terminal -- were offered to the desktop only
+            // when the shell was idle, so a command that ran for ten seconds
+            // took Alt-Tab with it for ten seconds. In order, the head only,
+            // and the desktop's refusals go to the shell (`kbd::route`).
+            gfx::render::beat(gfx::render::Phase::Keys);
+            if gfx::desk::ready() {
+                dev::kbd::route(|k| match gfx::desk::key(k) {
+                    gfx::desk::Route::Handled => None,
+                    gfx::desk::Route::Shell(k) => Some(k),
+                });
+            }
             // The USB devices are polled above, for every owner of the
             // screen. They are polled rather than interrupt-driven, and polled
             // from the shell's idle loop they stopped for the length of every
@@ -1014,7 +1027,7 @@ fn comp_task() {
                 gfx::desk::paint_tray();
                 gfx::render::beat(gfx::render::Phase::Turn);
                 task::sleep_until_or(ticks + t, || {
-                    gfx::render::is_dirty() || dev::mouse::pending()
+                    gfx::render::is_dirty() || dev::mouse::pending() || dev::kbd::routable()
                 });
                 continue;
             }
@@ -1403,6 +1416,20 @@ fn init_keyboard(acpi: &Option<acpi::Acpi>) {
 
     let report = dev::kbd::init(a, dev::lapic::id());
     let mouse = dev::mouse::init(a, dev::lapic::id());
+    // The keyboard's configuration as the mouse left it, which is what the
+    // machine runs with. The mouse's set-up once wrote a zero here and
+    // switched the keyboard off; the line says so if anything ever does again.
+    match dev::kbd::controller_config() {
+        Some(c) if c & 0x01 != 0 && c & 0x10 == 0 => {
+            kprintln!("  after the mouse: config {:#04x}, the keyboard still interrupts", c)
+        }
+        Some(c) => {
+            console::set_color(LTRED);
+            kprintln!("  after the mouse: config {:#04x} -- the keyboard will NOT interrupt", c);
+            console::set_color(LTGRAY_IDX);
+        }
+        None => kprintln!("  after the mouse: config unreadable"),
+    }
     if let Some(fb) = gfx::primary() {
         dev::mouse::set_bounds(fb.width() as i32, fb.height() as i32);
     }

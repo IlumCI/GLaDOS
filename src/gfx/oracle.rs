@@ -247,8 +247,7 @@ impl Oracle {
         // numbers arrive rather than being there already. It is presentation
         // and nothing else: what it uncovers was measured once, at boot, and
         // does not change while it is being drawn.
-        let now = crate::dev::lapic::ticks() as u64 * 1000 / crate::TIMER_HZ as u64;
-        let since = now.saturating_sub(self.shown_ms);
+        let since = now_ms().saturating_sub(self.shown_ms);
         let grow = (since as f32 / REVEAL_MS as f32).clamp(0.0, 1.0);
 
         let chance = 100 / f.classes.max(1);
@@ -549,8 +548,10 @@ impl Oracle {
     }
 }
 
+/// `gfx::now_ms`: the frame's time while a frame is drawn, so a moving tab's
+/// stamp, its paint and the verifier's reference all see one moment.
 fn now_ms() -> u64 {
-    crate::dev::lapic::ticks() as u64 * 1000 / crate::TIMER_HZ as u64
+    super::now_ms()
 }
 
 fn clip(s: &str, n: usize) -> String {

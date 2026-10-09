@@ -1962,7 +1962,16 @@ pub fn selftest() -> bool {
     // `take_as` exists so it can be asked without arranging a second task.
     let me = crate::task::current();
     let other = me.wrapping_add(1);
-    let first = Claim::take();
+    // The compositor holds the claim for the whole of each frame, so "free"
+    // has to be waited for: with `render verify on` a frame is slow enough
+    // that taking it cold lost the race often enough to fail the suite. A
+    // second's patience, then the claim is taken as before.
+    let deadline = crate::time::rdtsc() + crate::time::tsc_mhz().max(1) as u64 * 1_000_000;
+    let mut first = Claim::take();
+    while first.is_none() && crate::time::rdtsc() < deadline {
+        crate::task::yield_now();
+        first = Claim::take();
+    }
     claim("a free claim can be taken", first.is_some());
     claim("and another task is refused", Claim::take_as(other).is_none());
     // Reentrancy, asserted rather than assumed: `draw` holds this across a
@@ -1971,15 +1980,23 @@ pub fn selftest() -> bool {
     // frame.
     claim("while this task may re-enter", Claim::take().is_some());
     drop(first);
-    let again = Claim::take();
+    // The compositor may take it in between, which is the claim working;
+    // what is asked is that it can be had again at all.
+    let deadline = crate::time::rdtsc() + crate::time::tsc_mhz().max(1) as u64 * 1_000_000;
+    let mut again = Claim::take();
+    while again.is_none() && crate::time::rdtsc() < deadline {
+        crate::task::yield_now();
+        again = Claim::take();
+    }
     claim("dropping it lets the next one in", again.is_some());
     drop(again);
     // Leaving it held would deadlock every later repaint, so the release path
     // is worth one more claim of its own -- and a re-entry must *not* release
-    // it, which is what `Claim::took` is for.
+    // it, which is what `Claim::took` is for. Asked of this task: the
+    // compositor holding it a moment later is not this task leaking it.
     claim(
-        "and it is free afterwards",
-        PAINTER.load(core::sync::atomic::Ordering::Relaxed) == NOBODY,
+        "and this task no longer holds it",
+        PAINTER.load(core::sync::atomic::Ordering::Relaxed) != me,
     );
 
     // --- tiling -----------------------------------------------------------
@@ -3097,6 +3114,60 @@ pub fn retitle_tagged(tag: u64, title: &str) {
     });
     super::render::invalidate();
 }
+
+/// What a Super chord does.
+///
+/// The few that need nothing that does not exist yet. The tiling binds --
+/// focus and move by arrow, float, fullscreen -- arrive with the tiling
+/// (phase 13), and Super-Tab becomes the Flip view (phase 15); until then it
+/// switches windows. A chord with no binding is still the desktop's and is
+/// dropped, so a reader of the plan does not find Super-V typing a 'v'.
+fn super_key(k: u8) {
+    let Some((key, shift)) = kbd::chord_of(k) else { return };
+    match (key, shift) {
+        (b'\n', _) => open_terminal(),
+        (b'q', _) => close_focused(),
+        (b'd', _) => show_desktop(),
+        (b'\t', _) => {
+            with(|d| d.mode = Mode::Normal);
+            cycle(false);
+        }
+        _ => {}
+    }
+    super::render::invalidate();
+}
+
+/// Super-D: put every window away, and the second press brings back exactly
+/// those that were showing -- not every window, which would also restore the
+/// ones somebody had minimised on purpose.
+fn show_desktop() {
+    let away = unsafe { &mut *SHOWN_AWAY.get() };
+    with(|d| {
+        let showing: Vec<(u64, WinState)> = d
+            .windows
+            .iter()
+            .filter(|w| w.state != WinState::Minimised)
+            .map(|w| (w.serial, w.state))
+            .collect();
+        if showing.is_empty() && !away.is_empty() {
+            for w in d.windows.iter_mut() {
+                if let Some((_, was)) = away.iter().find(|(s, _)| *s == w.serial) {
+                    w.state = *was;
+                }
+            }
+            away.clear();
+        } else {
+            for w in d.windows.iter_mut() {
+                w.state = WinState::Minimised;
+            }
+            *away = showing;
+        }
+    });
+}
+
+/// Which windows Super-D put away, and how each was showing -- a maximised
+/// window comes back maximised. Only touched under the desktop's claim.
+static SHOWN_AWAY: Racy<Vec<(u64, WinState)>> = Racy::new(Vec::new());
 
 pub fn close_focused() {
     with(|d| {
@@ -4556,6 +4627,7 @@ pub fn draw() {
     let (reported, full) = super::render::take_damage();
     let whole = Rect::new(0, 0, real.width(), real.height());
     let mut damage = super::region::Region::new();
+    super::frame_clock(true);
     with_ref(|d| {
         let next = layers(d, &real, screen);
         let prev = unsafe { &mut *PREV.get() };
@@ -4597,6 +4669,7 @@ pub fn draw() {
         }
         *prev = Some(next);
     });
+    super::frame_clock(false);
     super::render::drew();
     let presenting = crate::time::rdtsc();
     super::render::damaged(damage.len() as u64, damage.area());
@@ -4944,7 +5017,32 @@ static VERIFY_CONSOLE: core::sync::atomic::AtomicU64 = core::sync::atomic::Atomi
 static VERIFY_RUNS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static VERIFY_FIRST: Racy<Option<Rect>> = Racy::new(None);
 
+/// The verifier's reference frame. Written only under the paint claim.
+static VERIFY_BUF: Racy<Vec<u32>> = Racy::new(Vec::new());
+
 pub fn set_verify(on: bool) {
+    if on {
+        // Sized here, on the shell's task and under the paint claim, so no
+        // frame ever allocates it and none can be reading it while it moves.
+        if let Some(fb) = super::primary() {
+            let n = fb.width() as usize * fb.height() as usize;
+            let deadline = crate::time::rdtsc() + crate::time::tsc_mhz().max(1) as u64 * 1_000_000;
+            let mut held = Claim::take();
+            while held.is_none() && crate::time::rdtsc() < deadline {
+                crate::task::yield_now();
+                held = Claim::take();
+            }
+            if held.is_some() {
+                let buf = unsafe { &mut *VERIFY_BUF.get() };
+                if buf.len() != n {
+                    buf.clear();
+                    if buf.try_reserve_exact(n).is_ok() {
+                        buf.resize(n, 0);
+                    }
+                }
+            }
+        }
+    }
     VERIFY.store(on, core::sync::atomic::Ordering::Relaxed);
     if on {
         VERIFY_BAD.store(0, core::sync::atomic::Ordering::Relaxed);
@@ -4971,17 +5069,22 @@ pub fn verify_report() -> (u64, u64, u64, Option<Rect>) {
 
 /// Paint the whole frame into scratch memory and compare it with `back`.
 ///
-/// The tray readouts are left out of the comparison: `paint_tray` writes them
-/// after the frame, on its own tenth-of-a-second schedule, so the frame never
-/// contains them and the back buffer usually does.
+/// The tray readouts are left out of the comparison: their text is read at
+/// paint time, so a tenth of a second turning over between the frame and the
+/// reference is a difference in the clock rather than in the renderer.
+///
+/// The reference lives in `VERIFY_BUF`, allocated once when verification is
+/// switched on. It was a fresh eight megabytes per frame, and `diag mt` --
+/// which checks the heap has not grown across a run -- caught a frame that
+/// happened to be in flight at its closing sample and reported it as a leak
+/// of exactly one 1920x1080 frame.
 fn verify_frame(back: &Framebuffer, d: &Desktop, screen: Rect) {
     let (w, h) = (back.width(), back.height());
     let n = w as usize * h as usize;
-    let mut px = Vec::new();
-    if px.try_reserve_exact(n).is_err() {
+    let px = unsafe { &mut *VERIFY_BUF.get() };
+    if px.len() != n {
         return;
     }
-    px.resize(n, 0u32);
     let scratch = unsafe { Framebuffer::over_ram(px.as_mut_ptr() as u64, w, h, w, back.format()) };
     paint_scene(&scratch, d, screen);
     VERIFY_RUNS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -5532,6 +5635,12 @@ pub fn key(k: u8) -> Route {
             }
         });
         super::render::invalidate();
+        return Route::Handled;
+    }
+
+    // Super chords are the desktop's in every mode, like Alt-Tab.
+    if kbd::chord_of(k).is_some() {
+        super_key(k);
         return Route::Handled;
     }
 

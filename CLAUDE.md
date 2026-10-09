@@ -4325,6 +4325,16 @@ the firmware banner and the boot sequence first. `.qemu/qemu-stderr.log` says
 `Failed to find an available port`. Check for a running QEMU before launching,
 especially when the first run is in the background.
 
+**`@mouse sendkey <keys>` is the real keyboard**, through the i8042, the
+decoder and the compositor's routing -- `sendkey meta_l-d`, `sendkey alt-tab`,
+`sendkey e`. It did nothing until 1.4.1, and not because of QEMU: the mouse's
+set-up read the controller's configuration while the keyboard's interrupt was
+already live, the keyboard handler took the reply, the read timed out, and a
+configuration of zero was written back -- keyboard interrupt off, for the life
+of every boot. `kbd` showed it as one keyboard interrupt and config `0x02`.
+Nothing on this path depends on the emulator, so whether it ever bit on the
+GF63 is unknown; boot now prints the configuration as the mouse left it.
+
 **`@send <text>` types raw into whatever has the keyboard**, with `\e` for
 Escape and `\r` for Enter, and does not wait for a prompt -- it is how a
 program that owns the screen until told to stop is driven at all:
@@ -5006,6 +5016,14 @@ the order a frame happens:
   (`cpu::mtrr`), and present uses streaming stores. `video cache` reports the
   memory type the hardware actually applies.
 - **A full-screen program holds a `gfx::lease`.**
+- **The compositor routes keystrokes** (`kbd::route`), in order and the head
+  only, so Alt-Tab, Super and every key for a window other than the terminal
+  work while the shell is inside a command; the desktop's refusals queue for
+  the shell. **Super** (the Windows key, `E0 5B`/`E0 5C`, which the decoder
+  used to drop) is a byte per chord in `0xC0..=0xE3`: tapped alone it opens
+  Start, Super-Enter a terminal, Super-Q closes, Super-D shows the desktop and
+  brings back what it hid, Super-Tab switches. `win keys super-<key>` drives
+  them; `kbd` reports interrupts, routing and the controller's configuration.
 
 `render verify on` composes a full reference frame after every incremental
 one and compares them; a stamp that misses some state shows up there as a

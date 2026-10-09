@@ -392,6 +392,15 @@ pub fn input_arrived() {
     }
 }
 
+/// A keystroke is waiting to be routed. Wakes the compositor, and arms the
+/// same run-next preference a pointer packet does.
+pub fn key_arrived() {
+    let i = COMP_TASK.load(Ordering::Acquire);
+    if i != u64::MAX && crate::task::wake(i as usize) {
+        WOKE_FOR_INPUT.store(true, Ordering::Release);
+    }
+}
+
 /// Set when an input event woke the compositor and nothing has acted on it.
 static WOKE_FOR_INPUT: AtomicBool = AtomicBool::new(false);
 
@@ -672,6 +681,8 @@ pub enum Phase {
     Frame,
     /// Painting the taskbar's uptime and charge.
     Tray,
+    /// Offering keystrokes to the desktop, and running what a key started.
+    Keys,
 }
 
 impl Phase {
@@ -683,6 +694,7 @@ impl Phase {
             Phase::Pointer => 3,
             Phase::Frame => 4,
             Phase::Tray => 5,
+            Phase::Keys => 6,
         }
     }
 
@@ -693,6 +705,7 @@ impl Phase {
             3 => Phase::Pointer,
             4 => Phase::Frame,
             5 => Phase::Tray,
+            6 => Phase::Keys,
             _ => Phase::Cold,
         }
     }
@@ -702,6 +715,7 @@ impl Phase {
             Phase::Cold => "never started",
             Phase::Turn => "between turns",
             Phase::Ops => "applying posted ops",
+            Phase::Keys => "routing keystrokes",
             Phase::Pointer => "reading the pointer",
             Phase::Frame => "composing a frame",
             Phase::Tray => "painting the taskbar readouts",

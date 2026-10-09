@@ -222,12 +222,41 @@ pub struct InitReport {
 }
 
 pub fn init(acpi: &Acpi, apic_id: u8) -> InitReport {
+    // **The whole conversation with the controller happens with interrupts
+    // off**, because the keyboard's interrupt is already live by now and it
+    // shares the data port. Every reply below -- the config byte, each ACK,
+    // the device id -- raises IRQ1 as it lands, and the keyboard handler read
+    // it first. The config read then timed out, `unwrap_or(0)` turned the
+    // timeout into a configuration of zero, and writing that back switched
+    // the keyboard's interrupt off for the life of the boot: the controller
+    // read back `0x02`, irq1 off, translation off, after exactly one keyboard
+    // interrupt, which was the stolen config byte. Found under QEMU, where no
+    // PS/2 key had ever reached this kernel -- every test drove the desktop
+    // through `win keys` -- and it is no property of QEMU's: it depends only
+    // on IRQ1 being routed before the mouse is set up, which it always is.
+    let flags: u64;
+    unsafe { core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags) };
+    let report = init_quiet(acpi, apic_id);
+    // Anything the mouse sent while the line was masked is stale, and the
+    // edges that would announce it were taken with interrupts off.
+    flush();
+    if flags & (1 << 9) != 0 {
+        crate::cpu::enable_interrupts();
+    }
+    report
+}
+
+fn init_quiet(acpi: &Acpi, apic_id: u8) -> InitReport {
     let mut report = InitReport { present: false, wheel: false, id: None, routed_gsi: None };
 
     command(CMD_ENABLE_PORT2);
 
     command(CMD_READ_CONFIG);
-    let current = read_data().unwrap_or(0);
+    // A configuration that could not be read is not written back: a guess
+    // here is a byte that turns the keyboard off.
+    let Some(current) = read_data() else {
+        return report;
+    };
     let config = (current | CFG_PORT2_IRQ) & !CFG_PORT2_CLOCK_OFF;
     command(CMD_WRITE_CONFIG);
     write_data(config);
