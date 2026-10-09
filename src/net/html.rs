@@ -390,6 +390,43 @@ fn squeeze(into: &mut String, s: &str) {
     }
 }
 
+/// Every link in a page, in document order, resolved against where the page
+/// came from.
+///
+/// **It lives here rather than in whatever renders a page, because there is
+/// more than one reader now** -- the browser numbers these for a person and
+/// `net::reader` numbers them for the model, and two walks over the same
+/// blocks are two chances to disagree about what link 3 is.
+///
+/// Document order is the whole contract: a caller hands out indices and the
+/// next caller resolves one, so the order has to be a property of the page and
+/// not of when somebody looked.
+///
+/// **`resolve` and not `parse_url`, which is a fix rather than a tidy-up.**
+/// `parse_url` accepts only absolute URLs, so the browser's own link list had
+/// been dropping every `href="/about"` and `href="page.html"` on every site in
+/// the world -- which on most pages is nearly all of them. `resolve` takes the
+/// base and handles absolute, protocol-relative, root-relative and
+/// directory-relative alike, and drops a bare `#fragment` because that is a
+/// position on this page rather than another page.
+pub fn links_of(page: &Page, base: &Url) -> Vec<Url> {
+    let mut out = Vec::new();
+    for b in &page.blocks {
+        let spans = match b {
+            Block::Heading(_, s) | Block::Para(s) | Block::Item(s) => s,
+            _ => continue,
+        };
+        for s in spans {
+            if let Span::Link { href, .. } = s {
+                if let Some(u) = resolve(base, href) {
+                    out.push(u);
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn parse(body: &[u8], base: &Url) -> Page {
     let mut p = Parser { b: body, i: 0 };
     let mut page = Page { title: String::new(), blocks: Vec::new() };
@@ -405,11 +442,22 @@ pub fn parse(body: &[u8], base: &Url) -> Page {
 
     macro_rules! flush_text {
         () => {
-            if !buf.trim().is_empty() {
-                let t = String::from(buf.trim_end_matches(' '));
+            // A run of pure whitespace is kept when it sits *between* spans,
+            // because there it is the separator -- `</a> <a>` would otherwise
+            // join two link labels into one word. At the start of a block it
+            // is still dropped, since a paragraph does not open with a space.
+            if !buf.is_empty() && (!buf.trim().is_empty() || !spans.is_empty()) {
                 match &link {
-                    Some(h) => spans.push(Span::Link { text: t, href: h.clone() }),
-                    None => spans.push(Span::Text(t)),
+                    // An anchor's own label is trimmed: the spaces inside
+                    // `<a> x </a>` are the author's formatting, where the ones
+                    // outside it are the sentence.
+                    Some(h) => {
+                        let t = String::from(buf.trim());
+                        if !t.is_empty() {
+                            spans.push(Span::Link { text: t, href: h.clone() });
+                        }
+                    }
+                    None => spans.push(Span::Text(buf.clone())),
                 }
             }
             buf.clear();
@@ -437,11 +485,25 @@ pub fn parse(body: &[u8], base: &Url) -> Page {
     while p.i < body.len() {
         if body[p.i] != b'<' {
             let t = p.text_until_tag();
-            squeeze(&mut buf, &{
-                let mut d = String::new();
-                push_decoded(&mut d, t);
-                d
-            });
+            let mut d = String::new();
+            push_decoded(&mut d, t);
+            // **`squeeze` drops whitespace while its target is empty, which is
+            // right at the start of a block and wrong after a link.** The run
+            // following `</a>` starts a fresh `buf`, so the space that
+            // separated the anchor from the next word was being discarded --
+            // and `flush_text!` trimmed the other side, so `An <a>x</a> b`
+            // became the three spans `An`, `x`, `b` with nothing to say they
+            // had ever been apart.
+            //
+            // Nothing noticed because the only reader was `browse::wrap`,
+            // which splits spans into words and rejoins them with spaces of
+            // its own. A reader that concatenates gets `Anxb`, and cannot
+            // repair it: the information that `x</a> b` had a space and
+            // `x</a>.` did not is exactly what was thrown away.
+            if buf.is_empty() && !spans.is_empty() && d.starts_with(char::is_whitespace) {
+                buf.push(' ');
+            }
+            squeeze(&mut buf, &d);
             continue;
         }
         let save = p.i;

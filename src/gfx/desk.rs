@@ -414,18 +414,10 @@ const START_ITEMS: [(&str, &str); 13] = [
 /// Run what an icon or Start entry names.
 fn launch(cmd: &str) {
     if cmd == "term" {
-        with(|d| {
-            if let Some(i) = d
-                .windows
-                .iter()
-                .position(|w| matches!(w.content, Content::Terminal(c) if c == super::console::USER))
-            {
-                // The icon is a way back for a minimised terminal besides
-                // its task button, so restoring and raising it here is wanted.
-                d.windows[i].state = WinState::Normal;
-                d.raise(i);
-            }
-        });
+        // Open the terminal, creating it if the desktop has none -- which a
+        // clean startup does. The icon is also the way back for a minimised
+        // one, which `open_terminal` restores and raises.
+        open_terminal();
         return;
     }
     // Queue the command and let it run. A command that opens a window leaves
@@ -913,24 +905,58 @@ impl Desktop {
 }
 
 pub fn init() {
-    let Some(fb) = super::primary() else {
+    if super::primary().is_none() {
         return;
-    };
-    let screen = screen_rect(&fb);
+    }
 
-    let mut pm = ui::program_manager();
-    let (pm_w, pm_h) = pm.preferred();
-    pm.set_title("Program Manager");
-    let pm_w = pm_w.min(screen.w / 2);
-    // The icon column stays visible: the wall is part of the interface now,
-    // and a terminal that covers it leaves the icons reachable only by
-    // closing the terminal, which is backwards.
+    // A clean desktop: nothing open. The wallpaper, the icon column and the
+    // taskbar are the whole of it, and the operator opens what they want from
+    // the sidebar -- the machine covers its own wall with nothing. This is the
+    // "manufacturer hands you a bare desktop" startup, and it is what lets the
+    // boot splash settle onto the wallpaper's mark with nothing in front of it.
+    //
+    // The consoles are not given windows here, but they still exist: the shell
+    // runs on the serial line regardless, `USER` is shown by a Terminal opened
+    // from the sidebar, and `EXEC` carries the boot log for when its window is
+    // opened. Both are retargeted into the back buffer below so their output is
+    // ready the instant a window asks for them.
+    unsafe {
+        *DESK.get() = Some(Desktop {
+            windows: Vec::new(),
+            mode: Mode::Normal,
+            hover: Hover::None,
+            query: String::new(),
+        })
+    };
+    // The compositor needs the heap, which exists by now; the console then
+    // paints into the back buffer and pushes its own cells through, so shell
+    // output stays immediate between desktop draws.
+    super::compose::init();
+    if let Some(back) = super::compose::target() {
+        for ch in [super::console::USER, super::console::EXEC] {
+            super::console::with_ch(ch, |c| c.retarget(back.clone(), true));
+        }
+    }
+    super::render::invalidate();
+}
+
+fn item(label: &str, cmd: &str) -> MenuItem {
+    MenuItem {
+        label: String::from(label),
+        action: Action::Run(String::from(cmd)),
+    }
+}
+
+/// The user terminal window, with its menus. Built on demand now rather than at
+/// `init`, because a clean desktop opens with nothing -- so this is the one
+/// place the terminal's shape is described, and `open_terminal` is the one
+/// caller. `closable` stays false: closing the terminal minimises it, the way
+/// it always has, because the shell behind it keeps running.
+fn make_terminal(screen: Rect) -> Window {
     let icons_w = 10 + ICON_W + 10;
     let term_x = screen.x.max(icons_w);
-    let term_w = (screen.x + screen.w)
-        .saturating_sub(term_x + pm_w + MARGIN);
-
-    let terminal = Window {
+    let term_w = (screen.x + screen.w).saturating_sub(term_x + MARGIN);
+    Window {
         title: String::from("GLaDOS Terminal"),
         icon: ICO_TERM,
         rect: Rect::new(term_x, screen.y, term_w, screen.h),
@@ -966,82 +992,38 @@ pub fn init() {
             },
         ],
         closable: false,
-    };
-
-    let pm_x = (term_x + term_w + MARGIN).min(screen.x + screen.w.saturating_sub(pm_w));
-    let pmw = Window {
-        title: String::from("Program Manager"),
-        icon: ICO_PROGRAMS,
-        rect: Rect::new(pm_x, screen.y, pm_w, pm_h.min(screen.h)),
-        state: WinState::Normal,
-        snap_back: None,
-        route: None,
-        round: theme::WIN_ROUND,
-        content: Content::Panel(pm),
-        menus: Vec::new(),
-        closable: false,
-    };
-
-    // The executive console: the boot log, background tasks, and the episodes
-    // the machine decides to run on its own.
-    //
-    // Starts minimised. It carries everything printed before the shell
-    // existed, so it is worth having and worth being able to reach, and it is
-    // not what an operator wants filling half the screen the moment they sit
-    // down. The taskbar button is the affordance; the machine raises nothing
-    // by itself, because a window that appears on its own while somebody is
-    // typing is the problem this split was made to solve, arriving by a
-    // different route.
-    let executive = Window {
-        title: String::from("Executive"),
-        icon: ICO_TERM,
-        rect: Rect::new(
-            term_x + MARGIN,
-            screen.y + MARGIN,
-            term_w.saturating_sub(MARGIN * 2).max(320),
-            screen.h.saturating_sub(MARGIN * 4).max(200),
-        ),
-        state: WinState::Minimised,
-        snap_back: None,
-        route: None,
-        round: theme::WIN_ROUND,
-        content: Content::Terminal(super::console::EXEC),
-        menus: alloc::vec![Menu {
-            label: String::from("View"),
-            items: alloc::vec![
-                item("Clear", "exec clear"),
-                item("Save log", "log save /tmp/boot.txt"),
-                item("Redraw", "refresh"),
-            ],
-        }],
-        closable: true,
-    };
-
-    unsafe {
-        *DESK.get() = Some(Desktop {
-            windows: alloc::vec![pmw, executive, terminal],
-            mode: Mode::Normal,
-            hover: Hover::None,
-            query: String::new(),
-        })
-    };
-    // The compositor needs the heap, which exists by now; the console then
-    // paints into the back buffer and pushes its own cells through, so shell
-    // output stays immediate between desktop draws.
-    super::compose::init();
-    if let Some(back) = super::compose::target() {
-        for ch in [super::console::USER, super::console::EXEC] {
-            super::console::with_ch(ch, |c| c.retarget(back.clone(), true));
-        }
     }
-    super::render::invalidate();
 }
 
-fn item(label: &str, cmd: &str) -> MenuItem {
-    MenuItem {
-        label: String::from(label),
-        action: Action::Run(String::from(cmd)),
-    }
+/// Open the user terminal, creating it if the desktop has none. The sidebar
+/// icon and the `term` action land here, so a bare clean desktop is one click
+/// from a shell. Distinct from `focus_terminal`, which the shell calls after
+/// every command and must *not* create a window -- a shell that conjured its
+/// own window on every line could never be closed.
+pub fn open_terminal() {
+    let Some(fb) = super::primary() else {
+        return;
+    };
+    let screen = screen_rect(&fb);
+    let existing = with(|d| {
+        d.windows
+            .iter()
+            .position(|w| matches!(w.content, Content::Terminal(c) if c == super::console::USER))
+    })
+    .flatten();
+    with(|d| match existing {
+        Some(i) => {
+            d.windows[i].state = WinState::Normal;
+            d.raise(i);
+        }
+        None => {
+            let term = make_terminal(screen);
+            d.windows.push(term);
+            let n = d.windows.len() - 1;
+            d.raise(n);
+        }
+    });
+    super::render::invalidate();
 }
 
 /// Open a new window holding a panel.
@@ -2215,6 +2197,12 @@ pub fn poll_mouse() {
     }
     let s = mouse::take();
     if !s.moved {
+        // Nothing new, but a paint may be owed from a turn the pacing refused.
+        if unsafe { *CURSOR_PENDING.get() } {
+            if let Some((x, y)) = unsafe { *POS.get() } {
+                paint_cursor_paced(x, y);
+            }
+        }
         return;
     }
     // Still a precondition even though the framebuffer is no longer touched
@@ -2290,11 +2278,50 @@ pub fn poll_mouse() {
     unsafe { *SHAPE.get() = want };
     // Same claim the pump takes. This runs on the shell task and the pump runs
     // on whichever task is generating, so without it the two interleave in
-    // exactly the way the cursor statics cannot survive.
-    move_cursor(x as u32, y as u32);
+    // exactly the way the cursor statics cannot survive. Paced, not per event
+    // -- see `CURSOR_PAINTED_AT`.
+    paint_cursor_paced(x as u32, y as u32);
 }
 
 static BUTTONS: Racy<(bool, bool)> = Racy::new((false, false));
+/// When the arrow was last painted, in TSC ticks, and whether a move has been
+/// recorded since that is still owed a paint.
+///
+/// **The cursor is coalesced to one paint per `CURSOR_MIN_US`, and it had to
+/// be.** `cursor_show` writes the arrow straight into the aperture and
+/// `cursor_hide` repaints what was under it from the back buffer, so every
+/// paint is an erase and a redraw on the one surface a person is looking at.
+/// While the pointer was read from the shell's idle loop that happened at most
+/// once a tick; read from the compositor's loop it happened once per HID
+/// report, several hundred times a second, and the arrow strobed -- and each
+/// erase copied whatever the back buffer held at that instant, which during a
+/// `draw()` on another task is half a frame, so what the pointer crossed
+/// flickered with it. Every position is still recorded and every press still
+/// acts at once; only the painting waits, and the last position is always
+/// painted on a later turn so the arrow never stops short of the hand.
+static CURSOR_PAINTED_AT: Racy<u64> = Racy::new(0);
+static CURSOR_PENDING: Racy<bool> = Racy::new(false);
+/// Four milliseconds: 250 paints a second, which no hand can tell from
+/// unlimited, and a tenth of what a 1 kHz mouse was asking for.
+const CURSOR_MIN_US: u64 = 4_000;
+
+/// Paint the arrow at `POS` if enough time has passed since the last paint;
+/// otherwise remember that one is owed.
+fn paint_cursor_paced(x: u32, y: u32) {
+    let now = crate::time::rdtsc();
+    let min = crate::time::tsc_mhz().max(1) * CURSOR_MIN_US;
+    let last = unsafe { *CURSOR_PAINTED_AT.get() };
+    if now.wrapping_sub(last) < min {
+        unsafe { *CURSOR_PENDING.get() = true };
+        return;
+    }
+    if move_cursor(x, y) {
+        unsafe {
+            *CURSOR_PAINTED_AT.get() = now;
+            *CURSOR_PENDING.get() = false;
+        }
+    }
+}
 /// The previous press, for double-click detection: milliseconds and place.
 static LAST_CLICK: Racy<(u64, i32, i32)> = Racy::new((0, -100, -100));
 
@@ -2363,22 +2390,63 @@ const CORNER: i32 = 16;
 /// window on its own: a window that appears while an operator is typing is
 /// the problem the split was made to solve, arriving by another route.
 pub fn show_executive() {
-    let ok = with(|d| {
-        let Some(i) = d
-            .windows
+    let Some(fb) = super::primary() else {
+        return;
+    };
+    let screen = screen_rect(&fb);
+    let existing = with(|d| {
+        d.windows
             .iter()
             .position(|w| matches!(w.content, Content::Terminal(c) if c == super::console::EXEC))
-        else {
-            return false;
-        };
-        d.windows[i].state = WinState::Normal;
-        let last = d.windows.len() - 1;
-        d.windows.swap(i, last);
-        true
     })
-    .unwrap_or(false);
-    if ok {
-        super::render::invalidate();
+    .flatten();
+    // Created on demand like the terminal: a clean desktop opens with no
+    // Executive window, but its console has carried the boot log the whole
+    // time, so opening one here shows everything printed before the shell.
+    with(|d| match existing {
+        Some(i) => {
+            d.windows[i].state = WinState::Normal;
+            d.raise(i);
+        }
+        None => {
+            let e = make_executive(screen);
+            d.windows.push(e);
+            let n = d.windows.len() - 1;
+            d.raise(n);
+        }
+    });
+    super::render::invalidate();
+}
+
+/// The Executive (boot-log) window, built on demand. One place its shape is
+/// described; `show_executive` is the one caller.
+fn make_executive(screen: Rect) -> Window {
+    let icons_w = 10 + ICON_W + 10;
+    let term_x = screen.x.max(icons_w);
+    let term_w = (screen.x + screen.w).saturating_sub(term_x + MARGIN);
+    Window {
+        title: String::from("Executive"),
+        icon: ICO_TERM,
+        rect: Rect::new(
+            term_x + MARGIN,
+            screen.y + MARGIN,
+            term_w.saturating_sub(MARGIN * 2).max(320),
+            screen.h.saturating_sub(MARGIN * 4).max(200),
+        ),
+        state: WinState::Normal,
+        snap_back: None,
+        route: None,
+        round: theme::WIN_ROUND,
+        content: Content::Terminal(super::console::EXEC),
+        menus: alloc::vec![Menu {
+            label: String::from("View"),
+            items: alloc::vec![
+                item("Clear", "exec clear"),
+                item("Save log", "log save /tmp/boot.txt"),
+                item("Redraw", "refresh"),
+            ],
+        }],
+        closable: true,
     }
 }
 
@@ -2782,6 +2850,38 @@ fn act_on(step: ui::Step) {
 /// the dialog open, one place further back. The same control has to mean the
 /// same thing however it is pressed; that rule is why the pointer and the paint
 /// pass share their layout functions, and it applies to the keyboard too.
+/// Close every window whose program carries this tag. Answers how many.
+pub fn close_tagged(tag: u64) -> usize {
+    if tag == 0 {
+        return 0;
+    }
+    let n = with(|d| {
+        let before = d.windows.len();
+        d.windows.retain(|w| !matches!(&w.content, Content::App(a) if a.tag() == tag));
+        before - d.windows.len()
+    })
+    .unwrap_or(0);
+    if n > 0 {
+        super::render::invalidate();
+    }
+    n
+}
+
+/// Retitle the window whose program carries this tag.
+pub fn retitle_tagged(tag: u64, title: &str) {
+    if tag == 0 {
+        return;
+    }
+    with(|d| {
+        for w in d.windows.iter_mut() {
+            if matches!(&w.content, Content::App(a) if a.tag() == tag) {
+                w.title = String::from(title);
+            }
+        }
+    });
+    super::render::invalidate();
+}
+
 pub fn close_focused() {
     with(|d| {
         if let Some(f) = d.focus() {

@@ -297,12 +297,53 @@ pub struct Frame {
 // at the `call` -- getting that wrong does not fault, it misaligns every SSE
 // spill the dispatcher makes, which on this machine surfaces as #GP inside
 // unrelated Rust code.
+//
+// **The `fxsave64` pair is the ABI and not a precaution, and it was missing.**
+// A Linux syscall clobbers `rax`, `rcx` and `r11` and *nothing else*: every
+// other register, the whole FPU and SSE state included, is the caller's and
+// must come back. This stub saved fifteen general-purpose registers and then
+// called into Rust, where SSE is not optional -- a `memcpy` is enough, never
+// mind anything holding a float -- so a guest's `xmm` registers were destroyed
+// by any syscall at all. Silent, because nothing faults: the guest reads back
+// whatever the kernel happened to leave.
+//
+// Found from the guest side after a long way round, which is the argument for
+// writing it down here. QuickJS died at exit in musl's `pthread_key_delete`,
+// walking a thread list whose `self->next` was zero, and musl's `__init_tp`
+// plainly sets it. One disassembly says why:
+//
+//     movq       %rbx,%xmm0        ; xmm0 = td
+//     punpcklqdq %xmm0,%xmm0       ; xmm0 = {td, td}
+//     mov        $0xda,%eax        ; SYS_set_tid_address
+//     syscall                      ; <-- td live in xmm0 across it
+//     movups     %xmm0,0x10(%rbx)  ; td->prev = td->next = td, one 16-byte store
+//
+// musl keeps the value in `xmm0` across the syscall and writes both list
+// pointers with a single `movups`. Entirely legal, and this kernel wrote zeros
+// over it -- so the list was never linked and the fault arrived at exit,
+// thousands of instructions later, in a function that had done nothing wrong.
+//
+// `fxsave64` and not a run of `movaps`: two instructions against thirty-two,
+// and it covers x87 and `MXCSR` as well, which the ABI also promises. The area
+// is 512 bytes on the syscall stack, which is per task, so a preempted syscall
+// keeps its own copy. `and rsp, -16` makes the alignment `fxsave` requires
+// self-enforcing rather than inherited from whoever allocated the stack --
+// which the `sub rsp, 8` above had been quietly assuming all along.
+//
+// **The residual gap is AVX**: `fxsave` does not carry `ymm`'s upper halves,
+// so a guest holding one of those across a syscall still loses it. Closing
+// that means `xsave` with `XCR0` in `edx:eax` and a 64-byte-aligned area,
+// which is the same shape and a bigger decision; it is named here rather than
+// left to be rediscovered the way this was.
 core::arch::global_asm!(
     r#"
     .globl glados_syscall_entry
 glados_syscall_entry:
     mov [rip + GLADOS_GUEST_RSP], rsp
     mov rsp, [rip + GLADOS_SYSCALL_STACK]
+    and rsp, -16
+    sub rsp, 512
+    fxsave64 [rsp]
     push r15
     push r14
     push r13
@@ -337,6 +378,8 @@ glados_syscall_entry:
     pop r13
     pop r14
     pop r15
+    fxrstor64 [rsp]
+    add rsp, 512
     mov rsp, [rip + GLADOS_GUEST_RSP]
     sysretq
 
@@ -461,6 +504,12 @@ pub struct Resume {
     pub r13: u64,
     pub r14: u64,
     pub r15: u64,
+    /// The thread-local base, `IA32_FS_BASE`. **Last, and read by Rust, not by
+    /// the assembly** that loads the fields above at fixed offsets. A forked
+    /// child was entered with whatever FS its pool task had -- zero -- and the
+    /// first thing glibc does is read its stack canary at `%fs:0x28`, so every
+    /// glibc child faulted reading address 0x28.
+    pub fs: u64,
 }
 
 /// Where the guest's stack pointer went while the handler runs.
@@ -564,6 +613,15 @@ pub enum Source {
     /// something it never owned. The pages to release are the backing's, and
     /// this is the only place that still knows which they were.
     Backed(u64),
+    /// A forked child's inherited record of one of its parent's mappings.
+    ///
+    /// **A sixth way back, and it is to do nothing.** The record was cloned
+    /// with the rest of the parent's entry, so it still named the parent's
+    /// source -- and a child calling `munmap` handed the *parent's* pages
+    /// back to the heap while the parent was still using them. The child's
+    /// own copy of those bytes is in its entry's `owned` list and goes back
+    /// with the entry, so the record owes nothing at all.
+    Copied,
     /// Pages a `memfd` owns, which the guest sees at their own address.
     ///
     /// A fifth source because it goes back a fifth way, and the way is to do
@@ -885,7 +943,16 @@ pub unsafe fn set_syscall_stack(stack: u64) {
 }
 
 pub unsafe fn enter_resumed(r: &Resume) -> u64 {
-    unsafe { glados_enter_guest_regs(r as *const Resume) }
+    unsafe {
+        crate::cpu::wrmsr(IA32_FS_BASE, r.fs);
+        glados_enter_guest_regs(r as *const Resume)
+    }
+}
+
+/// The running guest's thread-local base, for a `fork` that gives its child
+/// the same one.
+pub fn guest_fs() -> u64 {
+    unsafe { crate::cpu::rdmsr(IA32_FS_BASE) }
 }
 
 /// Where the running guest's stack pointer went, for a `fork` that has to give
@@ -898,7 +965,7 @@ pub fn guest_rsp() -> u64 {
 /// forever on a child that is never coming back.
 pub unsafe fn kill_if_overdue() -> bool {
     let d = DEADLINE.load(Ordering::Relaxed);
-    d != 0 && crate::dev::lapic::ticks() >= d
+    doomed() != 0 || (d != 0 && crate::dev::lapic::ticks() >= d)
 }
 
 /// Copy a guest entry into another slot, for `fork`.
@@ -929,7 +996,8 @@ pub fn clone_guest(
         brk_start: p.brk_start,
         brk_now: p.brk_now,
         brk_end: p.brk_end,
-        maps: p.maps.clone(),
+        // Re-badged as the child's copies: see `Source::Copied`.
+        maps: p.maps.iter().map(|m| Mapping { from: Source::Copied, ..*m }).collect(),
         fds: p.fds.clone(),
         cwd: p.cwd.clone(),
         argv: p.argv.clone(),
@@ -1106,6 +1174,9 @@ const PAGE: u64 = 4096;
 pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
     let brk = r.brk;
     teardown();
+    // A display server is listening before the guest's first instruction, so
+    // a client that connects first thing finds one. See `sky::server`.
+    crate::sky::server::serve();
     unsafe {
         *guest_slot() = Some(Space {
             image: r.image,
@@ -1146,6 +1217,9 @@ pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
 /// `exit_group` is how programs end -- so the teardown is where mappings are
 /// actually reclaimed and `munmap` is only the early return of one.
 pub fn teardown() -> usize {
+    // Every display connection ends with the guest that held it, and its
+    // windows with it: nothing else would take them down.
+    crate::sky::server::reap();
     // **Before anything else, and unconditionally.** A guest that took the
     // display and then faulted is exactly the case this has to cover, and a
     // release conditional on a tidy exit would leave the desktop stood down
@@ -1220,6 +1294,31 @@ pub fn teardown() -> usize {
         *guest_slot() = None;
     }
     freed
+}
+
+/// Free a finished forked child's guest entry: its descriptors, the mappings
+/// it made itself, the pages it was copied into and its tables.
+///
+/// **Not `teardown`**, which belongs to the session: it stands down the
+/// screen, the input script, the display server and every pool. A child ending
+/// owes none of that, only its own memory.
+///
+/// The caller must already be off this entry's root; dropping the entry drops
+/// the tables.
+pub fn release_guest(i: usize) {
+    let Some(mut sp) = (unsafe { slot_at(i) }).take() else { return };
+    for slot in sp.fds.iter_mut() {
+        if let Some(f) = slot.take() {
+            f.flush();
+        }
+    }
+    for m in sp.maps.drain(..) {
+        give_back(m.at, m.len, Some(m.from));
+    }
+    for (at, len) in core::mem::take(&mut sp.owned) {
+        free_pages(at, len);
+    }
+    drop(sp);
 }
 
 pub fn page_up(n: usize) -> usize {
@@ -1540,6 +1639,39 @@ fn with_fds<T>(f: impl FnOnce(&mut Vec<Option<super::fs::Fd>>, &str) -> T) -> Op
     Some(f(fds, cwd))
 }
 
+/// The directory a `*at` call's relative path is resolved against.
+///
+/// `AT_FDCWD` means the working directory; anything else is a descriptor that
+/// has to *be* a directory. This was `ENOSYS` for a long time under a comment
+/// saying a descriptor-relative path "needs the directory's path, which means
+/// keeping one per open directory" -- and `fs::Dir` has carried `path` since it
+/// was written, so the thing the refusal was waiting for was already there. The
+/// refusal outlived its reason, which is why it is worth saying so here.
+///
+/// What it cost while it stood: `openat(dirfd, rel)` is how every `fts`-based
+/// program walks a tree, so `find`, `rm -r`, `du` and `cp -r` all stopped at
+/// the first subdirectory.
+///
+/// **An absolute path ignores `dirfd` entirely**, which is POSIX and is not a
+/// shortcut: a caller passing a closed descriptor with an absolute path is
+/// correct code, so checking the descriptor first would refuse it.
+fn at_base(fds: &[Option<super::fs::Fd>], dirfd: u64, cwd: &str) -> Result<String, u64> {
+    if (dirfd as i64) == super::fs::AT_FDCWD {
+        return Ok(String::from(cwd));
+    }
+    let i = dirfd as i64;
+    if i < 0 || i as usize >= fds.len() {
+        return Err(EBADF);
+    }
+    match &fds[i as usize] {
+        Some(super::fs::Fd::Dir(d)) => Ok(d.borrow().path.clone()),
+        // A descriptor that is open and is not a directory is `ENOTDIR`, which
+        // is a different fact from `EBADF` and sends a program somewhere else.
+        Some(_) => Err(ENOTDIR),
+        None => Err(EBADF),
+    }
+}
+
 /// Open a path in the namespace and hand back a descriptor.
 ///
 /// **Read-only, and that is a decision rather than a gap.** The namespace is
@@ -1595,14 +1727,18 @@ fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
         return ENOENT;
     }
     let cwd_relative = !raw.starts_with('/');
-    if cwd_relative && (dirfd as i64) != super::fs::AT_FDCWD {
-        // A descriptor-relative open needs the directory's path, which means
-        // keeping one per open directory. Refused rather than resolved against
-        // the wrong place.
-        return ENOSYS;
-    }
     with_fds(|fds, cwd| {
-        let Some(path) = super::fs::resolve(cwd, &raw) else { return ENOENT };
+        // Only consulted for a relative path, so a closed `dirfd` beside an
+        // absolute one is not refused -- see `at_base`.
+        let base = if cwd_relative {
+            match at_base(fds, dirfd, cwd) {
+                Ok(b) => b,
+                Err(e) => return e,
+            }
+        } else {
+            String::new()
+        };
+        let Some(path) = super::fs::resolve(&base, &raw) else { return ENOENT };
         // **Before the store, because these are answers rather than blobs.**
         // Nothing under `/proc` is writable, listed by `sysbox` or in a
         // snapshot, and asking the store about it first would answer `ENOENT`
@@ -1860,8 +1996,28 @@ fn sys_nanosleep(req: u64) -> u64 {
     let hz = crate::TIMER_HZ as u64;
     let want = sec.saturating_mul(hz) + nsec * hz / 1_000_000_000;
     let until = crate::dev::lapic::ticks().saturating_add(want);
+
+    // **This spun, and it was the one wait in the kernel that did.** The loop
+    // was `while ticks() < until { spin_loop() }`: no yield, so a guest
+    // sleeping a second held its core for a second and every other task on it
+    // waited; no deadline check, so a sleep longer than the session's own
+    // bound outlived it; and no `sky::server::pump`, so a Wayland client that
+    // slept stopped serving its own display connection. Harmless with one
+    // foreground guest and a CPU sink with several.
+    //
+    // A tick at a time rather than one long sleep, deliberately. The slice is
+    // what keeps the two checks below running at the cadence every other
+    // blocking path here uses -- the sleep is the only thing that changes, and
+    // what it changes is that the core is free meanwhile.
     while crate::dev::lapic::ticks() < until {
-        core::hint::spin_loop();
+        if overran(crate::dev::lapic::ticks()) {
+            unsafe { kill_blocked() }
+        }
+        // The display server answers while its client sleeps, for the same
+        // reason it does while one waits on a socket.
+        crate::sky::server::pump();
+        let now = crate::dev::lapic::ticks();
+        let _ = crate::task::sleep_until(until.min(now.saturating_add(1)));
     }
     0
 }
@@ -2263,6 +2419,8 @@ fn sys_epoll_wait(epfd: u64, evs: u64, maxevents: u64, timeout: u64) -> u64 {
         if overran(crate::dev::lapic::ticks()) {
             unsafe { kill_blocked() }
         }
+        // The display server answers while its client waits.
+        crate::sky::server::pump();
         crate::task::yield_now();
     }
 }
@@ -2763,6 +2921,8 @@ fn sys_recvmsg(fd: u64, hdr: u64, flags: u64) -> u64 {
         if overran(crate::dev::lapic::ticks()) {
             unsafe { kill_blocked() }
         }
+        // The display server answers while its client waits.
+        crate::sky::server::pump();
         crate::task::yield_now();
     };
     if let Err(e) = scatter(iov, cnt, &buf[..got]) {
@@ -3243,13 +3403,13 @@ impl MinFd for u64 {
 /// is one the caller is relying on.
 /// Start a thread, and refuse everything else `clone` can mean.
 ///
-/// **`fork` is the one thing this system cannot grow into.** One address space
-/// is its founding claim rather than a shortcut, and a `clone` without
-/// `CLONE_VM` is asking for a second one. `CLONE_THREAD` is the other half: a
-/// clone without it becomes a process, and there are none. Both are refused
-/// with `ENOSYS` rather than approximated, because a thread handed back for a
-/// process request is two names for one address space and a program free to
-/// write through both.
+/// Threads only. A clone asking for a process never reaches here -- the
+/// dispatcher sends it to `fork::clone_process`, which is how glibc forks --
+/// and anything that is neither is refused with `ENOSYS` rather than
+/// approximated: a thread handed back for a request it does not match is two
+/// names for one address space and a program free to write through both.
+/// (This said `fork` was "the one thing this system cannot grow into", which
+/// `fork.rs` has since disproved.)
 fn sys_clone(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64, rip: u64) -> u64 {
     if !super::thread::is_thread(flags) {
         return ENOSYS;
@@ -3414,7 +3574,23 @@ pub fn run_thread(w: super::thread::Work, stack: u64) {
         core::ptr::write(core::ptr::addr_of_mut!(GLADOS_SYSCALL_STACK), stack);
         crate::cpu::wrmsr(IA32_FS_BASE, w.fs);
     }
-    let _ = unsafe { glados_enter_guest(w.rip, w.rsp) };
+    let code = as_guest(|| unsafe { glados_enter_guest(w.rip, w.rsp) });
+    // **A thread that crashes takes its process with it**, as on Linux: the
+    // memory it shares with every other thread is exactly what a wild pointer
+    // may have just corrupted, so the others carrying on would be running on
+    // state nobody can vouch for. Ended here rather than in the fault handler,
+    // because ending the main thread means longjmping out of *its* stack --
+    // so it is doomed, and ends itself at its next safe point with this
+    // thread's fault as the session's report.
+    if code & FAULTED != 0 {
+        if let Some(f) = take_task_fault(me()) {
+            adopt_fault(f);
+        }
+        if let Some(m) = main_task() {
+            doom(m, code);
+        }
+        super::thread::begin_exit();
+    }
     // **Clearing this is the whole of how `pthread_join` works.** The joiner
     // futex-waits on the word, and the kernel zeroing it is the notification;
     // a kernel that ignored `CLONE_CHILD_CLEARTID` leaves a library waiting
@@ -3616,6 +3792,8 @@ fn do_poll(fds: u64, nfds: u64, limit: Option<u64>) -> u64 {
         if overran(crate::dev::lapic::ticks()) {
             unsafe { kill_blocked() }
         }
+        // The display server answers while its client waits.
+        crate::sky::server::pump();
         crate::task::yield_now();
     }
 }
@@ -3769,6 +3947,8 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
             // against, so a wait is this kernel's wait, and a busy loop here
             // starves the resident mind and the clock for as long as nobody
             // touches the keyboard.
+            // The display server answers while its client waits.
+            crate::sky::server::pump();
             crate::task::yield_now();
         }
     }
@@ -3795,6 +3975,8 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
             if overran(crate::dev::lapic::ticks()) {
                 unsafe { kill_blocked() }
             }
+            // The display server answers while its client waits.
+            crate::sky::server::pump();
             crate::task::yield_now();
         }
     }
@@ -3834,6 +4016,8 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
             if overran(crate::dev::lapic::ticks()) {
                 unsafe { kill_blocked() }
             }
+            // The display server answers while its client waits.
+            crate::sky::server::pump();
             crate::task::yield_now();
         }
     }
@@ -3971,16 +4155,37 @@ fn sys_readlinkat(dirfd: u64, path_at: u64, buf: u64, size: u64) -> u64 {
     if raw.is_empty() {
         return ENOENT;
     }
-    if !raw.starts_with('/') && (dirfd as i64) != super::fs::AT_FDCWD {
-        return ENOSYS;
-    }
     if size == 0 {
         return EINVAL;
     }
-    let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
+    let rel = !raw.starts_with('/');
+    let found = with_fds(|fds, cwd| {
+        let base = if rel { at_base(fds, dirfd, cwd)? } else { String::new() };
+        super::fs::resolve(&base, &raw).ok_or(ENOENT)
+    });
+    let found = match found {
+        Some(Ok(p)) => Some(p),
+        Some(Err(e)) => return e,
+        None => None,
+    };
     let Some(path) = found else { return ENOENT };
     let Some(target) = super::proc::link(&path) else {
-        return if super::proc::claims(&path) || sysbox::blob_len(&path).is_some() {
+        // **A directory is not a symlink, and saying it does not exist is a
+        // different claim.** `blob_len` answers for a blob and nothing else,
+        // so every directory on the way to a file answered `ENOENT` here --
+        // and `realpath` is a walk over exactly those components. glibc reads
+        // `EINVAL` as "not a symlink, carry on" and `ENOENT` as "this path is
+        // not there", so resolving `/tmp/h.js` failed at `/tmp`.
+        //
+        // Found from the guest side rather than by reading: QuickJS printed
+        // `TypeError: realpath failure` and then dereferenced the null it had
+        // not checked, faulting at `0x80`. The errno was the whole of it --
+        // one wrong value sending a correct program down a path that ends in
+        // a crash it cannot explain.
+        return if super::proc::claims(&path)
+            || sysbox::blob_len(&path).is_some()
+            || sysbox::is_dir(&path)
+        {
             EINVAL
         } else {
             ENOENT
@@ -4268,10 +4473,16 @@ fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 {
         }
         return ENOENT;
     }
-    if !raw.starts_with('/') && (dirfd as i64) != super::fs::AT_FDCWD {
-        return ENOSYS;
-    }
-    let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
+    let rel = !raw.starts_with('/');
+    let found = with_fds(|fds, cwd| {
+        let base = if rel { at_base(fds, dirfd, cwd)? } else { String::new() };
+        super::fs::resolve(&base, &raw).ok_or(ENOENT)
+    });
+    let found = match found {
+        Some(Ok(p)) => Some(p),
+        Some(Err(e)) => return e,
+        None => None,
+    };
     let Some(path) = found else { return ENOENT };
     if let Some(n) = super::dev::node(&path) {
         return write_stat(buf, super::fs::Kind::Char, super::dev::size(n), super::fs::ino_of(&path));
@@ -4859,6 +5070,7 @@ fn give_back(at: u64, len: usize, from: Option<Source>) {
         Some(Source::Shared) => {
             crate::mem::paging::protect(at, page_up(len), crate::mem::paging::Perm::RWX);
         }
+        Some(Source::Copied) => {}
         // The backing, at its own address. Nothing is done about the guest's
         // mapping of it: those page tables belong to the guest's `Space` and
         // die with it, so unmapping here would be tidying something that is
@@ -4981,6 +5193,9 @@ fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
 /// assembly above, and the `sysv64` pinning is why `rdi` is the frame.
 #[no_mangle]
 pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
+    // A doomed guest asks for nothing more. Here and again on the way out,
+    // which bounds how long a task outlives its doom by one syscall's work.
+    unsafe { die_if_doomed() };
     let nr = f.rax;
     let args = [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9];
 
@@ -5076,7 +5291,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_KILL => (super::signal::kill(f.rdi as i64, f.rsi), true),
         // No parent, and no group but the one. `getppid` answering zero is
         // what a process reparented to nothing reports.
-        SYS_GETPPID => (0, true),
+        SYS_GETPPID => (super::fork::parent_pid(), true),
         SYS_GETGROUPS => (0, true),
         SYS_UNAME => (sys_uname(f.rdi), true),
         SYS_FCNTL => (sys_fcntl(f.rdi, f.rsi, f.rdx), true),
@@ -5088,6 +5303,9 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         // `rcx` is where `syscall` stashed the return address, which is where
         // the child resumes: a cloned thread does not start at an entry point,
         // it returns from `clone` on a different stack with `rax` zero.
+        // A process-shaped clone is glibc's fork and posix_spawn; see
+        // `fork::clone_process`. Everything else is a thread or refused.
+        SYS_CLONE if super::fork::is_process(f.rdi) => (super::fork::clone_process(f), true),
         SYS_CLONE => (sys_clone(f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.rip), true),
         // The whole frame, because a child resumes with its parent's
         // registers and this is the only place that still has them.
@@ -5114,7 +5332,8 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         }
         // One process, and it is the guest. Reporting a pid at all is what
         // stops a runtime deciding it failed to start.
-        SYS_GETPID | SYS_SET_TID_ADDRESS => (1, true),
+        SYS_GETPID => (super::fork::current_pid(), true),
+        SYS_SET_TID_ADDRESS => (super::thread::current_tid(), true),
         // Root, and every id the same. There is no privilege boundary above a
         // guest here to be anything else, which is the same fact `AT_SECURE`
         // reports as zero and `stat` reports as uid 0 -- said once per place
@@ -5140,6 +5359,10 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         _ => (ENOSYS, false),
     };
     record(Call { nr, args, ret, served, path: [0; PATH_SNIP], path_len: 0 });
+    // The display server's turn, on the guest's own task -- see `sky::server`
+    // for why it runs here and nowhere else. A request just written is
+    // answered before the client next looks.
+    crate::sky::server::pump();
     f.rax = ret;
     // **On the way out, and this is the only place it can be.** The guest's
     // whole register state is in this frame, its stack pointer is parked in
@@ -5155,6 +5378,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
     if nr != SYS_RT_SIGRETURN {
         super::signal::deliver(f);
     }
+    unsafe { die_if_doomed() };
 }
 
 extern "sysv64" {
@@ -5166,6 +5390,14 @@ extern "sysv64" {
 pub const EXITED: u64 = 1 << 32;
 /// Set when the guest was killed for running past its deadline.
 pub const OVERRAN: u64 = 1 << 34;
+/// Set when the guest was ended by a signal, whose number is the low byte.
+///
+/// Its own flag rather than an exit code of `128 + sig`, which is what a shell
+/// *prints* for a signalled child and is not what `wait4` reports: a parent
+/// reading `WIFSIGNALED` of an exit code would be told its child chose to exit
+/// with 137, and a parent that kills a child to stop it would never learn the
+/// kill landed.
+pub const SIGNALED: u64 = 1 << 35;
 
 /// How long a guest may run before the timer takes the machine back.
 ///
@@ -5214,9 +5446,29 @@ pub fn limit() -> u64 {
 static DEADLINE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Whether the running guest has outstayed its welcome.
+///
+/// Or has been told to die: a task marked by `doom` answers true here too, so
+/// every wait loop that already ends a guest at its deadline ends a doomed one
+/// at the same check, and the timer ends a doomed one spinning at ring 3. One
+/// question for both, because a second check beside the first at each of the
+/// eight sites is eight places to forget it.
 pub fn overran(now: u64) -> bool {
+    if !running() {
+        return false;
+    }
+    if doomed() != 0 {
+        return true;
+    }
     let d = DEADLINE.load(Ordering::Relaxed);
     d != 0 && now >= d && GUEST_RUNNING.load(Ordering::Relaxed)
+}
+
+/// What a task ending at a deadline or a doom check ends with.
+fn death_code() -> u64 {
+    match doomed() {
+        0 => OVERRAN,
+        d => d,
+    }
 }
 
 /// End a guest that would not stop on its own.
@@ -5226,7 +5478,7 @@ pub fn overran(now: u64) -> bool {
 /// executing. Called while the kernel is working on the guest's behalf it
 /// would abandon whatever that work was holding.
 pub unsafe fn kill_overrun() -> ! {
-    unsafe { kill_with(OVERRAN) }
+    unsafe { kill_with(death_code()) }
 }
 
 /// End a guest that blocked past its deadline.
@@ -5238,7 +5490,7 @@ pub unsafe fn kill_overrun() -> ! {
 /// is that this particular loop has no allocation in flight, no borrow of
 /// `SPACE` live and no lock taken across the yield.
 pub unsafe fn kill_blocked() -> ! {
-    unsafe { kill_with(OVERRAN) }
+    unsafe { kill_with(death_code()) }
 }
 
 /// Set instead when the guest died of a fault.
@@ -5352,8 +5604,153 @@ pub fn locate(at: u64) -> alloc::string::String {
 /// took a #GP inside the read on exactly that path.
 static GUEST_RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// **Per task, and one flag for the machine was the bug that halted it.**
+/// `GUEST_RUNNING` answered "is a guest running" for everybody, and the kill
+/// path cleared it -- so the first forked child to crash was ended correctly
+/// and took the flag with it, and the second faulted at ring 3 with nothing
+/// saying a guest was there to blame. The handler took it for the kernel's
+/// own fault and halted. One child's death disarmed isolation for every guest
+/// after it, which is the shape `forktest` crashes two children to catch.
+///
+/// What the fault handler needs to know is narrower than "a guest exists": it
+/// is whether *the task that faulted* entered ring 3 through one of the three
+/// doors that park a landing in its own `GLADOS_HOST_RSP` -- `run`,
+/// `run_thread` and a forked child's `enter_resumed`. Each sets its own task's
+/// flag, and only the task itself or its own kill ever clears it.
+/// `GUEST_RUNNING` stays, meaning only what `run` means by it: the session's
+/// deadline is armed.
+static IN_GUEST: [AtomicBool; crate::task::MAX_TASKS] =
+    [const { AtomicBool::new(false) }; crate::task::MAX_TASKS];
+
+/// Per task, a code to die with at the next safe point; zero for none.
+///
+/// Ending a guest means longjmping out of *its* stack, which only its own task
+/// can do, so nobody kills a task directly: they mark it here and it ends
+/// itself at the next point that holds nothing -- a syscall's way in or out,
+/// a wait loop's check, or the timer finding it at ring 3. That is how a
+/// session ending takes its children with it, how `SIGKILL` reaches a child
+/// spinning in a loop that makes no syscall, and how a thread's crash ends its
+/// process.
+static DOOM: [core::sync::atomic::AtomicU64; crate::task::MAX_TASKS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; crate::task::MAX_TASKS];
+
+/// The fault each task last died of, read by whoever ran it.
+static TASK_FAULT: Racy<[Option<Fault>; crate::task::MAX_TASKS]> =
+    Racy::new([None; crate::task::MAX_TASKS]);
+
+/// The task running the session's first guest, the one `linux run` started.
+static MAIN_TASK: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(usize::MAX);
+
+pub fn main_task() -> Option<usize> {
+    let t = MAIN_TASK.load(Ordering::Relaxed);
+    (t != usize::MAX).then_some(t)
+}
+
+fn me() -> usize {
+    crate::task::current().min(crate::task::MAX_TASKS - 1)
+}
+
+/// Whether the running task is inside a guest, so that its own landing is
+/// valid and a ring-3 fault on it may end the guest rather than the machine.
 pub fn running() -> bool {
-    GUEST_RUNNING.load(Ordering::Relaxed)
+    IN_GUEST[me()].load(Ordering::Acquire)
+}
+
+/// Mark a task to end itself with `code` at its next safe point.
+///
+/// The first doom wins: a child crashing and then being swept up by its
+/// session ending died of the crash, and the report should say so.
+///
+/// Only a task that is inside a guest can be doomed, and answers whether this
+/// one was. A mark left on a task between guests would be inherited by its
+/// next tenant, which would die the instant it started for something its
+/// predecessor did; `as_guest` clears on both sides as well, so the window
+/// that remains loses a doom rather than misdirecting one.
+pub fn doom(task: usize, code: u64) -> bool {
+    if task >= crate::task::MAX_TASKS || !IN_GUEST[task].load(Ordering::Acquire) {
+        return false;
+    }
+    let _ = DOOM[task].compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire);
+    true
+}
+
+/// The code this task has been told to die with, or zero.
+pub fn doomed() -> u64 {
+    DOOM[me()].load(Ordering::Acquire)
+}
+
+/// The fault a task died of, taken so the next run on the same task starts
+/// clean.
+pub fn take_task_fault(task: usize) -> Option<Fault> {
+    if task >= crate::task::MAX_TASKS {
+        return None;
+    }
+    unsafe { (*TASK_FAULT.get())[task].take() }
+}
+
+/// Run `enter` as a guest on this task: armed so a fault ends it and not the
+/// machine, with any doom from a previous tenant of the task forgotten.
+///
+/// The one place the flag is set, so the three doors cannot disagree about
+/// it. Cleared on the way back whichever way the guest left -- an exit, a
+/// kill, a fault -- because all of them return here through the longjmp.
+pub fn as_guest(enter: impl FnOnce() -> u64) -> u64 {
+    let t = me();
+    DOOM[t].store(0, Ordering::Release);
+    unsafe { (*TASK_FAULT.get())[t] = None };
+    IN_GUEST[t].store(true, Ordering::Release);
+    let code = enter();
+    IN_GUEST[t].store(false, Ordering::Release);
+    DOOM[t].store(0, Ordering::Release);
+    code
+}
+
+/// End this task's guest now if it has been doomed. From the syscall path's
+/// way in and way out, where nothing is held.
+///
+/// # Safety
+/// Longjmps; only where `exit_group` itself could be served.
+unsafe fn die_if_doomed() {
+    let d = doomed();
+    if d != 0 {
+        unsafe { glados_leave_guest(d) };
+    }
+}
+
+/// What a guest's end means as a `wait4` status word.
+///
+/// The encoding is Linux's: an exit puts its code in bits 8..15 and a signal
+/// puts its number in the low seven, which is what `WIFEXITED` and
+/// `WIFSIGNALED` tell apart. A fault is the signal Linux would have raised for
+/// it, so a parent sees `SIGSEGV` for a wild pointer rather than an exit code
+/// of 14 -- the vector number -- which is what it saw before.
+pub fn wait_status(code: u64) -> i32 {
+    if code & FAULTED != 0 {
+        signal_of_vector((code & 0xFF) as u8) as i32
+    } else if code & SIGNALED != 0 {
+        (code & 0x7F) as i32
+    } else if code & OVERRAN != 0 {
+        9
+    } else {
+        ((code & 0xFF) as i32) << 8
+    }
+}
+
+/// The signal Linux sends for a processor exception taken at ring 3.
+pub fn signal_of_vector(v: u8) -> u32 {
+    const SIGILL: u32 = 4;
+    const SIGTRAP: u32 = 5;
+    const SIGBUS: u32 = 7;
+    const SIGFPE: u32 = 8;
+    const SIGSEGV: u32 = 11;
+    match v {
+        0 | 16 | 19 => SIGFPE,
+        1 | 3 => SIGTRAP,
+        6 => SIGILL,
+        17 => SIGBUS,
+        _ => SIGSEGV,
+    }
 }
 
 /// End a guest that faulted, and go back to whoever started it.
@@ -5369,8 +5766,20 @@ pub fn running() -> bool {
 pub unsafe fn kill(f: Fault) -> ! {
     let vector = f.regs.vector;
     // Copied out before the longjmp, which abandons the stack this arrived on.
-    unsafe { *LAST_FAULT.get() = Some(f) };
+    // Into the faulting task's own cell: a child's crash is its parent's to
+    // read through `wait4`, and writing it over the session's report would
+    // put a child's registers under the main guest's name.
+    let t = me();
+    unsafe { (*TASK_FAULT.get())[t] = Some(f) };
+    if main_task() == Some(t) {
+        unsafe { *LAST_FAULT.get() = Some(f) };
+    }
     unsafe { kill_with(FAULTED | vector) }
+}
+
+/// Record a fault as the session's, for a thread whose crash ends the process.
+pub fn adopt_fault(f: Fault) {
+    unsafe { *LAST_FAULT.get() = Some(f) };
 }
 
 /// The longjmp both reasons share.
@@ -5379,7 +5788,9 @@ pub unsafe fn kill(f: Fault) -> ! {
 /// Only while a guest is running, and only from a context that may abandon its
 /// stack.
 unsafe fn kill_with(code: u64) -> ! {
-    GUEST_RUNNING.store(false, Ordering::Relaxed);
+    // This task's flag and nobody else's. Clearing the session's here was
+    // what let one dead child disarm the next one's fault.
+    IN_GUEST[me()].store(false, Ordering::Release);
     // **Inline, and calling `glados_leave_guest` through its declaration was
     // the bug.** This target is Windows-ABI, so an ordinary Rust function is
     // Microsoft x64, where xmm6-xmm15 are non-volatile. `glados_leave_guest`
@@ -5465,7 +5876,8 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
     crate::task::ring3_active(true, unsafe {
         core::ptr::read(core::ptr::addr_of!(GLADOS_SYSCALL_STACK))
     });
-    let code = unsafe { glados_enter_guest(entry, stack_top) };
+    MAIN_TASK.store(me(), Ordering::Relaxed);
+    let code = as_guest(|| unsafe { glados_enter_guest(entry, stack_top) });
     crate::task::ring3_active(false, 0);
     // **Every thread has to be gone before the space is.** A child still
     // running would be reading regions `teardown` is about to hand back, and
@@ -5473,11 +5885,23 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
     // longjmping out of its own stack, which only that thread can do.
     // Bounded, because a thread that makes no syscall never notices the ask
     // and the alternative is a shell that never comes back.
+    //
+    // **And every child goes with the session.** There is no init to reparent
+    // an orphan to, and an orphan left running was a guest nobody would ever
+    // wait for, holding a pool task forever -- and, before `IN_GUEST`, one
+    // whose next fault halted the machine because the session it belonged to
+    // had already cleared the flag. `SIGKILL`, as a terminal hangup ends a
+    // shell's jobs. A child that does not notice inside the bound is still
+    // doomed, and the timer ends it at its next tick at ring 3.
     super::thread::begin_exit();
+    super::fork::doom_all(SIGNALED | 9);
     let give_up = crate::dev::lapic::ticks() + 200;
-    while super::thread::live() > 0 && crate::dev::lapic::ticks() < give_up {
+    while (super::thread::live() > 0 || super::fork::live() > 0)
+        && crate::dev::lapic::ticks() < give_up
+    {
         crate::task::yield_now();
     }
+    MAIN_TASK.store(usize::MAX, Ordering::Relaxed);
     DEADLINE.store(0, Ordering::Relaxed);
     GUEST_RUNNING.store(false, Ordering::Relaxed);
     if flags & (1 << 9) != 0 {
@@ -5570,6 +5994,45 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // Errors are small negatives in rax, which is the whole of Linux's error
     // convention. A positive ENOSYS would read to a guest as a successful call
     // that returned 38.
+    // How a guest's end reads to its parent. Linux's encoding, because
+    // `WIFEXITED` and `WIFSIGNALED` are macros compiled into the parent: an
+    // exit in bits 8..15, a signal in the low seven. A crash used to arrive as
+    // an *exit* whose code was the vector number.
+    out.push((
+        "a child's exit reads as an exit, and its crash as the signal Linux would send",
+        wait_status(EXITED | 7) == 7 << 8
+            && wait_status(FAULTED | 14) == 11
+            && wait_status(FAULTED | 13) == 11
+            && wait_status(FAULTED | 0) == 8
+            && wait_status(FAULTED | 6) == 4
+            && wait_status(SIGNALED | EXITED | 9) == 9
+            && wait_status(OVERRAN) == 9,
+    ));
+    out.push((
+        "and every one of those reads as signalled, not as exited, by the parent's own test",
+        [FAULTED | 14, SIGNALED | 9, OVERRAN]
+            .iter()
+            .all(|&c| { let w = wait_status(c); w & 0x7F != 0 && w & 0x7F != 0x7F })
+            && wait_status(EXITED | 3) & 0x7F == 0,
+    ));
+    // A forked child's records of its parent's mappings must give nothing
+    // back: the pages behind them are the parent's, and freeing them from the
+    // child pulled memory out from under a running process.
+    out.push((
+        "a forked child's inherited mapping owes nothing when it is unmapped",
+        {
+            let m = Mapping { at: 0x1000, len: 4096, from: Source::Heap };
+            let c = Mapping { from: Source::Copied, ..m };
+            c.from == Source::Copied && c.at == m.at && c.len == m.len
+        },
+    ));
+    // Doom lands only on a task inside a guest, so a stale mark can never be
+    // inherited by the next program a pool task runs. Asked of a task index
+    // nothing is running a guest on at boot.
+    out.push((
+        "a task that is not inside a guest cannot be doomed",
+        !doom(crate::task::MAX_TASKS - 1, SIGNALED | 9) && !doom(crate::task::MAX_TASKS, 1),
+    ));
     out.push((
         "an unimplemented call answers a negative errno, not a plausible length",
         (ENOSYS as i64) < 0 && (EBADF as i64) < 0 && ENOSYS as i64 == -38 && EBADF as i64 == -9,
@@ -5855,6 +6318,109 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             "with the flag and a descriptor nobody opened it is EBADF, not success",
             sys_statat(99, p, at, AT_EMPTY_PATH) == EBADF,
         ));
+        teardown();
+    }
+
+    // A descriptor-relative path, which was `ENOSYS` under a comment saying it
+    // needed the directory's own path kept per open descriptor -- and
+    // `fs::Dir` has carried `path` since it was written. The refusal outlived
+    // its reason, and what it cost is every `fts`-based program: `find`,
+    // `rm -r`, `du` and `cp -r` all stop at the first subdirectory.
+    //
+    // `/lib` is the directory used because it is seeded at every boot, so this
+    // needs no store mounted and no guest staged.
+    {
+        let mut buf = [0u8; 512];
+        let at = buf.as_mut_ptr() as u64;
+        let owned = Region { at, len: 512 };
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+
+        // Three disjoint slices of the one region: the paths have to live
+        // inside what the guest owns, because `read_cstr` bounds-checks them
+        // like any other guest pointer, and a `stat` writes 144 bytes.
+        let dir_p = at;            // "/lib"
+        let rel_p = at + 32;       // "geom.ai&xi"
+        let abs_p = at + 64;       // "/lib/geom.ai&xi"
+        let sbuf = at + 256;
+        let put = |off: usize, text: &str, b: &mut [u8; 512]| {
+            b[off..off + text.len()].copy_from_slice(text.as_bytes());
+            b[off + text.len()] = 0;
+        };
+        put(0, "/lib", &mut buf);
+        put(32, "geom.ai&xi", &mut buf);
+        put(64, "/lib/geom.ai&xi", &mut buf);
+
+        let fd = sys_openat(super::fs::AT_FDCWD as u64, dir_p, O_DIRECTORY, 0);
+        out.push(("a directory opens, which is what a relative path is resolved against", (fd as i64) > 2));
+
+        out.push((
+            "a path relative to an open directory resolves, where it was ENOSYS",
+            sys_statat(fd, rel_p, sbuf, 0) == 0,
+        ));
+        // A descriptor that is open and is not a directory is a different fact
+        // from one nobody opened, and sends a program somewhere else.
+        out.push((
+            "the same path against stdin is ENOTDIR rather than EBADF",
+            sys_statat(0, rel_p, sbuf, 0) == ENOTDIR,
+        ));
+        out.push((
+            "and against a descriptor nobody opened it is EBADF",
+            sys_statat(99, rel_p, sbuf, 0) == EBADF,
+        ));
+        // POSIX: an absolute path ignores `dirfd` entirely. A caller passing a
+        // closed descriptor with an absolute path is correct code, so checking
+        // the descriptor first would refuse it -- which is why `at_base` is
+        // consulted only for a relative path.
+        out.push((
+            "an absolute path ignores dirfd, so a closed one is not an error",
+            sys_statat(99, abs_p, sbuf, 0) == 0,
+        ));
+        // `..` is still refused, and that has to survive the new base: a tree
+        // with O(1) copies has no single parent to walk back to, so a relative
+        // path cannot be used to climb out of the directory it was opened on.
+        put(32, "../lib/geom.ai&xi", &mut buf);
+        out.push((
+            "a relative path may not climb out with .. , as resolve refuses it",
+            sys_statat(fd, rel_p, sbuf, 0) == ENOENT,
+        ));
+        teardown();
+    }
+
+    // `nanosleep`, which was the one wait in this kernel that genuinely spun:
+    // `while ticks() < until { spin_loop() }`, no yield in it at all. One
+    // foreground guest made that invisible; a background one per sleeping
+    // process is a core each.
+    //
+    // Tested here rather than through a fixture because the only fixture that
+    // calls it is `--kind fb`, which sleeps ten minutes holding the display so
+    // the harness can photograph it -- a poor instrument for asking whether a
+    // sleep of 50 ms takes 50 ms.
+    {
+        let mut buf = [0u8; 32];
+        let at = buf.as_mut_ptr() as u64;
+        let owned = Region { at, len: 32 };
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+
+        // 50 ms as a timespec, which at TIMER_HZ is five ticks.
+        buf[0..8].copy_from_slice(&0u64.to_le_bytes());
+        buf[8..16].copy_from_slice(&50_000_000u64.to_le_bytes());
+        let before = crate::dev::lapic::ticks();
+        let rc = sys_nanosleep(at);
+        let elapsed = crate::dev::lapic::ticks().saturating_sub(before);
+        out.push(("nanosleep answers 0 for a sleep it completed", rc == 0));
+        // At least what was asked for. Returning early is the failure a busy
+        // wait cannot have and a sleep can, so `>=` is the honest direction --
+        // the tick is 10 ms, so overshooting by one is expected.
+        out.push((
+            "and it slept at least the five ticks it was asked for",
+            elapsed >= 5,
+        ));
+        // A nanosecond field at or past a second is EINVAL on Linux, and this
+        // is checked after the sleep so a refusal cannot be mistaken for the
+        // sleep above having been skipped.
+        buf[8..16].copy_from_slice(&1_000_000_000u64.to_le_bytes());
+        out.push(("a nanosecond field of a whole second is EINVAL", sys_nanosleep(at) == EINVAL));
+        out.push(("and an unreachable timespec is EFAULT", sys_nanosleep(0x1000) == EFAULT));
         teardown();
     }
 
@@ -6263,8 +6829,19 @@ const AT_RANDOM: u64 = 25;
 /// `TERM=dumb` because there is no terminal here at all and `ioctl` says so,
 /// `PWD=/` because there is no `chdir`, and `PATH` naming directories that may
 /// well be empty, which is what a search path is for.
-const ENVIRON: [&str; 5] =
-    ["PATH=/bin:/usr/bin:/tmp", "HOME=/", "PWD=/", "TERM=dumb", "USER=root"];
+///
+/// And where the display server is, which is a fact now that there is one:
+/// `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` together name `sky::server::PATH`.
+/// A Wayland client with neither set gives up before it tries to connect.
+const ENVIRON: [&str; 7] = [
+    "PATH=/bin:/usr/bin:/tmp",
+    "HOME=/",
+    "PWD=/",
+    "TERM=dumb",
+    "USER=root",
+    "XDG_RUNTIME_DIR=/run/glados",
+    "WAYLAND_DISPLAY=wayland-0",
+];
 
 /// Extra variables, on top of the five above.
 ///

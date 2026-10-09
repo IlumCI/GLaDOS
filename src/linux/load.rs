@@ -47,10 +47,32 @@ use super::{elf, syscall};
 use crate::cpu::code::Exec;
 use alloc::vec::Vec;
 
-/// Sixteen KiB of guest stack. A static binary that does not recurse needs a
-/// fraction of it; the number is chosen so overflowing it is a bug in the
-/// guest rather than a limit of the harness.
-const GUEST_STACK: usize = 16 * 1024;
+/// A mebibyte of guest stack.
+///
+/// **It was sixteen KiB, under a comment saying the number was chosen so that
+/// overflowing it is a bug in the guest rather than a limit of the harness.
+/// A real interpreter falsified that.** QuickJS is not a buggy guest: it
+/// recurses in its parser and again in its own interpreter loop, and at 16 KiB
+/// it died of `#PF` with `rsp` about 5.6 KiB *below* the region -- error 0x6, a
+/// user write to a page nothing owns, after 165 syscalls of perfectly healthy
+/// start-up. The old figure was right for a hand-assembled fixture and for
+/// busybox, which is what had been run.
+///
+/// The size is chosen against the *guest's* own guard rather than picked for
+/// roundness. An engine that tracks its own depth -- QuickJS defaults to about
+/// 256 KiB through `JS_SetMaxStackSize` -- should hit that limit and throw
+/// where a script recurses too far, because a `RangeError` the program can
+/// catch is worth incomparably more than a page fault that ends it. Four times
+/// its ceiling leaves the engine's guard strictly in front of the kernel's.
+///
+/// `prlimit64` reports this honestly as `RLIMIT_STACK`, so a guest that asks
+/// is told what it really has.
+///
+/// **The stack still does not grow**, which Linux's does. That is the next
+/// thing to want here and it is a fault handler rather than a constant: a
+/// write just below the region would have to be recognised as growth instead
+/// of as a violation, and nothing distinguishes the two today.
+const GUEST_STACK: usize = 1024 * 1024;
 
 /// What `brk` may grow into.
 ///
@@ -522,16 +544,16 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
 
 /// Whether a guest gets a page-table root of its own.
 ///
-/// **Off by default, and that is the whole point of it being a switch.** The
-/// space a guest gets here *shares* every mapping with the kernel's, so on and
-/// off should be indistinguishable in every observable way -- which is exactly
-/// what makes it worth having: a fixture that behaves identically both ways
-/// says the guest lifecycle survives a non-kernel CR3, and that is the thing
-/// that has to be true before any of it diverges. Defaulting on would make the
-/// first divergence bug and the first "does this work at all" bug arrive
-/// together, with nothing to tell them apart.
+/// **On by default, since 1.4.0.** It was off, deliberately, while a space was
+/// new: one that shares every kernel mapping should be indistinguishable from
+/// none, and proving that before anything diverged kept the first divergence
+/// bug apart from the first "does this work at all" one. It has since carried
+/// busybox under both libcs, the dynamic loaders, fixed-address images and
+/// `fork` -- and with it off, `fork` and `posix_spawn` refuse, so no glibc
+/// program could start another. `linux space off` remains, for telling a bug
+/// in the space apart from a bug in a program.
 static OWN_SPACE: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+    core::sync::atomic::AtomicBool::new(true);
 
 pub fn set_own_space(on: bool) {
     OWN_SPACE.store(on, core::sync::atomic::Ordering::Relaxed);

@@ -636,6 +636,76 @@ pub fn write_file(bs: &BootServices, image: Handle, path: &str, data: &[u8]) -> 
     ok && done == data.len()
 }
 
+/// Every regular file in one directory of the boot volume, by name.
+///
+/// **No allocation, because this runs before the heap exists.** Reading a
+/// directory handle hands back one `EFI_FILE_INFO` per call into a caller's
+/// buffer, so a 1 KiB stack buffer is the whole cost: the fixed part is 80 bytes
+/// and a FAT long name is at most 255 UCS-2 characters, so nothing a FAT volume
+/// can hold overflows it. A name that is not ASCII is skipped rather than
+/// narrowed, for `widen`'s reason in the other direction -- a path this module
+/// cannot spell back to the firmware is a file it cannot then open. It is still
+/// reported, as `None`, so a caller counting what it could not take counts it.
+///
+/// A missing directory calls `f` zero times, which is what a caller asking
+/// "what is in there" wants to hear about a directory that is not there.
+pub fn for_each_file(bs: &BootServices, image: Handle, dir: &str, mut f: impl FnMut(Option<&str>, u64)) {
+    // EFI_FILE_INFO: Size, FileSize, PhysicalSize, three 16-byte times, then
+    // Attribute at 72 and the name at 80.
+    const ATTR_DIRECTORY: u64 = 0x10;
+    const NAME_AT: usize = 80;
+    let Some(root) = open_root(bs, image) else { return };
+    let Some(wide) = widen(dir) else {
+        unsafe { ((*root).close)(root) };
+        return;
+    };
+    let mut d: *mut FileProtocol = core::ptr::null_mut();
+    let opened = unsafe { ((*root).open)(root, &mut d, wide.as_ptr(), FILE_MODE_READ, 0) };
+    unsafe { ((*root).close)(root) };
+    if is_error(opened) || d.is_null() {
+        return;
+    }
+    // u64 so the buffer is aligned for the fields read out of it.
+    let mut buf = [0u64; 128];
+    // Bounded: a directory that never reports its end must not hold the boot.
+    for _ in 0..256 {
+        let mut n = core::mem::size_of_val(&buf);
+        let st = unsafe { ((*d).read)(d, &mut n, buf.as_mut_ptr() as *mut u8) };
+        if is_error(st) || n < NAME_AT {
+            break;
+        }
+        let bytes = unsafe { core::slice::from_raw_parts(buf.as_ptr() as *const u8, n) };
+        let word = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+        if word(72) & ATTR_DIRECTORY != 0 {
+            continue;
+        }
+        let mut name = [0u8; 255];
+        let mut len = 0usize;
+        let mut ascii = true;
+        let mut at = NAME_AT;
+        while at + 1 < n && len < name.len() {
+            let c = u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+            if c == 0 {
+                break;
+            }
+            if c > 0x7e || c < 0x20 {
+                ascii = false;
+            }
+            name[len] = c as u8;
+            len += 1;
+            at += 2;
+        }
+        // A name that filled the buffer without its terminator was cut short,
+        // and a cut name opens nothing.
+        let whole = at + 1 >= n || u16::from_le_bytes([bytes[at], bytes[at + 1]]) == 0;
+        match core::str::from_utf8(&name[..len]) {
+            Ok(s) if ascii && len > 0 && whole => f(Some(s), word(8)),
+            _ => f(None, word(8)),
+        }
+    }
+    unsafe { ((*d).close)(d) };
+}
+
 pub fn read_file(bs: &BootServices, image: Handle, path: &str) -> Option<Blob> {
     let root = open_root(bs, image)?;
     let Some(wide) = widen(path) else {

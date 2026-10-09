@@ -219,11 +219,18 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
             // Beside TCP because it is the same bargain: no receive
             // interrupts, so a state machine advances when the shell is idle.
             crate::net::wifi_service();
+            // A miner image has no compositor, so the pointer is read here --
+            // the Wi-Fi panel is the one thing on that screen to click.
+            crate::mine::wifiui::pointer_poll();
             // USB is polled and not interrupt-driven in this kernel, so a
-            // keyboard on it is only heard from when somebody asks. Here
-            // rather than in the timer tick for the same reason the pointer
-            // is: a keystroke can raise a window.
-            crate::dev::usbhid::poll();
+            // keyboard on it is only heard from when somebody asks. The
+            // compositor asks now, whatever the shell is doing -- a USB mouse
+            // polled only from here froze for the length of every command,
+            // exactly as the pointer did before it moved. This is the fallback
+            // for an image with no compositor, which is the miner.
+            if !crate::gfx::render::enabled() {
+                crate::dev::usbhid::poll();
+            }
             // The pointer is **not** read here any more. It was, and that is
             // precisely why it froze: a click is only noticed while the shell
             // is idle, so any command that took a second took the pointer with
@@ -257,6 +264,18 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
 
         match key {
             b'\n' => {
+                // A Wi-Fi passphrase typed into the miner's panel is not a
+                // command: taken here, before the serial log and the history
+                // below -- the two places every other line is kept -- and
+                // never echoed. See `mine::wifiui`.
+                if crate::mine::wifiui::wants_passphrase() {
+                    let pass = core::mem::take(&mut line);
+                    cursor = 0;
+                    crate::mine::wifiui::take_passphrase(pass);
+                    serial_println!("{}(a Wi-Fi passphrase, not logged)", PROMPT);
+                    prompt();
+                    continue;
+                }
                 console::with(|c| {
                     let avail = c.cols().saturating_sub(PROMPT_LEN + 1);
                     c.set_col(PROMPT_LEN + line.len().min(avail));
@@ -2357,6 +2376,34 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
     let cmd = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim();
 
+    // **The operator's own hands are the one label the model did not produce.**
+    // If they asked for something, watched the agent choose, and are now
+    // running a different applet themselves, that disagreement is a routing
+    // label -- and the only kind worth having, since a harvested success is the
+    // model's own argmax and `work.rs` measured what training on those is
+    // worth. `ai::learn::judge` owns every refusal; this is only the place the
+    // typing happens.
+    //
+    // Before the dispatch rather than after, because the verdict is about which
+    // verb was typed and not about whether it worked: an operator correcting
+    // the machine with a command that then fails has still said which applet
+    // they meant.
+    match crate::ai::learn::operator_ran(cmd) {
+        crate::ai::learn::Verdict::Learn(applet, task) => {
+            console::set_color(LTGREEN);
+            kprintln!("  [learn] '{}' for: {}", applet, task);
+            console::set_color(LTGRAY);
+            kprintln!("          routing will be refitted from this. 'learn' to see, 'learn forget' to drop");
+        }
+        crate::ai::learn::Verdict::Spent => {
+            console::set_color(YELLOW);
+            kprintln!("  [learn] not recorded: this boot has already learned {} correction(s)",
+                crate::ai::learn::PER_BOOT);
+            console::set_color(LTGRAY);
+        }
+        _ => {}
+    }
+
     // One name, two meanings, told apart by shape: `write <path> <text>` is
     // the sysbox applet and has always been; `write [path]` with no text is
     // the editor window, because an editor is what "write" with nothing to
@@ -2367,10 +2414,32 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         return;
     }
 
-    // sysbox first: it owns a whole vocabulary of short names, and claiming
-    // them here keeps that list in one place instead of spreading twenty more
-    // arms across this match.
-    if crate::sysbox::dispatch(cmd, rest) {
+    // `linux` is two things told apart by shape, the way `write` is, and the
+    // shape is "does the first word name an installed program".
+    //
+    // The applet and the shell verb share a name, and sysbox is consulted
+    // first, so the applet claimed the whole verb the moment it existed --
+    // `linux trace` answered "'trace' is not an installed Linux program",
+    // taking `run`, `libc`, `env`, `space`, `deadline` and `feed` with it.
+    // Every diagnostic this subsystem has, shadowed by its own applet.
+    //
+    // Decided against `program::path_of` rather than against a list of the
+    // verb's subcommands, because that list already exists as the match arms
+    // below and a second copy is two things that have to agree: the next
+    // subcommand somebody adds would be silently eaten instead. The cost is
+    // that `linux <misspelled>` reaches the verb's usage rather than the
+    // applet's "not installed", and the usage names both forms, so the
+    // operator is not left guessing.
+    //
+    // The model's route is `sysbox::dispatch` directly and is untouched by any
+    // of this.
+    let shell_owns = cmd == "linux"
+        && crate::linux::program::path_of(rest.split_whitespace().next().unwrap_or("")).is_none();
+
+    // sysbox first otherwise: it owns a whole vocabulary of short names, and
+    // claiming them here keeps that list in one place instead of spreading
+    // twenty more arms across this match.
+    if !shell_owns && crate::sysbox::dispatch(cmd, rest) {
         return;
     }
 
@@ -2655,6 +2724,50 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         // the transfer `fat get` leaves in the namespace. Replacing rather
         // than appending, because the bundle carries split *positions* and a
         // merge would leave them describing a corpus that no longer exists.
+        "learn" => {
+            use crate::ai::learn;
+            match rest {
+                "off" => {
+                    learn::set_enabled(false);
+                    kprintln!("  learning from corrections is off");
+                }
+                "on" => {
+                    learn::set_enabled(true);
+                    kprintln!("  learning from corrections is on");
+                }
+                "forget" => {
+                    learn::clear();
+                    kprintln!("  the live request is forgotten, so the next command is not a correction");
+                    kprintln!("  rows already written stay in /ai/train -- 'ls /ai/train' to see them");
+                }
+                _ => {
+                    kprintln!("  learning from corrections: {}",
+                        if learn::enabled() { "on" } else { "off" });
+                    let (goal, chose) = learn::pending();
+                    match (goal, chose) {
+                        (Some(g), Some(c)) =>
+                            kprintln!("  live request: {}\n  the agent chose: {}", g, c),
+                        (Some(g), None) =>
+                            kprintln!("  live request: {}\n  the agent has not acted on it", g),
+                        _ => kprintln!("  nothing asked, so nothing to correct"),
+                    }
+                    let rows = learn::rows();
+                    if rows.is_empty() {
+                        kprintln!("  nothing learned this boot (cap is {})", learn::PER_BOOT);
+                    } else {
+                        kprintln!("  learned this boot, {} of {}:", rows.len(), learn::PER_BOOT);
+                        for (applet, task) in &rows {
+                            kprintln!("    {:<10} {}", applet, task);
+                        }
+                        // Said because a row in the working tree is not a row
+                        // that survives: `write_blob` lands in memory and only
+                        // `snap` commits it. Autosnap is on by default, so this
+                        // is usually already done -- usually is not always.
+                        kprintln!("  durable only once a snapshot has been taken ('snaps' to check)");
+                    }
+                }
+            }
+        }
         "teach" if rest.starts_with("bundle ") => {
             let path = rest[7..].trim();
             match crate::sysbox::read_blob(path) {
@@ -3305,7 +3418,38 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     let bytes = crate::log::contents();
                     console::with(|c| c.write_bytes(&bytes));
                 }
-                _ => kprintln!("  usage: log [status|all|save [path]]"),
+                // Off the machine, over the network. The GF63 has no serial line
+                // and boots from a USB disk no driver here can write, so a
+                // bare-metal trip's transcript otherwise leaves only as a
+                // photograph of the screen. Its wired port is driven: on the
+                // host, `nc -l 4444 > trip.log`, then `log send <host> 4444`.
+                "send" => {
+                    let host = words.next().and_then(crate::net::parse_ip);
+                    // A port that does not parse is refused rather than quietly
+                    // becoming 4444, which would send a transcript to whatever
+                    // listens there.
+                    let port = match words.next() {
+                        None => Some(4444),
+                        Some(p) => p.parse::<u16>().ok().filter(|&p| p != 0),
+                    };
+                    let (Some(host), Some(port)) = (host, port) else {
+                        kprintln!("  usage: log send <ipv4> [port]  -- on the host: nc -l <port> > trip.log");
+                        return;
+                    };
+                    let bytes = crate::log::contents();
+                    match crate::net::tcp::open(host, port, 5000) {
+                        Err(e) => kprintln!("  could not connect: {:?}", e),
+                        Ok(h) => {
+                            let sent = bytes.chunks(1024).try_for_each(|c| crate::net::tcp::send_at(h, c, 5000));
+                            crate::net::tcp::close_at(h, 2000);
+                            match sent {
+                                Ok(()) => kprintln!("  {} bytes sent", bytes.len()),
+                                Err(e) => kprintln!("  the send stopped partway: {:?}", e),
+                            }
+                        }
+                    }
+                }
+                _ => kprintln!("  usage: log [status|all|save [path]|send <ipv4> [port]]"),
             }
         }
         // A council core the machine wrote, and the judges that let one in.
@@ -4866,6 +5010,24 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  {} ticks  ({}.{:02} s at {} Hz)", t, t / hz, (t % hz) * 100 / hz, hz);
             kprintln!("  apic timer calibrated at {} Hz", lapic::timer_hz());
         }
+        // What the firmware says this machine is -- SMBIOS + CPUID, read at
+        // boot. The POST intro draws from the same source, so this is how to
+        // see on any machine what that screen will show before rebooting into
+        // it. An empty field is firmware that published nothing there, not a
+        // bug: QEMU leaves the baseboard blank, the GF63 fills all four.
+        "sysinfo" | "dmi" => {
+            let show = |label: &str, v: &str| {
+                if v.is_empty() {
+                    kprintln!("  {:<10} (not reported)", label);
+                } else {
+                    kprintln!("  {:<10} {}", label, v);
+                }
+            };
+            show("vendor", crate::dmi::vendor());
+            show("product", crate::dmi::product());
+            show("board", crate::dmi::board());
+            show("cpu", crate::dmi::cpu());
+        }
         "battery" | "batt" => crate::dev::battery::report(),
         "ec" => crate::dev::ec::report(),
         // The ACPI path on its own, so it can be exercised without the
@@ -5044,15 +5206,19 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             if step.starts_with("ctxt") {
                 let path = step.trim_start_matches("ctxt").trim();
                 if path.is_empty() {
-                    kprintln!("  usage: iwx ctxt <path to a .ucode in the namespace>");
+                    kprintln!("  usage: iwx ctxt <a .ucode in the namespace, or a name `fw` lists>");
                     kprintln!("  builds the AX210 boot structures and prints them. Touches no");
                     kprintln!("  register, so it works under emulation and needs no radio.");
                     return;
                 }
-                let bytes = match crate::sysbox::read_blob(path) {
+                // A namespace path, or the name of an image `dev::firmware` holds,
+                // so the boot volume's copy can be checked without staging it.
+                let bytes = match crate::sysbox::read_blob(path)
+                    .or_else(|| crate::dev::firmware::get(path).map(|i| i.bytes().to_vec()))
+                {
                     Some(b) => b,
                     None => {
-                        kprintln!("  no such blob: {}", path);
+                        kprintln!("  no such blob or firmware image: {}", path);
                         return;
                     }
                 };
@@ -5099,6 +5265,17 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         image.has_capa(capa::MLD_API_SUPPORT),
                         image.has_api(api::REGULATORY_NVM_INFO),
                         image.has_api(api::REDUCED_SCAN_CONFIG),
+                    );
+                    // The layouts this driver has to match, by the image's own say.
+                    use crate::dev::iwx::config::{LONG_GROUP, SCAN_CFG_CMD};
+                    let v = |g: u8, c: u8| image.cmd_ver(g, c).map(|n| n as i32).unwrap_or(-1);
+                    kprintln!(
+                        "  {} command versions: scan {} scan-config {} mcc {} (reply {})",
+                        image.cmd_versions.len(),
+                        v(LONG_GROUP, 0x0d),
+                        v(LONG_GROUP, SCAN_CFG_CMD),
+                        v(LONG_GROUP, crate::dev::iwx::reg::MCC_UPDATE_CMD),
+                        image.notif_ver(LONG_GROUP, crate::dev::iwx::reg::MCC_UPDATE_CMD).map(|n| n as i32).unwrap_or(-1),
                     );
                 }
                 match crate::dev::iwx::ctxt::group(&image.sections) {
@@ -5175,6 +5352,92 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             }
                         }
                     }
+                }
+                return;
+            }
+            // `rx` and `down` are about the part already held, not the bus,
+            // so they answer before the sweep: a part that has dropped off the
+            // bus -- all ones, or gone into D3 -- is exactly the one somebody
+            // needs to be able to stop.
+            if step == "rx" || step == "down" || step == "journal" {
+                match step {
+                    // What the join path did and what the part answered, newest
+                    // last. The laptop has no serial line, so this is the trip's
+                    // evidence about joining, the way `rx` is about scanning.
+                    "journal" => {
+                        crate::dev::iwx::service();
+                        let shown = crate::dev::iwx::with_held(|h| {
+                            match &h.link {
+                                Some(l) => kprintln!(
+                                    "  link to {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} on channel {}, {}; queues mgmt {} data {}; {} frame(s) sent, {} response(s), {} said sent, last status {}",
+                                    l.target.bssid[0], l.target.bssid[1], l.target.bssid[2], l.target.bssid[3], l.target.bssid[4], l.target.bssid[5],
+                                    l.target.channel,
+                                    match l.assoc { Some(a) => alloc::format!("associated as {}", a), None => "not associated".into() },
+                                    l.mgmt.id.map(|q| alloc::format!("{}", q)).unwrap_or_else(|| "-".into()),
+                                    l.data.id.map(|q| alloc::format!("{}", q)).unwrap_or_else(|| "-".into()),
+                                    l.mgmt.sent + l.data.sent, l.tx_done, l.tx_ok,
+                                    l.tx_last.map(|s| alloc::format!("{:#04x}", s)).unwrap_or_else(|| "-".into())
+                                ),
+                                None => kprintln!("  no link: nothing has been prepared for an access point"),
+                            }
+                            kprintln!("  versions: {:?}", h.facts.vers);
+                            if h.journal.is_empty() {
+                                kprintln!("  the journal is empty");
+                            }
+                            for line in h.journal.iter() {
+                                kprintln!("    {}", line);
+                            }
+                        });
+                        if shown.is_none() {
+                            kprintln!("  nothing is held: `iwx boot` brings a part up");
+                        }
+                    }
+                    // What the held part has said that nobody asked for. The first
+                    // thing to read on the laptop after `iwx boot`: a part that is
+                    // alive and silent and one that is talking into a full ring look
+                    // the same from every other command.
+                    "rx" => {
+                        crate::dev::iwx::service();
+                        let shown = crate::dev::iwx::with_held(|h| {
+                            let ib = &h.inbox;
+                            kprintln!(
+                                "  {} frame(s), {} notification(s) waiting; {} frame(s) and {} notification(s) dropped for room, {} unreadable",
+                                ib.frames.len(), ib.notifs.len(), ib.dropped, ib.dropped_notifs, ib.bad
+                            );
+                            kprintln!(
+                                "  scan {}, {} abandoned for never saying it ended",
+                                if h.scanning { "running" } else { "idle" },
+                                h.scans_abandoned
+                            );
+                            for f in ib.frames.iter().rev().take(8) {
+                                let ty = (f.frame[0] >> 2) & 3;
+                                let sub = f.frame[0] >> 4;
+                                let ssid = crate::net::ieee80211::parse_beacon(&f.frame)
+                                    .map(|b| b.ssid)
+                                    .unwrap_or_default();
+                                kprintln!(
+                                    "    type {} sub {:2}  ch {:3}  {:4} dBm  {} bytes  {}",
+                                    ty, sub, f.channel, f.rssi, f.frame.len(), ssid
+                                );
+                            }
+                            for n in ib.notifs.iter().rev().take(8) {
+                                kprintln!("    notification group {:#04x} code {:#04x}, {} bytes", n.group, n.code, n.payload.len());
+                            }
+                        });
+                        if shown.is_none() {
+                            kprintln!("  nothing is held: `iwx boot` brings a part up");
+                        }
+                    }
+                    "down" => match crate::dev::iwx::release() {
+                        // wlan0 goes with the part, or it is a handle to nothing.
+                        Some(st) if crate::net::wlan_name() == Some("iwx") => {
+                            crate::net::detach_radio();
+                            kprintln!("  {}; wlan0 is empty again", st.say());
+                        }
+                        Some(st) => kprintln!("  {}", st.say()),
+                        None => kprintln!("  nothing is held: `iwx boot` brings a part up"),
+                    },
+                    _ => {}
                 }
                 return;
             }
@@ -5291,18 +5554,50 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // fetch a megabyte and a half out of host memory on its own
                 // initiative. Somebody should have to ask for that by name.
                 b if b.starts_with("boot") => {
-                    let path = b.trim_start_matches("boot").trim();
-                    if path.is_empty() {
-                        kprintln!("  usage: iwx boot <path to a .ucode in the namespace>");
-                        kprintln!("  powers the part up, loads its firmware and waits for it to");
-                        kprintln!("  report alive. This grants the radio bus-master DMA.");
-                        return;
+                    // One part held at a time, and the old one is stopped before
+                    // the new power-up touches the same registers.
+                    if let Some(st) = crate::dev::iwx::release() {
+                        kprintln!("  the part already up: {}", st.say());
                     }
-                    let bytes = match crate::sysbox::read_blob(path) {
-                        Some(b) => b,
-                        None => {
-                            kprintln!("  no such blob: {}", path);
+                    let path = b.trim_start_matches("boot").trim();
+                    // With no path the part names its own image: its registers
+                    // give the base, and `dev::firmware` has whatever the boot
+                    // volume or `/fw` provided. A path still wins, for trying a
+                    // file under a name the rule would not pick.
+                    let bytes = if path.is_empty() {
+                        let chosen = r.hw_rev(ecam).ok().and_then(|(rev, rf)| {
+                            crate::dev::iwx::firmware_base(r.dev.device, rev, crate::dev::iwx::rf_of(rf))
+                        });
+                        let Some(base) = chosen else {
+                            kprintln!("  usage: iwx boot [path to a .ucode in the namespace]");
+                            kprintln!("  this part did not name an image: read it with `iwx probe`.");
+                            kprintln!("  Booting grants the radio bus-master DMA.");
                             return;
+                        };
+                        match crate::dev::iwx::firmware_for(&base) {
+                            Some((name, img)) => {
+                                kprintln!("  {} from the {}", name, img.source());
+                                img.bytes().to_vec()
+                            }
+                            None => {
+                                kprintln!(
+                                    "  this part wants iwlwifi-{}-<api>.ucode, API {} to {}, and none is in {} or {}/",
+                                    base,
+                                    crate::dev::iwx::MIN_API,
+                                    crate::dev::iwx::MAX_API,
+                                    crate::dev::firmware::DIR,
+                                    crate::dev::firmware::NS_DIR
+                                );
+                                return;
+                            }
+                        }
+                    } else {
+                        match crate::sysbox::read_blob(path) {
+                            Some(b) => b,
+                            None => {
+                                kprintln!("  no such blob: {}", path);
+                                return;
+                            }
                         }
                     };
                     let image = match crate::dev::iwx::fw::parse(&bytes) {
@@ -5341,8 +5636,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             // thrown away. So one verb does both and the second
                             // half is reported separately.
                             let mut b = b;
+                            let mut regulatory = None;
+                            let mut facts = None;
                             match r.nvm(&mut b, 2000) {
                                 Ok(n) => {
+                                    facts = Some(crate::dev::iwx::Facts::of(&image, &n));
                                     crate::dev::iwx::note_nvm(Ok(n));
                                     console::set_color(LTGREEN);
                                     kprintln!(
@@ -5359,6 +5657,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                             console::set_color(LTGREEN);
                                             kprintln!("  {}", d.say());
                                             console::set_color(LTGRAY);
+                                            match &d.regulatory {
+                                                Some(reg) => kprintln!("  {}", reg.say()),
+                                                None => kprintln!("  the firmware does not own regulatory; the NVM's map stands"),
+                                            }
+                                            regulatory = d.regulatory;
                                         }
                                         Err(e) => {
                                             console::set_color(LTRED);
@@ -5374,12 +5677,50 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                     console::set_color(LTGRAY);
                                 }
                             }
-                            // **Dropped here, and on purpose.** Keeping it would
-                            // mean a static holding two megabytes and a live DMA
-                            // target with nothing to service it; the part goes back
-                            // to quiet when its regions go away, which is the
-                            // honest state until there is something to do next.
-                            drop(b);
+                            // **Kept, and that reverses a decision.** This dropped
+                            // the regions on the argument that the part "goes back
+                            // to quiet when its regions go away" -- and nothing
+                            // told it to, so firmware went on writing its receive
+                            // ring into freed heap. `Held` owns both and stops the
+                            // part before releasing either; `iwx down` does that
+                            // on request, and the next `iwx boot` does it first.
+                            match crate::dev::iwx::Held::new(*r, b, ecam, crate::dev::iwx::Family::Ax210) {
+                                Some(mut h) => {
+                                    h.regulatory = regulatory;
+                                    let scannable = facts.is_some();
+                                    if let Some(f) = facts {
+                                        h.facts = f;
+                                    }
+                                    crate::dev::iwx::hold(h);
+                                    kprintln!("  held, running. `iwx down` stops it.");
+                                    // wlan0, if nothing else is: a part that can
+                                    // scan is worth a `wifi scan`, and the stack
+                                    // above it has been waiting for one.
+                                    // `Air` holds no state of its own, so a wlan0 that
+                                    // is already this driver is already the new part.
+                                    let on = crate::net::wlan_name();
+                                    if scannable && on == Some("iwx") {
+                                        // The station above it still remembers the
+                                        // part it replaced: a scan in flight, a
+                                        // prepared access point. Stood down, so the
+                                        // new part starts from nothing.
+                                        {
+                                            let _c = crate::net::claim_wifi();
+                                            if let Some(w) = crate::net::wlan() {
+                                                w.leave_net();
+                                            }
+                                        }
+                                        kprintln!("  wlan0 is this part again: `wifi scan` asks it what is in the air");
+                                    } else if scannable && crate::net::ifaces()[crate::net::WLAN0].nic.is_none() {
+                                        if crate::net::attach_radio(crate::dev::iwx::wlan::Air) {
+                                            kprintln!("  attached as wlan0: `wifi scan` asks it what is in the air");
+                                        }
+                                    } else if scannable {
+                                        kprintln!("  wlan0 already has a driver; `wifi rehearse off` frees it");
+                                    }
+                                }
+                                None => kprintln!("  no aperture to stop it through; dropped"),
+                            }
                         }
                         Err(f) => {
                             crate::dev::iwx::note_alive(Err(f.why()));
@@ -5390,12 +5731,168 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                 }
                 other => kprintln!(
-                    "  no such step '{}' -- try `iwx`, `iwx probe`, `iwx up`, `iwx ctxt <fw>` or `iwx boot <fw>`",
+                    "  no such step '{}' -- try `iwx`, `iwx probe`, `iwx up`, `iwx ctxt <fw>`, `iwx boot [fw]` or `iwx down`",
                     other
                 ),
             }
         }
 
+        // **Sound.** `hda` lists the controllers and, once one is up, its
+        // codecs and the path it plays through; `hda up` brings one up (it
+        // grants the controller DMA, so it is asked for rather than done at
+        // boot); `hda tone [hz] [ms]` plays a sine, a quarter of full scale.
+        "hda" | "sound" => {
+            let mut w = rest.split_whitespace();
+            let sub = w.next().unwrap_or("");
+            let Some(ecam) = acpi.as_ref().and_then(|a| a.mcfg) else {
+                kprintln!("  no ECAM: the bus cannot be read");
+                return;
+            };
+            let bring_up = |pick: Option<usize>| -> bool {
+                let found = crate::dev::hda::find(ecam);
+                if found.is_empty() {
+                    kprintln!("  no HD Audio controller on the bus");
+                    return false;
+                }
+                // The one asked for, or the first whose codecs have an output
+                // wired to something -- an HDMI-only controller has none.
+                let order: alloc::vec::Vec<usize> = match pick {
+                    Some(i) => alloc::vec![i],
+                    None => (0..found.len()).collect(),
+                };
+                for i in order {
+                    let Some(d) = found.get(i).copied() else {
+                        kprintln!("  no controller {}", i);
+                        return false;
+                    };
+                    match crate::dev::hda::Hda::up(ecam, d) {
+                        Ok(h) => {
+                            let has = h.output().is_some();
+                            for line in crate::dev::hda::describe(&h) {
+                                kprintln!("  {}", line);
+                            }
+                            if has || pick.is_some() {
+                                crate::dev::hda::hold(h);
+                                return true;
+                            }
+                        }
+                        Err(f) => kprintln!("  {:04x}:{:04x}: {}", d.vendor, d.device, f.why()),
+                    }
+                }
+                kprintln!("  no controller has an output to play to");
+                false
+            };
+            match sub {
+                "" => {
+                    let found = crate::dev::hda::find(ecam);
+                    kprintln!("[hda] {} controller(s)", found.len());
+                    for (i, d) in found.iter().enumerate() {
+                        kprintln!(
+                            "  {} {:02x}:{:02x}.{} {:04x}:{:04x} class {:02x}/{:02x}",
+                            i, d.bus, d.dev, d.func, d.vendor, d.device, d.class, d.subclass
+                        );
+                    }
+                    let shown = crate::dev::hda::with(|h| {
+                        for line in crate::dev::hda::describe(h) {
+                            kprintln!("  {}", line);
+                        }
+                    });
+                    if shown.is_none() && !found.is_empty() {
+                        kprintln!("  'hda up' brings one up; 'hda tone' plays a test tone");
+                    }
+                }
+                "up" => {
+                    crate::dev::hda::release();
+                    let pick = w.next().and_then(|n| n.parse::<usize>().ok());
+                    bring_up(pick);
+                }
+                "tone" => {
+                    let hz = w.next().and_then(|n| n.parse::<u32>().ok()).unwrap_or(440).clamp(20, 20_000);
+                    let ms = w.next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(1000).min(60_000);
+                    if crate::dev::hda::with(|_| ()).is_none() && !bring_up(None) {
+                        return;
+                    }
+                    let fmt = crate::dev::hda::verb::format(48_000, 16, 2).unwrap_or(0x11);
+                    let pcm = crate::dev::hda::tone(hz, 0.25);
+                    // Taken out first: a `match` on `with(..)` keeps its lock
+                    // guard alive across every arm, and the arm below asks
+                    // for the controller again.
+                    let played = crate::dev::hda::with(|h| h.play(&pcm, fmt));
+                    match played {
+                        Some(Ok(())) => {
+                            kprintln!("  {} Hz, 48 kHz 16-bit stereo, a quarter of full scale", hz);
+                            if ms > 0 {
+                                let end = crate::dev::lapic::ticks() + ms * crate::TIMER_HZ as u64 / 1000;
+                                while crate::dev::lapic::ticks() < end {
+                                    crate::task::yield_now();
+                                }
+                                let at = crate::dev::hda::with(|h| {
+                                    let p = h.position();
+                                    h.stop();
+                                    p
+                                })
+                                .flatten();
+                                kprintln!("  stopped after {} ms, {} byte(s) into the loop", ms, at.unwrap_or(0));
+                            } else {
+                                kprintln!("  looping until 'hda stop'");
+                            }
+                        }
+                        Some(Err(f)) => kprintln!("  {}", f.why()),
+                        None => {}
+                    }
+                }
+                "stop" => {
+                    crate::dev::hda::with(|h| h.stop());
+                }
+                "down" => {
+                    kprintln!("  {}", if crate::dev::hda::release() { "stopped, and bus mastering taken away" } else { "nothing was up" });
+                }
+                other => kprintln!("  no such step '{}' -- hda [up [n] | tone [hz] [ms] | stop | down]", other),
+            }
+        }
+
+        "fw" | "firmware" => {
+            // What the boot volume provided, and what a driver would be handed.
+            // `fw <name>` answers the second question for one name, because the
+            // staged copy wins and a listing of the boot volume cannot show that.
+            console::set_color(YELLOW);
+            kprintln!("[firmware]");
+            console::set_color(WHITE);
+            let name = rest.trim();
+            if !name.is_empty() {
+                match crate::dev::firmware::get(name) {
+                    Some(img) => {
+                        let h = crate::store::sha256::hash(img.bytes());
+                        kprintln!(
+                            "  {}  {} bytes from the {}  sha256 {:02x}{:02x}{:02x}{:02x}",
+                            name,
+                            img.bytes().len(),
+                            img.source(),
+                            h[0], h[1], h[2], h[3]
+                        );
+                    }
+                    None => kprintln!(
+                        "  {} is neither in {}/ nor in {} on the boot volume",
+                        name,
+                        crate::dev::firmware::NS_DIR,
+                        crate::dev::firmware::DIR
+                    ),
+                }
+                return;
+            }
+            let all = crate::dev::firmware::list();
+            if all.is_empty() {
+                kprintln!("  nothing in {} on the boot volume", crate::dev::firmware::DIR);
+            }
+            for (n, len) in &all {
+                kprintln!("  {:<40} {:>9} bytes", n, len);
+            }
+            let skipped = crate::dev::firmware::skipped();
+            if skipped > 0 {
+                kprintln!("  {} file(s) there were refused: too many, too large, or unreadable", skipped);
+            }
+            kprintln!("  a copy staged at {}/<name> is used in preference to these", crate::dev::firmware::NS_DIR);
+        }
         "devices" => {
             console::set_color(YELLOW);
             kprintln!("[devices]");
@@ -6216,6 +6713,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                     r & 0xFFFF_FFFF, calls.len()
                                 );
                                 console::set_color(LTGRAY);
+                            } else if r & linux::syscall::SIGNALED != 0 {
+                                kprintln!(
+                                    "  ended by signal {} after {} syscall(s), machine intact",
+                                    r & 0x7F,
+                                    calls.len()
+                                );
                             } else if r & linux::syscall::EXITED != 0 {
                                 kprintln!(
                                     "  exited {} after {} syscall(s)",
@@ -6663,18 +7166,96 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             crate::gfx::splash::stage("held -- try 'fault'");
         }
         "splash" => {
-            // Worth having beyond nostalgia: it is the only way to look at the
-            // boot screen without rebooting, which is how it got laid out.
-            crate::gfx::splash::begin();
-            for s in ["a", "b", "c", "d", "e", "f", "g", "h"] {
-                crate::gfx::splash::stage(s);
-                crate::time::delay_us(120_000);
+            // The only way to look at the boot screen without rebooting, which
+            // is how the clockwise reveal got laid out. `splash` animates the
+            // iris forming then waits for a key; `splash <ms>` holds that long
+            // and returns instead -- the bounded form `port bars` needs, since
+            // the harness cannot deliver the key that would end it. `splash f
+            // <step> [ms]` freezes one frame, for screenshotting the reveal
+            // mid-forming. It runs under `with_screen` so the clock and cursor
+            // stand down, the way any full-screen program here must.
+            let labels = [
+                "starting",
+                "memory map and page tables",
+                "interrupts and keyboard",
+                "self-test",
+                "scheduler",
+                "network",
+                "storage",
+                "namespace",
+                "loading the model",
+                "fitting the router",
+                "ready",
+            ];
+            let t = rest.trim();
+            let a0 = t.split_whitespace().nth(0);
+            let a1 = t.split_whitespace().nth(1);
+            if a0 == Some("release") {
+                // Give the screen back, for the frame-by-frame capture below.
+                crate::gfx::set_exclusive(false);
+                crate::gfx::compose::invalidate();
+                crate::gfx::render::invalidate();
+                kprintln!("  released");
+            } else if a0 == Some("hold") {
+                // Draw one frame and keep the framebuffer held, returning to
+                // the prompt at once -- so a driver can shoot the sequence
+                // frame by frame in a single boot, `@shot` between the holds,
+                // and `splash release` at the end. Exclusive is set so the
+                // clock and cursor do not paint over the held frame.
+                let step: u32 = a1.and_then(|s| s.parse().ok()).unwrap_or(0);
+                crate::gfx::set_exclusive(true);
+                crate::gfx::compose::invalidate();
+                let label = labels.get(step as usize).copied().unwrap_or("ready");
+                crate::gfx::splash::demo_frame(step, label);
+                kprintln!("  frame {}", step);
+            } else {
+                let freeze = if a0 == Some("f") {
+                    a1.and_then(|s| s.parse::<u32>().ok())
+                } else {
+                    None
+                };
+                let hold_ms: u64 = if a0 == Some("f") {
+                    t.split_whitespace().nth(2)
+                } else {
+                    a0
+                }
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+                crate::port::with_screen(|| {
+                    // The splash composes into the back buffer now, and
+                    // `with_screen` blanked the screen straight to the aperture,
+                    // so the shadow is stale -- forget it, or the first frame's
+                    // diff would leave the blanked pixels where splash happens
+                    // to match the old desktop.
+                    crate::gfx::compose::invalidate();
+                    let stages = crate::gfx::splash::stages();
+                    if let Some(step) = freeze {
+                        let label = labels.get(step as usize).copied().unwrap_or("ready");
+                        crate::gfx::splash::demo_frame(step, label);
+                    } else {
+                        for step in 0..=stages {
+                            let label = labels.get(step as usize).copied().unwrap_or("ready");
+                            crate::gfx::splash::demo_frame(step, label);
+                            let until = crate::port::clock::now_ms() + 320;
+                            while crate::port::clock::now_ms() < until {
+                                unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+                            }
+                        }
+                    }
+                    crate::gfx::desk::trace("splash");
+                    let until = crate::port::clock::now_ms() + hold_ms;
+                    loop {
+                        if crate::dev::kbd::pop_any().is_some() {
+                            break;
+                        }
+                        if hold_ms != 0 && crate::port::clock::now_ms() >= until {
+                            break;
+                        }
+                        unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+                    }
+                });
+                kprintln!("  done");
             }
-            crate::gfx::splash::note("press a key");
-            while crate::dev::kbd::pop_any().is_none() {
-                unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
-            }
-            crate::gfx::splash::finish();
         }
         "echo" => kprintln!("  {}", rest),
         "clear" => console::with(|c| c.clear()),
@@ -8376,6 +8957,9 @@ fn push_num(s: &mut String, mut v: u64) {
 /// purpose -- writing one means writing a passphrase into a content-addressed
 /// store where every past root hash still names it.
 fn wifi_cmd(rest: &str) {
+    // The whole verb under one claim: the clock task polls the same station,
+    // and every arm below takes a `&mut` to it.
+    let _claim = crate::net::claim_wifi();
     let mut it = rest.splitn(3, ' ');
     let sub = it.next().unwrap_or("").trim();
     let a = it.next().unwrap_or("").trim();
@@ -8388,14 +8972,19 @@ fn wifi_cmd(rest: &str) {
                 Some(w) => {
                     let (state, secure) = w.status();
                     kprintln!("  wlan0  {}", state);
-                    kprintln!(
-                        "         {}",
-                        if secure {
-                            "encrypted with a key from the handshake"
-                        } else {
-                            "NOT encrypted -- anything sent is readable in the room"
-                        }
-                    );
+                    // Only about a link that carries traffic. "NOT encrypted"
+                    // under "idle" or a failure read as a warning about a
+                    // connection there was none of.
+                    if state == "running" {
+                        kprintln!(
+                            "         {}",
+                            if secure {
+                                "encrypted with a key from the handshake"
+                            } else {
+                                "NOT encrypted -- anything sent is readable in the room"
+                            }
+                        );
+                    }
                     let seen = w.networks();
                     if !seen.is_empty() {
                         kprintln!("  {} network(s) heard in the last scan:", seen.len());
@@ -8448,10 +9037,7 @@ fn wifi_cmd(rest: &str) {
         // this must not do.
         "rehearse" | "rehearsal" => {
             if a == "off" {
-                let w = &mut crate::net::ifaces()[crate::net::WLAN0];
-                let had = w.nic.is_some();
-                w.nic = None;
-                w.up = false;
+                let had = crate::net::detach_radio();
                 kprintln!(
                     "  {}",
                     if had { "wlan0 is empty again" } else { "wlan0 was already empty" }
@@ -8463,7 +9049,15 @@ fn wifi_cmd(rest: &str) {
                 return;
             }
             let mac = [0x02, 0x47, 0x4C, 0x41, 0x44, 0x53];
-            let r = crate::net::rehearsal::Rehearsal::new(mac);
+            // `offload` plays a part that scans in firmware and must be told
+            // about an access point before it will send to one, which is the
+            // shape the Intel driver has -- so the hooks it will use can be
+            // driven end to end before it can.
+            let r = if a == "offload" {
+                crate::net::rehearsal::Rehearsal::offloading(mac)
+            } else {
+                crate::net::rehearsal::Rehearsal::new(mac)
+            };
             if !crate::net::attach_radio(r) {
                 kprintln!("  refused, which should not happen: a rehearsal radio is SoftMAC");
                 return;

@@ -775,31 +775,62 @@ fn sleep_ms(ms: u64) {
 /// different fix: no card is a driver or hardware matter, no link is a cable,
 /// no address is the router, and only after all three is anything about the
 /// pool worth saying.
-static LEASED: AtomicBool = AtomicBool::new(false);
+static LEASED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The lease as `(interface, link generation)`, packed and offset by one so
+/// zero is "none". **Keyed on the link, not a flag**: a flag set once stayed
+/// true when the cable came out and wlan0 took over, or when the station
+/// joined another network, and the old address was used on a subnet it does
+/// not belong to -- the pool unreachable forever as "the pool did not answer".
+fn lease_key(n: usize) -> u64 {
+    ((n as u64) << 32 | crate::net::ifaces()[n].link_gen as u64) + 1
+}
 
 fn network_ready() -> bool {
     let n = crate::net::primary();
+    let has_wifi = crate::net::ifaces()[crate::net::WLAN0].present();
     if n == crate::net::LO || !crate::net::ifaces()[n].present() {
         set_phase(Phase::Network);
-        note("no network card found: plug in Ethernet (Intel or Realtek) or USB phone tethering");
+        note("no network card found: plug in Ethernet (Intel or Realtek), USB phone tethering, or Wi-Fi");
         return false;
     }
     if !crate::net::ifaces()[n].usable() {
         set_phase(Phase::Network);
-        note("no network cable: plug this PC into your router");
-        LEASED.store(false, Ordering::Release);
+        let rejoining = crate::net::wlan_rejoining();
+        note(if crate::net::ifaces()[n].wireless {
+            match rejoining {
+                Some(_) => "Wi-Fi dropped; rejoining the network",
+                None => "Wi-Fi not connected: 'wifi join <network> <passphrase>'",
+            }
+        } else if has_wifi {
+            "no network cable, and Wi-Fi is not connected: plug in, or 'wifi join <network> <passphrase>'"
+        } else {
+            "no network cable: plug this PC into your router"
+        });
+        LEASED.store(0, Ordering::Release);
         return false;
     }
-    if !LEASED.load(Ordering::Acquire) {
+    let key = lease_key(n);
+    if LEASED.load(Ordering::Acquire) != key {
         set_phase(Phase::Network);
+        // Addressed already -- by DHCP from the idle loop when the link came
+        // up -- is as good as addressed here.
+        if crate::net::ifaces()[n].configured {
+            LEASED.store(key, Ordering::Release);
+            return true;
+        }
         match crate::net::dhcp::configure_on(n) {
             Ok(c) => {
-                LEASED.store(true, Ordering::Release);
+                LEASED.store(lease_key(n), Ordering::Release);
                 let line = alloc::format!("network up: this PC is {}.{}.{}.{}", c.ip[0], c.ip[1], c.ip[2], c.ip[3]);
                 note(&line);
             }
             Err(_) => {
-                note("cable in, but the router gave no address: check the router");
+                note(if crate::net::ifaces()[n].wireless {
+                    "Wi-Fi connected, but the network gave no address"
+                } else {
+                    "cable in, but the router gave no address: check the router"
+                });
                 return false;
             }
         }
@@ -832,7 +863,11 @@ impl Link {
     /// Send, and `false` if the peer has gone.
     fn send(&mut self, bytes: &[u8]) -> bool {
         match self {
-            Link::Tcp(h) => tcp::send_at(*h, bytes, 5_000).is_ok(),
+            // Queued and not yet acknowledged is still sent: TCP retransmits,
+            // and a dead connection says so as `NotConnected`. A share sent
+            // across a wireless reassociation was being thrown away with the
+            // session over a gap TCP would have covered.
+            Link::Tcp(h) => matches!(tcp::send_at(*h, bytes, 5_000), Ok(()) | Err(tcp::Error::Timeout)),
             Link::Ws(w) => w.send_text(&String::from_utf8_lossy(bytes)).is_ok(),
         }
     }

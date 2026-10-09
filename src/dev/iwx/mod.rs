@@ -38,7 +38,13 @@ pub mod gen3;
 pub mod init;
 pub mod nvm;
 pub mod power;
+pub mod reg;
+pub mod rx;
+pub mod scan;
+pub mod wlan;
 pub mod fw;
+pub mod join;
+pub mod err;
 
 use crate::dev::pci::{self, Device};
 use alloc::string::String;
@@ -46,8 +52,9 @@ use alloc::vec::Vec;
 
 /// Intel, and the CNVi/PCIe wireless functions this kernel knows by id.
 ///
-/// The list is `dev::registry`'s `INTEL_CNVI_IDS`, not a second copy: a private
-/// id list per driver is the arrangement the registry exists to replace.
+/// The ids themselves are `dev::registry`'s rows that name `iwx`, not a second
+/// copy: a private id list per driver is the arrangement the registry exists to
+/// replace.
 pub const VENDOR_INTEL: u16 = 0x8086;
 
 /// Hardware revision, valid from reset and before any firmware runs.
@@ -107,6 +114,11 @@ pub enum Family {
     Ax210,
     /// Bz and later. Differs again at the reset and the clock handshake, so it is
     /// named in order to be refused rather than driven by this table.
+    ///
+    /// **Ma is not one, and this said it was.** Both references file Ma under the
+    /// AX210 family -- OpenBSD's `iwx_attach` sets `IWX_DEVICE_FAMILY_AX210` for
+    /// `7e40`, and it boots out of the same gen3 context info -- so the refusal
+    /// was a guess from the type number being above Snow Owl's.
     Bz,
 }
 
@@ -217,8 +229,8 @@ impl Mac {
     pub fn family(&self) -> Option<Family> {
         Some(match self {
             Mac::Qu | Mac::Quz | Mac::Qnj => Family::F22000,
-            Mac::So | Mac::Snj | Mac::Sof => Family::Ax210,
-            Mac::Bz | Mac::Gl | Mac::BzW | Mac::Ma => Family::Bz,
+            Mac::So | Mac::Snj | Mac::Sof | Mac::Ma => Family::Ax210,
+            Mac::Bz | Mac::Gl | Mac::BzW => Family::Bz,
             Mac::Unknown(_) => return None,
         })
     }
@@ -331,6 +343,79 @@ pub fn product_name(mac: Mac, rf: Rf) -> Option<&'static str> {
     })
 }
 
+/// The highest firmware API this driver understands.
+///
+/// An image's API is the version of its command layouts, and a newer one moves
+/// fields this driver writes at fixed offsets -- so the newest file on a disk is
+/// not the right one, the newest at or below this is. `tools/wifi_fw.py` stages
+/// by the same ceiling and its selftest reads this line out of the source, so
+/// the two cannot drift apart silently. 89 because that is the image every
+/// layout here was measured against.
+pub const MAX_API: u32 = 89;
+
+/// The oldest API worth looking for. Below this the container predates the
+/// TLVs `fw::parse` relies on, so a file that old is not a candidate.
+pub const MIN_API: u32 = 50;
+
+/// The firmware *base* a part wants: everything in `iwlwifi-<base>-<api>.ucode`
+/// but the API.
+///
+/// **Mostly a function of the registers, and the PCI id only where they are
+/// ambiguous.** The controller type and step give the first half and the radio
+/// type and step the second, which is how `so-a0-hr-b0` falls out of the GF63's
+/// `0x370` and `0x10a100`. Two cases need the id and both are upstream's:
+/// the AX200 (`2723`) carries its radio in the controller name, `cc-a0`; and
+/// type `0x42` is both SnJ and Typhoon Peak, which `iwx_attach` separates by
+/// product -- `2725` is the discrete AX210 and wants `ty-a0-gf-a0`.
+///
+/// `None` rather than a guess for anything else. A wrong base is the wrong
+/// firmware, and the symptom of the wrong firmware is a part that never says it
+/// is alive -- which is the most expensive thing to debug on hardware with no
+/// emulator.
+///
+/// Not covered, deliberately: the Killer 1690 parts, which want a `gf4` image
+/// and are told apart only by PCI subsystem id. They get the `gf` base, which is
+/// the documented fallback upstream takes when the subsystem is not listed.
+pub fn firmware_base(device: u16, rev: Rev, rf: RfId) -> Option<String> {
+    let step = |n: u8| -> Option<char> {
+        match n {
+            0 => Some('a'),
+            1 => Some('b'),
+            2 => Some('c'),
+            _ => None,
+        }
+    };
+    if device == 0x2723 {
+        return Some(String::from("cc-a0"));
+    }
+    let radio = match rf.rf {
+        Rf::Hr1 | Rf::Hr2 => alloc::format!("hr-{}0", step(rf.step)?),
+        Rf::Gf => alloc::format!("gf-{}0", step(rf.step)?),
+        Rf::Jf1 | Rf::Jf2 => alloc::format!("jf-{}0", step(rf.step)?),
+        _ => return None,
+    };
+    let mac = match rev.mac {
+        Mac::Snj if device == 0x2725 => return Some(alloc::format!("ty-a0-{}", radio)),
+        Mac::So | Mac::Sof | Mac::Snj => String::from("so-a0"),
+        // By its own step: an A-step Ma handed the B-step image is firmware
+        // built for different silicon. linux-firmware ships no `ma-a0`, so such a
+        // part is reported as wanting an image nobody has, which is the truth.
+        Mac::Ma => alloc::format!("ma-{}0", step(rev.step)?),
+        Mac::Qu => alloc::format!("Qu-{}0", step(rev.step)?),
+        Mac::Quz => String::from("QuZ-a0"),
+        _ => return None,
+    };
+    Some(alloc::format!("{}-{}", mac, radio))
+}
+
+/// The image for a base, newest API first, wherever `dev::firmware` finds it.
+pub fn firmware_for(base: &str) -> Option<(String, crate::dev::firmware::Image)> {
+    (MIN_API..=MAX_API).rev().find_map(|api| {
+        let name = alloc::format!("iwlwifi-{}-{}.ucode", base, api);
+        crate::dev::firmware::get(&name).map(|img| (name, img))
+    })
+}
+
 #[derive(Clone, Copy)]
 pub struct Radio {
     pub dev: Device,
@@ -364,7 +449,7 @@ impl Refusal {
         match self {
             Refusal::NoAperture => "no register aperture assigned; firmware left this function unused",
             Refusal::NotMapped => "the register aperture could not be mapped",
-            Refusal::Asleep => "reads as all ones: parked in D3cold, or memory-space decoding is off",
+            Refusal::Asleep => "reads as all ones after waking it to D0: parked in D3cold, or memory-space decoding is off",
             Refusal::Silent => "reads as all zeroes, which no live function reports",
             Refusal::Faulted => "the read faulted and was caught: the aperture is mapped and the device does not decode it",
         }
@@ -386,6 +471,10 @@ impl Radio {
     /// `pci::enable_bus_master`.
     pub fn hw_rev(&self, ecam: u64) -> Result<(Rev, u32), Refusal> {
         let bar0 = self.bar0.filter(|&b| b != 0).ok_or(Refusal::NoAperture)?;
+        // Woken first: a part the firmware left in D3hot answers config space
+        // and not its BARs, and its all-ones read is otherwise reported as
+        // `Asleep` with nothing done about it. D3cold is out of reach from here.
+        let _ = pci::set_d0(ecam, &self.dev);
         enable_memory_space(ecam, &self.dev);
         if !crate::mem::paging::map_range(bar0, APERTURE, true) {
             return Err(Refusal::NotMapped);
@@ -441,10 +530,12 @@ fn enable_memory_space(ecam: u64, d: &Device) {
     }
 }
 
-/// Every Intel wireless function on the bus, with its aperture.
+/// Every function on the bus that `dev::registry` hands to this driver.
 ///
-/// Asks `dev::registry` which ids are wireless rather than carrying a list, so
-/// adding a part is a row there and not a second table here.
+/// Asks for the rows naming `iwx` rather than for Intel wireless in general,
+/// which is what this asked until the id lists were rebuilt: an AC 9560 is Intel
+/// wireless of the generation before, and collecting it here would send the
+/// power-up at a part with a different firmware API.
 pub fn find(ecam: u64) -> Vec<Radio> {
     use crate::dev::registry::{lookup, Ident, Role};
     let mut out: Vec<Radio> = Vec::new();
@@ -455,7 +546,8 @@ pub fn find(ecam: u64) -> Vec<Radio> {
         if dev.vendor != VENDOR_INTEL {
             return;
         }
-        if lookup(&Ident::of_pci(&dev)).map(|e| e.role) != Some(Role::Wireless) {
+        let row = lookup(&Ident::of_pci(&dev));
+        if row.map(|e| e.role) != Some(Role::Wireless) || row.and_then(|e| e.support.driver()) != Some("iwx") {
             return;
         }
         out.push(Radio { dev, bar0: pci::bar(ecam, &dev, 0) });
@@ -588,6 +680,46 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     claim("Qu is family 22000", rev_of(0x33 << 4).mac.family() == Some(Family::F22000));
     claim("QuZ too", rev_of(0x35 << 4).mac.family() == Some(Family::F22000));
     claim("Bz is its own family, named so it can be refused", rev_of(0x46 << 4).mac.family() == Some(Family::Bz));
+    claim("Ma is AX210 family, as both references file it", rev_of(0x44 << 4).mac.family() == Some(Family::Ax210));
+    claim(
+        "a Ma part names the image for its own step, and a B-step's is the one linux-firmware ships",
+        firmware_base(0x7e40, rev_of(0x441), rf_of(0x0010_a100)).as_deref() == Some("ma-b0-hr-b0")
+            && firmware_base(0x7e40, rev_of(0x440), rf_of(0x0010_a100)).as_deref() == Some("ma-a0-hr-b0"),
+    );
+
+    // --- which image, from the registers -----------------------------------
+    //
+    // The GF63's own words, read off the machine: `51f0`, `rev=0x370`,
+    // `rfid=0x10a100`. The image it loaded under Linux was so-a0-hr-b0-89.
+    let gf63 = firmware_base(0x51f0, rev_of(0x370), rf_of(0x0010_a100));
+    claim("the GF63's registers name the image it is known to load", gf63.as_deref() == Some("so-a0-hr-b0"));
+    claim(
+        "a Gale Force radio on the same controller names a different image",
+        firmware_base(0x51f0, rev_of(0x370), rf_of(0x0010_d000)).as_deref() == Some("so-a0-gf-a0"),
+    );
+    claim(
+        "type 0x42 is Typhoon Peak on a discrete 2725 and Snow Owl elsewhere",
+        firmware_base(0x2725, rev_of(0x420), rf_of(0x0010_d000)).as_deref() == Some("ty-a0-gf-a0")
+            && firmware_base(0x2726, rev_of(0x420), rf_of(0x0010_d000)).as_deref() == Some("so-a0-gf-a0"),
+    );
+    claim(
+        "a Qu takes its step into the name, which is what tells b0 from c0",
+        // The register, not upstream's constants: `IWX_CSR_HW_REV_TYPE_QU_B0` is
+        // 0x334 *after* `iwx_attach` re-packs the step two bits up, so the word
+        // the part actually reads for B0 is 0x331 and for C0 0x332.
+        firmware_base(0xa0f0, rev_of(0x331), rf_of(0x0010_a100)).as_deref() == Some("Qu-b0-hr-b0")
+            && firmware_base(0xa0f0, rev_of(0x332), rf_of(0x0010_a100)).as_deref() == Some("Qu-c0-hr-b0"),
+    );
+    claim(
+        "the AX200 is named by its id, its radio being part of the controller name",
+        firmware_base(0x2723, rev_of(0x340), rf_of(0)).as_deref() == Some("cc-a0"),
+    );
+    claim(
+        "and a radio nobody has named gets no image rather than a neighbour's",
+        firmware_base(0x51f0, rev_of(0x370), rf_of(0x0011_0000)).is_none()
+            && firmware_base(0x51f0, rev_of(0x460), rf_of(0x0010_a100)).is_none(),
+    );
+    claim("the API window is not empty", MIN_API <= MAX_API);
     claim(
         "and a type nobody has named has no family rather than a default",
         rev_of(0x99 << 4).mac.family().is_none(),
@@ -776,7 +908,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     claim(
         "every register is inside the mapped aperture",
         POWER_UP.iter().all(|s| match s {
-            Step::SetBit(r, _) | Step::Write(r, _) => *r < APERTURE,
+            Step::SetBit(r, _) | Step::ClearBit(r, _) | Step::Write(r, _) => *r < APERTURE,
             Step::Poll { reg, .. } => *reg < APERTURE,
             Step::Settle(_) => true,
             // Every register `acquire` touches, listed here rather than trusted,
@@ -787,6 +919,41 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             }
         }),
     );
+    // The stop sequence, by the same rules as the power-up.
+    let at = |pred: &dyn Fn(&Step) -> bool| STOP.iter().position(|s| pred(s));
+    let stop_master = at(&|s| matches!(s, Step::SetBit(CSR_RESET, b) if *b == CSR_RESET_REG_FLAG_STOP_MASTER));
+    let master_poll = at(&|s| matches!(s, Step::Poll { reg: CSR_RESET, mask, .. } if *mask == CSR_RESET_REG_FLAG_MASTER_DISABLED));
+    let sw_reset = at(&|s| matches!(s, Step::SetBit(CSR_RESET, b) if *b == CSR_RESET_REG_FLAG_SW_RESET));
+    claim(
+        "the part is asked to stop mastering, and waited on, before its processor is reset",
+        matches!((stop_master, master_poll, sw_reset), (Some(a), Some(b), Some(c)) if a < b && b < c),
+    );
+    claim(
+        "and the reset is followed by a settle, as in the power-up",
+        sw_reset.and_then(|i| STOP.get(i + 1)).map(|s| matches!(s, Step::Settle(_))) == Some(true),
+    );
+    claim(
+        "the link is held out of power management only across the prepare, then released",
+        {
+            let hold = at(&|s| matches!(s, Step::SetBit(CSR_DBG_LINK_PWR_MGMT_REG, _)));
+            let free = at(&|s| matches!(s, Step::ClearBit(CSR_DBG_LINK_PWR_MGMT_REG, _)));
+            matches!((hold, free), (Some(a), Some(b)) if a < b)
+        },
+    );
+    claim(
+        "every stop register is inside the mapped aperture, and nothing in it acquires",
+        STOP.iter().all(|s| match s {
+            Step::SetBit(r, _) | Step::ClearBit(r, _) | Step::Write(r, _) => *r < APERTURE,
+            Step::Poll { reg, us, .. } => *reg < APERTURE && *us > 0,
+            Step::Settle(_) => true,
+            Step::Acquire { .. } => false,
+        }),
+    );
+    claim(
+        "a stop with nothing confirmed still says so rather than reporting success",
+        Stopped::default().say() != Stopped { rx_idle: true, master_off: true, host_off: true }.say(),
+    );
+
     // L1 must survive: upstream disables L0s alone, and disabling both would
     // cost the link's power management for no reason this driver needs.
     claim(
@@ -819,6 +986,11 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.extend(init::checks());
     out.extend(config::checks());
     out.extend(power::checks());
+    out.extend(rx::checks());
+    out.extend(reg::checks());
+    out.extend(scan::checks());
+    out.extend(join::checks());
+    out.extend(err::checks());
     out
 }
 
@@ -873,6 +1045,742 @@ const CSR_GIO_CHICKEN_BITS_REG_BIT_L1A_NO_L0S_RX: u32 = 0x0080_0000;
 const CSR_DBG_HPET_MEM_REG_VAL: u32 = 0xFFFF_0000;
 const CSR_MBOX_SET_REG_OS_ALIVE: u32 = 0x20;
 const CSR_RESET_LINK_PWR_MGMT_DISABLED: u32 = 0x8000_0000;
+const CSR_HW_IF_CONFIG_REG_ENABLE_PME: u32 = 0x1000_0000;
+const CSR_RESET_REG_FLAG_MASTER_DISABLED: u32 = 0x0000_0100;
+const CSR_RESET_REG_FLAG_STOP_MASTER: u32 = 0x0000_0200;
+const CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ: u32 = 0x0000_0008;
+
+/// Taking a running part down: `iwx_apm_stop` then `iwx_sw_reset`, for the
+/// families below Bz.
+///
+/// **The bus master is stopped by the part before the host takes the grant
+/// away**, and the order is the point of the table. Clearing bus mastering in
+/// the PCI command register first would refuse a transfer the part is halfway
+/// through, which is the kind of thing a PCIe completer reports as an error and
+/// a laptop's firmware is entitled to escalate. Asking the part to stop
+/// mastering and waiting for it to say it has stopped is upstream's order and
+/// the polite one; the PCI bit goes afterwards, in `Held::stop`, as the
+/// guarantee rather than the request.
+pub const STOP: &[Step] = &[
+    Step::ClearBit(CSR_GP_CNTRL, CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ),
+    // Hold the link out of power management while the part is told to prepare
+    // for sleep, then let it go.
+    Step::SetBit(CSR_DBG_LINK_PWR_MGMT_REG, CSR_RESET_LINK_PWR_MGMT_DISABLED),
+    Step::SetBit(CSR_HW_IF_CONFIG_REG, CSR_HW_IF_CONFIG_REG_PREPARE | CSR_HW_IF_CONFIG_REG_ENABLE_PME),
+    Step::Settle(1_000),
+    Step::ClearBit(CSR_DBG_LINK_PWR_MGMT_REG, CSR_RESET_LINK_PWR_MGMT_DISABLED),
+    Step::Settle(5_000),
+    // Stop mastering, and wait for the part to say it has.
+    Step::SetBit(CSR_RESET, CSR_RESET_REG_FLAG_STOP_MASTER),
+    Step::Poll {
+        reg: CSR_RESET,
+        mask: CSR_RESET_REG_FLAG_MASTER_DISABLED,
+        want: CSR_RESET_REG_FLAG_MASTER_DISABLED,
+        us: 100,
+    },
+    // Back from powered-up-active to uninitialised.
+    Step::ClearBit(CSR_GP_CNTRL, CSR_GP_CNTRL_REG_FLAG_INIT_DONE),
+    // And reset the on-board processor, so the firmware is not running at all.
+    Step::SetBit(CSR_RESET, CSR_RESET_REG_FLAG_SW_RESET),
+    Step::Settle(5_000),
+];
+
+/// Upper-MAC peripheral registers for the receive DMA engine, gen3.
+const RFH_RXF_DMA_CFG_GEN3: u32 = 0xA0_7880;
+const RFH_GEN_STATUS_GEN3: u32 = 0xA0_7824;
+const RXF_DMA_IDLE: u32 = 1 << 31;
+
+/// How a stop went. Every step is attempted whatever an earlier one said: a
+/// stop that gave up halfway leaves a part half running, which is the one
+/// state worse than either.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Stopped {
+    /// The receive DMA engine reported idle before anything else was touched.
+    pub rx_idle: bool,
+    /// The part said it had stopped mastering the bus.
+    pub master_off: bool,
+    /// And the host's bus-master enable read back clear. **This is the one that
+    /// decides whether memory is freed**: the part's own word is about its
+    /// firmware, the command register is about whether it can reach memory at
+    /// all, and without it the regions are leaked rather than handed back.
+    pub host_off: bool,
+}
+
+impl Stopped {
+    pub fn say(&self) -> &'static str {
+        if !self.host_off {
+            return "reset, but bus mastering would not read back off -- its memory is kept, not freed";
+        }
+        match (self.rx_idle, self.master_off) {
+            (true, true) => "stopped: receive DMA idle, bus master released, firmware reset",
+            (false, true) => "stopped, though the receive engine never reported idle",
+            (true, false) => "reset, though the part never confirmed it stopped mastering",
+            (false, false) => "reset with neither the receive engine nor the bus master confirming",
+        }
+    }
+}
+
+/// Take a booted part down. Interrupts masked, receive DMA quiesced, the bus
+/// master stopped by the part and then by the host, the firmware reset.
+///
+/// # Safety
+/// `bar0` must be the mapped aperture of the part `dev` names.
+unsafe fn stop_part(ecam: u64, dev: &Device, bar0: u64) -> Stopped {
+    let mut out = Stopped::default();
+    alive::arm(bar0);
+    if gen3::lock(bar0) {
+        gen3::prph_write(bar0, gen3::umac_prph(RFH_RXF_DMA_CFG_GEN3), 0);
+        for _ in 0..1000 {
+            if gen3::prph_read(bar0, gen3::umac_prph(RFH_GEN_STATUS_GEN3)) & RXF_DMA_IDLE != 0 {
+                out.rx_idle = true;
+                break;
+            }
+            crate::time::delay_us(10);
+        }
+        gen3::unlock(bar0);
+    }
+    for step in STOP {
+        match *step {
+            Step::SetBit(reg, bit) => {
+                let p = (bar0 + reg) as *mut u32;
+                core::ptr::write_volatile(p, core::ptr::read_volatile(p) | bit);
+            }
+            Step::ClearBit(reg, bit) => {
+                let p = (bar0 + reg) as *mut u32;
+                core::ptr::write_volatile(p, core::ptr::read_volatile(p) & !bit);
+            }
+            Step::Write(reg, val) => core::ptr::write_volatile((bar0 + reg) as *mut u32, val),
+            Step::Settle(us) => crate::time::delay_us(us as u64),
+            Step::Poll { reg, mask, want, us } => {
+                let got = poll_bit(bar0, reg, mask, want, us);
+                if reg == CSR_RESET && mask == CSR_RESET_REG_FLAG_MASTER_DISABLED {
+                    out.master_off = got;
+                }
+            }
+            Step::Acquire { .. } => {}
+        }
+    }
+    // The reset re-arms nothing, but upstream masks again here because the
+    // power-management transition can raise an interrupt on its own.
+    alive::arm(bar0);
+    out.host_off = crate::dev::pci::disable_bus_master(ecam, dev);
+    out
+}
+
+/// A booted part, owned. **The only way to hold one**, so that letting go of it
+/// takes the part down first.
+///
+/// `Booted` alone could be dropped while firmware went on writing into its
+/// receive ring -- freed heap, written by a device -- and `iwx boot` did exactly
+/// that, on purpose, with a comment saying the part "goes back to quiet when its
+/// regions go away". It does not: nothing tells it to. This holds the regions and
+/// the part together and its `Drop` runs the stop before either is released.
+pub struct Held {
+    pub radio: Radio,
+    /// `ManuallyDrop` so that `Drop` decides: freed after a stop the host can
+    /// confirm, leaked after one it cannot. A leak is a few megabytes; freeing
+    /// memory a device can still write is corruption somewhere unrelated.
+    pub booted: core::mem::ManuallyDrop<Booted>,
+    bar0: u64,
+    ecam: u64,
+    stopped: Option<Stopped>,
+    /// Frames and notifications nobody was waiting for.
+    pub inbox: rx::Inbox,
+    /// The receive descriptor this family puts in front of a frame.
+    desc: usize,
+    /// The channel map the firmware put in force, which is what a scan plan is
+    /// drawn from. `None` when the firmware does not own regulatory.
+    pub regulatory: Option<reg::Regulatory>,
+    /// What a scan request needs from the image and the NVM, kept so a scan
+    /// can be built without either in hand.
+    pub facts: Facts,
+    /// A scan is running, and how the last one ended.
+    pub scanning: bool,
+    pub scan_ended: Option<scan::Done>,
+    scan_began: u64,
+    /// Scans that never said they ended and were given up on.
+    pub scans_abandoned: u32,
+    /// The access point this part has been set up to talk to, if any.
+    pub link: Option<Link>,
+    /// What the join path did and what the part said, newest last. Bounded.
+    /// The laptop has no serial line, so this is what a trip brings home.
+    pub journal: alloc::collections::VecDeque<String>,
+}
+
+/// Everything set up in the firmware for one access point.
+pub struct Link {
+    pub target: crate::dev::radio::JoinTarget,
+    pub band24: bool,
+    pub mgmt: join::TxQueue,
+    pub data: join::TxQueue,
+    /// The association id, once `associated` has been told it.
+    pub assoc: Option<u16>,
+    /// Transmit responses seen, and how many said the frame went out.
+    pub tx_done: u32,
+    pub tx_ok: u32,
+    /// The last status byte a transmit response carried.
+    pub tx_last: Option<u8>,
+}
+
+/// How long a scan may run before the part is taken not to be scanning. Sixty-
+/// odd channels at the longest passive dwell is under eight seconds; this is
+/// well past that and well short of an operator giving up.
+const SCAN_LIMIT_MS: u64 = 20_000;
+
+/// What `Held` keeps from the firmware image and the NVM.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Facts {
+    pub mac: [u8; 6],
+    pub band_5: bool,
+    pub scan_ver: Option<u8>,
+    pub ds_param: bool,
+    pub scan_channels: usize,
+    /// What the join path needs to know about the image's command table.
+    pub vers: join::Versions,
+    /// The transmit chains the NVM declares, which is which antenna a fixed-rate
+    /// frame is sent on; and the receive chains, which the PHY context listens on.
+    pub tx_ant: u8,
+    pub rx_ant: u8,
+}
+
+impl Facts {
+    pub fn of(image: &fw::Image, n: &nvm::Nvm) -> Facts {
+        Facts {
+            mac: n.mac,
+            band_5: n.band_52,
+            scan_ver: image.cmd_ver(config::LONG_GROUP, scan::SCAN_REQ_UMAC),
+            ds_param: image.has_capa(scan::CAPA_DS_PARAM_SET_IE),
+            scan_channels: image.scan_channels(),
+            vers: join::Versions::of(image),
+            tx_ant: n.tx_chains,
+            rx_ant: n.rx_chains,
+        }
+    }
+}
+
+impl Held {
+    pub fn new(radio: Radio, booted: Booted, ecam: u64, family: Family) -> Option<Held> {
+        let bar0 = radio.bar0.filter(|&b| b != 0)?;
+        let desc = if family == Family::F22000 { rx::DESC_V1 } else { rx::DESC_V3 };
+        Some(Held {
+            radio,
+            booted: core::mem::ManuallyDrop::new(booted),
+            bar0,
+            ecam,
+            stopped: None,
+            inbox: rx::Inbox::new(),
+            desc,
+            regulatory: None,
+            facts: Facts::default(),
+            scanning: false,
+            scan_ended: None,
+            scan_began: 0,
+            scans_abandoned: 0,
+            link: None,
+            journal: alloc::collections::VecDeque::new(),
+        })
+    }
+
+    /// Drain the receive ring into the inbox. Cheap, and safe to call as often
+    /// as anybody likes: it reads a producer index and does nothing more when the
+    /// ring is empty. Answers how many packets it took.
+    ///
+    /// Polled rather than interrupt-driven, like every network driver here: the
+    /// interrupt is masked (`alive::arm`), the status block is in memory, and the
+    /// idle loop already turns over every few milliseconds.
+    pub fn poll(&mut self) -> usize {
+        if self.stopped.is_some() {
+            return 0;
+        }
+        let mut n = 0;
+        let b: &mut Booted = &mut self.booted;
+        while let Some(got) = b.rx.next(&b.boot.rings, &b.buffers) {
+            n += 1;
+            match got {
+                Ok(p) => {
+                    b.cmds.completed(&p);
+                    self.inbox.take(&p, self.desc)
+                }
+                Err(_) => self.inbox.bad += 1,
+            }
+        }
+        if n > 0 {
+            // Safety: this part's aperture, and it has not been stopped.
+            unsafe { b.rx.ack(self.bar0, &b.boot.rings) };
+        }
+        // A scan ends by notification, in whichever group and by whichever of
+        // the two codes it arrives as; `Inbox::take` keeps the latest apart so
+        // it cannot be lost behind other notifications. **Taken whether or not a
+        // scan is running**: firmware sends the iteration's end and then the
+        // scan's, the first ends it, and a second left lying would end the
+        // *next* scan the moment it began -- every other scan empty. Upstream
+        // throws a late one away for the same reason.
+        // Transmit responses arrive on the data queues' ids, which the command
+        // queue rightly ignores; counted here so a trip can say whether frames
+        // left the part. A session-protection end is noted and nothing more.
+        while let Some(t) = self.inbox.notif(0, join::TX_CMD).or_else(|| self.inbox.notif(config::LONG_GROUP, join::TX_CMD)) {
+            if let Some(l) = self.link.as_mut() {
+                l.tx_done += 1;
+                let st = join::tx_status(&t.payload);
+                l.tx_last = st;
+                if matches!(st.map(|s| s & 0xff), Some(1) | Some(2)) {
+                    l.tx_ok += 1;
+                }
+            }
+        }
+        while let Some(n) = self.inbox.notif(join::MAC_CONF_GROUP, join::SESSION_PROTECTION_NOTIF) {
+            let status = n.payload.get(4).copied().unwrap_or(0);
+            self.note(alloc::format!("session protection ended, status {}", status));
+        }
+        let ended = self.inbox.scan_done.take();
+        if self.scanning {
+            if ended.is_some() {
+                self.scanning = false;
+                self.scan_ended = ended;
+            } else if crate::net::now_ms().saturating_sub(self.scan_began) > SCAN_LIMIT_MS {
+                // A request the part refused never says it ended. Given up on
+                // rather than held forever, which would refuse every later scan.
+                self.scanning = false;
+                self.scan_ended = None;
+                self.scans_abandoned += 1;
+            }
+        }
+        n
+    }
+
+    /// Ask the part to scan. Frames it hears arrive in the inbox as they come;
+    /// `scanning` clears when it says it has finished.
+    ///
+    /// The plan is narrowed to what regulatory allows when the firmware gave a
+    /// map: asking a part to visit a channel its own regulatory refuses is a
+    /// command error at best, and on a DFS channel a transmission at worst.
+    pub fn scan(&mut self, ssid: &[u8], plan: &[u8]) -> Result<(), &'static str> {
+        if self.stopped.is_some() {
+            return Err("the part is stopped");
+        }
+        // One at a time: a second request while one runs is a firmware error
+        // nothing would read, and its completion would end the wrong scan.
+        self.poll();
+        if self.scanning {
+            return Err("a scan is already running on the part");
+        }
+        let allowed: Vec<u8> = match &self.regulatory {
+            Some(r) => {
+                let ok = r.numbers();
+                plan.iter().copied().filter(|c| ok.contains(c)).collect()
+            }
+            None => plan.to_vec(),
+        };
+        let req = scan::Request {
+            mac: self.facts.mac,
+            channels: &allowed,
+            ssid,
+            band_5: self.facts.band_5,
+            ds_param: self.facts.ds_param,
+            max_channels: self.facts.scan_channels,
+        };
+        let body = scan::request(self.facts.scan_ver, &req).map_err(|e| e.why())?;
+        let b: &mut Booted = &mut self.booted;
+        // Safety: this part's aperture, alive, and not stopped.
+        unsafe { b.cmds.send(self.bar0, &mut b.boot.rings, config::LONG_GROUP, scan::SCAN_REQ_UMAC, 0, &body) }
+            .map_err(|_| "the scan request could not be queued")?;
+        // Frames left over from before are not this scan's.
+        self.inbox.frames.clear();
+        self.inbox.scan_done = None;
+        self.scanning = true;
+        self.scan_began = crate::net::now_ms();
+        self.scan_ended = None;
+        Ok(())
+    }
+
+    /// Call off a scan that is running, upstream's `iwx_scan_abort`: the abort
+    /// for uid zero, waited on, and the scan taken as over once the part has
+    /// completed the command. Its own end-of-scan arrives afterwards and is
+    /// thrown away by `poll`, which takes one whether or not a scan runs.
+    pub fn scan_abort(&mut self) -> Result<(), &'static str> {
+        if self.stopped.is_some() || !self.scanning {
+            return Ok(());
+        }
+        let b: &mut Booted = &mut self.booted;
+        let (inbox, desc) = (&mut self.inbox, self.desc);
+        // Safety: this part's aperture, alive, and not stopped.
+        let r = unsafe {
+            cmd::ask_with(
+                self.bar0,
+                &mut b.boot.rings,
+                &b.buffers,
+                &mut b.rx,
+                &mut b.cmds,
+                config::LONG_GROUP,
+                scan::SCAN_ABORT_UMAC,
+                0,
+                &[0u8; 8],
+                1000,
+                &mut |p| inbox.take(p, desc),
+            )
+        };
+        match r {
+            Ok(_) => {
+                self.scanning = false;
+                self.scan_ended = None;
+                Ok(())
+            }
+            Err(_) => Err("the part would not call its scan off"),
+        }
+    }
+
+
+    /// One line into the journal, oldest dropped past sixty-four.
+    pub fn note(&mut self, line: String) {
+        if self.journal.len() >= 64 {
+            self.journal.pop_front();
+        }
+        self.journal.push_back(line);
+    }
+
+    /// Send one command and wait for its completion, filing whatever else
+    /// arrives meanwhile. The reply's payload comes back; a refusal or a
+    /// silence is an `Err` naming the command.
+    fn ask(&mut self, group: u8, code: u8, version: u8, payload: &[u8], ms: u32, what: &'static str) -> Result<Vec<u8>, &'static str> {
+        if self.stopped.is_some() {
+            return Err("the part is stopped");
+        }
+        let b: &mut Booted = &mut self.booted;
+        let (inbox, desc) = (&mut self.inbox, self.desc);
+        // Safety: this part's aperture, alive, and not stopped.
+        let r = unsafe {
+            cmd::ask_with(
+                self.bar0,
+                &mut b.boot.rings,
+                &b.buffers,
+                &mut b.rx,
+                &mut b.cmds,
+                group,
+                code,
+                version,
+                payload,
+                ms,
+                &mut |p| inbox.take(p, desc),
+            )
+        };
+        match r {
+            Ok(p) => {
+                let v = p.payload.to_vec();
+                self.note(alloc::format!("{} ok, {} byte(s) back", what, v.len()));
+                Ok(v)
+            }
+            Err(e) => {
+                self.note(alloc::format!("{} failed: {}", what, e.why()));
+                // A silence is one of two things, and only the part can say
+                // which: a firmware that is slow, or one that has asserted and
+                // will never answer again. Its error tables say so, and name
+                // the command it was handling when it died.
+                if matches!(e, cmd::CmdError::NoReply | cmd::CmdError::Full) {
+                    let alive = self.booted.alive;
+                    // Safety: this part's aperture, alive, not stopped.
+                    for line in unsafe { err::report(self.bar0, &alive) } {
+                        self.note(line);
+                    }
+                }
+                Err(what)
+            }
+        }
+    }
+
+    /// Set the firmware up to talk to one access point: `iwx_auth`'s
+    /// sequence, which `join.rs` opens with. On any refusal what was already
+    /// added is taken down again, so a failed join leaves the part as it was.
+    pub fn prepare_join(&mut self, t: &crate::dev::radio::JoinTarget) -> Result<(), &'static str> {
+        if self.stopped.is_some() {
+            return Err("the part is stopped");
+        }
+        if self.link.is_some() {
+            self.leave();
+        }
+        self.facts.vers.check()?;
+        // A MAC context added while the UMAC is still scanning is a UMAC
+        // fatal, and the firmware's scan can finish without `poll` having seen
+        // the completion, so drain first and then call off anything still in
+        // flight. Upstream ensures no scan is active before `iwx_auth`.
+        self.poll();
+        if self.scanning {
+            self.note(String::from("a scan was still in flight; calling it off before the join"));
+            let _ = self.scan_abort();
+        }
+        let band24 = matches!(crate::dev::radio::band_of(t.channel), Some(crate::dev::radio::Band::G24));
+        let addr = self.facts.mac;
+        let vers = self.facts.vers;
+        let l = config::LONG_GROUP;
+        self.note(alloc::format!(
+            "join {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} on channel {} ({})",
+            t.bssid[0], t.bssid[1], t.bssid[2], t.bssid[3], t.bssid[4], t.bssid[5], t.channel, if band24 { "2.4 GHz" } else { "5 GHz" }
+        ));
+
+        // The PHY, and where its receive chains are declared depends on the
+        // image: in `RLC_CONFIG_CMD` at version 2, in the context itself before.
+        let chains = join::rx_chain_info(self.facts.rx_ant);
+        let rx_in_phy = if vers.rlc_separate() { None } else { Some(chains) };
+        self.ask(l, join::PHY_CONTEXT_CMD, 0, &join::phy_context(join::ACTION_ADD, t.channel, band24, vers.cdb, rx_in_phy), 2000, "PHY_CONTEXT_CMD add")?;
+        let mac = join::MacParams { band24, bi: t.beacon_int, dtim: t.dtim.unwrap_or(0), assoc: None };
+        let step: Result<(), &'static str> = (|| {
+            if vers.rlc_separate() {
+                self.ask(join::DATA_PATH_GROUP, join::RLC_CONFIG_CMD, 2, &join::rlc_config(self.facts.rx_ant), 2000, "RLC_CONFIG_CMD")?;
+            }
+            self.ask(l, join::MAC_CONTEXT_CMD, 0, &join::mac_context(join::ACTION_ADD, addr, t.bssid, &mac), 2000, "MAC_CONTEXT_CMD add")?;
+            let r = (|| {
+                // The binding answers a status word, zero for success.
+                let rsp = self.ask(l, join::BINDING_CONTEXT_CMD, 0, &join::binding(join::ACTION_ADD, 0), 2000, "BINDING_CONTEXT_CMD add")?;
+                if rsp.len() >= 4 && rsp[..4] != [0, 0, 0, 0] {
+                    self.note(alloc::format!("BINDING_CONTEXT_CMD answered status {:#x}", u32::from_le_bytes([rsp[0], rsp[1], rsp[2], rsp[3]])));
+                    return Err("BINDING_CONTEXT_CMD refused");
+                }
+                let r = (|| {
+                    let rsp = self.ask(l, join::ADD_STA, 0, &join::add_sta(false, t.bssid), 2000, "ADD_STA add")?;
+                    if !join::add_sta_ok(&rsp) {
+                        self.note(alloc::format!("ADD_STA answered status {:#x}", rsp.first().copied().unwrap_or(0xff)));
+                        return Err("ADD_STA refused");
+                    }
+                    let r = (|| {
+                        let mut mgmt = join::TxQueue::new(join::MGMT_TID).ok_or("no memory for a management queue")?;
+                        let rsp = self.ask(join::DATA_PATH_GROUP, join::SCD_QUEUE_CONFIG_CMD, 0, &mgmt.add_body(), 2000, "SCD_QUEUE_CONFIG_CMD add (management)")?;
+                        mgmt.activated(&rsp)?;
+                        let mut data = join::TxQueue::new(join::DATA_TID).ok_or("no memory for a data queue")?;
+                        let rsp = self.ask(join::DATA_PATH_GROUP, join::SCD_QUEUE_CONFIG_CMD, 0, &data.add_body(), 2000, "SCD_QUEUE_CONFIG_CMD add (data)")?;
+                        if let Err(e) = data.activated(&rsp) {
+                            let _ = self.ask(join::DATA_PATH_GROUP, join::SCD_QUEUE_CONFIG_CMD, 0, &mgmt.remove_body(), 1000, "SCD_QUEUE_CONFIG_CMD remove (management)");
+                            return Err(e);
+                        }
+                        self.note(alloc::format!("queues: management {}, data {}", mgmt.id.unwrap_or(255), data.id.unwrap_or(255)));
+                        self.link = Some(Link { target: *t, band24, mgmt, data, assoc: None, tx_done: 0, tx_ok: 0, tx_last: None });
+                        Ok(())
+                    })();
+                    if r.is_err() {
+                        let _ = self.ask(l, join::REMOVE_STA, 0, &join::sta_remove(), 1000, "REMOVE_STA");
+                    }
+                    r
+                })();
+                if r.is_err() {
+                    let _ = self.ask(l, join::BINDING_CONTEXT_CMD, 0, &join::binding(join::ACTION_REMOVE, 0), 1000, "BINDING_CONTEXT_CMD remove");
+                }
+                r
+            })();
+            if r.is_err() {
+                let _ = self.ask(l, join::MAC_CONTEXT_CMD, 0, &join::mac_context(join::ACTION_REMOVE, addr, t.bssid, &mac), 1000, "MAC_CONTEXT_CMD remove");
+            }
+            r
+        })();
+        if let Err(e) = step {
+            let _ = self.ask(l, join::PHY_CONTEXT_CMD, 0, &join::phy_context(join::ACTION_REMOVE, t.channel, band24, vers.cdb, rx_in_phy), 1000, "PHY_CONTEXT_CMD remove");
+            return Err(e);
+        }
+        // Hold the channel for the handshake: nine beacon intervals, upstream's
+        // figure, or 900 TU when the beacon did not say. Advisory -- a refusal
+        // is noted and the join goes on, since nothing else is competing for
+        // the radio.
+        let tu = if t.beacon_int == 0 { 900 } else { t.beacon_int as u32 * 9 };
+        let _ = self.ask(join::MAC_CONF_GROUP, join::SESSION_PROTECTION_CMD, 0, &join::session_protection(join::ACTION_ADD, tu), 1000, "SESSION_PROTECTION_CMD add");
+        Ok(())
+    }
+
+    /// The association succeeded: `iwx_run`'s half. The station is updated,
+    /// the MAC is told the id and stops asking for beacons, and the channel
+    /// no longer needs protecting.
+    pub fn associated(&mut self, aid: u16, t: &crate::dev::radio::JoinTarget) {
+        let Some(link) = self.link.as_mut() else { return };
+        link.assoc = Some(aid);
+        link.target = *t;
+        let (addr, band24) = (self.facts.mac, link.band24);
+        let l = config::LONG_GROUP;
+        let mac = join::MacParams { band24, bi: t.beacon_int, dtim: t.dtim.unwrap_or(0), assoc: Some(aid) };
+        match self.ask(l, join::ADD_STA, 0, &join::add_sta(true, t.bssid), 2000, "ADD_STA update") {
+            Ok(rsp) if !join::add_sta_ok(&rsp) => self.note(alloc::format!("ADD_STA update answered status {:#x}", rsp.first().copied().unwrap_or(0xff))),
+            _ => {}
+        }
+        let _ = self.ask(l, join::MAC_CONTEXT_CMD, 0, &join::mac_context(join::ACTION_MODIFY, addr, t.bssid, &mac), 2000, "MAC_CONTEXT_CMD associated");
+        let _ = self.ask(join::MAC_CONF_GROUP, join::SESSION_PROTECTION_CMD, 0, &join::session_protection(join::ACTION_REMOVE, 0), 1000, "SESSION_PROTECTION_CMD remove");
+    }
+
+    /// Take everything `prepare_join` put up back down, in reverse. Every step
+    /// is attempted whatever the one before said, because a part left with
+    /// half a station is the state the next join cannot recover from.
+    pub fn leave(&mut self) {
+        let Some(link) = self.link.take() else { return };
+        if self.stopped.is_some() {
+            return;
+        }
+        let (addr, band24, ch) = (self.facts.mac, link.band24, link.target.channel);
+        let vers = self.facts.vers;
+        let l = config::LONG_GROUP;
+        let mac = join::MacParams { band24, bi: link.target.beacon_int, dtim: link.target.dtim.unwrap_or(0), assoc: link.assoc };
+        if link.assoc.is_none() {
+            let _ = self.ask(join::MAC_CONF_GROUP, join::SESSION_PROTECTION_CMD, 0, &join::session_protection(join::ACTION_REMOVE, 0), 1000, "SESSION_PROTECTION_CMD remove");
+        }
+        if link.data.id.is_some() {
+            let _ = self.ask(join::DATA_PATH_GROUP, join::SCD_QUEUE_CONFIG_CMD, 0, &link.data.remove_body(), 1000, "SCD_QUEUE_CONFIG_CMD remove (data)");
+        }
+        if link.mgmt.id.is_some() {
+            let _ = self.ask(join::DATA_PATH_GROUP, join::SCD_QUEUE_CONFIG_CMD, 0, &link.mgmt.remove_body(), 1000, "SCD_QUEUE_CONFIG_CMD remove (management)");
+        }
+        let _ = self.ask(l, join::REMOVE_STA, 0, &join::sta_remove(), 1000, "REMOVE_STA");
+        let _ = self.ask(l, join::BINDING_CONTEXT_CMD, 0, &join::binding(join::ACTION_REMOVE, 0), 1000, "BINDING_CONTEXT_CMD remove");
+        let _ = self.ask(l, join::MAC_CONTEXT_CMD, 0, &join::mac_context(join::ACTION_REMOVE, addr, link.target.bssid, &mac), 1000, "MAC_CONTEXT_CMD remove");
+        let rx_in_phy = if vers.rlc_separate() { None } else { Some(join::rx_chain_info(self.facts.rx_ant)) };
+        let _ = self.ask(l, join::PHY_CONTEXT_CMD, 0, &join::phy_context(join::ACTION_REMOVE, ch, band24, vers.cdb, rx_in_phy), 1000, "PHY_CONTEXT_CMD remove");
+        // The queues' memory goes back with `link`, which the firmware has now
+        // been told to forget. A part that refused the removes keeps writing
+        // transmit responses, not descriptors, so the heap is safe either way.
+        drop(link);
+    }
+
+    /// Send one 802.11 frame to the access point. Management frames take the
+    /// management queue; everything else the data queue. Fixed at the lowest
+    /// legacy rate, encrypted in software -- `mld.rs` says why.
+    pub fn tx(&mut self, frame: &[u8]) -> Result<(), &'static str> {
+        if self.stopped.is_some() {
+            return Err("the part is stopped");
+        }
+        let (bar0, ant) = (self.bar0, self.facts.tx_ant);
+        let link = self.link.as_mut().ok_or("no access point has been prepared; `prepare_join` first")?;
+        let rate = join::legacy_rate(link.band24, ant);
+        let flags = join::TX_FLAGS_CMD_RATE | join::TX_FLAGS_ENCRYPT_DIS;
+        let q = if join::is_mgmt(frame) { &mut link.mgmt } else { &mut link.data };
+        // Safety: this part's aperture, alive, not stopped, and the queue was
+        // activated by the firmware's own reply.
+        unsafe { q.send(bar0, frame, rate, flags) }
+    }
+
+    pub fn bar0(&self) -> u64 {
+        self.bar0
+    }
+
+    pub fn desc(&self) -> usize {
+        self.desc
+    }
+
+    /// Take the part down. Idempotent: the second call answers the first's result.
+    pub fn stop(&mut self) -> Stopped {
+        if let Some(s) = self.stopped {
+            return s;
+        }
+        // Safety: `bar0` is this part's aperture, mapped by `boot`.
+        let s = unsafe { stop_part(self.ecam, &self.radio.dev, self.bar0) };
+        self.stopped = Some(s);
+        s
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if self.stop().host_off {
+            // Safety: dropped once, here, and the part can no longer reach it.
+            unsafe { core::mem::ManuallyDrop::drop(&mut self.booted) };
+        }
+    }
+}
+
+/// The one held part, if `iwx boot` brought one up and nothing has stopped it.
+///
+/// **A lock and not a `Racy`, because two tasks reach it.** The shell boots,
+/// stops and reads it; `net::wifi_poll` drains it from the idle loop *and* from
+/// the clock task. A `Racy` there is the clock task servicing a part the shell
+/// is halfway through replacing. The service side only ever tries the lock and
+/// skips a tick if it is taken; the shell side yields between tries rather than
+/// spinning, because a holder preempted on this same core does not finish while
+/// its waiter spins.
+static HELD: crate::sync::Spin<Slot> = crate::sync::Spin::new(Slot(None));
+
+/// `Held` carries raw pointers to its DMA regions and so is not `Send` on its
+/// own. It is moved between tasks only behind `HELD`'s lock, one owner at a
+/// time, which is the property `Send` stands for.
+struct Slot(Option<Held>);
+unsafe impl Send for Slot {}
+
+/// Which task holds `HELD`, so the same task asking again is told rather than
+/// left yielding forever. The lock records no owner of its own, and a wait that
+/// only another task can end is a hang when the other task is this one.
+static HOLDER: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
+
+struct Grabbed {
+    guard: crate::sync::Guard<'static, Slot>,
+}
+
+impl Drop for Grabbed {
+    fn drop(&mut self) {
+        HOLDER.store(usize::MAX, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl core::ops::Deref for Grabbed {
+    type Target = Slot;
+    fn deref(&self) -> &Slot {
+        &self.guard
+    }
+}
+
+impl core::ops::DerefMut for Grabbed {
+    fn deref_mut(&mut self) -> &mut Slot {
+        &mut self.guard
+    }
+}
+
+/// The lock, yielding to whoever has it -- or `None` if that is this task.
+fn grab() -> Option<Grabbed> {
+    let me = crate::task::current();
+    loop {
+        if let Some(g) = HELD.try_lock() {
+            HOLDER.store(me, core::sync::atomic::Ordering::Relaxed);
+            return Some(Grabbed { guard: g });
+        }
+        if HOLDER.load(core::sync::atomic::Ordering::Relaxed) == me {
+            return None;
+        }
+        crate::task::yield_now();
+    }
+}
+
+/// For the two callers that change what is held: nesting either inside a
+/// `with_held` is a bug, and saying so beats a machine that stops answering.
+fn grab_or_say(who: &str) -> Grabbed {
+    match grab() {
+        Some(g) => g,
+        None => panic!("iwx::{} called while this task already holds the part", who),
+    }
+}
+
+/// Keep a booted part, stopping whatever was held before.
+pub fn hold(d: Held) {
+    let mut g = grab_or_say("hold");
+    // Replaced rather than swapped in place, so the old one's Drop -- the stop --
+    // runs before the new one is reachable.
+    g.0 = None;
+    g.0 = Some(d);
+}
+
+/// Stop and release the held part, answering how the stop went.
+pub fn release() -> Option<Stopped> {
+    let mut d = grab_or_say("release").0.take()?;
+    Some(d.stop())
+}
+
+/// Drain the held part's ring, from the idle loop or the clock task. Nothing
+/// held, or the shell busy with it, and nothing is done this tick.
+pub fn service() -> usize {
+    match HELD.try_lock() {
+        Some(mut g) => g.0.as_mut().map(|h| h.poll()).unwrap_or(0),
+        None => 0,
+    }
+}
+
+/// Run `f` against the held part, if there is one. `None` as well when this
+/// task is already inside a `with_held`.
+pub fn with_held<R>(f: impl FnOnce(&mut Held) -> R) -> Option<R> {
+    grab()?.0.as_mut().map(f)
+}
+
+pub fn held() -> bool {
+    grab().is_some_and(|g| g.0.is_some())
+}
+
 /// Upstream's own figure, and it is **microseconds**: fifty, not fifty
 /// milliseconds. The semaphore is granted immediately or the part needs the
 /// prepare dance, so a generous timeout here buys nothing and hides which of the
@@ -894,6 +1802,8 @@ pub enum Step {
     /// been told about, which matters because several of these hold state set by
     /// firmware that has already run.
     SetBit(u64, u32),
+    /// Read, mask out, write back. The stop sequence's half of `SetBit`.
+    ClearBit(u64, u32),
     /// Write a whole word, for the registers that are thresholds rather than
     /// flag sets.
     Write(u64, u32),
@@ -1056,6 +1966,10 @@ impl Radio {
                 Step::SetBit(reg, bit) => unsafe {
                     let p = (bar0 + reg) as *mut u32;
                     core::ptr::write_volatile(p, core::ptr::read_volatile(p) | bit);
+                },
+                Step::ClearBit(reg, bit) => unsafe {
+                    let p = (bar0 + reg) as *mut u32;
+                    core::ptr::write_volatile(p, core::ptr::read_volatile(p) & !bit);
                 },
                 Step::Write(reg, val) => unsafe {
                     core::ptr::write_volatile((bar0 + reg) as *mut u32, val);
@@ -1237,13 +2151,32 @@ impl Radio {
 
         crate::dev::pci::enable_bus_master(ecam, &self.dev);
 
+        // **From here every failure stops the part before its memory goes.** A
+        // firmware that missed the ALIVE deadline may be slow rather than dead,
+        // and the first thing a slow one does is write its ALIVE into the receive
+        // ring -- which an early return would have just handed back to the heap.
+        let give_up = |boot: gen3::Boot, buffers: alive::Buffers, e: BootFault| {
+            // Safety: this part's aperture, mapped by `power_up`.
+            let s = unsafe { stop_part(ecam, &self.dev, bar0) };
+            if !s.host_off {
+                core::mem::forget(boot);
+                core::mem::forget(buffers);
+            }
+            Err(e)
+        };
         // Safety: an AX210 part whose power-up completed, with every address in
         // `boot` pointing at memory this driver owns.
-        unsafe { gen3::kick(bar0, &boot) }.map_err(BootFault::Kick)?;
+        if let Err(e) = unsafe { gen3::kick(bar0, &boot) } {
+            return give_up(boot, buffers, BootFault::Kick(e));
+        }
         let mut rx = alive::Rx::new();
-        let a = unsafe { alive::wait(bar0, &mut boot.rings, &buffers, &mut rx, ms) }
-            .map_err(BootFault::NotAlive)?;
-        let cmds = cmd::Queue::new().ok_or(BootFault::NoMemory)?;
+        let a = match unsafe { alive::wait(bar0, &mut boot.rings, &buffers, &mut rx, ms) } {
+            Ok(a) => a,
+            Err(e) => return give_up(boot, buffers, BootFault::NotAlive(e)),
+        };
+        let Some(cmds) = cmd::Queue::new() else {
+            return give_up(boot, buffers, BootFault::NoMemory);
+        };
         Ok(Booted { alive: a, boot, buffers, rx, cmds, configured: false })
     }
 }
@@ -1320,7 +2253,7 @@ impl Radio {
     /// call and not folded into `nvm`.
     ///
     /// Answers what it sent and what it skipped. **A success here does not mean the
-    /// part can scan**: six of upstream's twelve are written and `config.rs` names
+    /// part can scan**: seven of upstream's twelve are written and `config.rs` names
     /// the five that are not.
     pub fn configure(
         &self,
@@ -1333,12 +2266,16 @@ impl Radio {
             Some(a) => a,
             None => return Err(config::Fault::At(0, cmd::CmdError::NoQueue)),
         };
+        let (mcc_multi, scan_cfg_ver) = config::Facts::from_image(image);
         let f = config::Facts {
-            tx_ant: n.tx_chains,
-            // Upstream's flag for this product id, followed rather than reasoned
-            // about -- see the constant's own note on why it reads oddly.
-            discrete: true,
-            xtal_latency: 0,
+            rx_ant: image.valid_rx_ant(n.rx_chains),
+            lar: n.lar,
+            mcc_multi,
+            scan_cfg_ver,
+            tx_ant: image.valid_tx_ant(n.tx_chains),
+            // By product id; see `config::Soc` for why 0x51f0 is integrated.
+            soc: config::Soc::for_device(self.dev.device),
+            scan_ver: image.cmd_ver(config::LONG_GROUP, scan::SCAN_REQ_UMAC),
             ltr_enabled: config::ltr_enabled(ecam, &self.dev),
             // Not sleeping. `power.rs` argues for it: on a machine whose job is
             // mining or serving, a radio asleep between beacons trades latency for
@@ -1347,7 +2284,22 @@ impl Radio {
         };
         // Safety: a part whose firmware is alive and which has been through the
         // handshake, on an aperture `boot` mapped.
-        unsafe { config::configure(bar0, &mut b.boot.rings, &mut b.cmds, image, &f) }
+        // Packets stepped over while waiting for the regulatory reply are
+        // dropped here: nothing is held yet to keep them for, and at
+        // initialisation nothing but notifications nobody needs can arrive.
+        unsafe {
+            config::configure(
+                bar0,
+                &mut b.boot.rings,
+                &b.buffers,
+                &mut b.rx,
+                &mut b.cmds,
+                image,
+                &f,
+                n.band_52,
+                &mut |_| {},
+            )
+        }
     }
 }
 

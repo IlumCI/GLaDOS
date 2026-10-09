@@ -185,6 +185,11 @@ pub const SUITES: &[Suite] = &[
         run: crate::mem::census::selftest,
     },
     Suite {
+        name: "learn",
+        about: "a correction is a label the model did not produce",
+        run: crate::ai::learn_selftest,
+    },
+    Suite {
         name: "migrate",
         about: "a task carried onto another core and back",
         run: crate::task::migration_selftest,
@@ -265,6 +270,11 @@ pub const SUITES: &[Suite] = &[
         run: linux_selftest,
     },
     Suite {
+        name: "web",
+        about: "a page laid out as text, and its links numbered for a reader that is not a person",
+        run: web_selftest,
+    },
+    Suite {
         name: "paging",
         about: "page rights, and a write to a read-only page that has to fault",
         run: paging_selftest,
@@ -278,6 +288,16 @@ pub const SUITES: &[Suite] = &[
         name: "wifi",
         about: "the half of the wireless bring-up that can be checked without a radio",
         run: wifi_selftest,
+    },
+    Suite {
+        name: "firmware",
+        about: "device firmware by name, and which copy wins",
+        run: firmware_selftest,
+    },
+    Suite {
+        name: "hda",
+        about: "HD Audio verbs, pin defaults, the path to a speaker, a test tone",
+        run: hda_selftest,
     },
     Suite {
         name: "iwx",
@@ -435,7 +455,7 @@ fn devices_selftest() -> bool {
     use crate::kprintln;
     let mut ok = true;
     let mut n = 0usize;
-    for (what, good) in crate::dev::registry::checks() {
+    for (what, good) in crate::dev::registry::checks().into_iter().chain(crate::dev::pci::checks()) {
         n += 1;
         if !good {
             kprintln!("    FAIL: {}", what);
@@ -475,6 +495,36 @@ fn wifi_selftest() -> bool {
 /// the shape `mem::fixed` refuses for its own map. What is left is the decode,
 /// and the decode is where a wrong answer picks the wrong firmware and gets
 /// silence.
+fn hda_selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    let mut n = 0usize;
+    for (what, good) in crate::dev::hda::checks() {
+        n += 1;
+        if !good {
+            kprintln!("    FAIL: {}", what);
+            ok = false;
+        }
+    }
+    kprintln!("    {} claim(s)", n);
+    ok
+}
+
+fn firmware_selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    let mut n = 0usize;
+    for (what, good) in crate::dev::firmware::checks() {
+        n += 1;
+        if !good {
+            kprintln!("    FAIL: {}", what);
+            ok = false;
+        }
+    }
+    kprintln!("    {} claim(s)", n);
+    ok
+}
+
 fn iwx_selftest() -> bool {
     use crate::kprintln;
     let mut ok = true;
@@ -509,7 +559,7 @@ fn sockets_selftest() -> bool {
     use crate::kprintln;
     let mut ok = true;
     let mut n = 0usize;
-    for (what, good) in crate::net::tcp::checks() {
+    for (what, good) in crate::net::tcp::checks().into_iter().chain(crate::net::link_checks()) {
         n += 1;
         if !good {
             kprintln!("    FAIL: {}", what);
@@ -602,6 +652,24 @@ fn linux_selftest() -> bool {
     ok
 }
 
+/// The reader's claims, counted and printed for `linux_selftest`'s reason: a
+/// list that returned early passes in exactly the same silence as one that
+/// checked everything.
+fn web_selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    let mut n = 0usize;
+    for (what, good) in crate::net::reader::checks() {
+        n += 1;
+        if !good {
+            kprintln!("    FAIL: {}", what);
+            ok = false;
+        }
+    }
+    kprintln!("    {} claim(s)", n);
+    ok
+}
+
 /// How many suites there are, and therefore how many verdict slots.
 ///
 /// One number rather than two, because the assertion below used to compare
@@ -612,7 +680,7 @@ fn linux_selftest() -> bool {
 /// says it exists to prevent. A `static` cannot be read in a const context, so
 /// the array cannot be measured directly; naming its length is the next best
 /// thing and it is now the only place the number appears.
-const SLOTS: usize = 71;
+const SLOTS: usize = 75;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.

@@ -33,17 +33,28 @@
 //!
 //! ### What is checked and what is owed
 //!
-//! The cipher underneath is checked against RFC 3610 at every boot. The
-//! *framing* here is checked structurally -- that each mask masks what it
-//! should and nothing else, that a round trip returns the frame it started
-//! with, that a tampered header is refused -- and **not** against a published
-//! CCMP vector, because one has not been transcribed. IEEE 802.11-2016 Annex J
-//! carries them and that is the gap.
+//! The cipher underneath is checked against RFC 3610 at every boot, and the
+//! *framing* is checked against **IEEE 802.11-2012 Annex M.6.4** -- the
+//! published CCMP encapsulation example, ciphertext and MIC byte for byte.
+//! That gap was open for a long time and this is what closed it.
 //!
-//! The consolation is the shape of the failure: a mask transcribed wrongly
-//! produces frames no real access point authenticates, which shows up as a
-//! network that will not associate rather than as traffic that silently leaks.
-//! It is the loud kind of wrong. It is still owed.
+//! Why a vector and not only a round trip, which this file also does: the AAD
+//! masking and the nonce layout could be self-consistently wrong and round-trip
+//! perfectly against themselves while failing against every access point in
+//! the world. The other end of a real conversation is not available to test
+//! against, so a published frame is the only thing that catches it.
+//!
+//! The vector's own frame carries the **retry bit set**, which is the case the
+//! AAD mask exists for, so it exercises the masking rather than passing
+//! through it. Both directions of that are asserted: a change to an address
+//! the AAD covers must fail the MIC, and a retry bit set in flight must *not*
+//! -- the second being the one a too-eager mask breaks, and it presents as a
+//! flaky radio rather than as a bug.
+//!
+//! What is still structural rather than published: the QoS layout. Annex M's
+//! example is a non-QoS data frame, so the TID's path into the nonce and the
+//! two-byte QoS control in the AAD are checked by round trip and by the
+//! rewritten-TID refusal above, and not against anybody else's bytes.
 
 use alloc::vec::Vec;
 
@@ -288,9 +299,10 @@ impl Keys {
 /// The CCMP *header* is what this exposes to an outside reader -- six packet
 /// number bytes in an order that is not the order they are counted in, a key
 /// id in the top two bits of the fifth byte, and ExtIV always set. Scapy
-/// parses that structure, so the framing gets a second opinion even though the
-/// cryptography still does not: an Annex J vector is what the top of this file
-/// says is owed, and this is not it.
+/// parses that structure, so the framing gets a second opinion from a reader
+/// nobody here wrote. The cryptography has its own second opinion now -- the
+/// Annex M.6.4 vector in `selftest` -- so this is no longer standing in for
+/// one.
 pub fn dump() {
     use crate::kprintln;
     let me: [u8; 6] = [0x02, 0, 0, 0, 0, 0x11];
@@ -554,6 +566,158 @@ pub fn selftest() -> bool {
                 let mut t = w.clone();
                 t[24] = 0x01;
                 unprotect(&tk, &t).is_none()
+            }
+            None => false,
+        },
+    );
+
+
+    // --- IEEE 802.11-2012 Annex M.6.4, the published CCMP example ----------
+    //
+    // Everything above this line is a round trip against ourselves, and the
+    // top of this file spent a long time saying why that is not enough: the
+    // AAD masking and the nonce layout could be self-consistently wrong and
+    // round-trip perfectly while failing against every access point in the
+    // world. Nothing here can be checked against the other end of a real
+    // conversation, so a published vector is the only thing that catches it.
+    //
+    // The frame is a plain data frame with the retry bit set, which is the
+    // case the AAD mask exists for -- so the vector exercises the masking
+    // rather than merely passing through it.
+    let vtk: [u8; 16] = [
+        0xc9, 0x7c, 0x1f, 0x67, 0xce, 0x37, 0x11, 0x85, 0x51, 0x4a, 0x8a, 0x19, 0xf2, 0xbd, 0xd5,
+        0x2f,
+    ];
+    let vhdr: [u8; 24] = [
+        0x08, 0x48, 0xc3, 0x2c, 0x0f, 0xd2, 0xe1, 0x28, 0xa5, 0x7c, 0x50, 0x30, 0xf1, 0x84, 0x44,
+        0x08, 0xab, 0xae, 0xa5, 0xb8, 0xfc, 0xba, 0x80, 0x33,
+    ];
+    let vplain: [u8; 20] = [
+        0xf8, 0xba, 0x1a, 0x55, 0xd0, 0x2f, 0x85, 0xae, 0x96, 0x7b, 0xb6, 0x2f, 0xb6, 0xcd, 0xa8,
+        0xeb, 0x7e, 0x78, 0xa0, 0x50,
+    ];
+    let want_c: [u8; 20] = [
+        0xf3, 0xd0, 0xa2, 0xfe, 0x9a, 0x3d, 0xbf, 0x23, 0x42, 0xa6, 0x43, 0xe4, 0x32, 0x46, 0xe8,
+        0x0c, 0x3c, 0x04, 0xd0, 0x19,
+    ];
+    let want_mic: [u8; 8] = [0x78, 0x45, 0xce, 0x0b, 0x16, 0xf9, 0x76, 0x23];
+    let vpn: u64 = 0xb503_9776_e70c;
+
+    let vframe: Vec<u8> = [&vhdr[..], &vplain[..]].concat();
+    let vf = parse(&vframe);
+
+    // The two intermediate values are asserted directly as well as through the
+    // ciphertext, so a failure says which of the two is wrong rather than only
+    // that the frame came out different.
+    check(
+        "the vector's AAD is 22 bytes with retry masked and protected forced on",
+        match &vf {
+            Some(f) => {
+                let a = aad(&vframe, f);
+                a.len() == 22 && a[0] == 0x08 && a[1] == 0x40
+            }
+            None => false,
+        },
+    );
+    check(
+        "the vector's nonce is priority, transmitter, then the PN big-endian",
+        match &vf {
+            Some(f) => {
+                let n = nonce(f.tid, &f.a2, vpn);
+                n[0] == 0 && &n[1..7] == &vhdr[10..16] && &n[7..13] == &vpn.to_be_bytes()[2..8]
+            }
+            None => false,
+        },
+    );
+
+    // The vector proper: the cipher, under this file's own AAD and nonce.
+    check(
+        "Annex M.6.4: the published ciphertext and MIC, byte for byte",
+        match &vf {
+            Some(f) => {
+                let a = aad(&vframe, f);
+                let n = nonce(f.tid, &f.a2, vpn);
+                match ccm::seal(&vtk, &n, &a, &vplain, MIC_LEN) {
+                    Some(sealed) => {
+                        sealed.len() == vplain.len() + MIC_LEN
+                            && &sealed[..vplain.len()] == &want_c[..]
+                            && &sealed[vplain.len()..] == &want_mic[..]
+                    }
+                    None => false,
+                }
+            }
+            None => false,
+        },
+    );
+
+    // And through the public path, which additionally has to get the CCMP
+    // header's byte order right: PN0, PN1, reserved, key id with ExtIV, then
+    // PN2 to PN5. That is neither endianness, and it is the field most often
+    // written out as a plain integer.
+    let vout = protect(&vtk, &vframe, vpn, 0);
+    check(
+        "the whole protected frame matches the vector, header order included",
+        match &vout {
+            Some(o) => {
+                o.len() == 24 + HDR_LEN + vplain.len() + MIC_LEN
+                    && header_pn(&o[24..]) == Some(vpn)
+                    && o[27] & 0x20 != 0
+                    && u16::from_le_bytes([o[0], o[1]]) & FC_PROTECTED != 0
+                    && &o[32..32 + want_c.len()] == &want_c[..]
+                    && &o[o.len() - MIC_LEN..] == &want_mic[..]
+            }
+            None => false,
+        },
+    );
+
+    // A flipped ciphertext bit must fail the MIC and -- the half that matters
+    // -- must not advance the replay window, or anybody able to inject garbage
+    // can lock out the real sender. Authentication before state.
+    check(
+        "a tampered frame fails the MIC without advancing the replay window",
+        match &vout {
+            Some(o) => {
+                let mut k = Keys::new(&vtk, 0).unwrap();
+                let mut bad = o.clone();
+                bad[33] ^= 1;
+                let refused = k.unprotect(&bad).is_none();
+                let still_zero = k.seen().1 == 0;
+                // The genuine frame is still accepted afterwards.
+                refused && still_zero && k.unprotect(o).is_some()
+            }
+            None => false,
+        },
+    );
+
+    // addr3 is authenticated and not encrypted, so this is the check that the
+    // AAD reaches the MIC at all rather than being computed and dropped.
+    check(
+        "a changed address the AAD covers fails the MIC",
+        match &vout {
+            Some(o) => {
+                let mut moved = o.clone();
+                moved[16] ^= 1;
+                unprotect(&vtk, &moved).is_none()
+            }
+            None => false,
+        },
+    );
+
+    // And the mirror of it, which a too-eager mask would break: the retry bit
+    // is rewritten in flight, so a receiver seeing it set where the sender had
+    // it clear has to accept the frame. That failure presents as a flaky radio
+    // rather than as a bug, which is why it is asserted rather than reasoned
+    // about.
+    check(
+        "a frame retried in flight still verifies, because the AAD masks it",
+        match &vout {
+            Some(o) => {
+                let mut retried = o.clone();
+                retried[1] |= 0x08; // FC1 retry
+                match unprotect(&vtk, &retried) {
+                    Some((_, p, pn)) => p == vplain && pn == vpn,
+                    None => false,
+                }
             }
             None => false,
         },

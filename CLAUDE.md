@@ -2028,6 +2028,45 @@ same fault stopped the machine, because a guest sharing an address space with
 the kernel might already have corrupted anything. At ring 3 the kernel is
 intact by construction, so ending the guest is the honest response.
 
+**"The guest" stopped being one thing, and the flag that said so did not
+notice.** `running()` was a single `GUEST_RUNNING` for the machine and the
+kill path cleared it. With `fork` that is a session of several guests on
+several tasks, so the first forked child to crash was killed correctly and
+took the flag with it -- and the second faulted at ring 3 with nothing saying
+a guest was there, was taken for the kernel's own fault, and halted the
+machine. One child's death disarmed isolation for every guest after it.
+`forktest` crashes two children in a row for exactly that reason.
+
+Fault ownership is **per task** now (`IN_GUEST`), set by the one wrapper all
+three doors into ring 3 go through (`syscall::as_guest`: `run`, `run_thread`,
+a forked child's `enter_resumed`), and cleared only by that task or its own
+kill. `GUEST_RUNNING` means what `run` means by it and nothing more: the
+session deadline is armed.
+
+**Nothing kills another task directly**, because ending a guest is a longjmp
+out of *its* stack. It is marked instead (`syscall::doom`) and ends itself at
+the next point holding nothing: a syscall's way in or out, any wait loop's
+existing deadline check (`overran` answers for a doom too), or the timer
+finding it at ring 3. That one mechanism is how a session ending takes its
+orphans with it (there is no init to reparent to), how `SIGKILL` reaches a
+child spinning in a loop with no syscalls, and how a crashing *thread* ends
+its whole process, as on Linux. A doom lands only on a task inside a guest,
+so a pool task's next tenant cannot inherit its predecessor's.
+
+Two more isolation holes came out of the same test. A forked child's mapping
+records were the parent's cloned verbatim, so a child's `munmap` freed the
+**parent's** pages; they are `Source::Copied` now and give nothing back. And a
+finished child's whole memory copy was never freed -- every fork leaked a
+process. `release_guest` frees it when the child ends: three runs of
+`forktest` (26 forks each, an orphan in the middle) move the heap 176 bytes.
+
+`wait4` reports a crash as Linux does -- `WIFSIGNALED`, `SIGSEGV` for a wild
+pointer -- where it reported an *exit* whose code was the vector number.
+
+**Still not isolated: a fault at ring 0 while the kernel serves a guest's
+syscall.** That is a kernel bug reached through guest input, the kernel's own
+state may be half-updated, and it still halts the machine.
+
 **Getting there took finding an ABI bug that looked like a ring-3 bug for a
 long time.** `syscall::kill` was calling `glados_leave_guest` through its
 `extern "sysv64"` declaration. This target is Windows-ABI, so an ordinary Rust
@@ -2267,7 +2306,7 @@ than how often.
 `linux` reports whether the trap is armed, `linux run <path> [args...]` loads
 and runs, `linux trace` prints what the last guest asked for, `linux libc` says
 which interpreters are installed, and `linux env NAME=VALUE` adds a variable to
-what the next guest is handed. `diag linux` is 134 claims.
+what the next guest is handed. `diag linux` is 289 claims.
 
 **The trace records the path, not only the pointer.** A row read `257 openat
 0x2d23faa 0x0 0x0` and the useful half of it was in the guest's memory, so
@@ -2368,8 +2407,12 @@ with no `HOME` writes its dotfiles into the working directory. `TERM=dumb`
 because `ioctl` already says there is no terminal, and `PWD=/` because there is
 no `chdir`.
 
-`nanosleep` spins on the timer tick, because there is no guest scheduler to
-block against, so it costs the CPU it is not using.
+`nanosleep` **sleeps** now, and this said it "spins on the timer tick, because
+there is no guest scheduler to block against, so it costs the CPU it is not
+using". The second clause was the stale one: `task.rs` has a sleep queue, and
+the loop was `while ticks() < until { spin_loop() }` with no yield in it at all
+-- so it cost the CPU *and* skipped the deadline check *and* stopped pumping
+Skywalker for its own client. See "A task that waits stands down" below.
 
 **Signals used to be accepted and never delivered, and that paragraph is worth
 keeping because of how it stopped being true.** It read: "nothing here can
@@ -2442,6 +2485,56 @@ three-right-one-wrong that passes.
 ignored by default -- which is why a parent that installs no handler is not
 killed by its own children finishing.
 
+**Two signals this kernel adds that Linux has no number for.** Both sit above
+the real-time range (`SIGRTMAX` is 64) so no libc can mean them by accident,
+and both are kernel actions rather than deliveries -- handled in `kill` before
+the range guard, the way `SIGKILL` is special-cased.
+
+- **`SIGRANDOM` (69420)** rolls a real signal off a fixed wheel and sends
+  *that*, through `kill` itself so the rolled signal takes exactly the path an
+  ordinary send would. The wheel is real signals only, so it recurses once and
+  never onto another custom one; it includes `SIGKILL`, so the roulette can
+  cost the target its life. It prints what it landed on. Driven: two runs
+  rolled `SIGSEGV` and `SIGUSR1`, and the child died of each.
+- **`SIGQUARANTINE` (2020)** seals a process and its whole connected family --
+  parent, children and siblings, transitively -- into an isolation field no
+  other process can observe, then terminates the entire field at once. It is
+  for a self-replicating tree, where killing one process at a time loses the
+  race against it forking more: sealing comes *before* the kill, so a member
+  that forks once more in the gap hands the new child to a family nobody can
+  see, and it is swept by the same doom. "Sealed" means `guest_of_pid`,
+  `task_of_pid` and `wait4` all skip the member, so from outside the field it
+  is already gone. The field is the connected component over the parent/child
+  graph, walked to a fixpoint rather than assumed -- in the one-session model
+  that is the whole session, but the day two unrelated guest trees exist,
+  sealing one leaves the other untouched. Terminating the field uses the same
+  `doom` the orphan sweep does, so a member spinning without syscalls is ended
+  by the timer at ring 3.
+
+Because every live child's parent chain leads back to pid 1, quarantining any
+member pulls in pid 1 and so ends the session -- including the process that
+sent it, if it is in the family. That is inherent to the group operation and
+not a bug: the field is defined by kinship, not by who asked. Driven on a
+family of four: `sealed and purged 4 process(es)`, the run `ended by signal 9
+... machine intact`, and the shell answered afterwards.
+
+**One thing the en-masse kill exposed, and it is the SMP audit rather than
+this feature.** Sealing a field and dooming every task in it at once means
+several ring-3 guests are timer-killed in the same breath -- `kill_overrun`
+longjmps out of each and the scheduler re-picks under that churn. At `-smp 1`
+the whole signal suite passes, as it does at `-smp 2` for `diag all` 73/73
+and for a quarantine run on its own or after one other guest session. But a
+quarantine of three pure-spinning children as the *third* guest session of a
+`-smp 2` boot panics in `task::finish_handoff` with a corrupted cpu index
+(`this_cpu()` reads back garbage) -- shared scheduler state, `PENDING` and the
+LAPIC-to-cpu map, touched from the other core while the kills land. The
+timer-kill-to-longjmp-to-reschedule path predates signals and nothing had ever
+killed several guests at once before, so `forktest` run three times over
+(crashing children, a `SIGKILL`ed spinner, an orphan) stays clean at `-smp 2`
+where this does not. It belongs to the ~149-`Racy` SMP audit the 1.4.0 plan
+holds, not to the signal table, and it is written here so the next reader does
+not rediscover it from a panic.
+
 Measured, on `mkelf.py --kind signal`:
 
     13 rt_sigaction  0xa 0x8010000191 0x0 -> 0
@@ -2475,6 +2568,496 @@ The surface is 93 calls of Linux's roughly 350, counted from the match in
 The lesson the pair of them teaches is the one to keep: **a limitation stated
 as a founding claim is still a limitation, and it will be removed by somebody
 who did not read the claim as permanent.**
+
+### The model can run one, out of a closed table
+
+`linux run` was a shell verb and nothing else, so the model had no route to a
+guest at all: `linux` was absent from `sysbox::APPLETS`, the decoding grammar
+is built from that table, and no Aiksi builtin named `crate::linux::*` either.
+That was the deliberate `work` / `skill trust` / `app trust` pattern -- verbs
+the grammar cannot spell.
+
+**The founding premise survives giving it one, and the half that could have
+broken it turned out already broken.** A tool call from the model is a function
+call, and an applet row is exactly that: `sysbox::dispatch` into a Rust fn into
+`syscall::run`, with no marshalling anywhere between the model and the kernel.
+The ring-3 boundary is *inside* the tool, below the call, the way `fsck`
+touching NVMe is. What looked fatal was the result: `sysbox`'s own module doc
+says results are computed before printing because "the model will be another"
+consumer of them, which reads as a promise of structured values that a guest's
+exit code and stdout could not keep. It is future tense and still is --
+`agent.rs` wraps every dispatch in `console::begin_capture` and hands the model
+captured *text*. A guest's stdout is the same kind of thing `ls` already gives
+it, so this concedes nothing that was not already conceded.
+
+**`linux::program` is the table, and the directory is the security property.**
+`constrain.rs` makes invalid output unreachable rather than improbable, and
+"any path in the namespace" is not a set anything can enumerate -- so the first
+argument is a *program name* out of a closed set, the shape `skill_choices`
+gave `run` after the model turned out unable to spell
+`/ai/tools/learned-3f2a91c4.ai&xi`. The set is `/linux/bin`, scanned rather
+than declared, which is the opposite of `load::INTERPRETERS` for a stated
+reason: an interpreter path is dictated by some binary's `PT_INTERP` and the
+useful list is of paths to check *for*, while a program is whatever somebody
+installed.
+
+It is **not** `/tmp`, and that is the whole of it rather than tidiness. `fs.rs`
+lets a guest write inside `/tmp` and refuses everywhere else, so a table
+scanned from `/tmp` would let a program install the next program the model is
+able to invoke -- the model's action vocabulary writable by the things it runs,
+which is an escalation from ring 3 to the kernel's action surface with no gate
+in front of it. Nothing at ring 3 can write `/linux/bin`. The claim is made
+against `fs::writable` rather than restated, so a jail that ever widens fails
+there instead of becoming an escalation nobody noticed.
+
+**The table is asked at the dispatch and not only in the grammar.** A decode
+cannot reach a name outside the set, but the shell and a skill's own `applet`
+builtin arrive at the same dispatch without a grammar, so a check living only
+in `constrain` would be a check on one caller of three. `path_of` is the one
+resolution both consult, and it refuses a name carrying a separator, `.` or
+`..` before anything is joined onto a directory -- five claims, because those
+are the inputs that would turn a closed set back into any path the model can
+spell.
+
+**Mutating by construction, exactly as `run` is.** A guest may write inside
+`/tmp`, so no inspection of the binary may claim otherwise and the read-only
+grammar never carries it. That it is *more* contained than `run` is a reason to
+be comfortable offering it and not a reason to call it read-only: `run` on a
+trusted Aiksi program gets operator capabilities -- raw memory, I/O ports,
+sockets -- where a guest gets ring 3 with the U bit only on its own pages, its
+own page-table root, every pointer it hands back bounds-checked to `EFAULT`, no
+socket surface at all, a session deadline, and since the fault work a crash
+that ends only itself. It is the best-leashed thing in the applet table.
+
+**What it prints is an observation, not a report**, and that is the one design
+decision in the dispatch. The shell verb prints the whole syscall trace, which
+is right for somebody debugging a loader and would hand the model sixty lines
+of register dumps as the answer to "list that directory". So the trace stays
+with the shell verb and the applet prints the program's own output -- which
+arrives on its own through `sys_write` -- plus one line saying how it ended. A
+refusal names what *is* installed, for the same reason: "no such program" is
+not something a model can act on.
+
+`[args...]` is a new argument shape and `check_args` had no way to say it.
+`<text>` would have demanded at least one argument and refused a program that
+takes none; leaving it off the tail list capped argv at the spec's own word
+count, which is two. Both ends are claims -- a program with no arguments, and
+more argv than the usage has words -- because the middle case passes under
+every arity rule and would hide both.
+
+Driven, with `mkelf.py`'s static fixture installed into the table:
+
+    linux                    nothing is installed in /linux/bin -- that
+                             directory is the whole set
+    cp /tmp/hello /linux/bin/hello
+    linux                    installed: hello
+    linux hello              hello from ring 3
+                             hello exited 5 after 2 syscall(s)
+    linux nope               'nope' is not an installed Linux program
+                             installed: hello
+
+Exit 5 is the code `mkelf.py` built in, and two lines is the whole observation.
+`diag linux` is 289 claims and `sysbox` lists the row as mutating.
+
+**A closed set is not the same property as a decodable one, and the second is
+the one a reader will not think to ask about.** Every name becomes a grammar
+alternative, `Cursor::finished` is an exact match on what has been produced,
+and the decode loop breaks the moment it hits -- so an alternative that is a
+prefix of another makes the longer program unreachable however well it was
+installed. That is "a skill it could not spell was a skill it could not use"
+arriving on programs, and `run` never had to care: its choices are paths ending
+`.ai&xi`, so none can prefix another. Bare names can -- `sh` and `shuf`, `ls`
+and `lsof`.
+
+`constrain::Grammar::new` already prevents it, by appending `TERMINATOR` to
+every alternative, which is also why the pre-existing `snap`/`snaps` pair is
+safe. So the hazard is real, handled, and handled *elsewhere* -- which makes
+the invariant worth naming where the names are made: a program name may not
+contain the terminator, or it puts the delimiter inside an alternative and
+hands the property straight back. `is_name` refuses a newline and every other
+control character, and three claims cover it, including that no offered name
+shadows a longer one it prefixes. Nothing is likely to be called `sh\nls`; the
+point is that a set offered to a grammar has to be checked against the
+grammar's own delimiter rather than against what a filename usually looks like.
+
+**Driving the decode found two things, and neither was the applet.**
+
+**A new applet is spellable and invisible.** The grammar is built from
+`APPLETS`, so `linux` was reachable the moment the row existed -- and the
+*router* had never heard of it. `corpus.rs` supplies labels for 21 applets
+while the probe head carries 24: `linux`, `run` and `remember` have no
+examples at all, so a closed-form fit has nothing to key them on. The first
+episode on the real 0.6B routed "run the hello linux program at ring 3" to
+`find` three times at the `pulse` tier, with coherent arguments and the
+repetition detector firing -- a working model with no reason to pick a name it
+had never been taught. Four `teach linux ...` lines and a `fit` (361 train,
+360 held out, 24 classes, 71% held out) moved it to `reflex`, the probe's most
+confident tier. **Adding an applet is two edits, and the second one is the
+corpus.** `run` and `remember` are still untaught, which is the same latent
+hole and is now written down rather than discovered again.
+
+**And the closed set was arriving one step late.** The branch sampled
+`e.state.logits` without ensuring a forward pass had written any.
+`from_context` is exactly that signal -- a `reflex` choice leaves the engine
+unpositioned -- and the branch ignored it, so on an episode's first step
+`e.pos` is 0, nothing has run, `sample_among` answers `None` on its first call
+and the whole closed set falls through to free text. Measured, because four
+hypotheses about ring positions and stale logits came first and all of them
+were wrong:
+
+    (closed set: 1 choice(s), from_context false, picked None)
+    1. linux 64-bit        <- free text; '64-bit' is not installed
+    (closed set: 1 choice(s), from_context false, picked Some(0))
+    2. linux hello         <- committed
+
+Two steps, the same tier, the same single-choice set, opposite outcomes. Step 2
+worked only because step 1's own free-text prefill had left logits behind. With
+one program installed a closed-set decode *cannot* emit `64-bit` -- the grammar
+has one path -- so that argument is the proof the branch did not fire, and
+`run` had the same defect for its whole life, where it reads as the model
+spelling a skill path it was never offered. The branch prefills through
+`harness::args_prompt` now, one function because the trailing space after the
+name is what stops the model continuing mid-word, and two copies of that are
+two chances to drop it. Step 1 commits immediately afterwards.
+
+**The dispatch-level check is what made the bug survivable, which is the
+argument for having put it there.** `'64-bit' is not an installed Linux
+program / installed: hello` turned a wrong decode into a correct next step: the
+model read the refusal and asked for `hello`. A grammar-only leash would have
+had nothing to say.
+
+**Two things are deliberately not done.** Only the *program* is decoded; argv
+is not enumerable -- `busybox ls -l` is argv no table can hold -- so a program
+needing arguments is reached through the shell or installed as a wrapper. And
+ownership is bounded rather than solved, as below.
+
+Driven on the resident checkpoint rather than the small one, which is worth
+recording because the instinct is wrong in both directions: `--stage-iso` has
+no size cap, so Qwen3-0.6B at `--seq 512` (570.5 MiB, 112 MiB of KV cache) runs
+here under `-accel kvm` with a **60-second** boot, against the 370 s this file
+quotes for WHPX. And SmolLM2-135M would have been the *worse* instrument, not
+merely the smaller one: twelve of its fourteen candidate goals route to `ls`,
+so a negative from it would have said nothing about the branch.
+
+**The open question is ownership rather than purity.** A guest holds the shell
+until it exits and the model runs on the agent task, which holds the engine for
+a whole episode -- so a model-invoked guest takes the terminal for its lifetime
+with the engine still claimed, and every other task answers "another task holds
+it" meanwhile. The session deadline bounds it. That is the same gap Skywalker
+names as "a client running beside the shell", and it is bounded here rather
+than solved.
+
+### JavaScript, at ring 3
+
+`qjs` from quickjs-ng v0.17.0, a 1.77 MB stripped static-PIE built against
+musl, installed into `/linux/bin` and reached through the `linux` applet. It
+runs:
+
+    write /tmp/h.js print(6*7)
+    linux quickjs /tmp/h.js
+      42
+      quickjs died of fault 0x0e after 181 syscall(s)
+
+**The 42 is real** -- a parser, a bytecode compiler and an interpreter this
+kernel did not write, executing at CPL 3 on its own page-table root. Nothing
+in the syscall surface was missing: the trace has no `-ENOSYS` in it, so the
+93 calls already there carry a JS engine. The glibc-shaped `mmap` dance is
+visible and healthy -- it asks for 1 GB arenas, gets `ENOMEM`, and walks down
+to 64 KB without complaint.
+
+**Getting there found two kernel bugs, and a real interpreter is what found
+them.** Both had been invisible because what had been run was a hand-assembled
+fixture and busybox.
+
+*Sixteen KiB of guest stack was not enough*, under a comment saying the figure
+was chosen so that overflowing it is a bug in the guest rather than a limit of
+the harness. QuickJS is not a buggy guest: it recurses in its parser and again
+in its own interpreter loop, and it died with `rsp` about 5.6 KiB *below* the
+region after 165 syscalls of healthy start-up. It is a mebibyte now, and the
+size is chosen against the *guest's* own guard rather than for roundness --
+QuickJS tracks its own depth at about 256 KiB through `JS_SetMaxStackSize`, and
+four times that keeps the engine's `RangeError` strictly in front of the
+kernel's page fault. A script that recurses too far should get an exception it
+can catch. **The stack still does not grow**, which Linux's does, and that is a
+fault handler rather than a constant.
+
+*`readlink` answered `ENOENT` for a directory.* The errno logic already told
+"exists but is not a symlink" (`EINVAL`) from "is not there" (`ENOENT`) -- and
+only recognised blobs as existing, because `blob_len` answers for a blob and
+nothing else. `realpath` is a walk over path *components*, glibc and musl read
+`EINVAL` as "not a symlink, carry on", so resolving `/tmp/h.js` failed at
+`/tmp`. QuickJS printed `TypeError: realpath failure` and then dereferenced the
+null it had not checked. One wrong errno sending a correct program down a path
+that ends in a crash it cannot explain.
+
+**And `linux` is two things told apart by shape now, the way `write` is.** The
+applet and the shell verb share a name and sysbox is consulted first, so the
+applet claimed the whole verb the moment it existed: `linux trace` answered
+`'trace' is not an installed Linux program`, taking `run`, `libc`, `env`,
+`space`, `deadline` and `feed` with it -- every diagnostic this subsystem has,
+shadowed by its own applet, which is how it was found. The discriminator is
+`program::path_of` rather than a list of the verb's subcommands, because that
+list already exists as the match arms and a second copy is two things that have
+to agree.
+
+**And the third bug was the syscall ABI, which every guest had been subject to
+all along.** The exit path faulted deterministically at syscall 181, *after* all
+output. The fault reporter plus one disassembly of the unstripped binary named
+it exactly:
+
+    rip image+0x1532c0   musl pthread_key_delete, pthread_key_create.c:65
+    mov 0x80(%rax),%rdx      ; t->tsd       <- rax = 0
+    mov 0x18(%rax),%rax      ; t = t->next
+    reached for 0x80 (error 0x4: user read, not present)
+
+`rbp` is `self` and the first pass of that `do/while` succeeded, so
+`self->next` was zero -- musl's circular thread list had never been linked,
+although `__init_tp` sets `td->next = td->prev = td` and the trace showed the
+two calls it needs, `arch_prctl(ARCH_SET_FS) -> 0` and `set_tid_address -> 1`,
+both answering what musl wants.
+
+Two theories died first and are worth recording as dead: the loader's span is
+**exactly** the ELF's highest `vaddr + memsz` (0x1be838), so `self + 0x18` is
+inside mapped memory; and `ring3_now` samples `IA32_FS_BASE` at every switch,
+so FS survives preemption without `arch_prctl` having to record anything.
+
+What settled it was disassembling `__init_tp` itself:
+
+    movq       %rbx,%xmm0        ; xmm0 = td
+    punpcklqdq %xmm0,%xmm0       ; xmm0 = {td, td}
+    mov        $0xda,%eax        ; SYS_set_tid_address
+    syscall                      ; <-- td live in xmm0 across it
+    movups     %xmm0,0x10(%rbx)  ; td->prev = td->next = td, one 16-byte store
+
+musl keeps the value in `xmm0` across the syscall and writes both list pointers
+with a single `movups`. **That is legal and this kernel was writing zeros over
+it.** A Linux syscall clobbers `rax`, `rcx` and `r11` and nothing else: every
+other register, the whole FPU and SSE state included, is the caller's.
+`glados_syscall_entry` saved fifteen general-purpose registers and then called
+into Rust, where SSE is not optional -- a `memcpy` is enough -- so **any guest
+holding a live value in an XMM register across any syscall got silent data
+corruption**. musl's thread list was simply the first place it was caught, and
+it took a crash thousands of instructions later in a function that had done
+nothing wrong.
+
+The stub does `fxsave64`/`fxrstor64` into 512 bytes of its own stack now, which
+is per task so a preempted syscall keeps its own copy, with `and rsp, -16`
+making the alignment `fxsave` requires self-enforcing rather than inherited
+from whoever allocated the stack. Two instructions against thirty-two `movaps`,
+and it covers x87 and `MXCSR` as well, which the ABI also promises. **The
+residual gap is AVX**: `fxsave` does not carry `ymm`'s upper halves, so a guest
+holding one of those across a syscall still loses it; closing that means
+`xsave` with `XCR0` in `edx:eax` and a 64-byte-aligned area, and it is named
+in the stub rather than left to be rediscovered the way this was.
+
+Measured after the fix, and the engine is genuinely working rather than merely
+exiting:
+
+    write /tmp/h.js print(6*7)
+    linux quickjs /tmp/h.js            42          exited 0 after 197 syscall(s)
+
+    write /tmp/a.js print(JSON.stringify([1,2,3,4].map(function(x){return x*x})))
+    linux quickjs /tmp/a.js            [1,4,9,16]  exited 0 after 207 syscall(s)
+
+    write /tmp/b.js function f(n){return n<2?n:f(n-1)+f(n-2)}print(f(20))
+    linux quickjs /tmp/b.js            6765        exited 0 after 197 syscall(s)
+
+Closures, arrays, `JSON.stringify` and thirteen thousand recursive calls, and
+`exited 0` rather than a fault. `diag all` 73 of 73 throughout.
+
+### The web as text, and a link as a number
+
+`src/net/reader.rs` and the `web` applet. `gfx::browse` lays a page out in rows
+for somebody looking at a screen; the model reads its world as captured console
+text, so what it needs is the same content laid out to be *read back* --
+headings marked, paragraphs flowed, and every link carrying the number that
+reaches it.
+
+**The number is the whole design.** `constrain.rs` makes invalid output
+unreachable rather than improbable, and a URL is not a set anything can
+enumerate -- but the links on the page in front of you are. So a journey starts
+at a name the operator declared in `/web/sites` and continues by index, and at
+every step the legal next moves are finite and known. That is
+`linux::program`'s shape one layer out: a closed table for the first move, and
+the page itself for every move after. `arg_choices("web")` is the union of the
+two, which is why it is one applet and not two -- "go somewhere" and "go
+deeper" are the same move to a reader, and splitting them would put two rows in
+the grammar whose union is that set anyway.
+
+**The observation is bounded, because the observation is a prompt.**
+`agent.rs` captures what an applet prints and hands it back as the step's
+result, so an unbounded page is an unbounded prefix -- a real article is tens of
+kilobytes against a context measured in hundreds of tokens, and a page that
+overflows the window costs the model the goal it was pursuing. `TEXT_CAP` is
+1400 bytes and the cut announces itself, because a page truncated silently
+reads as a short page. The **links are not** truncated with the text: they are
+numbered over the whole document, since the index is a contract and a numbering
+that depended on where the text stopped would renumber the page whenever the
+cap moved.
+
+**What comes back is untrusted input and cannot be made otherwise.** A fetched
+page is bytes a stranger chose and the applet's output becomes the model's
+prompt; nothing here can stop a page containing text shaped like an
+instruction. What it can do is never let that text arrive unlabelled, so the
+content is bracketed by `--- begin fetched page ---`. That is a mitigation and
+not a fix, and it is part of why the row is `mutates: true`.
+
+That flag is doing a different job on this row than on any other, and it is
+worth saying so. Nothing persistent changes; what happens is that a packet
+leaves the machine and a stranger's bytes enter the model's context. `mutates`
+is what `harness::Trust::ReadOnly` filters on, so it is this table's only word
+for "not safe to hand a read-only agent" -- and `eval.rs` draws the same line
+in the same place for `Touch::Net`, where `net_ifaces` is Read and
+`tcp_connect` is not.
+
+**The identity verdict is reported and not enforced**, which is the `https`
+verb's bargain rather than `update::fetch`'s: a machine deciding what to boot
+must refuse an unverified peer, and a reader is reading. But it is printed into
+the observation, because what the model does next may depend on the page and
+"who vouched for this" is part of the page. With no `roots.der` every fetch
+reads `NOT verified`, which is the correct default this tree already argues for.
+
+**Two bugs came out of building it, and the first was the browser's.**
+
+*Every relative link was being dropped.* `collect_links` was private to
+`browse.rs` and used `html::parse_url`, which accepts only absolute URLs -- so
+`href="/about"` and `href="page.html"` produced nothing, which on most pages is
+nearly every link. `html::links_of` is the one walk now, it takes the base and
+calls `resolve`, and `browse.rs` consumes it: two readers numbering the same
+links are two chances to disagree about what link 3 is.
+
+*And the parser was throwing away the space at every span boundary.*
+`flush_text!` trimmed the trailing space of each text run and `squeeze` drops
+leading whitespace while its target is empty -- which is right at the start of a
+block and wrong after a link. So `An <a>x</a> b` became the three spans `An`,
+`x`, `b` with nothing to say they had ever been apart, and a reader that
+concatenates got `Anxb`. Nothing noticed because the only consumer was
+`browse::wrap`, which splits spans into words and rejoins them with spaces of
+its own. **It cannot be repaired downstream**: the information that `x</a> b`
+had a space and `x</a>.` did not is exactly what was discarded, so the fix is
+in the parser, where a whitespace-only run is kept when it sits between spans
+and an anchor's own label is still trimmed.
+
+**And one interaction that only driving found.** `propose` short-circuits an
+applet that takes no arguments rather than spending a prefill to decode the
+empty string -- and `web`'s argument is *optional* (`[site|link]`), so
+`check_args` was happy with nothing and the model was handed back a bare `web`
+and got a list of sites where it had asked to read one. The test is
+`arg_choices(&name).is_empty()` now rather than the arity, because the question
+is not "may this run with no argument" but "is there a set we could have
+offered".
+
+Driven against a local TLS 1.3 server with a page built to exercise
+resolution -- an absolute, a root-relative and a directory-relative href:
+
+    web local
+      https://10.0.2.2:8443/t.html -- 200, NOT verified
+      --- begin fetched page ---
+      # Reader Test
+      # Top
+      An absolute [1] link, a root-relative [2] one, and a directory-relative [3] one.
+      - first item
+      - second item
+          verbatim
+            indented
+      ---
+      Tail paragraph after the rule.
+      links: 1..3
+      --- end fetched page ---
+
+    web 2    followed the root-relative link, which is the dropped-links fix
+    web 99   there is no link 99 -- this page has 1..1
+
+`<script>` is skipped entirely, `<pre>` keeps its indent where every other
+block loses the space a block never opens with, and the refusal names the
+*current* page's range rather than the one before it.
+
+**And the model browsed on its own**, after four `teach web ...` lines and a
+`fit` put the row in front of the router -- `linux`'s lesson, that adding an
+applet is two edits and the second one is the corpus:
+
+    goal: read the local site   trust: full   budget: 2 steps
+      1. web local    200, the page
+      2. web 1        https://example.com/abs -- 404
+
+Step 2 is the model choosing a link *by number* out of the page it had just
+read, which is the closed set doing the one thing it exists for. The 404 is the
+real server's answer and correct. `diag web` is 19 claims and passes twice in
+one boot, which `forget()` is there to make true; `diag all` 74 of 74.
+
+### The applet table and the corpus were four classes apart
+
+**A new applet is spellable and unroutable, and this is the gap closed rather
+than named.** The decoding grammar is built from `sysbox::APPLETS`, so a row is
+reachable the moment it exists -- and the *router* is a ridge probe fitted on
+`corpus.rs`, which had labels for 21 of the table's 25. `linux`, `web`, `run`
+and `remember` therefore had no label to key on, the probe could never emit
+one, and the first episode to want one routed somewhere else. Measured on the
+untaught build: a goal naming a Linux program reached `find` at the `pulse`
+tier.
+
+It had been worked around twice by hand -- four `teach` lines and a `fit` each
+for `linux` and `web` -- and that does not survive a reboot without a mounted
+store, so every fresh boot lost it again.
+
+The four classes are in `dataset.py`'s `FAMILIES` now, with `EVAL` rows written
+separately so widening cannot eat the test set. **The confusions they are
+written against are predicted and not measured**, which is the opposite footing
+from the paragraph above that table, and the measurement is owed:
+
+- **run against linux.** Both execute something and "run the program" is
+  either. The distinguishing idea is *whose*: `run` is a skill this machine
+  wrote in its own language, `linux` is a binary somebody else compiled. So
+  `run` never says program, binary or elf, and `linux` never says skill or
+  routine. They share *verbs* deliberately -- `expand`'s docstring argues the
+  verb vocabulary should be broad for every class and the nouns are where the
+  signal lives.
+- **web against ls and find.** All three fetch and list. `web` never says
+  files or directory, for the reason the `sysbox` family does not: that is the
+  vocabulary that collapsed three classes into `ls`.
+- **remember against write.** Both keep something. `write` puts bytes at a
+  path; `remember` keeps a fact about the operator with nowhere named.
+
+**One scare on the way, and the correction is the useful part.** Regenerating
+looked destructive: `balance=True` truncates every class to the thinnest, the
+thinnest family set expands to 17, and `corpus.rs` appeared to hold 33-35 rows
+per class -- so regenerating read as halving the training data as a side
+effect. It was an arithmetic error. Those rows are train *and* test together;
+`fit` on the old build reports `357 train` over 21 labelled classes, which is
+17 each. **The corpus was already at the floor**, so the change is purely
+additive and nothing existing moved.
+
+Measured, and it is a gain rather than a trade:
+
+    before   357 train, 360 held out, 25 classes, held out 72%
+    after    425 train, 380 held out, 25 classes, held out 73%
+
+Held-out went *up* a point while four classes stopped being structurally
+unreachable, which is the part that matters: a class the probe cannot emit is
+0% recall by construction, and no amount of accuracy on the other 21 is worth
+that. `fit` reported 25 classes in both runs, because the head's width comes
+from the applet table and not from the corpus -- which is exactly how the gap
+was invisible.
+
+And on a fresh boot with **no teaching at all**, both of the new paths route
+and run:
+
+    agent -n 1 --trust full run the installed linux program hello
+      (tier: reflex)   1. linux hello    hello from ring 3, exited 5
+
+    agent -n 1 --trust full read the local site
+      (tier: reflex)   1. web local      200, the page
+
+`diag all` 74 of 74. The corpus hash changed, which refills the family-wise
+alpha budget -- correct by the design's own rule, since a new body of evidence
+is what refills it, and every ledger line is scoped to the corpus it was paid
+for out of.
+
+**What is still owed is the measurement.** `tools/analyse.py` is the instrument
+that produced the confusion table above this one, and it has not been re-run
+against 25 classes: the three pairs this corpus is written against are
+predictions, and whether `run` and `linux` actually confuse is a thing to read
+off a fitted probe rather than to argue about.
 
 ### A second address space
 
@@ -2771,13 +3354,18 @@ its own task is running *is* per-task as long as somebody swaps it. The
 alternative was `swapgs` and a per-thread block, which collides with
 `cpu::percpu` owning GS -- the same reason a guest is refused `ARCH_SET_GS`.
 
-**A pool, not a task per thread.** `MAX_TASKS` is 24 and a kernel task that
-returns is not reclaimed, it spins in `yield_now` forever. Reclaiming slots
-means teaching the scheduler about a finished task, and the outgoing task's
-state is written unconditionally in `schedule`, so that is surgery on the most
-delicate loop here. Instead a finished thread parks its task and the next
-`clone` takes it back: the limit is eight *concurrent* threads rather than
-eight ever created, and a machine that never runs one spawns nothing.
+**A pool, not a task per thread.** The reason given here was that `MAX_TASKS`
+was 24 and a kernel task that returns "is not reclaimed, it spins in
+`yield_now` forever", and that reclaiming slots meant surgery on the most
+delicate loop in the kernel. **A finished task is reclaimed now** -- see the
+section below -- so the surgery is done and the pool stays for its own reason
+rather than that one: a thread that parks keeps its syscall stack and its
+slot's identity, so `clone` taking one back costs nothing, and the limit is
+eight *concurrent* threads rather than eight ever created.
+
+That reason was half right in a way worth keeping. The outgoing task's state
+*is* written unconditionally in `schedule`, which is exactly why reclaim could
+not go there and went into `finish_handoff` instead.
 
 `clone` returns twice, in two threads, at the same instruction, and only `rax`
 tells them apart. The child arrives with every register zero except `rsp`,
@@ -3300,11 +3888,35 @@ snapshot. `EACCES`, and the day a guest needs to write, what it needs is a
 scratch subtree with the same jail an Aiksi program gets, not this call quietly
 growing a second meaning.
 
-**A descriptor-relative `openat` is refused too**, with `ENOSYS` and for a
-smaller reason: resolving one needs the directory's own path kept per open
-descriptor, and resolving it against the working directory instead would open a
-real file that is not the one the guest named. `AT_FDCWD` and absolute paths
-are the whole of what works.
+**A descriptor-relative `openat` works, and the refusal it replaced is worth
+knowing about.** It answered `ENOSYS` for a long time under a comment saying
+resolving one "needs the directory's own path kept per open descriptor" -- and
+`fs::Dir` has carried `path` since it was written, snapshotted at `open` for
+`getdents64`'s sake. The reasoning was right and the thing it was waiting for
+was already there, so the refusal outlived its reason. That is a different
+defect from an unimplemented call: nothing fails, nothing is missing, and the
+call says no.
+
+What it cost is most of a tree walk. `openat(dirfd, rel)` is how every
+`fts`-based program descends, so `find`, `rm -r`, `du` and `cp -r` stopped at
+the first subdirectory -- and stopped with `ENOSYS`, which reads as a kernel
+without the call rather than one declining.
+
+`at_base` is the one resolution `openat`, `newfstatat` and `readlinkat` share,
+and its three refusals are three different answers a program acts on: an open
+non-directory is `ENOTDIR`, nothing open is `EBADF`, and `AT_FDCWD` is the
+working directory. **An absolute path ignores `dirfd` entirely**, which is
+POSIX rather than a shortcut -- a closed descriptor beside an absolute path is
+correct code, so consulting the descriptor first would refuse it. `..` still
+cannot climb out, because `resolve` refuses it and the new base does not go
+around that.
+
+Six claims, and they were *proved to run* rather than assumed to: `diag` prints
+only failures and a count, so one claim was flipped to a value `sys_statat`
+cannot return, the suite failed naming that claim alone with the count
+unchanged at 289, and it was disarmed after. Not verified end to end -- no
+static busybox is staged on this host, so `find` walking a tree is the expected
+consequence and not a measurement.
 
 **An open file holds its whole contents.** `read_blob` answers a `Vec`, so the
 honest options were to keep that or to teach the store ranged reads. Keeping it
@@ -3536,7 +4148,7 @@ At boot the system runs **twenty-nine selftest sections** -- count the
 `[selftest]` headings in a boot log, which is the only figure that cannot go
 stale -- **seventeen** of which are wrapped in `main::section` so one that
 breaks marks itself unavailable instead of taking the machine, and `diag`
-offers **sixty-eight named suites** on demand (`diag.rs`'s `SLOTS`, asserted
+offers **seventy-five named suites** on demand (`diag.rs`'s `SLOTS`, asserted
 against `SUITES.len()`), most of them the same checks (the `aiksi` section covers the capability gate by name and never by
 calling -- half that table pokes memory, drives I/O ports or paints over the
 screen, and a suite that called every row to prove it exists would be
@@ -3713,6 +4325,12 @@ like a guest that died early. The tell is the empty log: a real hang prints
 the firmware banner and the boot sequence first. `.qemu/qemu-stderr.log` says
 `Failed to find an available port`. Check for a running QEMU before launching,
 especially when the first run is in the background.
+
+**`@mouse <monitor command>` and `@shot <png>` are beats in the command list**,
+like `@wait`: `--mouse` sends its events only after every command and
+`--screenshot` photographs only the end, so click, type, click could not be
+driven. The miner's Wi-Fi panel is tested this way, against a miner ISO built
+with `mkiso.py --payload <dir with MINER.TXT and FW/>` and booted with `--iso`.
 
 **A screenshot is taken when `drive.py` exits, which for a full-screen program
 means you get the desktop.** The bounded `ms` form returns before the harness
@@ -4321,6 +4939,42 @@ moving the bytes under the new name. Identity is the hash of the file contents,
 so manifests, grants and lineage survive untouched. It runs after every
 namespace init rather than once, because a restored snapshot can be older than
 the rename.
+
+### A USB mouse is polled by the compositor, and was polled by the shell
+
+`dev::usbhid` enumerates boot-protocol keyboards and mice at boot (after the
+network, so a USB Ethernet adapter claims its device first) and the GF63 trip
+read it as "no USB mouse support". There was support; the *poll* was in the
+shell's idle loop, so a USB mouse delivered reports only between commands and
+went dead for the length of every one -- `iwx boot`, `wifi scan`, anything --
+which on a screen where nothing else moves either is indistinguishable from
+the machine freezing. The PS/2 pointer had the identical defect and was moved
+to the compositor's loop for it; `usbhid::poll` runs there now, beside
+`poll_mouse`, and the shell's idle loop polls only when no compositor exists,
+which is the miner image.
+
+That made the device list reachable from two tasks, so `DEVICES` is a `Spin`:
+`probe` holds it across its whole walk of the bus and `poll` takes it with
+`try_lock`, skipping a turn rather than stalling the screen behind an
+enumeration. The controller underneath already tolerated this -- `CONTROLLER`
+is a lock held per operation, command completions are awaited under it, and
+transfer events a waiter was not asking for are stashed for whoever is -- so
+the two tasks' transfers cannot take each other's completions. Not driven
+under QEMU, which has no USB mouse plugged into it; the trip is the test.
+
+**The trip found that the trackpad is that USB device, and that the cursor
+could not take the rate.** With reports consumed from the compositor's loop
+the arrow strobed and whatever it crossed flickered with it. `cursor_show`
+writes the arrow straight into the aperture and `cursor_hide` repaints what
+was under it from the back buffer, so every paint is an erase and a redraw on
+the surface a person is looking at -- once a tick from the shell's idle loop,
+once per HID report from the compositor's, several hundred times a second.
+And each erase copies the back buffer as it stands, which during a `draw()`
+on another task is half a frame. `paint_cursor_paced` coalesces: every
+position is recorded and every press acts at once, but the arrow is painted
+at most every `CURSOR_MIN_US` (4 ms) and the last position is always painted
+on a later turn. The back-buffer race underneath is older than this and is
+still there; pacing makes it rare rather than gone.
 
 ### Graphics and the desktop
 
@@ -4977,6 +5631,153 @@ one: QEMU reports `hwp no`, so the GF63's actual `#GP` cannot reproduce here at
 all. The sequence of that machine faulting, being repaired by `skip-hwp`,
 persisting it and booting clean is still owed, and it needs the laptop.
 
+### A finished task gives its slot back
+
+`trampoline` ended in `loop { yield_now() }` under the comment "a task that
+returns just stops being scheduled onto". True, and not the whole story: the
+slot stayed claimed and its 64 KiB stack and extended-state image stayed
+resident forever. `MAX_TASKS` is 40 and `task.rs`'s own budget counts 37
+committed at sixteen cores, so anything that spawns and finishes repeatedly
+does not leak quietly -- it runs out of tasks.
+
+**Reclaim belongs in `finish_handoff` and nowhere else**, and that is the whole
+design. A task cannot free its own stack, because it is standing on it; and
+`schedule` cannot either, because it writes the outgoing state *before*
+`glados_switch_context` has stored that task's `rsp`. `finish_handoff` already
+runs as the incoming task on the core that switched away, which is both the only
+moment the outgoing `rsp` is known to have landed and the first moment nothing
+is executing on that stack. So `exit` raises a flag and yields, and the core
+that leaves does the work.
+
+The loop in `exit` is load-bearing rather than defensive: `yield_now` returns
+normally when there was nothing else to switch to, so with the flag set this
+task is still running and has to ask again.
+
+`Task` gained `stack`, because `rsp` is somewhere inside the allocation and
+moves, so it cannot be handed back. **Null where the stack is not ours** -- task
+0 stands on the firmware's and an adopted idle task on the one its core arrived
+on, and freeing either hands away a stack a core is running on.
+
+**Slots are claimed under `TASKS` now rather than off `COUNT`.** `COUNT` is a
+high-water mark and the scan bound `schedule` uses; it cannot come down, since
+lowering it asserts nothing above the new value is live and a count cannot
+answer that. So a reclaimed slot sits `Unused` *below* `COUNT` and `spawn` looks
+for one -- and looking then claiming has to be one critical section, or two
+spawns take the same slot. That also closed a live window: the old form read
+`COUNT`, allocated, and stored `slot + 1` afterwards, so an `adopt_idle` landing
+in between had its `fetch_add` discarded, which is the bug `task.rs`'s own
+`COUNT` comment describes still reachable by the other caller.
+
+Freeing happens outside the `TASKS` lock, because `dealloc` takes the heap's and
+`TASKS`-then-heap is a lock order nothing else here uses. Safe because the slot
+goes `Unused` first.
+
+Measured in `diag migrate`, and exact rather than approximate:
+
+    -smp 2   slot goes unused, the next spawn takes that very slot, heap grew 0 B
+    -smp 4   the same, twice in one boot, heap grew 0 B both times
+
+The heap claim is the one that earns its place: a reclaim returning the slot and
+leaking 64 KiB a time passes every other claim above it. It is written as
+`grew < STACK_SIZE` rather than `== 0` because this is a live machine with a
+clock task and a compositor on it, and one stack of slack catches the leak
+without flaking.
+
+`root` is deliberately not freed -- a `Space` belongs to whoever installed it,
+and freeing page tables the kernel may still be walking is the failure
+`Space::drop` orders against.
+
+**Nothing calls `exit` yet except a task whose entry returns, and today nothing's
+does**: the clock and compositor loop forever, guest threads park into a pool.
+So this is the mechanism and the headroom with no behaviour change to anything
+running. The two items it unblocks are still open -- blocking primitives spin
+rather than sleep, and a guest still holds the shell until it exits.
+
+### Which guest a task speaks for
+
+`CURRENT_GUEST` was one machine-wide atomic, and `guest_slot()` resolves every
+syscall's view of its own memory through it. `fork` sets it before entering a
+child and restores it after, which reads as correct and is not: **the child is
+preempted at ring 3.** While it sits suspended holding index 3, any other task
+taking a syscall resolves `guest_slot()` to slot 3 -- somebody else's `Space`,
+and therefore somebody else's memory at every address they share, which is all
+of them. Every bounds check in `reachable` then passes, because it is checking
+the wrong guest's regions and those are perfectly valid.
+
+It could not bite while one guest ran in the foreground: the shell was inside
+`run` for the duration and there was no second guest to be confused with.
+`fork` made two and survived because a child's syscalls are short and the
+window is narrow. It is the first thing a background guest would hit.
+
+`Task.guest` carries it, saved and loaded by `schedule` beside the `Ring3`
+block -- the pattern that function already uses for this shape of problem. A
+global only read while its own task is running *is* per-task, provided somebody
+swaps it.
+
+Two places where the obvious form is wrong. **The live value is read back from
+the global rather than taken from the field**: the field is where the index was
+parked and the global is what it has been since, so taking the field writes
+back a stale index and undoes every `set_current_guest` since the last switch.
+And **the write is unconditional** where `root` and `ring3` beside it are
+guarded, because their guard reads the parked field and here the field and the
+live value legitimately differ -- a task that entered a guest since its last
+switch has 3 in the global and 0 in its field, so a guard on the field skips
+the save.
+
+Four claims, needing no guest at all. Proved to discriminate rather than
+assumed to: with the save/restore disabled the suite fails and prints the bug,
+which is why the helper holds its index *across a sleep* instead of setting and
+clearing it.
+
+    disabled   helper took 7 and saw 0, while this task reads 7 (was 0)  FAIL
+    enabled    helper took 7 and saw 0, while this task reads 0 (was 0)  ok
+
+### A task that waits stands down
+
+`sys_nanosleep` was the one wait in this kernel that genuinely spun:
+`while ticks() < until { spin_loop() }`. Three things wrong with that and one
+foreground guest hid all three -- the core was held for the whole sleep, the
+session deadline went unchecked (the timer only fires that from ring 3), and
+`sky::server::pump` stopped, so a Wayland client that slept stopped serving its
+own display connection. A background process per sleeping guest makes each of
+those a core.
+
+`State::Asleep` plus `Task.wake_at`, honoured in exactly the place `exiting`
+is and for the identical reason: `schedule` writes the outgoing state
+unconditionally, so a task that marked itself `Asleep` and yielded would have
+it overwritten. A task can no more put itself to sleep than free its own stack.
+
+Waking is decided in `schedule`'s own pass rather than from a timer hook -- the
+scan bound is already walked to pick a task, so an expired sleeper costs one
+comparison per slot and there is no second structure to disagree with `state`
+about who is runnable.
+
+**A deadline and a wake have to be told apart**, and that cost two failing
+claims. `wake` first set the task `Ready` and nothing else, which looks right:
+but `sleep_until` loops while the deadline is in the future, so being made
+runnable ended one iteration and the task slept again. A sixty-second sleep
+stayed sixty seconds however often it was woken. `Task.woken` is the flag the
+sleeper reads after its yield and before the loop condition, and `sleep_until`
+answers whether it reached its deadline.
+
+**nanosleep sleeps a tick at a time**, not once for the whole duration, and the
+slice is the point: it keeps the deadline check and the pump at the cadence
+every other blocking path uses. Only the sleeping changed.
+
+**The other yield loops are deliberately left alone.** `futex` WAIT, `accept`,
+the socket reads and the input wait all re-poll a condition *and* pump the
+display server each pass. Sleeping 10 ms between pumps trades a CPU sink for a
+sluggish display, and their existing form watches both the wake counter and the
+word, which is the lost-wakeup argument. So this is a sleep queue the one true
+busy-wait uses, not a wake protocol the pollers were rewritten into.
+
+Nine claims in `diag migrate`, four in `diag linux`. The one that separates a
+sleep from a spin is seeing the sleeper **asleep from another task** -- a
+spinning task is `Running` throughout, so elapsed time alone passes either way.
+Both duration claims are `>=` and never `==`: the tick is 10 ms so overshooting
+is expected, and returning early is the failure a sleep can have and a spin
+cannot.
+
 ### Concurrency
 
 `sync::Racy<T>` is **not a lock.** It is single-core interior mutability and
@@ -5603,7 +6404,7 @@ one that uses the laptop's own radio.
 `dev::registry` down to the network parts, so the naming lives in one table
 rather than two, and boot prints it.
 
-### Wireless: a seam, a shared layer, and no drivers
+### Wireless: a seam, a shared layer, and one driver
 
 **`net::iface::Nic` is Ethernet-shaped, and that was the finding that decided
 the architecture.** `transmit(&[u8])` takes an Ethernet frame, which suits a
@@ -5667,9 +6468,24 @@ Four things that cost a run each and are silent when wrong:
   which is the one asymmetry in RFC 3394 and the only place the two directions
   can silently disagree.
 
-Owed, and written at the top of `ccmp.rs` rather than only here: an IEEE
-802.11-2016 Annex J CCMP vector. The cipher is checked against RFC 3610; the
-*framing* is structural and round-trip only.
+**The CCMP framing is checked against a published vector at last**, IEEE
+802.11-2012 Annex M.6.4, which the top of `ccmp.rs` had said it owed since the
+file was written. The cipher was always checked against RFC 3610; the framing
+was checked only against itself, and the AAD masking and nonce layout can be
+self-consistently wrong and round-trip perfectly while failing against every
+access point in the world.
+
+It was verified on the host first, against an independent AES-CCM and
+reimplementing *this file's own* AAD and nonce rules rather than the standard's
+prose -- so a failure in the kernel would have been the port and not the
+arithmetic. The vector's frame carries the retry bit set, which is the case the
+mask exists for, and both directions are asserted: a change to an address the
+AAD covers must fail the MIC, and a retry bit set in flight must not. Only the
+second breaks under a too-eager mask, and it presents as a flaky radio rather
+than as a bug.
+
+Still structural rather than published: the QoS layout, since Annex M's example
+is a non-QoS data frame.
 
 For the rtl8188eu dongle specifically, more exists than a summary here once
 claimed: `xhci` identifies the part, reads its chip id and calls `bring_up`,
@@ -5683,6 +6499,161 @@ FIFO boundary that gates the MAC TX/RX enables, read the efuse, upload the
 firmware, select a channel) and then `impl Radio` over the descriptors. None of
 the chip-facing half can be exercised here, since QEMU models no wireless part
 at all.
+
+### The Intel driver, from detection to a scan
+
+`src/dev/iwx/` drives the AX210 family (Snow Owl, Typhoon Peak, Ma) and names
+the 22000 family; the GF63's "AX201" is Snow Owl with a Harrier radio. What a
+boot does and what is still owed, in order:
+
+- **Detection is automatic, bring-up is not.** `net::wireless` asks each driver
+  the registry names (`iwx` today) to look at its part: a guarded register read,
+  the product, the family, and the firmware image it wants. Boot prints it and
+  `wifi` repeats it. Booting firmware grants bus-master DMA, so it stays a verb.
+- **Firmware comes from `\GLADOS\FW\`**, read whole before ExitBootServices by
+  `dev::firmware`; a copy at `/fw/<name>` in the namespace wins. `tools/wifi_fw.py
+  stage` fills `esp/GLADOS/FW` from `/lib/firmware` at the highest API at or
+  below `iwx::MAX_API` (89), `record` writes `payload/firmware.txt`, and
+  `mkiso.py` carries it with `LICENCE.iwlwifi_firmware` beside it.
+  `release.yml` fetches it from the release `payload-wifi-fw-v1`, **which has to
+  be published by hand before the next ISO build passes.**
+- **`iwx boot`** powers up, boots firmware to ALIVE, reads the NVM, sends all ten
+  initialisation commands (MCC_UPDATE's reply is the regulatory channel map), and
+  holds the part. `iwx::Held` stops it before freeing anything; `iwx down` does
+  that. It then attaches as `wlan0`.
+- **`wifi scan`** goes through `Radio::scan_offload` to a SCAN_REQ_UMAC v17, the
+  version the image declares; beacons come back through the receive ring as
+  `RX_MPDU`. `iwx rx` shows what the inbox holds.
+- **Joining is written, through the legacy contexts, and has not run on the
+  part.** `src/dev/iwx/join.rs`. The first version spoke the MLD API on the
+  strength of a note that said the image declared it, and the part refused
+  before a byte was sent: `iwx journal` read `mld: false`, and the file on
+  the host confirms capability 121 is absent while 39 (`BINDING_CDB_SUPPORT`)
+  and 54 (`SESSION_PROT_CMD`) are present. So the sequence is `iwx_auth`'s:
+  `PHY_CONTEXT_CMD` v4, `RLC_CONFIG_CMD` v2 for the receive chains (at that
+  version the PHY context's own field is ignored), `MAC_CONTEXT_CMD` (148
+  bytes, the union sized by its largest member), `BINDING_CONTEXT_CMD` v2
+  (28 bytes, LMAC 0 on a single-LMAC part), `ADD_STA` v10 (48 bytes, status
+  byte 1 on success), two queues through `SCD_QUEUE_CONFIG_CMD` v3
+  (management TID 15, data TID 0), `SESSION_PROTECTION_CMD` v2 for nine beacon
+  intervals, and `TX_CMD` v10 framed as the firmware fetches it: a four-byte
+  command header, the command, the 802.11 header padded to four, then the
+  body. `associated` is `iwx_run`'s half -- `ADD_STA` as an update and the
+  MAC modified with the id -- and `left` reverses it all. 41 claims in
+  `diag iwx`, and `Versions::check` refuses by name an image whose table says
+  a layout moved, including one that *does* declare the MLD API.
+
+  Three legacy-versus-MLD facts bit once each and are asserted: the EDCA rows
+  are indexed by **transmit FIFO** (BK 1 .. VO 4) and not by access class,
+  `short_slot` is the flag bit 4 and not a boolean, and the beacon filter is
+  bit 6 where the MLD command puts it at 3.
+
+  Two things are deliberately not done and are stated there: **rates are fixed
+  at the lowest legacy rate** with `IWL_TX_FLAGS_CMD_RATE`, because letting
+  the firmware choose needs `TLC_MNG_CONFIG_CMD` and a link that works slowly
+  is the rung before one that works fast; and **keys stay in software**
+  (`hw_ccmp` false, `IWL_TX_FLAGS_ENCRYPT_DIS` on every frame). `iwx_run`'s
+  `SF_CFG_CMD`, `MCAST_FILTER_CMD` and power command are not sent either.
+
+  **The first trip of that path died at `MAC_CONTEXT_CMD`, and the journal
+  could not say why.** `PHY_CONTEXT_CMD add` and `RLC_CONFIG_CMD` answered,
+  the MAC add read `the part did not answer`, and so did the `PHY_CONTEXT_CMD
+  remove` after it -- two silences from a queue that had just answered twice,
+  which is a firmware that asserted and not one that was slow. Nothing could
+  tell the two apart: the command wait never read `CSR_INT`, and the error
+  tables ALIVE handed over were carried and never read. `src/dev/iwx/err.rs`
+  reads them now, through the `HBUS_TARG_MEM` window under the MAC access
+  lock, whenever a command goes unanswered: the interrupt status, and per
+  table the assertion id by name, the interrupt links, the three data words
+  and **the last host command header the firmware handled** -- which is the
+  command it was parsing when it died. Eight claims against synthetic tables.
+
+  **The next trip read the firmware's own verdict, and it was not a bad field.**
+  `CSR_INT 0x02000000` (a microcode fault), `lmac0 ... id 0x0071`
+  (`NMI_INTERRUPT_UMAC_FATAL`), `last command group 0x01 code 0x28`
+  (`MAC_CONTEXT_CMD`). So the UMAC took a *generic* fatal NMI parsing the MAC
+  add -- not `BAD_COMMAND` (0x38/0x39), which is what a wrong field would be.
+  Every field of `mac_context` was then checked against OpenBSD's
+  `iwx_mac_ctxt_cmd_common` and matches: the EDCA rows are right (gen2 FIFOs
+  are `BK=1,BE=2,VI=3,VO=4`, so the 1-based rows and `fifos_mask` and the zero
+  `ac[0]` are all correct), the filter is `ACCEPT_GRP | IN_BEACON` for a STA,
+  the rates are `iwx_ack_rates`'s own output (OFDM 0x15, CCK 0xf), the
+  `data_sta` offsets (100/116/124/128/132/136) match the struct, and the RLC
+  `rx_chain_info` is `valid<<1 | 1<<10 | 1<<12` with both chain counts 1, which
+  is `iwx_phy_send_rlc` exactly. The whole command-layout space is ruled out.
+  A UMAC NMI at MAC-add with a byte-correct command is firmware-internal state:
+  a missing `init_hw` command, or a PHY-context field the firmware validates
+  only when the MAC binds to it. `qos_flags` now carries `UPDATE_EDCA`, which
+  was correct to add and was not the cause.
+
+  **A deeper pass verified still more and found nothing wrong with the
+  command.** The group is right -- OpenBSD promotes every legacy-group command
+  (PHY 0x8, MAC 0x28) to `LONG_GROUP` via `IWX_WIDE_ID`, so `group 1 code 0x28`
+  is exactly what it sends; `id_and_color` is `id | color<<8` = 0; the PHY
+  context is the **UHB** 32-byte layout (`channel` u32 at 8, band at 12) because
+  the image declares `ULTRA_HB_CHANNELS`, with `rxchain_info` zeroed since RLC
+  is separate, matching `iwx_phy_ctxt_cmd_uhb_v3_v4`; the RLC is the 32-byte
+  `iwx_rlc_config_cmd` with only `phy_id` and `rx_chain_info` set; `ACTION_ADD`
+  is 1; and the legacy path is correct because `sc_use_mld_api` is gated on the
+  absent `MLD_API_SUPPORT`. Two changes came out of it. The error reader now
+  carries `log_pc` (LMAC word 20, the firmware PC that pins the assert), and the
+  `err.rs` field offsets were confirmed right against `iwx_error_event_table`
+  VER_3 rather than off by one as a note had claimed. And `prepare_join` now
+  **drains and aborts an in-flight scan** before the PHY context: the fatal is a
+  *UMAC* fatal and the UMAC owns scanning, so a MAC context added while a scan
+  the completion of which `poll` never saw is still live is a credible cause,
+  and upstream ensures no scan is active before `iwx_auth`. Built
+  (`3a23446b24ca69fc`), `diag iwx` passes, **not flashed** -- the SSD was not
+  connected. The next trip either joins (the scan was it) or prints a clean
+  UMAC `error_id`, `log_pc` and data words that name the real assert.
+
+  **`iwx journal`** is what the trip brings home: every command the join path
+  sent, what the part answered, the queue numbers, and how many transmit
+  responses said a frame went out. Read it after `wifi join` whatever happened.
+
+`Radio` grew hooks for parts like this (`scan_offload`, `prepare_join`,
+`associated`, `left`), every default being the host-driven behaviour; `diag mlme`
+runs the whole path through both, and `wifi rehearse offload` drives it live.
+
+**The part-facing half up to a scan has run on the GF63.** `iwx boot` reached
+ALIVE (ucode 89.3528957251, umac 25.0), read the NVM (28:c5:d2:06:00:72, 38 of
+51 channels usable), sent all nine configuration commands and attached as
+`wlan0`; `wifi scan` listed nineteen networks. The join path above has not.
+The trip order is the checklist: `iwx`, `iwx probe`, `fw`, `iwx boot`,
+`iwx rx`, `wifi scan`, then `wifi join <ssid> <pass>`, `iwx journal`, and
+`dhcp` if the journal says it associated. There is no serial line, so
+`log send <ipv4> [port]` sends the transcript over the wired port to a listener
+(`nc -l 4444 > trip.log`) -- which needs a second machine, since the GF63 is
+also the development host.
+
+### Skywalker: the Wayland server (`src/sky/`)
+
+A Linux program that draws asks a display server, so this is one. It is the
+kernel, bound at `/run/glados/wayland-0` in `linux::unix`'s table, and the
+guest environment carries `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` to find it.
+**It runs inside the client's own syscalls** -- after every one and inside
+every wait (`sky::server::pump`) -- because a guest's descriptors are
+`Rc<RefCell<..>>` on the guest's task and a server task would be a second task
+in them. Buffers are memfds, whose pages are identity-mapped heap, so a commit
+copies the client's pixels straight into a desktop window (`surface::Frame`)
+and releases the buffer.
+
+Served: the bootstrap, `wl_compositor`, `wl_surface`, `wl_region`, `wl_shm`
+(pools, buffers, ARGB8888/XRGB8888), frame callbacks paced at 60 Hz,
+`xdg_wm_base`/`xdg_surface`/`xdg_toplevel`; popups are dismissed at once.
+Closing the window from its title bar sends `xdg_toplevel.close`. Not yet:
+`wl_seat` (no input reaches a client), `wl_output`, and a client running
+beside the shell -- a guest still holds the shell until it exits.
+
+```bash
+python3 tools/sky.py build && python3 tools/sky.py stage
+mapfile -t C < <(python3 tools/sky.py commands)
+python3 tools/drive.py --no-payload "${C[@]}" "linux run /tmp/wl/skytest 90"
+```
+
+`skytest` is a real libwayland-client program run under the host's own glibc;
+it prints each step. To photograph its window, give it thousands of frames,
+`linux deadline 120`, and let `drive.py --timeout` take the screenshot.
 
 ### Crypto (`src/crypto/`)
 
@@ -5931,6 +6902,60 @@ the middle of its last sentence to the operator, and the next question read as a
 continuation of it. `companion::interject_frame` closes the open turn and opens
 a labelled one, so neither the operator nor the model has to guess who said
 what.
+
+### Learning from being corrected
+
+The routing corpus grew by `teach` and by nothing else, so a machine used for a
+month routed exactly as it did on its first boot, and every correction the
+operator made by hand was discarded at the moment it was most informative.
+
+**Corrections, and emphatically not successes**, because this tree has already
+measured the alternative. `work.rs`'s role adapters were trained on harvested
+transcripts and reported `fixed 0 broke 0` over 23 examples -- structurally, not
+for want of data, since **a harvested label is the base model's own argmax**:
+`choose` decodes at temperature zero, so the action in a successful transcript
+is what the classifier already ranked first. Filtering on "it ran" does not
+escape it, because running says the applet accepted its arguments and never
+that it was the right applet.
+
+A correction inverts that. The model ranked `find` first, a person ranked `ls`
+first, and the disagreement is the whole signal -- the one label here the model
+did not generate.
+
+`learn::judge` is pure, in the `update::decide` shape, so its ten claims need no
+engine, no corpus and no disk. Six refusals each with their own reason, and the
+dangerous one is **agreement**: recording it would feed the model its own output
+back, which is the role-adapter result arriving by a second route.
+
+Driven, and the first attempt was a bad test that proved the right thing --
+asking for a directory routed to `ls` and correcting with `ls /ai` recorded
+nothing, correctly. With a real disagreement:
+
+    1. ls                     <- what the agent chose
+    tree /ai                  <- what the operator then did
+      [learn] 'tree' for: show me the files in the ai directory
+
+And it reaches routing rather than only the disk. `fit` across that one
+correction:
+
+    before   425 train, 380 held out, 25 classes
+    after    426 train, 380 held out, 25 classes
+
+Train grew by exactly one and **held out did not move** -- `vocab::splits` takes
+its boundaries from recorded positions and anything past the recorded length
+trains, so an append is a training row by construction. The "test set that
+moved" failure is now checked against this path too.
+
+Nothing has to be typed for it to take effect: the cached router is keyed by
+`/ai/train`'s hash and `ensure_router` refits when that moves. `learn.rs` does
+not know that and must not -- it is a property of the cache.
+
+**Capped at eight a boot, and every row printed.** The alpha budget is scoped to
+a corpus hash so a comparison knows which evidence it was paid for; a corpus
+that moved on every command would refill it on every command. `learn` shows the
+live request and what was written, `learn forget` drops the request, `learn off`
+stands it down. Durability is still a snapshot, which the verb says at the point
+of writing.
 
 ### Skills, and who is allowed to be the operator
 

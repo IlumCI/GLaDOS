@@ -37,6 +37,7 @@ kernel that finds no model and says so.
 """
 
 import argparse
+import hashlib
 import struct
 import sys
 from pathlib import Path
@@ -433,6 +434,30 @@ def build_iso(out_path, efi_img, efi_size, label):
         out.write(b'\x00' * ISO_SECTOR)             # LBA 23, spare
 
 
+def declared_payload(manifests):
+    """`{name: (size, sha256)}` from the named manifests under payload/."""
+    root = Path(__file__).resolve().parent.parent / 'payload'
+    out = {}
+    for name in manifests:
+        man = root / name
+        if not man.is_file():
+            continue
+        for line in man.read_text(encoding='utf-8').splitlines():
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split()
+            if len(parts) >= 3:
+                out[parts[2]] = (int(parts[1].replace(',', '')), parts[0])
+    return out
+
+
+# The manifest that names \GLADOS\FW\, and nothing else. Firmware is held to
+# its own list: a name from the model's manifest under FW\, or a firmware name
+# at the payload's root, is in the union and in the wrong place.
+FIRMWARE_MANIFEST = 'firmware.txt'
+
+
 def declared_payload_names():
     """Every filename the tracked payload manifests name.
 
@@ -443,11 +468,14 @@ def declared_payload_names():
     the failure this tree keeps recording under a different name each time.
 
     The union across manifests rather than one of them, since a build names a
-    single manifest and this has to answer for whichever it was.
+    single manifest and this has to answer for whichever it was. Firmware's
+    manifest is not in it: those names belong under FW/ and only there.
     """
     root = Path(__file__).resolve().parent.parent / 'payload'
     names = set()
     for man in sorted(root.glob('*.txt')):
+        if man.name == FIRMWARE_MANIFEST:
+            continue
         for line in man.read_text(encoding='utf-8').splitlines():
             line = line.strip()
             if not line or line.startswith('#'):
@@ -545,6 +573,49 @@ def main():
         for f in files:
             g.children.append(Entry(f.name, f.stat().st_size, f))
             payload_bytes += f.stat().st_size
+        # Device firmware, which `dev::firmware` reads out of \GLADOS\FW\.
+        # Held to the same allowlist -- `payload/firmware.txt` names every
+        # image, written by tools/wifi_fw.py -- and to the same rule about
+        # licences, for the same reason: the images are redistributable in
+        # binary form on condition that the notice travels with them, so a
+        # disc carrying them without it is a disc that should not exist.
+        fwdir = pdir / 'FW'
+        if fwdir.is_dir():
+            fw_declared = declared_payload([FIRMWARE_MANIFEST])
+            nested = [f.name for f in fwdir.iterdir() if not f.is_file()]
+            if nested:
+                raise SystemExit(
+                    'not firmware: ' + ', '.join(sorted(nested)) + ' under ' + str(fwdir) + chr(10)
+                    + '  The kernel reads one flat directory, so nothing nested would be seen.')
+            fws = [f for f in sorted(fwdir.iterdir()) if f.is_file()]
+            stray = [f.name for f in fws if f.name not in fw_declared and f.name not in args.allow]
+            if stray:
+                raise SystemExit(
+                    'not declared firmware: ' + ', '.join(sorted(stray)) + chr(10)
+                    + '  tools/wifi_fw.py stage, then record, writes payload/firmware.txt.')
+            # By digest, not only by name: the licence is the condition the
+            # images travel on, and a file that is merely called the licence
+            # meets no condition. The images are checked the same way while the
+            # bytes are being read anyway.
+            for f in fws:
+                want = fw_declared.get(f.name)
+                if want is None:
+                    continue
+                got = hashlib.sha256(f.read_bytes()).hexdigest()
+                if (f.stat().st_size, got) != want:
+                    raise SystemExit(
+                        f.name + ' does not match payload/' + FIRMWARE_MANIFEST + chr(10)
+                        + '  Restage it, or record the manifest again if the change is meant.')
+            if fws and not any(f.name.upper().startswith('LICENCE') for f in fws):
+                raise SystemExit(
+                    'firmware in ' + str(fwdir) + ' with no licence beside it' + chr(10)
+                    + '  tools/wifi_fw.py stage copies LICENCE.iwlwifi_firmware in.')
+            fw = Entry('FW', 0)
+            for f in fws:
+                fw.children.append(Entry(f.name, f.stat().st_size, f))
+                payload_bytes += f.stat().st_size
+            if fw.children:
+                g.children.append(fw)
         root.children.append(g)
 
     # FAT32 is *defined* as having at least 65525 clusters -- below that the

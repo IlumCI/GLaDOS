@@ -53,12 +53,17 @@ pub const ETHERTYPE_EAPOL: u16 = 0x888E;
 /// forever, and an unattended one would grow this queue until the heap gave
 /// out. Small because the MLME drains it every poll and anything older than a
 /// poll is stale by definition.
-const MGMT_QUEUE: usize = 24;
+// As many as one `receive` can take, so a burst of beacons -- which is what a
+// firmware scan delivers -- cannot evict its own head before the MLME reads it.
+pub const MGMT_QUEUE: usize = 64;
 
 pub struct Link<R: Radio> {
     radio: R,
     bssid: Mac,
     keys: Option<ccmp::Keys>,
+    /// The group key, for frames addressed to more than one station. Its own
+    /// replay counter: the access point numbers group frames separately.
+    group: Option<ccmp::Keys>,
     seq: u16,
     joined: bool,
     /// Management frames seen while draining the radio for data, kept whole
@@ -72,6 +77,8 @@ pub struct Link<R: Radio> {
     pub dropped_unprotected: u32,
     pub dropped_replay: u32,
     pub dropped_malformed: u32,
+    /// Our own frames, reflected back by the access point.
+    pub dropped_own: u32,
 }
 
 impl<R: Radio> Link<R> {
@@ -80,12 +87,14 @@ impl<R: Radio> Link<R> {
             radio,
             bssid: [0; 6],
             keys: None,
+            group: None,
             seq: 0,
             joined: false,
             mgmt: Vec::new(),
             dropped_unprotected: 0,
             dropped_replay: 0,
             dropped_malformed: 0,
+            dropped_own: 0,
         }
     }
 
@@ -102,6 +111,25 @@ impl<R: Radio> Link<R> {
         self.bssid = bssid;
         self.joined = true;
         self.keys = None;
+        self.group = None;
+    }
+
+    /// The group key from the handshake or a group rekey, under its key id.
+    /// Offered to the radio first, as the pairwise key is.
+    pub fn keyed_group(&mut self, gtk: &[u8], key_id: u8) -> bool {
+        if gtk.len() != 16 {
+            return false;
+        }
+        if self.radio.caps().hw_ccmp {
+            let mut k = crate::dev::radio::Key { idx: key_id & 3, tk: [0; 16], pairwise: false, peer: [0xff; 6] };
+            k.tk.copy_from_slice(gtk);
+            if self.radio.set_key(&k) {
+                self.group = None;
+                return true;
+            }
+        }
+        self.group = ccmp::Keys::new(gtk, key_id);
+        self.group.is_some()
     }
 
     /// The four-way handshake finished and produced a temporal key.
@@ -139,6 +167,7 @@ impl<R: Radio> Link<R> {
     pub fn leave(&mut self) {
         self.joined = false;
         self.keys = None;
+        self.group = None;
         self.bssid = [0; 6];
     }
 
@@ -258,8 +287,19 @@ impl<R: Radio> Nic for Link<R> {
             let frame = got.frame;
             let protected = u16::from_le_bytes([frame[0], frame[1]]) & 0x4000 != 0;
 
+            // Group-addressed frames are under the group key, named by the id
+            // in their CCMP header; everything else under the pairwise key.
+            let group_addressed = frame.len() >= 10 && frame[4] & 1 != 0;
+            let named_id = ccmp::parse(&frame)
+                .and_then(|f| frame.get(f.hdr_len + 3))
+                .map(|b| b >> 6);
             let (hdr, body) = if protected {
-                match &mut self.keys {
+                let key = if group_addressed {
+                    self.group.as_mut().filter(|g| Some(g.key_id) == named_id)
+                } else {
+                    self.keys.as_mut()
+                };
+                match key {
                     Some(k) => match k.unprotect(&frame) {
                         Some(v) => v,
                         None => {
@@ -308,6 +348,13 @@ impl<R: Radio> Nic for Link<R> {
                     continue;
                 }
             };
+            // Our own broadcast, relayed back by the access point to everybody
+            // including us. Taken up, our own ARP request teaches the stack
+            // that our address is somebody else's.
+            if sa == self.radio.mac() {
+                self.dropped_own += 1;
+                continue;
+            }
             let (ethertype, payload) = match dot11::snap_unwrap(&body) {
                 Some(v) => v,
                 None => {
@@ -357,6 +404,25 @@ pub struct Loopback {
     /// the one lie the interface cannot catch and the fallback it forces.
     pub refuse_key: bool,
     pub keys_taken: u32,
+    /// Behave as a firmware-assisted part: scan in "firmware", and refuse to
+    /// send any frame until `prepare_join` has named an access point. The
+    /// refusal is what makes the fixture a test of the hooks rather than a
+    /// second copy of the host-driven path -- an MLME that skipped them sends
+    /// its authentication into a part that drops it.
+    pub offload: bool,
+    /// The firmware scan in progress: the channel plan and how far it has got.
+    /// Advanced by whoever plays the air (`mlme::Ap::serve`), one channel per
+    /// turn, which is the same pacing the host-driven scan gets.
+    pub fw_scan: Option<(Vec<u8>, usize)>,
+    /// What `prepare_join` was told, what `associated` was told, and how often
+    /// `left` was called. Recorded so the suite can ask.
+    pub prepared: Option<crate::dev::radio::JoinTarget>,
+    pub assoc_aid: Option<u16>,
+    pub left_count: u32,
+    /// Frames refused because nothing had been prepared. Zero is the claim.
+    pub refused: u32,
+    /// Firmware scans called off.
+    pub aborts: u32,
 }
 
 impl Loopback {
@@ -371,6 +437,13 @@ impl Loopback {
             softmac: true,
             refuse_key: false,
             keys_taken: 0,
+            offload: false,
+            fw_scan: None,
+            prepared: None,
+            assoc_aid: None,
+            left_count: 0,
+            refused: 0,
+            aborts: 0,
         }
     }
 
@@ -421,6 +494,10 @@ impl Radio for Loopback {
         if !self.started {
             return Err("radio is not started");
         }
+        if self.offload && self.prepared.is_none() {
+            self.refused += 1;
+            return Err("the firmware has not been told about an access point");
+        }
         self.sent.push(frame.to_vec());
         Ok(())
     }
@@ -439,6 +516,49 @@ impl Radio for Loopback {
         }
         self.keys_taken += 1;
         self.hw_ccmp
+    }
+
+    fn scan_offload(&mut self, _ssid: &str, chans: &[u8]) -> Option<Result<(), &'static str>> {
+        if !self.offload {
+            return None;
+        }
+        self.fw_scan = Some((chans.to_vec(), 0));
+        Some(Ok(()))
+    }
+
+    fn scan_done(&mut self) -> bool {
+        match &self.fw_scan {
+            Some((plan, at)) if *at >= plan.len() => {
+                self.fw_scan = None;
+                true
+            }
+            Some(_) => false,
+            None => true,
+        }
+    }
+
+    fn scan_abort(&mut self) {
+        if self.fw_scan.take().is_some() {
+            self.aborts += 1;
+        }
+    }
+
+    fn prepare_join(&mut self, t: &crate::dev::radio::JoinTarget) -> Result<(), &'static str> {
+        self.set_channel(t.channel)?;
+        if self.offload {
+            self.prepared = Some(*t);
+        }
+        Ok(())
+    }
+
+    fn associated(&mut self, aid: u16, _t: &crate::dev::radio::JoinTarget) {
+        self.assoc_aid = Some(aid);
+    }
+
+    fn left(&mut self) {
+        self.prepared = None;
+        self.assoc_aid = None;
+        self.left_count += 1;
     }
 }
 

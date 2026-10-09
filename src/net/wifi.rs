@@ -31,18 +31,19 @@
 //! shape of the answers:
 //!
 //!   * **Firmware.** Intel's AX-series will not initialise without a signed
-//!     blob -- roughly a megabyte, loaded over a bootstrap protocol before the
-//!     part does anything. Not redistributable, not documented, and the
-//!     sequence differs between families. It is the single largest obstacle
-//!     and no amount of writing code avoids it.
+//!     blob -- a megabyte and a half, loaded over a bootstrap protocol before
+//!     the part does anything. Redistributable in binary form and not
+//!     modifiable, and the sequence differs between families; `dev::iwx`
+//!     takes the AX210 family's to ALIVE.
 //!   * **A host command interface.** For a FullMAC part, not descriptor rings
 //!     and registers but an asynchronous command and response protocol with
 //!     the firmware, in its own versioned message formats. Such a part
 //!     implements `Nic` directly and skips `softmac` entirely, which is what
 //!     `Caps::softmac` exists to say.
-//!   * **An undocumented bus.** This machine's own is CNVi: the MAC lives in
-//!     the chipset and the M.2 module is a radio on an interface Intel has not
-//!     published. That one is not a driver-sized problem.
+//!   * **Not an undocumented bus**, which this said about CNVi for a while.
+//!     The link between the chipset and the radio module is unpublished and
+//!     the host never speaks it: from here a CNVi part is an ordinary PCIe
+//!     function, and this machine's own is one.
 //!
 //! `ath9k`-class Atheros parts are the tractable case and the registry says so
 //! on the row: no blob at all, and SoftMAC, so everything above them is
@@ -82,6 +83,23 @@ pub fn probe(ecam: u64) -> Probe {
         return Probe::Unsupported { vendor: n.id.vendor, device: n.id.device, what: e.what };
     }
     Probe::None
+}
+
+/// Every wireless part on the bus that no driver here claims, as `(vendor,
+/// device, what)`. The parts a driver does claim are that driver's to describe
+/// (`net::wireless`), and they say far more than a registry row can.
+pub fn undriven(ecam: u64) -> alloc::vec::Vec<(u16, u16, &'static str)> {
+    use crate::dev::registry::{self, Role};
+    if !registry::scanned() {
+        registry::scan_pci(ecam);
+    }
+    registry::nodes()
+        .iter()
+        .filter_map(|n| {
+            let e = n.entry?;
+            (e.role == Role::Wireless && e.support.driver().is_none()).then_some((n.id.vendor, n.id.device, e.what))
+        })
+        .collect()
 }
 
 /// Every piece of networking hardware on the machine, and what drives it.
@@ -177,6 +195,7 @@ pub fn hardware() -> alloc::vec::Vec<Hardware> {
 ///
 /// The display shape of `mlme::Bss`, and `from_bss` is the one conversion so
 /// the two cannot drift into disagreeing about what a network is called.
+#[derive(Clone)]
 pub struct Network {
     /// The network's name. **SSID and ESSID are the same field**; ESSID is the
     /// older name for it, from when a distinction between independent and
@@ -301,18 +320,18 @@ pub fn scan() -> Result<alloc::vec::Vec<Network>, &'static str> {
     // difference matters because the two need opposite next steps, and a page
     // that showed one empty list for both is what this module opens by
     // refusing to do.
-    if let Some(w) = crate::net::wlan() {
-        return Ok(w.networks());
+    {
+        let _claim = crate::net::claim_wifi();
+        if let Some(w) = crate::net::wlan() {
+            return Ok(w.networks());
+        }
     }
     match adapter() {
-        // The driver powers this chip on and loads its MAC registers, and the
-        // PHY, AGC and radio tables are transcribed. What is missing is the
-        // rest: the radio tables are not applied yet, no channel is set, and
-        // there is no transmit or receive path at all -- not one frame goes
-        // out or comes in. Scanning is sending probe requests and reading
-        // beacons, so it needs exactly the part that is absent.
+        // The RTL8188EU driver that made this arm say "its MAC can be brought
+        // up" was removed with its hardware, so a recognised USB adapter is
+        // now exactly as drivable as a recognised PCI one.
         Adapter::Usb { .. } => Err(
-            "This adapter is recognised and its MAC can be brought up, but there is no transmit or receive path yet, so no probe request can be sent and no beacon can be read.",
+            "This USB adapter is recognised and nothing here drives it.",
         ),
         Adapter::Pci { .. } => Err(
             "The wireless part in this machine cannot be driven. A supported USB adapter is the way on to a wireless network here.",
@@ -334,6 +353,27 @@ pub fn report() {
     console::set_color(YELLOW);
     kprintln!("[wlan0]");
     console::set_color(LTGRAY);
+
+    // What the boot's driver pass found, if a driver claimed anything. It has
+    // read the part's own registers, which the registry row cannot have.
+    let seen = crate::net::wireless::last();
+    if !seen.is_empty() {
+        crate::net::wireless::report(&seen);
+        // That was the boot's look. What has happened since is said too, or a
+        // part brought up and taken down again reads the same as one never
+        // touched.
+        if crate::dev::iwx::held() {
+            kprintln!("  now: a part is held and running; `iwx down` stops it, `iwx rx` shows what it hears");
+        } else if matches!(crate::dev::iwx::last_alive(), Some(Ok(_))) {
+            kprintln!("  now: brought up once this boot and since stopped; `iwx boot` again");
+        }
+        if let Some(e) = super::ecam() {
+            for (vendor, device, what) in undriven(e) {
+                kprintln!("  wlan0  {} ({:04x}:{:04x}) -- no driver", what, vendor, device);
+            }
+        }
+        return;
+    }
 
     match super::ecam().map(probe) {
         None => kprintln!("  no ECAM window, so the bus cannot be enumerated"),

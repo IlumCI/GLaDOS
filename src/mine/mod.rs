@@ -27,6 +27,7 @@ pub mod hash;
 pub mod proto;
 pub mod reward;
 pub mod screen;
+pub mod wifiui;
 pub mod header;
 pub mod neoscrypt;
 pub mod heavyhash;

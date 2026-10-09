@@ -26,6 +26,7 @@ mod cpu;
 mod crypto;
 mod diag;
 mod dev;
+mod dmi;
 mod edit;
 mod fmt;
 mod gfx;
@@ -212,6 +213,18 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     let rsdp = find_rsdp(st);
     serial_println!("glados: rsdp={:?}", rsdp);
 
+    // --- who this machine is, from SMBIOS + CPUID, while firmware memory is
+    // still valid. The POST intro below and `sysinfo` read what this found,
+    // rather than anything hardcoded about one laptop. ---
+    dmi::init(st);
+    serial_println!(
+        "glados: dmi vendor={:?} product={:?} board={:?}",
+        dmi::vendor(),
+        dmi::product(),
+        dmi::board()
+    );
+    serial_println!("glados: cpu {:?}", dmi::cpu());
+
     // --- Anything that needs a filesystem, while there still is one ---
     //
     // This has to happen before the memory map is sized: allocate_pool for a
@@ -302,13 +315,31 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         .and_then(|b| mine::boot::parse(b.as_slice()));
     {
         let note = match (&miner_bytes, &miner_plan) {
-            (None, _) => "glados: no \\GLADOS\\MINER.TXT on the boot volume -- this is not a miner image",
+            (None, _) => "glados: no \\GLADOS\\MINER.TXT -- an ordinary boot",
             (Some(_), None) => "glados: MINER.TXT was read and says nothing this understands -- it needs 'pool' and 'worker'",
             (Some(_), Some(_)) => "glados: MINER.TXT parsed -- no desktop, and this image mines",
         };
+        // **All three to serial, and only the two that found a file to the
+        // screen.** The absent case is every ordinary boot, so putting it on
+        // the display announced the default -- and it announced it as "this is
+        // not a miner image", which reads as a complaint about something
+        // missing. On real hardware that is a false alarm in the one place a
+        // person can least afford to misread the boot log, and it was read as
+        // one the first time this image booted on the GF63.
+        //
+        // The diagnostic is kept rather than deleted, because the failure the
+        // three-state split was written for is still live: a miner ISO whose
+        // `MINER.TXT` went somewhere `mkiso` did not mean it boots a desktop
+        // and says nothing, which is the "came up, printed nothing, pool
+        // unset" bug returning. Serial costs nothing, nobody reads it unless
+        // they are debugging, and `log send` carries it off a machine with no
+        // UART -- so the question is still answerable without putting a line
+        // on screen for every boot that was always going to be ordinary.
         serial_println!("{}", note);
-        con_out(st, note);
-        con_out(st, "\r\n");
+        if miner_bytes.is_some() {
+            con_out(st, note);
+            con_out(st, "\r\n");
+        }
     }
 
     let (persisted, repair_note) = update::repairs::at_boot(bs, image);
@@ -333,11 +364,22 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         }
     }
 
+    // The Aperture property screen, drawn on the firmware framebuffer *before*
+    // the weights are read -- the one slow stretch of boot, a minute or two on
+    // the GF63, which would otherwise be a black screen. The splash cannot
+    // cover it because the framebuffer console it needs is not up until after
+    // the read. Everything it shows is already known: `dmi::init` ran above,
+    // and `early_ram` totals the map the exit dance re-reads anyway.
+    gfx::intro::show(&fb, early_ram(bs) / (1024 * 1024));
+
     let model = uefi::read_file(bs, image, MODEL_PATH);
     let tokenizer = uefi::read_file(bs, image, TOKENIZER_PATH);
     // The root bundle comes off the same volume for the same reason: this is
     // the only moment there is a filesystem to read it from.
     let roots = uefi::read_file(bs, image, net::trust::ROOTS_PATH);
+    // Device firmware, every file of it, for the same reason: which image a part
+    // wants is read off its registers, and that is MMIO this path does not do.
+    dev::firmware::load(bs, image);
     match &roots {
         Some(b) => serial_println!("glados: roots {} bytes from {}", b.len, net::trust::ROOTS_PATH),
         None => serial_println!("glados: no roots at {}", net::trust::ROOTS_PATH),
@@ -530,6 +572,14 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     let headless = miner_plan.is_some();
     if headless {
         kprintln!("  no clock and no compositor -- this image mines, and draws its own screen");
+        // But the radio still needs its turn. The clock task is what runs the
+        // wireless state machine while the shell is busy, and without it a miner
+        // on Wi-Fi handled a deauthentication, a rekey or a handshake only when
+        // the idle loop came round -- so a long command was a link dropped.
+        match task::spawn("radio", radio_task) {
+            Some(i) => kprintln!("  spawned '{}' as task {}", "radio", i),
+            None => kprintln!("  could not spawn the radio task"),
+        }
     } else {
         match task::spawn("clock", clock_task) {
             Some(i) => kprintln!("  spawned '{}' as task {}", "clock", i),
@@ -886,6 +936,13 @@ fn comp_task() {
             // is not allowed to happen underneath one.
             gfx::render::beat(gfx::render::Phase::Pointer);
             gfx::desk::poll_mouse();
+            // And the USB input devices, for the identical reason: a mouse on
+            // the bus is polled, not interrupt-driven, and polled from the
+            // shell's idle loop it stopped for the length of every command.
+            // After `poll_mouse` on purpose -- a report it delivers lands in
+            // `mouse::apply` and is read on the next turn, a few milliseconds
+            // later, which is well inside what a hand notices.
+            dev::usbhid::poll();
         }
 
         // **Back to `Turn` before the wait, or the resting state lies.**
@@ -973,6 +1030,21 @@ fn comp_task() {
         // clock task owned this and could only repaint on its own schedule.
         gfx::render::beat(gfx::render::Phase::Tray);
         gfx::desk::paint_tray(composed);
+    }
+}
+
+/// The wireless state machine at ten a second and nothing else, for an image
+/// with no clock task. Yields between turns rather than spinning, because on
+/// a miner every cycle this does not spend is hashed.
+fn radio_task() {
+    let mut last = 0u64;
+    loop {
+        let now = dev::lapic::ticks();
+        if now.wrapping_sub(last) >= (TIMER_HZ as u64 / 10).max(1) {
+            last = now;
+            net::wifi_poll();
+        }
+        task::yield_now();
     }
 }
 
@@ -1557,6 +1629,11 @@ fn install_paging(boot: &BootInfo, frames: &mut mem::frame::EarlyFrames) {
 /// dangerous of the two everywhere a wrong answer still looks like an answer.
 fn section(name: &'static str, need: boot_report::Need, f: fn() -> bool) {
     use cpu::recover::Caught;
+    // Move the boot screen's travelling light on by one step. The selftests are
+    // the longest thing the splash is shown for and they run before preemption,
+    // so this is the only driver the sweep has through them -- one pump per
+    // section, off the real clock. A no-op once the splash is down.
+    gfx::splash::tick();
     // Recorded whether it passes or not, because a repair already applied to
     // this subsystem has to be re-testable: passing with a repair holding it up
     // and passing because the bug was fixed look the same from anywhere else.
@@ -2014,6 +2091,7 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
     // is a change to how the tables are held and belongs in its own argument.
     // Until then a fault in either is fatal, the way every check here used to
     // be.
+    gfx::splash::tick();
     kprintln!("
 [selftest] acpi tables:");
     if !acpi::selftest(acpi_ref) {
@@ -2022,6 +2100,7 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
         console::set_color(LTGRAY_IDX);
     }
 
+    gfx::splash::tick();
     kprintln!("
 [selftest] aml:");
     if !acpi::aml_selftest(acpi_ref) {
@@ -2043,6 +2122,7 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
     });
 
     section("text", boot_report::Need::Optional, check_text);
+    section("dmi", boot_report::Need::Optional, dmi::selftest);
     section("mining", boot_report::Need::Optional, check_mining);
     section("miner config", boot_report::Need::Optional, check_miner_config);
 
@@ -2095,6 +2175,16 @@ pub fn version_newer(candidate: &str, current: &str) -> bool {
 }
 
 fn banner(boot: &BootInfo, acpi: &Option<acpi::Acpi>) {
+    // Palette 6 is the amber on this console's palette, which is the colour the
+    // machine speaks in everywhere else.
+    console::set_color(6);
+    kprintln!("Property of APERTURE INSTITUTE FOR CYBERNETIC RESEARCH & ENGINEERING - 2005.");
+    kprintln!("ALL RIGHTS RESERVED.");
+    // One copy of the mark, shared with the pre-splash property screen.
+    for line in gfx::intro::MARK {
+        kprintln!("{}", line);
+    }
+    kprintln!();
     console::set_color(LTCYAN);
     kprintln!("glados {}", VERSION);
     console::set_color(WHITE);
@@ -2206,6 +2296,41 @@ fn survey_memory(boot: &BootInfo) -> (u64, usize) {
         }
     }
     (total, count)
+}
+
+/// Usable RAM in bytes from the firmware map, for the property screen -- read
+/// before the model load, when the map `survey_memory` reads does not exist
+/// yet. The exit dance re-reads the map from scratch, so this temporary is
+/// freed rather than kept, and a failure anywhere answers 0 ("not reported")
+/// rather than halting: it is a display line, not a load-bearing figure.
+fn early_ram(bs: &BootServices) -> u64 {
+    let mut size: usize = 0;
+    let mut key: usize = 0;
+    let mut dsz: usize = 0;
+    let mut dver: u32 = 0;
+    // First call fails BUFFER_TOO_SMALL and fills in the size and stride.
+    (bs.get_memory_map)(&mut size, ptr::null_mut(), &mut key, &mut dsz, &mut dver);
+    if size == 0 || dsz == 0 {
+        return 0;
+    }
+    size += dsz * 16; // slack: the allocate_pool below perturbs the map
+    let mut buf: *mut u8 = ptr::null_mut();
+    if is_error((bs.allocate_pool)(MemoryType::LoaderData, size, &mut buf)) {
+        return 0;
+    }
+    let mut sz = size;
+    let s = (bs.get_memory_map)(&mut sz, buf, &mut key, &mut dsz, &mut dver);
+    let mut total = 0u64;
+    if !is_error(s) {
+        for i in 0..(sz / dsz) {
+            let d = unsafe { &*(buf.add(i * dsz) as *const MemoryDescriptor) };
+            if d.is_usable_after_exit() {
+                total += d.num_pages * 4096;
+            }
+        }
+    }
+    let _ = (bs.free_pool)(buf);
+    total
 }
 
 fn find_rsdp(st: &SystemTable) -> *const c_void {

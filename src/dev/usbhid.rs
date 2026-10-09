@@ -47,7 +47,7 @@
 //! queued per poll.
 
 use super::xhci::{self, Device, HidIface};
-use crate::sync::Racy;
+use crate::sync::{Racy, Spin};
 use alloc::vec::Vec;
 
 /// HID class requests, sent to the interface.
@@ -77,14 +77,22 @@ struct Hid {
     reports: u64,
 }
 
-static DEVICES: Racy<Vec<Hid>> = Racy::new(Vec::new());
+/// **A lock, because two tasks reach it.** `poll` runs on the compositor so a
+/// USB mouse keeps moving while the shell is inside a command -- the same
+/// reason the pointer moved there -- and `probe` runs on the shell when
+/// somebody types `usb hid`. `probe` holds this for its whole walk of the bus,
+/// so a poll landing mid-enumeration finds it taken and skips a turn rather
+/// than reading a half-built entry. The controller underneath has its own lock
+/// and stashes transfer events it was not asked for, so the two tasks' transfers
+/// do not steal each other's completions.
+static DEVICES: Spin<Vec<Hid>> = Spin::new(Vec::new());
 
 /// Devices that offered HID but not the boot protocol, so `usb hid` can say
 /// what it declined instead of leaving a keyboard mysteriously dead.
 static DECLINED: Racy<Vec<(u16, u16)>> = Racy::new(Vec::new());
 
 pub fn attached() -> usize {
-    unsafe { (*DEVICES.get()).len() }
+    DEVICES.lock().len()
 }
 
 /// Find and configure every boot-protocol keyboard and mouse on the bus.
@@ -96,6 +104,9 @@ pub fn attached() -> usize {
 pub fn probe(ecam: u64) -> Result<usize, &'static str> {
     xhci::ensure_started(ecam)?;
     let mut found = 0usize;
+    // Taken before the controller and released after it, every time: the one
+    // lock order this file has, and `poll` keeps the same one.
+    let mut devices = DEVICES.lock();
 
     for port in xhci::free_ports() {
         // A port that will not enumerate is said out loud. It used to `continue`
@@ -125,7 +136,7 @@ pub fn probe(ecam: u64) -> Result<usize, &'static str> {
             {
                 continue;
             }
-            match setup(&mut dev, hid) {
+            match setup(&mut devices, &mut dev, hid) {
                 Ok(()) => {
                     claimed = true;
                     found += 1;
@@ -196,7 +207,7 @@ fn looks_hid(buf: u64, total: usize) -> bool {
     false
 }
 
-fn setup(dev: &mut Device, hid: HidIface) -> Result<(), &'static str> {
+fn setup(devices: &mut Vec<Hid>, dev: &mut Device, hid: HidIface) -> Result<(), &'static str> {
     if hid.ep_in.addr == 0 {
         return Err("no interrupt endpoint on the boot interface");
     }
@@ -241,7 +252,7 @@ fn setup(dev: &mut Device, hid: HidIface) -> Result<(), &'static str> {
     if hid.protocol == MOUSE {
         super::mouse::declare_present();
     }
-    unsafe { (*DEVICES.get()).push(entry) };
+    devices.push(entry);
     Ok(())
 }
 
@@ -267,11 +278,19 @@ fn encode_interval(b_interval: u8) -> u8 {
 
 /// Check every attached device for a report. Never waits.
 ///
-/// Called from the shell's idle loop beside `tcp::service`, for the reason
-/// that path already exists: there is no interrupt-driven USB in this kernel,
-/// so anything that wants to hear from the bus has to ask.
+/// Called from the compositor's loop beside the pointer, because that loop
+/// runs whatever the shell is doing; it was the shell's idle loop, and a USB
+/// mouse therefore stopped for the length of every command -- which read as
+/// the machine freezing, since nothing else on screen moves during one either.
+/// There is still no interrupt-driven USB in this kernel, so anything that
+/// wants to hear from the bus has to ask. A miner image has no compositor and
+/// its shell asks instead.
+///
+/// `try_lock`: a probe in progress holds the list, and waiting on it from the
+/// task that paints the screen would stop the screen for the length of a bus
+/// walk.
 pub fn poll() {
-    let devices = unsafe { &mut *DEVICES.get() };
+    let Some(mut devices) = DEVICES.try_lock() else { return };
     if devices.is_empty() {
         return;
     }
@@ -453,7 +472,7 @@ fn scancode(usage: u8) -> Option<u16> {
 }
 
 pub fn report() {
-    let devices = unsafe { &*DEVICES.get() };
+    let devices = DEVICES.lock();
     let declined = unsafe { &*DECLINED.get() };
     if devices.is_empty() && declined.is_empty() {
         crate::kprintln!("  no USB input devices");

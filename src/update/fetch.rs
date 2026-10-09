@@ -43,7 +43,11 @@ pub fn online() -> Result<(), String> {
     if n == crate::net::LO {
         return Err(String::from("no network interface is up"));
     }
-    if crate::net::config_of(n).gateway != crate::net::UNSPECIFIED {
+    // Configured, and on a link that is up: a gateway left over from another
+    // network -- a different Wi-Fi, a cable since unplugged -- is not online,
+    // and was read as if it were.
+    let i = &mut crate::net::ifaces()[n];
+    if i.configured && i.usable() && i.gateway != crate::net::UNSPECIFIED {
         return Ok(());
     }
     let c = dhcp::configure_on(n).map_err(|e| format!("no address, and DHCP {}", e.name()))?;

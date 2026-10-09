@@ -53,16 +53,33 @@ struct Slot {
     pid: u64,
     /// What it exited with, once it has. `wait4` reads this.
     status: Option<i32>,
+    /// Sealed into a quarantine field, invisible to everything outside it.
+    ///
+    /// A quarantined slot answers no pid lookup, no `kill`, no `wait4`: the
+    /// process is still on its task until it dies, but as far as the rest of
+    /// the machine is concerned it is already gone. `SIGQUARANTINE` sets it on
+    /// a whole process family at once and then dooms every task in the field --
+    /// which is what makes a self-replicating tree stoppable, since a fork that
+    /// lands after the lookups are blinded has nobody to be seen by and is
+    /// swept by the same doom.
+    quarantined: bool,
 }
 
 static SLOTS: Racy<[Slot; MAX_CHILDREN]> = Racy::new(
     [Slot { task: None, stack: 0, guest: 0, parent: 0, work: None, live: false,
-            pid: 0, status: None };
+            pid: 0, status: None, quarantined: false };
         MAX_CHILDREN],
 );
 
 /// The next process id. From 2, because `getpid` answers 1 for the first guest.
 static NEXT_PID: AtomicU64 = AtomicU64::new(2);
+
+/// The next id, for a process *or* a thread. One counter, as Linux has one id
+/// space: two counters both starting at 2 gave a thread and a forked child the
+/// same number, and `wait4` or `kill` naming it would mean either.
+pub fn next_id() -> u64 {
+    NEXT_PID.fetch_add(1, Ordering::Relaxed)
+}
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 
@@ -76,14 +93,148 @@ pub fn live() -> usize {
 /// spawned is kept and reused, exactly as `thread`'s is, because a kernel task
 /// that returns is not reclaimed and spawning one per fork would exhaust
 /// `MAX_TASKS` in four runs.
+///
+/// **A child still running is left alone.** `run` dooms every child and waits
+/// for them, but the wait is bounded, and a child that outlived it is still
+/// on its task reading its own slot. Marking that slot free would hand it to
+/// the next `fork` while its tenant is alive, and zeroing the count would make
+/// `live` lie about it. It ends at its next safe point and tidies its own
+/// slot then, exactly as it would have inside the bound.
 pub fn reset() {
     let s = unsafe { SLOTS.get() };
+    let mut still = 0;
     for slot in s.iter_mut() {
+        if slot.live {
+            still += 1;
+            continue;
+        }
         slot.work = None;
-        slot.live = false;
         slot.status = None;
+        slot.pid = 0;
+        slot.quarantined = false;
     }
-    LIVE.store(0, Ordering::Release);
+    LIVE.store(still, Ordering::Release);
+    MAIN_QUARANTINED.store(false, Ordering::Release);
+}
+
+/// Whether the session's first guest, pid 1, has been sealed into a quarantine
+/// field. It has no `Slot`, so its flag lives here.
+static MAIN_QUARANTINED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Seal a process and everyone connected to it by parent or child -- so its
+/// parent, its children and its siblings, transitively -- into one quarantine
+/// field, then terminate the whole field at once. Answers how many processes
+/// were sealed.
+///
+/// **The field is the connected component, computed rather than assumed.** In
+/// today's one-session model the parent chain of every child leads back to
+/// pid 1, so the component is usually the whole session; the closure is walked
+/// honestly anyway, so the day two unrelated guest trees exist, sealing one
+/// leaves the other untouched. That is the whole promise: nothing outside the
+/// field learns anything happened inside it.
+///
+/// Sealing comes before dooming, and the order is the point. Once every member
+/// is invisible to pid lookup, a member that forks one more child in the gap
+/// before it dies has handed that child to a family nobody can see, and the
+/// child is caught by the same sweep -- which is exactly what a self-replicating
+/// process is.
+pub fn quarantine(target_guest: usize) -> usize {
+    let s = unsafe { SLOTS.get() };
+    // The connected component over parent/child links, to a fixpoint. Bounded
+    // by the slot count plus the main guest, so the walk terminates.
+    let mut field: Vec<usize> = alloc::vec![target_guest];
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for slot in s.iter() {
+            if !slot.live {
+                continue;
+            }
+            if !(field.contains(&slot.guest) || field.contains(&slot.parent)) {
+                continue;
+            }
+            for g in [slot.guest, slot.parent] {
+                if !field.contains(&g) {
+                    field.push(g);
+                    grew = true;
+                }
+            }
+        }
+    }
+
+    // Seal first, every member, so the lookups are blinded before anything dies
+    // and a late fork has nowhere to escape to. Guest 0 is pid 1, the session
+    // itself: sealing it ends the whole session, there being nothing above it
+    // to be isolated from.
+    let mut sealed = 0;
+    if field.contains(&0) {
+        MAIN_QUARANTINED.store(true, Ordering::Release);
+        sealed += 1;
+    }
+    for slot in s.iter_mut() {
+        if slot.live && field.contains(&slot.guest) {
+            slot.quarantined = true;
+            sealed += 1;
+        }
+    }
+
+    // Then doom the whole field at once. Each task ends itself at its next safe
+    // point -- a syscall boundary, a wait loop, or the timer finding it at ring
+    // 3 -- so a member spinning without syscalls is ended by the timer just as
+    // `SIGKILL` reaches one.
+    if field.contains(&0) {
+        if let Some(t) = syscall::main_task() {
+            syscall::doom(t, syscall::SIGNALED | 9);
+        }
+    }
+    for slot in s.iter() {
+        if slot.live && field.contains(&slot.guest) {
+            if let Some(t) = slot.task {
+                syscall::doom(t, syscall::SIGNALED | 9);
+            }
+        }
+    }
+    sealed
+}
+
+/// Tell every running child to end itself with `code`. The session's end, and
+/// nothing else, sweeps them all -- see `syscall::run`.
+///
+/// A child forked but not yet entered is not in a guest, so it cannot be
+/// doomed -- it is cancelled instead: its work withdrawn before its task ever
+/// picks it up, its entry freed, and its parent told it was killed.
+pub fn doom_all(code: u64) {
+    let s = unsafe { SLOTS.get() };
+    for slot in s.iter_mut() {
+        if !slot.live {
+            continue;
+        }
+        if slot.work.take().is_some() {
+            syscall::release_guest(slot.guest);
+            slot.status = Some(syscall::wait_status(code));
+            slot.live = false;
+            LIVE.fetch_sub(1, Ordering::Release);
+            continue;
+        }
+        if let Some(t) = slot.task {
+            syscall::doom(t, code);
+        }
+    }
+}
+
+/// The task running the guest `pid` names, for a `SIGKILL` that has to reach a
+/// child which may never make another syscall.
+pub fn task_of_pid(pid: i64) -> Option<usize> {
+    if pid == 1 {
+        return (!MAIN_QUARANTINED.load(Ordering::Acquire))
+            .then(syscall::main_task)
+            .flatten();
+    }
+    unsafe { &*SLOTS.get() }
+        .iter()
+        .find(|x| x.live && x.work.is_none() && x.pid == pid as u64 && !x.quarantined)
+        .and_then(|x| x.task)
 }
 
 /// Copy one of the parent's ranges into pages of the child's own.
@@ -142,6 +293,58 @@ fn dup_range(
 /// child -- the child's first instruction is the one after the parent's
 /// `syscall`, on another task.
 pub fn fork(f: &Frame) -> u64 {
+    fork_with(f, None, None)
+}
+
+const SIGCHLD: u64 = 17;
+const CLONE_VFORK: u64 = 0x0000_4000;
+const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+
+/// Whether a `clone` is asking for a process rather than a thread: no
+/// `CLONE_THREAD`, an exit signal of `SIGCHLD` or none, and nothing among its
+/// flags this kernel cannot honour. `CLONE_VM` is allowed only with
+/// `CLONE_VFORK`, which is how `posix_spawn` asks -- see `clone_process`.
+pub fn is_process(flags: u64) -> bool {
+    use super::thread::{CLONE_CHILD_CLEARTID, CLONE_PARENT_SETTID, CLONE_THREAD, CLONE_VM};
+    let signal = flags & 0xFF;
+    let known = CLONE_VM | CLONE_VFORK | CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | CLONE_PARENT_SETTID | 0xFF;
+    flags & CLONE_THREAD == 0
+        && (signal == SIGCHLD || signal == 0)
+        && flags & !known == 0
+        && (flags & CLONE_VM == 0 || flags & CLONE_VFORK != 0)
+}
+
+/// `clone` asking for a process, which is how glibc forks.
+///
+/// **glibc never calls `fork`.** Its `fork()` is `clone(CLONE_CHILD_SETTID |
+/// CLONE_CHILD_CLEARTID | SIGCHLD)` with the child's tid written into the
+/// child's own thread block, and `posix_spawn` -- which `system()` uses -- is
+/// `clone(CLONE_VM | CLONE_VFORK | SIGCHLD)` on a stack of its own. This kernel
+/// served `fork` and `vfork` by number, which is musl's way, and answered
+/// `ENOSYS` to both of glibc's, so a glibc shell could run nothing.
+///
+/// `CLONE_VM | CLONE_VFORK` is served by a copy, not a share: the child of a
+/// spawn runs on the stack it was given until it calls `execve` or exits,
+/// which a copy does identically. What is lost is the child writing into the
+/// parent's memory before `exec` -- `posix_spawn` reports a failed `exec` that
+/// way, so here a spawn whose `exec` failed reads as started, and its exit
+/// status of 127 is what says otherwise. `CLONE_CHILD_CLEARTID` is accepted
+/// and not acted on: it clears a word in the child's own memory when the child
+/// ends, and nothing outside that child waits on it.
+pub fn clone_process(f: &Frame) -> u64 {
+    use super::thread::CLONE_PARENT_SETTID;
+    let (flags, stack, ptid, ctid) = (f.rdi, f.rsi, f.rdx, f.r10);
+    let settid = (flags & CLONE_CHILD_SETTID != 0 && ctid != 0).then_some(ctid);
+    let pid = fork_with(f, (stack != 0).then_some(stack), settid);
+    if (pid as i64) > 0 && flags & CLONE_PARENT_SETTID != 0 && ptid != 0 && syscall::reachable(ptid, 4, true) {
+        unsafe { core::ptr::write_volatile(ptid as *mut u32, pid as u32) };
+    }
+    pid
+}
+
+/// `fork`, running the child on `stack` if given, and writing its pid at
+/// `settid` in the child's memory if given.
+fn fork_with(f: &Frame, stack: Option<u64>, settid: Option<u64>) -> u64 {
     const EAGAIN: u64 = (-11i64) as u64;
     const ENOMEM: u64 = (-12i64) as u64;
     const ENOSYS: u64 = (-38i64) as u64;
@@ -178,17 +381,34 @@ pub fn fork(f: &Frame) -> u64 {
         (r, m)
     };
 
-    let mut owned: Vec<(u64, usize)> = Vec::new();
-    for (at, len) in regions.iter().chain(maps.iter()) {
-        if !dup_range(&mut tables, *at, *len, &mut owned) {
-            for (p, n) in owned {
-                syscall::free_pages(p, n);
-            }
-            return ENOMEM;
-        }
+    // The pid first, so it can be in the child's memory from its first
+    // instruction: `CLONE_CHILD_SETTID` is the child's copy of a word, and the
+    // simplest way to have a copy say something is to say it in the original
+    // for the length of the copy.
+    let pid = next_id();
+    let settid = settid.filter(|&a| syscall::reachable(a, 4, true));
+    let saved = settid.map(|a| unsafe { core::ptr::read_volatile(a as *const u32) });
+    if let Some(a) = settid {
+        unsafe { core::ptr::write_volatile(a as *mut u32, pid as u32) };
     }
 
-    let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+    let mut owned: Vec<(u64, usize)> = Vec::new();
+    let mut failed = false;
+    for (at, len) in regions.iter().chain(maps.iter()) {
+        if !dup_range(&mut tables, *at, *len, &mut owned) {
+            failed = true;
+            break;
+        }
+    }
+    if let (Some(a), Some(v)) = (settid, saved) {
+        unsafe { core::ptr::write_volatile(a as *mut u32, v) };
+    }
+    if failed {
+        for (p, n) in owned {
+            syscall::free_pages(p, n);
+        }
+        return ENOMEM;
+    }
 
     // A pool slot, and its stack on first use.
     let idx = {
@@ -218,7 +438,9 @@ pub fn fork(f: &Frame) -> u64 {
     // one call return twice.
     let resume = Resume {
         rip: f.rip,
-        rsp: syscall::guest_rsp(),
+        // A spawn's child runs on the stack it was handed; a fork's on its copy
+        // of the parent's.
+        rsp: stack.unwrap_or_else(syscall::guest_rsp),
         rflags: f.rflags,
         rax: 0,
         rbx: f.rbx,
@@ -227,6 +449,8 @@ pub fn fork(f: &Frame) -> u64 {
         r13: f.r13,
         r14: f.r14,
         r15: f.r15,
+        // The parent's TLS, which a child's copy of memory needs pointed at.
+        fs: syscall::guest_fs(),
     };
 
     // The child's guest entry, cloned from the parent's and given the tables
@@ -321,14 +545,37 @@ fn body() {
         // nothing switches between arming this task and entering the
         // child, so the global would still name the parent's stack.
         unsafe { syscall::set_syscall_stack(stack) };
-        let code = unsafe { syscall::enter_resumed(&work) };
+        let code = syscall::as_guest(|| unsafe { syscall::enter_resumed(&work) });
         crate::task::ring3_active(false, 0);
         crate::task::set_root(me, 0);
         syscall::set_current_guest(prev);
 
+        // Said, because nothing else will say it: the parent learns only a
+        // signal number from `wait4`, and a person watching learns nothing.
+        // Printed here, off the fault handler's stack -- painting from inside
+        // an interrupt gate is the console bug `cpu::idt` records.
+        let pid = unsafe { (*SLOTS.get())[i].pid };
+        if code & syscall::FAULTED != 0 {
+            match syscall::take_task_fault(me) {
+                Some(f) => crate::kprintln!(
+                    "  [linux] child {} killed by fault {:#04x} at rip {:#x} (cr2 {:#x}), its parent carries on",
+                    pid, f.regs.vector, f.regs.rip, f.cr2
+                ),
+                None => crate::kprintln!("  [linux] child {} killed by a fault, its parent carries on", pid),
+            }
+        }
+
+        // **The child's memory goes back now, not never.** Its copy of the
+        // parent and its tables lived in a guest entry nothing ever freed, so
+        // every fork leaked a whole process and a shell running commands in a
+        // loop would have run the heap dry. The root is off by now, which is
+        // the order `Space` needs: tables are freed only once nothing walks
+        // them.
+        syscall::release_guest(guest);
+
         let parent = {
             let s = unsafe { SLOTS.get() };
-            s[i].status = Some((code & 0xFF) as i32);
+            s[i].status = Some(syscall::wait_status(code));
             s[i].live = false;
             s[i].parent
         };
@@ -347,15 +594,45 @@ fn body() {
 ///
 /// Pid 1 is the guest the shell started, which `getpid` has always answered
 /// for and which has no slot here -- it was never forked.
+/// The pid of the guest entry `guest`: a forked child's own, or 1 for the
+/// guest `linux run` started.
+pub fn pid_of_guest(guest: usize) -> u64 {
+    unsafe { &*SLOTS.get() }
+        .iter()
+        .find(|s| s.live && s.guest == guest)
+        .map(|s| s.pid)
+        .unwrap_or(1)
+}
+
+/// `getpid`. It answered 1 to everybody, so a forked child named itself after
+/// its parent -- and glibc checks exactly that after `fork`.
+pub fn current_pid() -> u64 {
+    pid_of_guest(syscall::current_guest())
+}
+
+/// `getppid`: a child's parent's pid, and 0 for the first guest, whose parent
+/// is the kernel.
+pub fn parent_pid() -> u64 {
+    let me = syscall::current_guest();
+    match unsafe { &*SLOTS.get() }.iter().find(|s| s.live && s.guest == me) {
+        Some(s) => pid_of_guest(s.parent),
+        None => 0,
+    }
+}
+
 pub fn guest_of_pid(pid: i64) -> Option<usize> {
     if pid == 1 {
-        return Some(0);
+        // Sealed pid 1 is gone to the rest of the machine, as every sealed
+        // process is.
+        return (!MAIN_QUARANTINED.load(Ordering::Acquire)).then_some(0);
     }
     if pid <= 0 {
         return None;
     }
     let s = unsafe { SLOTS.get() };
-    s.iter().find(|x| x.pid == pid as u64).map(|x| x.guest)
+    s.iter()
+        .find(|x| x.pid == pid as u64 && !x.quarantined)
+        .map(|x| x.guest)
 }
 
 /// `wait4`, in the one shape a shell needs: wait for any child, or for one.
@@ -387,7 +664,7 @@ pub fn wait(pid: i64, status: u64, options: u64) -> u64 {
             let s = unsafe { SLOTS.get() };
             s.iter()
                 .position(|x| x.pid != 0 && !x.live && x.status.is_some()
-                    && (pid <= 0 || x.pid == pid as u64))
+                    && !x.quarantined && (pid <= 0 || x.pid == pid as u64))
         };
         if let Some(i) = found {
             let s = unsafe { SLOTS.get() };
@@ -395,16 +672,17 @@ pub fn wait(pid: i64, status: u64, options: u64) -> u64 {
             let got = s[i].pid;
             s[i].pid = 0;
             if status != 0 && syscall::owns(status, 4) {
-                // The wait status is encoded, not the exit code: bits 8..15
-                // are what `WEXITSTATUS` shifts back down, and a shell that
-                // read a bare code would report every exit as a signal.
-                unsafe { core::ptr::write(status as *mut i32, code << 8) };
+                // Already a wait status, encoded by `syscall::wait_status`
+                // when the child ended: an exit in bits 8..15, a signal in the
+                // low seven. Encoded there rather than here because only the
+                // end knows which of the two it was.
+                unsafe { core::ptr::write(status as *mut i32, code) };
             }
             return got;
         }
         let any = {
             let s = unsafe { SLOTS.get() };
-            s.iter().any(|x| x.pid != 0 && (pid <= 0 || x.pid == pid as u64))
+            s.iter().any(|x| x.pid != 0 && !x.quarantined && (pid <= 0 || x.pid == pid as u64))
         };
         if !any {
             return ECHILD;

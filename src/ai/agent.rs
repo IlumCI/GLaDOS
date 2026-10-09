@@ -501,6 +501,166 @@ fn prompt_for(goal: &str, steps: &[Step], ctx: &EpisodeCtx, names: &[&str]) -> S
 /// make `run` unable to reach things that work. Sorted, because `children` is
 /// sorted and a grammar built in a stable order is one a later reader can
 /// rebuild.
+/// The enumerable first argument of an applet, or empty when it has none.
+///
+/// **One function because the decode must not know which applets are special.**
+/// It was `if name == "run" || name == "linux"` with the sources inlined, and
+/// the next applet with a closed argument set would have made it three. The
+/// sources live in different modules -- skills under `/ai/tools`, programs
+/// under `/linux/bin` -- which is why this is a function here rather than a
+/// column on `sysbox::APPLETS`: that table is the action surface and must not
+/// learn to depend on `ai` or `linux` to describe itself.
+///
+/// Every other applet's arguments are genuinely open -- a filename to write, a
+/// string to search for -- and free text is right for them. Answering empty is
+/// how that is said.
+fn arg_choices(name: &str) -> Vec<String> {
+    match name {
+        "run" => skill_choices(),
+        "linux" => crate::linux::program::installed(),
+        // Two sources in one set, because at any moment they are the legal
+        // next moves and the model is choosing between them: a declared site
+        // to start at, or a link of the page it has just read. The set grows
+        // when a page is read and shrinks to the sites again when nothing has
+        // been, which is what makes a *closed* set the right shape for
+        // browsing at all -- a URL could never be one.
+        "web" => {
+            let mut v: Vec<String> =
+                crate::net::reader::sites().into_iter().map(|s| s.name).collect();
+            for i in 1..=crate::net::reader::links().len() {
+                let mut s = String::new();
+                let mut n = i;
+                let mut d = [0u8; 20];
+                let mut at = 20;
+                while n > 0 {
+                    at -= 1;
+                    d[at] = b'0' + (n % 10) as u8;
+                    n /= 10;
+                }
+                for c in &d[at..] {
+                    s.push(*c as char);
+                }
+                v.push(s);
+            }
+            v
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// What the chosen first argument itself admits, or empty.
+///
+/// A second level, because `linux quickjs hello.js` is two enumerable choices
+/// and not one: the program is installed and the script it runs is declared.
+/// Stopping at the first level would leave the script free text, which is the
+/// `skill_choices` failure one argument along -- a script the model cannot
+/// spell is a script it cannot run.
+fn inner_choices(name: &str, first: &str) -> Vec<String> {
+    match name {
+        "linux" => crate::linux::program::args_of(first),
+        _ => Vec::new(),
+    }
+}
+
+/// Decode one choice out of a closed set, positioning the engine first.
+///
+/// `sofar` is what has already been decided, so the second level sees the
+/// program it is choosing a script for. The prompt is `harness::args_prompt`'s,
+/// which is the one place the separator after the applet name lives.
+///
+/// Factored out because the two levels would otherwise be two copies of a loop
+/// whose every bound was got wrong once already.
+fn pick_closed(goal: &str, name: &str, sofar: &str, choices: &[String]) -> Option<usize> {
+    // **A closed set of one admits no decision, so nothing is asked.** The
+    // grammar has a single path and walking it can only end where it started;
+    // putting a decode in front of that spends a prefill to maybe fail, and
+    // failing means falling back to free text over an argument that had
+    // exactly one legal value. Measured: with one declared argument the decode
+    // returned `None` and the argument was dropped, on a set it could not have
+    // got wrong.
+    if choices.len() == 1 {
+        return Some(0);
+    }
+    harness::with_alphabet(|alphabet| {
+        with_engine(|e| {
+            let refs: Vec<&str> = choices.iter().map(|s| s.as_str()).collect();
+            let grammar = super::constrain::Grammar::new(refs.iter().copied());
+            let bound = super::constrain::step_bound(&grammar);
+            let mut cursor = super::constrain::Cursor::new(&grammar);
+            let limit = e.model.cfg.seq_len;
+
+            // Always positioned, never assumed. A `reflex` choice leaves the
+            // engine unpositioned and sampling it is sampling logits no
+            // forward pass has written: `e.pos` is 0 on an episode's first
+            // step, `sample_among` answers `None` on its first call, and the
+            // whole closed set falls through to free text. Measured, after
+            // four wrong theories about ring positions -- two steps of one
+            // episode, same tier, same single-choice set, `picked None` then
+            // `picked Some(0)`, the second working only because the first
+            // step's own free-text prefill had left logits behind.
+            let mut p = harness::args_prompt(goal, name);
+            p.push_str(sofar);
+            // **The separator that prompt ends with is right for free text and
+            // wrong here, and it cost a measurement to see.** `decode_args`
+            // samples the whole vocabulary, so without a space after the
+            // applet name the model continues it mid-word -- that is why
+            // `args_prompt` ends with one. Under a grammar continuing mid-word
+            // is already unreachable, and the space does active harm: the most
+            // likely token after it is another space, `Cursor::push` refuses an
+            // all-space piece while nothing has been produced, and the decode
+            // spends its whole idle allowance on whitespace and commits to
+            // nothing. Measured as `lvl2 returned None` on a set of exactly one
+            // choice -- a grammar with one path, declining to walk it.
+            //
+            // Trimmed, the model emits ` hello` as one piece, which the
+            // cursor's own leading-space trim turns into progress. That
+            // tolerance exists for precisely this and was being defeated by
+            // the prompt.
+            while p.ends_with(' ') {
+                p.pop();
+            }
+            let tokens = e.tok.encode(&p, true, false);
+            let at = e.pos;
+            let mut pos = e.model.prefill(&mut e.state, &tokens, at);
+            let (mut steps, mut idle, mut found) = (0usize, 0usize, None);
+            while steps < bound && idle <= ARGS_TOKEN_BUDGET && pos < limit {
+                let mut cands = cursor.candidates(alphabet);
+                // Once whitespace has cost a step, stop offering it. `push`
+                // refuses an all-space piece while nothing has been produced,
+                // and the set goes on admitting one -- so a model that wants a
+                // space here can be handed one sixteen times and commit to
+                // nothing, which is a decode losing to its own tolerance. One
+                // wasted step is the tolerance; a budget of them is the bug.
+                if idle > 0 {
+                    cands.retain(|&id| {
+                        !alphabet.piece(id as usize).iter().all(|b| *b == b' ')
+                    });
+                }
+                let Some(next) =
+                    sample::sample_among(&e.state.logits, &cands, 0.7, 0.0, &mut e.rng)
+                else {
+                    break;
+                };
+                if cursor.push(alphabet, next) {
+                    steps += 1;
+                } else {
+                    idle += 1;
+                }
+                if let Some(i) = cursor.finished() {
+                    found = Some(i);
+                    break;
+                }
+                e.model.forward(&mut e.state, next, pos);
+                pos += 1;
+            }
+            harness::invalidate_conversation(e);
+            found
+        })
+    })
+    .flatten()
+    .flatten()
+}
+
 pub fn skill_choices() -> Vec<String> {
     sysbox::children("/ai/tools")
         .into_iter()
@@ -511,6 +671,97 @@ pub fn skill_choices() -> Vec<String> {
             p
         })
         .collect()
+}
+
+/// Does this argument look like the model reciting the tool list?
+///
+/// **A detector for a bug class rather than a filter on the model.** The
+/// argument decode used to continue from the step prompt's own position, and
+/// `prompt_for` ends `Tools: cat, ls, cd, ... . Next tool:` -- so after the
+/// grammar emitted a name, free continuation reproduced that comma-separated
+/// list as the argument, on every tier but reflex, for every applet. Measured
+/// on Qwen3-0.6B: four steps, four rejections, score -5.50, and not one line of
+/// the transcript said why.
+///
+/// The cause is fixed (the decode prefills now), so this should never fire. It
+/// exists because the failure was *silent*: an argument that is a list of tool
+/// names is not a plausible argument to anything here, so recognising one and
+/// saying so converts a whole-agent outage into a printed line. The same reason
+/// `differ`'s canary exists -- a check that has never reported a difference is
+/// indistinguishable from one that compares nothing.
+///
+/// Deliberately strict. Two or more known applet names and *nothing else* but
+/// separators: one name alone is a legitimate argument (`help ls`, `same cat`),
+/// and a name beside real text is somebody's filename.
+/// The step that already did this, when repeating it could say nothing new.
+///
+/// **A repeat of a *failed* action and a repeat of a *successful* one are
+/// different facts.** Repeating a failure is a model going in circles, and the
+/// right answer is the refusal `LOOP_LIMIT` produces, which names the step and
+/// tells it to try something else. Repeating a success that nothing has
+/// invalidated is informationally empty: the observation already said what
+/// happened, the world has not moved since, and running it again produces the
+/// same bytes.
+///
+/// Both were the same case, so a one-step goal spent its whole budget and
+/// scored *negative* for having finished early. Measured on Qwen3-0.6B, once
+/// arguments had stopped coming back wrong:
+///
+/// ```text
+///     1. write  /tmp/notes.txt hello   -> /tmp/notes.txt  8 B
+///     2. write  /tmp/notes.txt hello   -> /tmp/notes.txt  8 B
+///     3. write  /tmp/notes.txt hello
+///     budget steps=3/3 ok=2 rej=0 rep=2 loop=1 score=-1.00
+/// ```
+///
+/// The applet was right, the file was written, and the episode reports as worse
+/// than one that did nothing at all.
+///
+/// **"Nothing has invalidated it" is the whole of the care here, and the first
+/// version of this did not have it.** Ending on any repeat of a success would
+/// break a sequence every careful agent runs: look, change something, look
+/// again. `ls /ai`, `rm /ai/x`, `ls /ai` is three useful steps and the third is
+/// not a repeat in any sense that matters -- the directory moved underneath it.
+/// So a dispatched *mutating* applet after the earlier success clears the
+/// finding, and the re-check is allowed.
+///
+/// Pure, over the transcript the loop already keeps, so every case is a claim
+/// with no model and no dispatch: the codebase's `update::decide` shape.
+fn satisfied_at(steps: &[Step], action: &str) -> Option<usize> {
+    // The *last* identical success, not the first: with a mutation in between
+    // the earlier one has been superseded and the question is only about what
+    // has happened since the most recent one.
+    let at = steps.iter().rposition(|st| st.action == action && st.ok)?;
+    // Anything that changed the world since means a repeat is a fresh reading
+    // rather than the same one. Only a step that actually ran counts -- a
+    // mutating applet the trust gate refused changed nothing.
+    let moved = steps[at + 1..].iter().any(|st| {
+        st.ok && {
+            let verb = st.action.split_whitespace().next().unwrap_or("");
+            sysbox::applet_mutates(verb) == Some(true)
+        }
+    });
+    if moved {
+        None
+    } else {
+        Some(at)
+    }
+}
+
+fn recites_tools(args: &str) -> bool {
+    let mut names = 0usize;
+    for piece in args.split(|c: char| c == ',' || c.is_whitespace()) {
+        if piece.is_empty() {
+            continue;
+        }
+        if sysbox::is_applet(piece) || piece == DONE {
+            names += 1;
+            continue;
+        }
+        // Anything that is not an applet name means this is not a recitation.
+        return false;
+    }
+    names >= 2
 }
 
 fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option<(String, String)> {
@@ -532,10 +783,27 @@ fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option
         return Some((name, String::new()));
     }
 
-    // Reflex choices carry no branch context; everything else left the
-    // engine positioned right after the chosen name's tokens.
-    let from_context = decision.tier != deliberate::Tier::Reflex;
-    if !from_context && sysbox::check_args(&name, "").is_ok() {
+    // The shortcut is for an applet that genuinely takes nothing -- `pwd`,
+    // `snaps`, `sysbox` -- where a decode would spend a prefill to produce the
+    // empty string. **It must not fire for an applet whose argument is
+    // optional and enumerable**, which `web` is: its spec reads `[site|link]`
+    // so `check_args` is happy with nothing, and the model was handed back
+    // `web` with no argument and got a list of sites where it had asked to
+    // read one. Driven, at the reflex tier, on the first episode that reached
+    // this applet at all.
+    //
+    // `arg_choices` is the test rather than the arity, because the question is
+    // not "may this run with no argument" but "is there a set we could have
+    // offered". A zero-argument applet has no such set and keeps the shortcut.
+    //
+    // **The tier is not part of this question and used to be.** The test read
+    // `!from_context && ...`, so the shortcut fired only for a reflex and a
+    // deliberated `pwd` went on to decode an argument it has nowhere to put.
+    // Whether an applet takes arguments is a property of the applet; the tier
+    // is a property of how its *name* was chosen. Conflating them was free
+    // while the argument decode continued from context, because that path was
+    // producing the tool list for everything anyway.
+    if sysbox::check_args(&name, "").is_ok() && arg_choices(&name).is_empty() {
         return Some((name, String::new()));
     }
 
@@ -555,58 +823,91 @@ fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option
     // conversation is invalidated either way -- the free-text walk below ends
     // with the identical call -- so this costs nothing that path was not
     // already paying.
-    if name == "run" {
-        let choices = skill_choices();
-        if !choices.is_empty() {
-            let picked = harness::with_alphabet(|alphabet| {
-                with_engine(|e| {
-                    let refs: Vec<&str> = choices.iter().map(|s| s.as_str()).collect();
-                    let grammar = super::constrain::Grammar::new(refs.iter().copied());
-                    let bound = super::constrain::step_bound(&grammar);
-                    let mut cursor = super::constrain::Cursor::new(&grammar);
-                    let limit = e.model.cfg.seq_len;
-                    let mut pos = e.pos;
-                    let (mut steps, mut idle, mut found) = (0usize, 0usize, None);
-                    while steps < bound && idle <= ARGS_TOKEN_BUDGET && pos < limit {
-                        let cands = cursor.candidates(alphabet);
-                        let Some(next) =
-                            sample::sample_among(&e.state.logits, &cands, 0.7, 0.0, &mut e.rng)
-                        else {
-                            break;
-                        };
-                        if cursor.push(alphabet, next) {
-                            steps += 1;
-                        } else {
-                            idle += 1;
-                        }
-                        if let Some(i) = cursor.finished() {
-                            found = Some(i);
-                            break;
-                        }
-                        e.model.forward(&mut e.state, next, pos);
-                        pos += 1;
-                    }
-                    harness::invalidate_conversation(e);
-                    found
-                })
-            })
-            .flatten()
-            .flatten();
-            if let Some(i) = picked {
-                return Some((name, choices[i].clone()));
+    // `linux` is the same shape as `run` and for the same reason: its first
+    // argument is a program and which programs exist is knowable, so the model
+    // picks out of a closed set instead of spelling a path. The set is
+    // `linux::program::installed()` rather than a directory listing taken here,
+    // because the dispatch resolves names through that one function and a
+    // second enumeration is a second answer to "what may be run".
+    //
+    // Only the *program* is decoded. Its argv is not enumerable -- `busybox ls
+    // -l` is argv a table cannot hold -- so a program needing arguments is
+    // reached through the shell or installed as a wrapper. That limit is real
+    // and is better than free-texting argv: an unspellable program is a
+    // program the model cannot use, which is the failure `skill_choices` was
+    // written to end, and offering argv it cannot get right would re-earn it.
+    // Some applets take an argument out of a closed set, and for those the
+    // decode has to make a wrong one unreachable rather than refuse it
+    // afterwards -- which is the whole of what `constrain.rs` is for. Which
+    // applets those are lives in `arg_choices`, so this reads the same however
+    // many of them there come to be.
+    let choices = arg_choices(&name);
+    if !choices.is_empty() {
+        if let Some(i) = pick_closed(goal, &name, "", &choices) {
+            let mut args = choices[i].clone();
+            // And the chosen argument may itself admit a closed set:
+            // `linux quickjs hello.js` is two choices, not one.
+            let inner = inner_choices(&name, &choices[i]);
+            if !inner.is_empty() {
+                let mut sofar = args.clone();
+                sofar.push(' ');
+                if let Some(j) = pick_closed(goal, &name, &sofar, &inner) {
+                    args.push(' ');
+                    args.push_str(&inner[j]);
+                } else {
+                    kprintln!("     (its argument set did not settle -- left bare)");
+                }
             }
-            // Falling through to the free-text walk is deliberate. A decode
-            // that would not commit is a small model failing to choose, not a
-            // reason to abandon the step -- and the old path still works.
+            return Some((name, args));
         }
+        // Said out loud, because the whole point of a closed set is that what
+        // comes next cannot be spelled wrongly, and falling through gives that
+        // up. It degraded silently for the life of this branch and the only
+        // visible symptom was an argument no table contained.
+        kprintln!("     (the closed set did not settle -- free text instead)");
     }
 
     // The same walk a workflow worker runs, lifted into `harness` so the two
     // cannot drift. It was always greedy; only the `run` path above samples.
-    let args = harness::decode_args(goal, &name, !from_context);
+    //
+    // **Always prefilled, and it used to be `!from_context`.** The intent was
+    // to save a prefill: a tier that left the engine positioned just after the
+    // chosen name has a cache worth continuing, so why pay for another. The
+    // position it leaves is the problem. `prompt_for` ends
+    // `Tools: cat, ls, cd, pwd, ... . Next tool:`, the grammar then emits one
+    // name, and free continuation from *there* is a continuation of that
+    // comma-separated list -- so the argument the model produced was the tool
+    // list, verbatim, every time.
+    //
+    // Measured on Qwen3-0.6B before the change, and it is not a degradation,
+    // it is total:
+    //
+    //     goal: list the files in /ai and say how many there are
+    //       1. cat , ls, cd, pwd, tree, cat, stat, hash, same
+    //       2. ls  cd pwd tree stat hash same du find diff snaps fsck ...
+    //       budget steps=4/4 ok=0 rej=4 score=-5.50
+    //
+    // Only the reflex tier escaped it, because a reflex carries no branch
+    // context and therefore took the prefill -- which is why episodes that
+    // routed at reflex looked fine and nothing in the suite caught it.
+    //
+    // This is the same correction the closed-set path above already carries,
+    // arriving on the other branch: both now go through `args_prompt`, whose
+    // trailing space is what stops a continuation mid-word. One prefill per
+    // step is the cost, and the alternative is an argument that cannot be
+    // right.
+    let args = harness::decode_args(goal, &name, true);
     // `decode_args` unwraps the with_alphabet/with_engine layers itself, so
     // what arrives here is the argument string or nothing.
     let args = args.unwrap_or_default();
+    // See `recites_tools`. Dropped rather than passed on, because an argument
+    // made of tool names cannot be what any applet here wanted, and a bare
+    // applet either runs or says what it needed -- both of which are better
+    // next steps for the model than a rejection it cannot read.
+    if recites_tools(&args) {
+        kprintln!("     (the argument came back as the tool list -- dropped)");
+        return Some((name, String::new()));
+    }
     Some((name, args))
 }
 
@@ -614,6 +915,11 @@ fn propose(goal: &str, steps: &[Step], ctx: &EpisodeCtx, trust: Trust) -> Option
 /// written to /ai/episodes/. Executes on the resident agent task -- the
 /// shell returned to its caller the moment this episode was queued.
 pub fn run(goal: &str, trust: Trust, max_steps: usize) {
+    // The request, so an operator command that follows it can be read as a
+    // correction. Noted here rather than in the shell because every route into
+    // an episode -- the verb, the applet, the resident mind -- arrives at this
+    // function, and a second notice site is a second thing to keep in step.
+    super::learn::goal_given(goal);
     console::set_color(YELLOW);
     kprintln!("[agent]");
     console::set_color(LTGRAY);
@@ -759,6 +1065,15 @@ impl End {
     fn from_outcome(s: &str) -> End {
         match s {
             "model called done" => End::Done,
+            // A completion the *loop* decided, not the model: it proposed an
+            // action that had already succeeded with nothing changed since, so
+            // there was nothing left for it to learn by running it again. Both
+            // are `End::Done` because both are an episode that finished its
+            // work, and they are different strings because they are different
+            // facts -- a transcript saying "model called done" about a model
+            // that did no such thing is the kind of wrong this file cannot
+            // afford, since the transcript is what `learn` and the judges read.
+            "the goal was already met" => End::Done,
             "aborted by operator" => End::Aborted,
             "decode did not settle" => End::Stuck,
             "script exhausted" => End::Script,
@@ -994,6 +1309,22 @@ fn episode(
         let prior = steps.iter().filter(|s| s.action == action).count();
         let first_at = steps.iter().position(|s| s.action == action).map(|i| i + 1);
 
+        // A repeat that cannot tell the model anything new ends the episode.
+        // See `satisfied_at`.
+        if let Some(at) = satisfied_at(&steps, &action) {
+            if !quiet {
+                console::set_color(LTCYAN);
+                kprintln!("  (step {} already did this, so the goal is met)", at + 1);
+                console::set_color(LTGRAY);
+            }
+            elog(format!("done: step {} already did this", at + 1));
+            // Its own string, mapped to `End::Done` by `from_outcome`. Not
+            // "model called done", which would credit the model with a
+            // decision the loop made.
+            outcome = "the goal was already met";
+            break;
+        }
+
         // Shape-check before dispatch. Rejection is an observation, not an
         // error: the model gets to read why and choose differently.
         let admitted = script.is_none()
@@ -1024,6 +1355,13 @@ fn episode(
             match checked {
                 Err(why) => (false, format!("invalid arguments: {}", why)),
                 Ok(()) => {
+                    // What the agent did about the live request, for
+                    // `learn`. Recorded at the dispatch rather than at the
+                    // decode, so a step the trust gate refused is not counted
+                    // as the agent's answer -- the operator correcting a
+                    // refusal is correcting the machine's policy, not its
+                    // routing.
+                    super::learn::agent_chose(&name);
                     console::begin_capture();
                     let ran = sysbox::dispatch(&name, &args);
                     let mut obs = console::end_capture().unwrap_or_default();
@@ -1084,6 +1422,34 @@ pub fn selftest() -> bool {
         ok &= pass;
     };
 
+    // --- the tool-list recitation detector ---------------------------
+    //
+    // Model-free, which is the point: the bug it names took a real checkpoint
+    // and three episodes to find, and these claims run on every boot with no
+    // forward pass at all.
+    check(
+        "an argument that is two tool names is recognised as a recitation",
+        recites_tools("ls, cd"),
+    );
+    check(
+        "and the real transcript that found it, verbatim",
+        recites_tools(", ls, cd, pwd, tree, cat, stat, hash, same")
+            && recites_tools("cd pwd tree stat hash same du find diff snaps fsck mkdir write rm mv"),
+    );
+    // The three shapes a legitimate argument takes, none of which may be
+    // mistaken for a recitation. One name alone is what `help ls` is; a name
+    // beside text is somebody's path; and the empty string is every
+    // zero-argument applet.
+    check(
+        "while one tool name alone is a legitimate argument",
+        !recites_tools("ls"),
+    );
+    check(
+        "and a tool name beside real text is not a recitation",
+        !recites_tools("cat /ai/tools/count.ai&xi") && !recites_tools("/ai ls"),
+    );
+    check("and nothing at all is not one", !recites_tools("") && !recites_tools("   "));
+
     // --- the outcome signal ------------------------------------------
     //
     // Counted against the same scripted episode the checks above assert on,
@@ -1124,25 +1490,68 @@ pub fn selftest() -> bool {
     // runs *before* dispatch inside the loop, which is the only place it can
     // save anything, and that `LOOP_LIMIT` is where it fires.
     //
-    // `ls /sys` four times: the first two dispatch, the third and fourth are
-    // refused. Read-only and idempotent on purpose, so a broken check that
-    // dispatched anyway would still leave the machine exactly as it found it.
+    // **A repeated *failure* four times**, and the action is what changed here.
+    // It used to be `ls /sys`, which succeeds -- and a repeat of a success now
+    // ends the episode (see `satisfied_at`), so the loop-breaker was never
+    // reached and this claim was asserting a path the loop no longer takes for
+    // that input. The mechanism is unchanged and still has to be checked, so it
+    // is checked on the input that still uses it: circling on something that
+    // does not work, which is the case circling actually hurts.
+    //
+    // `cat` with no argument is refused for arity every time, so it is
+    // idempotent in the strongest sense -- it does not even run.
     let circles = alloc::vec![
-        String::from("ls /sys"),
-        String::from("ls /sys"),
-        String::from("ls /sys"),
-        String::from("ls /sys"),
+        String::from("cat"),
+        String::from("cat"),
+        String::from("cat"),
+        String::from("cat"),
     ];
     let (spun_end, spun) = episode("boot selftest", Trust::ReadOnly, 8, Some(&circles), true);
     let spun_signal = Outcome::observe("circles", 8, &spun_end, &spun);
     check("the loop stops dispatching an action at the third identical try", {
         spun.len() == 4
-            && spun[0].ok
-            && spun[1].ok
+            && !spun[0].ok
+            && !spun[1].ok
             && !spun[2].ok
             && spun[2].looped
             && !spun[3].ok
             && spun[3].looped
+    });
+
+    // --- a repeat that can say nothing new ends the episode -----------
+    //
+    // Pure over a transcript, so these need no dispatch and no model. The
+    // third is the one that earns its place: it is the sequence a careful
+    // agent runs -- look, change something, look again -- and the first
+    // version of this rule would have ended the episode on it.
+    let ok_step = |a: &str, ok: bool| Step {
+        action: String::from(a),
+        ok,
+        looped: false,
+        observation: String::from("x"),
+    };
+    check("a repeat of a success that nothing has invalidated is the end", {
+        satisfied_at(&[ok_step("ls /ai", true)], "ls /ai") == Some(0)
+    });
+    check("a repeat of a failure is not, because it never worked", {
+        satisfied_at(&[ok_step("cat", false)], "cat").is_none()
+    });
+    check("and a re-check after something changed is allowed, not ended", {
+        satisfied_at(&[ok_step("ls /ai", true), ok_step("rm /ai/x", true)], "ls /ai").is_none()
+    });
+    check("a mutating step the trust gate refused changed nothing, so it still ends", {
+        satisfied_at(&[ok_step("ls /ai", true), ok_step("rm /ai/x", false)], "ls /ai") == Some(0)
+    });
+    check("an action not taken before is not a repeat at all", {
+        satisfied_at(&[ok_step("ls /ai", true)], "tree /ai").is_none()
+    });
+    // The *last* success, not the first: with a mutation between two
+    // identical successes only what happened after the later one matters.
+    check("it reads the most recent success, not the first", {
+        satisfied_at(
+            &[ok_step("ls /ai", true), ok_step("rm /ai/x", true), ok_step("ls /ai", true)],
+            "ls /ai",
+        ) == Some(2)
     });
     // The notice is the mechanism, so it has to be readable and it has to
     // point somewhere the model can still see. A refusal that said only "no"
@@ -1153,8 +1562,13 @@ pub fn selftest() -> bool {
     });
     // A loop-break is not a rejection, and conflating them would make an
     // episode that went in circles read as one that asked for the impossible.
+    //
+    // The numbers moved with the fixture and the claim did not weaken: the
+    // first two `cat`s are genuine arity refusals and the last two are
+    // loop-breaks, so `rejected == 2` is exactly what says the two kinds are
+    // still counted apart. Conflating them would read 4.
     check("a loop-break counts as looped and never as rejected", {
-        spun_signal.looped == 2 && spun_signal.rejected == 0 && spun_signal.dispatched == 2
+        spun_signal.looped == 2 && spun_signal.rejected == 2 && spun_signal.dispatched == 0
     });
 
     // An applet that runs and says nothing is legal and uninformative, which

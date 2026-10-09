@@ -52,13 +52,135 @@ use super::syscall::{self, Frame};
 /// with names, and nothing here generates a real-time signal.
 pub const NSIG: usize = 32;
 
+// The standard signals, in x86-64 Linux's numbering. Named in full rather than
+// handled only by number, so `kill` and the trace can speak of them and the
+// default-action table below has one row per name it can check itself against.
+pub const SIGHUP: u32 = 1;
+pub const SIGINT: u32 = 2;
+pub const SIGQUIT: u32 = 3;
+pub const SIGILL: u32 = 4;
+pub const SIGTRAP: u32 = 5;
+pub const SIGABRT: u32 = 6;
+pub const SIGBUS: u32 = 7;
+pub const SIGFPE: u32 = 8;
 pub const SIGKILL: u32 = 9;
 pub const SIGUSR1: u32 = 10;
 pub const SIGSEGV: u32 = 11;
 pub const SIGUSR2: u32 = 12;
+pub const SIGPIPE: u32 = 13;
+pub const SIGALRM: u32 = 14;
 pub const SIGTERM: u32 = 15;
+pub const SIGSTKFLT: u32 = 16;
 pub const SIGCHLD: u32 = 17;
+pub const SIGCONT: u32 = 18;
 pub const SIGSTOP: u32 = 19;
+pub const SIGTSTP: u32 = 20;
+pub const SIGTTIN: u32 = 21;
+pub const SIGTTOU: u32 = 22;
+pub const SIGURG: u32 = 23;
+pub const SIGXCPU: u32 = 24;
+pub const SIGXFSZ: u32 = 25;
+pub const SIGVTALRM: u32 = 26;
+pub const SIGPROF: u32 = 27;
+pub const SIGWINCH: u32 = 28;
+pub const SIGIO: u32 = 29;
+pub const SIGPWR: u32 = 30;
+pub const SIGSYS: u32 = 31;
+
+/// What a signal's default action is -- what happens when a guest has installed
+/// no handler for it. **This is the part that was wrong.** The delivery path
+/// modelled only two of these (ignore `SIGCHLD`, terminate on everything else),
+/// so a `SIGWINCH` on a window resize or a `SIGURG` on out-of-band data killed
+/// a guest that Linux would have left running.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Disposition {
+    /// End the process. Linux distinguishes terminate from core-dump; there are
+    /// no core dumps here, so the two fold together.
+    Terminate,
+    /// Do nothing.
+    Ignore,
+    /// Stop the process until continued. There is no job control here, so this
+    /// is a documented no-op rather than a kill -- a guest that should pause
+    /// keeps running, which is the harmless direction to be wrong in. The one
+    /// that matters is that it is **not** `Terminate`.
+    Stop,
+    /// Resume a stopped process. Nothing is ever stopped, so nothing to resume.
+    Continue,
+}
+
+/// The default disposition of each standard signal, in Linux's table.
+pub fn default_disposition(sig: u32) -> Disposition {
+    use Disposition::*;
+    match sig {
+        SIGCHLD | SIGURG | SIGWINCH => Ignore,
+        SIGCONT => Continue,
+        SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU => Stop,
+        // Everything else terminates. That is the right default for the whole
+        // Term/Core set -- HUP, INT, QUIT, ILL, TRAP, ABRT, BUS, FPE, KILL,
+        // USR1/2, PIPE, ALRM, TERM, STKFLT, XCPU, XFSZ, VTALRM, PROF, IO, PWR,
+        // SYS, SEGV -- and for any number in range without a name of its own.
+        _ => Terminate,
+    }
+}
+
+/// Two signals this kernel adds that Linux has no number for, placed well above
+/// the real-time range (`SIGRTMAX` is 64) so they can never be confused with a
+/// signal a libc might send. They are not delivered to a handler -- like
+/// `SIGKILL`, they are acted on by the kernel the moment they are sent.
+///
+/// `SIGRANDOM` rolls a real signal and sends *that* instead: a signal roulette,
+/// self-explanatory and about as safe as the wheel lands on, since the roll
+/// includes `SIGKILL`.
+pub const SIGRANDOM: u64 = 69420;
+/// `SIGQUARANTINE` seals the target and its whole process family -- parent,
+/// children and siblings, transitively -- into an isolation field no other
+/// process can observe, then terminates the entire field at once. For stopping
+/// a self-replicating process tree, where killing one at a time loses the race
+/// against it forking more.
+pub const SIGQUARANTINE: u64 = 2020;
+
+/// The wheel `SIGRANDOM` spins: real signals only, a spread of catchable and
+/// fatal, so the roll genuinely means something.
+const ROLL: [u32; 8] = [1, 2, 3, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGTERM];
+
+/// A signal's short name, for the one line `SIGRANDOM` prints saying what it
+/// landed on.
+pub fn name(sig: u32) -> &'static str {
+    match sig {
+        SIGHUP => "SIGHUP",
+        SIGINT => "SIGINT",
+        SIGQUIT => "SIGQUIT",
+        SIGILL => "SIGILL",
+        SIGTRAP => "SIGTRAP",
+        SIGABRT => "SIGABRT",
+        SIGBUS => "SIGBUS",
+        SIGFPE => "SIGFPE",
+        SIGKILL => "SIGKILL",
+        SIGUSR1 => "SIGUSR1",
+        SIGSEGV => "SIGSEGV",
+        SIGUSR2 => "SIGUSR2",
+        SIGPIPE => "SIGPIPE",
+        SIGALRM => "SIGALRM",
+        SIGTERM => "SIGTERM",
+        SIGSTKFLT => "SIGSTKFLT",
+        SIGCHLD => "SIGCHLD",
+        SIGCONT => "SIGCONT",
+        SIGSTOP => "SIGSTOP",
+        SIGTSTP => "SIGTSTP",
+        SIGTTIN => "SIGTTIN",
+        SIGTTOU => "SIGTTOU",
+        SIGURG => "SIGURG",
+        SIGXCPU => "SIGXCPU",
+        SIGXFSZ => "SIGXFSZ",
+        SIGVTALRM => "SIGVTALRM",
+        SIGPROF => "SIGPROF",
+        SIGWINCH => "SIGWINCH",
+        SIGIO => "SIGIO",
+        SIGPWR => "SIGPWR",
+        SIGSYS => "SIGSYS",
+        _ => "signal",
+    }
+}
 
 /// `SIG_DFL` is 0 and `SIG_IGN` is 1, which are addresses no handler can have.
 const SIG_DFL: u64 = 0;
@@ -288,6 +410,33 @@ pub fn raise_at(guest: usize, sig: u32) -> bool {
 pub fn kill(pid: i64, sig: u64) -> u64 {
     const ESRCH: u64 = (-3i64) as u64;
     const EINVAL: u64 = (-22i64) as u64;
+
+    // The two custom signals are kernel actions rather than deliveries, and
+    // they live above the real-time range, so they are handled before the guard
+    // that would reject them as out of range.
+    if sig == SIGQUARANTINE {
+        let Some(guest) = super::fork::guest_of_pid(pid) else { return ESRCH };
+        let sealed = super::fork::quarantine(guest);
+        crate::kprintln!("  [linux] SIGQUARANTINE sealed and purged {} process(es)", sealed);
+        return 0;
+    }
+    if sig == SIGRANDOM {
+        // Resolved first, so a target that does not exist is `ESRCH` rather
+        // than a roll thrown away on nobody.
+        if super::fork::guest_of_pid(pid).is_none() {
+            return ESRCH;
+        }
+        let mut b = [0u8; 1];
+        crate::rng::fill(&mut b);
+        let rolled = ROLL[b[0] as usize % ROLL.len()];
+        crate::kprintln!("  [linux] SIGRANDOM rolled {} for pid {}", name(rolled), pid);
+        // Through `kill` itself, so the rolled signal takes exactly the path it
+        // would have as an ordinary send -- the `SIGKILL` doom, the default
+        // terminate, a handler. The roll is always a real signal, so this
+        // recurses once and never onto another custom one.
+        return kill(pid, rolled as u64);
+    }
+
     if sig as usize > NSIG {
         return EINVAL;
     }
@@ -297,6 +446,16 @@ pub fn kill(pid: i64, sig: u64) -> u64 {
     let Some(guest) = super::fork::guest_of_pid(pid) else { return ESRCH };
     if sig == 0 {
         return 0;
+    }
+    // **`SIGKILL` cannot wait for a syscall.** Delivery happens on the way
+    // out of one, so a child spinning in a loop that makes none would never
+    // receive the one signal that exists to stop exactly that. Its task is
+    // doomed instead, which the timer acts on at ring 3.
+    if sig == 9 {
+        if let Some(t) = super::fork::task_of_pid(pid) {
+            syscall::doom(t, syscall::SIGNALED | 9);
+            return 0;
+        }
     }
     if !raise_at(guest, sig as u32) {
         return EINVAL;
@@ -336,14 +495,23 @@ pub fn deliver(f: &mut Frame) -> bool {
     if a.handler == SIG_DFL {
         sp.signals.pending &= !bit(sig);
         // **What the default is depends on the signal, and getting it wrong is
-        // the difference between a program that stops and one that does not.**
-        // `SIGCHLD` is ignored by default, which is why a shell that never
-        // installs a handler is not killed by its own children finishing.
-        // Everything else here terminates.
-        if sig == SIGCHLD {
-            return false;
+        // the difference between a program that stops and one that dies.** This
+        // read `if sig == SIGCHLD` once -- ignore that, terminate on everything
+        // else -- which killed a guest on `SIGWINCH`, `SIGURG` and the stop
+        // signals. The whole table decides now.
+        match default_disposition(sig) {
+            // Nothing to do, and nothing stopped to resume, so both are a quiet
+            // clear-and-return.
+            Disposition::Ignore | Disposition::Continue => return false,
+            // No job control here, so a stop cannot actually pause the guest.
+            // Returning rather than killing is the honest no-op: Linux would
+            // suspend it, and the one answer that is definitely wrong is to end
+            // it, which is what used to happen.
+            Disposition::Stop => return false,
+            Disposition::Terminate => unsafe {
+                syscall::kill_guest_now(syscall::SIGNALED | sig as u64)
+            },
         }
-        unsafe { syscall::kill_guest_now(128 + sig as u64) };
     }
     // A handler with nowhere to return to is refused rather than entered: the
     // `ret` at the end of it would take whatever the stack happened to hold.
@@ -477,4 +645,67 @@ pub fn sigreturn(f: &mut Frame) -> u64 {
     sp.signals.blocked = unsafe { core::ptr::read((at + frame::SIGMASK) as *const u64) };
     sp.signals.depth = sp.signals.depth.saturating_sub(1);
     f.rax
+}
+
+/// What `diag linux` asks of the two custom signals without sending one.
+pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
+    let mut out = alloc::vec::Vec::new();
+    // Above the real-time range, so they bypass the range guard on purpose and
+    // can never be the number a libc means by a real or real-time signal.
+    out.push((
+        "the custom signals sit above every real signal, so nothing collides with them",
+        SIGRANDOM > 64 && SIGQUARANTINE > 64 && SIGRANDOM != SIGQUARANTINE,
+    ));
+    // Every face of the wheel is a real, deliverable signal -- never a custom
+    // one, which is what stops `SIGRANDOM` ever recursing onto itself.
+    out.push((
+        "SIGRANDOM only ever rolls a real signal, never another custom one",
+        !ROLL.is_empty()
+            && ROLL.iter().all(|&s| (s as usize) <= NSIG
+                && s as u64 != SIGRANDOM
+                && s as u64 != SIGQUARANTINE),
+    ));
+    // The roulette line names what it landed on rather than printing a bare
+    // number, so every face has a name of its own.
+    out.push((
+        "every signal the wheel can land on has a name to print",
+        ROLL.iter().all(|&s| name(s) != "signal"),
+    ));
+
+    // The default-action table was the hole: delivery used to ignore SIGCHLD
+    // and terminate on everything else, which killed a guest on the signals
+    // whose default is to be ignored or to stop.
+    out.push((
+        "the signals Linux ignores by default are not treated as fatal",
+        [SIGCHLD, SIGURG, SIGWINCH]
+            .iter()
+            .all(|&s| default_disposition(s) == Disposition::Ignore)
+            && default_disposition(SIGCONT) == Disposition::Continue,
+    ));
+    out.push((
+        "the stop signals stop rather than terminate, and none of them is a kill",
+        [SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU]
+            .iter()
+            .all(|&s| default_disposition(s) == Disposition::Stop),
+    ));
+    out.push((
+        "the terminating signals still terminate",
+        [SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGABRT, SIGFPE, SIGKILL, SIGSEGV,
+         SIGPIPE, SIGALRM, SIGTERM, SIGSYS]
+            .iter()
+            .all(|&s| default_disposition(s) == Disposition::Terminate),
+    ));
+    // Every standard number has a name, so a trace never prints a bare integer
+    // for one Linux has a word for.
+    out.push((
+        "every signal from 1 to 31 has a name",
+        (1..=31).all(|s| name(s) != "signal"),
+    ));
+    // The two that no handler and no default can override.
+    out.push((
+        "SIGKILL and SIGSTOP cannot be caught, and nothing else claims to be uncatchable",
+        uncatchable(SIGKILL) && uncatchable(SIGSTOP)
+            && (1..=31).filter(|&s| uncatchable(s)).count() == 2,
+    ));
+    out
 }

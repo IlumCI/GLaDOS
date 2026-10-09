@@ -596,7 +596,14 @@ pub fn call(it: &mut Interp, name: &str, args: &[Value]) -> Result<Value, String
         }
 
         // --- crate::net ------------------------------------------------
-        "net_ready" => Ok(Value::Int(crate::net::ready() as i64)),
+        // Usable and addressed, which is what a program asking "can I reach
+        // the network" means -- `ready` is only "an interface is present", and
+        // answered yes for a Wi-Fi card that had joined nothing.
+        "net_ready" => Ok(Value::Int({
+            let n = crate::net::primary();
+            let i = &mut crate::net::ifaces()[n];
+            (n != crate::net::LO && i.usable() && i.configured) as i64
+        })),
         // Was a list of names, which threw away everything else an interface
         // knows: its address, whether it is up, what it has carried. Not a
         // struct flattened into text -- a struct discarded -- which makes it
@@ -676,6 +683,7 @@ pub fn call(it: &mut Interp, name: &str, args: &[Value]) -> Result<Value, String
                         t(match task.state {
                             crate::task::State::Ready => "ready",
                             crate::task::State::Unused => "unused",
+                            crate::task::State::Asleep => "asleep",
                             // Which core, because with more than one the
                             // interesting question about a running task is
                             // where rather than whether.

@@ -755,6 +755,47 @@ pub(crate) const ARGS_TOKEN_BUDGET: usize = 16;
 /// `prefill` is false when the caller has already left the engine positioned
 /// after the chosen name, which is the branch `propose` takes when the choice
 /// came from a deliberation rather than from a reflex.
+/// The prompt that positions the engine to decode an applet's *arguments*.
+///
+/// Targeted: the routed name is known and only what follows it is wanted.
+///
+/// **One function because two callers have to agree, and the trailing space is
+/// why.** `agent::propose` decodes some arguments under a closed-set grammar
+/// and the rest as free text here, and a prompt that does not emit a separator
+/// after the name leaves the model continuing *mid-word* -- which is the bug
+/// `work.rs` records as every step of its first run planning `find - - - -`,
+/// and which this path never had precisely because its prompt ends `"name "`.
+/// Two copies of that would be two chances to drop the space, and dropping it
+/// is invisible until the arguments come back wrong.
+///
+/// **It also says what the applet expects, and did not.** The prompt was the
+/// goal and the name, so a model deciding what to write after `write ` was
+/// never told that `write` takes a path and then a body -- the table has
+/// carried `args: "<path> <text>"` and a help line since it was written and
+/// none of it reached the decode. Measured on Qwen3-0.6B, the goal "write a
+/// file at /tmp/notes.txt containing hello" produced the argument `1`.
+///
+/// The usage line is omitted for an applet that takes nothing, because there
+/// the only honest spec is empty and a line saying so is a line inviting the
+/// model to fill it.
+pub(crate) fn args_prompt(goal: &str, name: &str) -> alloc::string::String {
+    let spec = crate::sysbox::applet_usage(name);
+    match spec {
+        Some((args, _help)) if !args.is_empty() => {
+            // **The help line was in here and had to come out.** The prompt
+            // read `usage: cat <path>  (print a file)` and ended `cat `, so the
+            // nearest thing to continue was the parenthetical -- the model
+            // produced the argument `(print a file)`, measured on Qwen3-0.6B,
+            // which is the same failure as reciting the tool list arriving from
+            // a prompt meant to fix it. Anything placed between the spec and
+            // the final name is a candidate for being copied; the spec alone
+            // is the least of them.
+            alloc::format!("Task: {}\nusage: {} {}\n{} ", goal, name, args, name)
+        }
+        _ => alloc::format!("Task: {}\n{} ", goal, name),
+    }
+}
+
 pub(crate) fn decode_args(goal: &str, name: &str, prefill: bool) -> Option<String> {
     with_alphabet(|_alphabet| {
         with_engine(|e| {
@@ -763,10 +804,7 @@ pub(crate) fn decode_args(goal: &str, name: &str, prefill: bool) -> Option<Strin
             let limit = e.model.cfg.seq_len;
             let mut pos = e.pos;
             if prefill {
-                // Targeted prompt: the routed name is known, only its
-                // arguments are wanted.
-                let p = alloc::format!("Task: {}\n{} ", goal, name);
-                let tokens = e.tok.encode(&p, true, false);
+                let tokens = e.tok.encode(&args_prompt(goal, name), true, false);
                 pos = e.model.prefill(&mut e.state, &tokens, pos);
             }
             for _ in 0..ARGS_TOKEN_BUDGET {

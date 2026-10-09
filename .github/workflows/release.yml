@@ -322,6 +322,31 @@ jobs:
           # and deliberately not the writer.
           python3 tools/ctxstamp.py payload-dir/model.bin "${{ matrix.seq }}"
 
+      # Wireless firmware for \GLADOS\FW\. After the model's verify and stamp,
+      # not before: `payload.py verify` refuses a file its manifest does not
+      # name and walks subdirectories, so FW/ in place earlier would read as
+      # seventeen strays in the model payload.
+      #
+      # From a pinned release like the weights, and for their reason: a fetch
+      # from linux-firmware at build time is a build that changes when
+      # somebody else's repository does. `payload/firmware.txt` is what the
+      # bytes must hash to, and the licence is one of the recorded files, so an
+      # asset set missing it fails here rather than shipping without it.
+      - name: Fetch the wireless firmware
+        if: matrix.payload != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p payload-dir/FW
+          # By name, from the manifest: an extra asset on the release -- a
+          # README, a note -- would otherwise be downloaded, refused by verify
+          # as EXTRA, and fail every ISO for something nobody would ship.
+          for f in $(grep -v '^#' payload/firmware.txt | awk 'NF >= 3 {print $3}'); do
+            gh release download payload-wifi-fw-v1 --dir payload-dir/FW --clobber --pattern "$f"
+          done
+          python3 tools/wifi_fw.py --selftest
+          python3 tools/payload.py verify payload-dir/FW payload/firmware.txt
+
       - name: Build the ISO
         run: |
           # The matrix names the image outright. Deriving it as

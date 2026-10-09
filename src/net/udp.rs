@@ -43,6 +43,9 @@ pub struct Datagram {
     pub src: Ipv4,
     pub src_port: u16,
     pub data: Vec<u8>,
+    /// The interface it arrived on. DHCP asks one link for an address and must
+    /// not take another link's answer.
+    pub iface: usize,
 }
 
 static BOUND: Racy<Option<u16>> = Racy::new(None);
@@ -112,7 +115,7 @@ fn unbind() {
 }
 
 /// Queue a datagram addressed to the bound port. Called from `net::poll`.
-pub fn deliver(src: Ipv4, dst: Ipv4, segment: &[u8]) {
+pub fn deliver(iface: usize, src: Ipv4, dst: Ipv4, segment: &[u8]) {
     if segment.len() < 8 {
         return;
     }
@@ -144,7 +147,7 @@ pub fn deliver(src: Ipv4, dst: Ipv4, segment: &[u8]) {
     crate::cpu::without_interrupts(|| {
         let inbox = unsafe { &mut *INBOX.get() };
         if inbox.len() < MAX_QUEUED {
-            inbox.push(Datagram { src, src_port, data });
+            inbox.push(Datagram { src, src_port, data, iface });
         }
     });
 }
@@ -181,6 +184,12 @@ pub fn send(dst: Ipv4, dst_port: u16, src_port: u16, payload: &[u8]) -> bool {
 pub fn send_from(src: Ipv4, dst: Ipv4, dst_port: u16, src_port: u16, payload: &[u8]) -> bool {
     let d = datagram(src, dst, src_port, dst_port, payload);
     send_ipv4_from(src, dst, PROTO_UDP, &d)
+}
+
+/// Send out of one named interface, for DHCP. See `net::send_ipv4_on`.
+pub fn send_on(iface: usize, src: Ipv4, dst: Ipv4, dst_port: u16, src_port: u16, payload: &[u8]) -> bool {
+    let d = datagram(src, dst, src_port, dst_port, payload);
+    super::send_ipv4_on(iface, src, dst, PROTO_UDP, &d)
 }
 
 /// Wait for a datagram on the bound port.

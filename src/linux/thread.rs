@@ -126,13 +126,6 @@ struct Slot {
 static SLOTS: Racy<[Slot; MAX_THREADS]> =
     Racy::new([Slot { task: None, stack: 0, work: None, live: false }; MAX_THREADS]);
 
-/// The next thread id to hand out.
-///
-/// From 2, because `getpid` answers 1 and the main thread's `gettid` has to
-/// agree with it: on Linux a single-threaded process has `tid == pid`, and a
-/// library that finds them different concludes it is not the main thread.
-static NEXT_TID: AtomicU64 = AtomicU64::new(2);
-
 /// How many guest threads are running, main thread excluded.
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 
@@ -191,7 +184,7 @@ pub fn spawn(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64, rip: u64) -
         // alternative diagnostic is a register dump.
         return Err(EINVAL);
     }
-    let tid = NEXT_TID.fetch_add(1, Ordering::Relaxed);
+    let tid = super::fork::next_id();
     let work = Work {
         rip,
         rsp: stack,
@@ -268,9 +261,12 @@ fn my_slot() -> Option<usize> {
 /// process's first thread has `tid == pid` and a library that finds otherwise
 /// concludes it is not the main thread and takes a different path.
 pub fn current_tid() -> u64 {
+    // A process's main thread has its process's id, which for a forked child
+    // is not 1.
+    let main = super::fork::current_pid();
     match my_slot() {
-        Some(i) => unsafe { (*SLOTS.get())[i].work.map(|w| w.tid).unwrap_or(1) },
-        None => 1,
+        Some(i) => unsafe { (*SLOTS.get())[i].work.map(|w| w.tid).unwrap_or(main) },
+        None => main,
     }
 }
 

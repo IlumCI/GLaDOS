@@ -901,9 +901,12 @@ fn connection_rows() -> Vec<Widget> {
             value: String::from("Not connected"),
             tone: Tone::Bad,
         });
-        out.push(note(
-            "No interface has a route off this machine. Attach a cable, then renew DHCP below.",
-        ));
+        let wifi = crate::net::ifaces()[crate::net::WLAN0].present();
+        out.push(note(if wifi {
+            "No interface has a route off this machine. Attach a cable or join a Wi-Fi network ('wifi join'), then renew DHCP below."
+        } else {
+            "No interface has a route off this machine. Attach a cable, then renew DHCP below."
+        }));
         return out;
     };
     let ifaces = crate::net::ifaces();

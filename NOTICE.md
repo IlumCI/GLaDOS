@@ -22,6 +22,15 @@ implementation in this tree was written for it. Three of those numbers turned ou
 to be wrong or misleading in the reference, and each is documented at the point it
 is corrected.
 
+One table came from Intel's own Linux driver instead, because OpenBSD's was
+wrong about the GF63's part: how each AX210-family product id sits on the
+platform (integrated or discrete, its crystal latency and LTR delay), from
+`drivers/net/wireless/intel/iwlwifi/pcie/drv.c`, `cfg/ax210.c` and `fw/init.c`.
+Those files are `GPL-2.0 OR BSD-3-Clause`, Copyright (C) 2005-2014, 2018-2026
+Intel Corporation, (C) 2013-2015 Intel Mobile Communications GmbH and (C)
+2015-2017 Intel Deutschland GmbH -- the same dual licence from the same author,
+and the same BSD arm, whose conditions and disclaimer are the ones below.
+
 Intel's headers are offered under a dual BSD/GPLv2 licence. **This tree uses the
 BSD arm**, and that notice, its conditions and its disclaimer are reproduced in
 full below to satisfy it, whether or not taking a register offset triggers it at
@@ -70,7 +79,18 @@ in full when the hardware it served stopped working.
 
 ## Firmware
 
-Intel's wireless firmware (`iwlwifi-so-a0-hr-b0-*.ucode`) is **not in this
-repository and is not redistributed by it**. It is loaded at runtime from wherever
-the operator has put it, under Intel's own redistribution terms, exactly as no
-model weights and no game data are in this repository either.
+Intel's wireless firmware (`iwlwifi-*.ucode` and `.pnvm`) is **not in this
+repository**, exactly as no model weights and no game data are. It is loaded at
+runtime from `\GLADOS\FW\` on the boot volume, or from `/fw/` in the namespace.
+
+**The install image does carry it**, and does so under Intel's own terms:
+`LICENCE.iwlwifi_firmware` permits redistribution and use in binary form,
+without modification, provided the licence is reproduced with it. So the
+images on the ISO are byte-for-byte what `linux-firmware` ships (each is
+recorded by digest in `payload/firmware.txt`), and the licence is placed
+beside them in `\GLADOS\FW\` -- `tools/mkiso.py` refuses to build an image
+with firmware and no licence, and `tools/wifi_fw.py stage` copies it in.
+
+The firmware is not covered by this tree's licence and is not open source; it
+is a binary Intel permits to be passed on unchanged, which is the whole of
+what is done with it here.

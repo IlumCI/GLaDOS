@@ -14,7 +14,8 @@
 //! `iretq`s back to wherever the task was. Each task carries its own suspended
 //! interrupt frame around with it.
 
-use alloc::alloc::{alloc, Layout};
+use crate::sync::Racy;
+use alloc::alloc::{alloc, dealloc, Layout};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// **Forty, and the arithmetic is now visible where it was hidden by a bug.**
@@ -104,6 +105,14 @@ pub enum State {
     /// core that switched *in* clears this, by which time the store has
     /// happened.
     Handoff(u8),
+    /// Waiting for a tick deadline, and not claimable until it passes.
+    ///
+    /// The deadline is `wake_at`. `schedule` promotes an expired sleeper back
+    /// to `Ready` at the top of its own pass, so waking costs no timer hook and
+    /// no separate queue -- the scan bound is already being walked to pick a
+    /// task, and at `MAX_TASKS` of 40 the test is cheaper than maintaining a
+    /// sorted list would be.
+    Asleep,
 }
 
 impl State {
@@ -116,6 +125,7 @@ impl State {
     pub fn name(self) -> &'static str {
         match self {
             State::Unused => "unused",
+            State::Asleep => "asleep",
             State::Ready => "ready",
             State::Running(_) => "running",
             State::Handoff(_) => "handoff",
@@ -202,6 +212,56 @@ pub struct Task {
     /// the interrupted code called nothing, spilled nothing, and expects every
     /// register back. XMM and YMM are caller-saved, so nobody was holding them.
     pub fpu: *mut u8,
+    /// Base of the stack allocation, or null when this task does not own one.
+    ///
+    /// `rsp` is somewhere *inside* the stack and moves, so it cannot be handed
+    /// back to the allocator. This is the pointer `alloc` answered, kept for
+    /// the one moment it is needed. Null for an adopted idle task, whose stack
+    /// is the one the firmware or the trampoline was already standing on --
+    /// freeing that would hand away the stack a core is running on.
+    pub stack: *mut u8,
+    /// Set by a task that has finished and is waiting to be let go.
+    ///
+    /// Read by `finish_handoff`, on the core that switched *away* from it,
+    /// because that is the only moment this task's `rsp` is known to have
+    /// landed and nothing is executing on its stack any more. A task cannot
+    /// free its own stack: it is standing on it.
+    pub exiting: bool,
+    /// The tick this task is waiting for, or 0 when it is not waiting.
+    ///
+    /// Set by `sleep_until` and honoured in the same place `exiting` is, and
+    /// for the identical reason: `schedule` writes the outgoing task's state
+    /// unconditionally, so a task that marked itself `Asleep` and yielded would
+    /// have that overwritten by `Handoff` and then by `Ready`. A task cannot
+    /// put itself to sleep any more than it can free its own stack -- both are
+    /// things the core switching away has to do on its behalf.
+    pub wake_at: u64,
+    /// Set by `wake`, cleared by the sleeper when it notices.
+    ///
+    /// **A deadline and a wake have to be told apart**, which cost a failing
+    /// claim to learn: `sleep_until` loops while the deadline is in the future,
+    /// so making a task `Ready` only ended one iteration of that loop and it
+    /// went straight back to sleep. Waking was indistinguishable from an
+    /// ordinary scheduling pass, so a sixty-second sleep stayed a
+    /// sixty-second sleep however often anybody woke it.
+    pub woken: bool,
+    /// Which entry in the guest table this task speaks for.
+    ///
+    /// **This was one machine-wide atomic and that was a latent bug.**
+    /// `fork` sets it before entering a child and restores it after, which
+    /// reads as correct and is not: the child is *preempted* at ring 3, so
+    /// while it is suspended any other task taking a syscall read a global
+    /// naming the child's slot and resolved `guest_slot()` to somebody else's
+    /// memory. It could not bite while one guest ran in the foreground,
+    /// because the shell was inside `run` and there was no other guest to be
+    /// confused with -- and it is the first thing a background guest would
+    /// have hit.
+    ///
+    /// Saved and loaded by `schedule` beside the `Ring3` block, which is the
+    /// pattern that already exists here for exactly this shape of problem: a
+    /// global only read while its own task is running *is* per-task, provided
+    /// somebody swaps it.
+    pub guest: usize,
 }
 
 // The extended-state image is a raw pointer, and moving a task between cores
@@ -221,6 +281,11 @@ const EMPTY: Task = Task {
     fpu: core::ptr::null_mut(),
     ring3: None,
     root: 0,
+    stack: core::ptr::null_mut(),
+    exiting: false,
+    wake_at: 0,
+    woken: false,
+    guest: 0,
 };
 
 /// Allocate a zeroed, 64-byte aligned extended-state image.
@@ -336,6 +401,13 @@ pub fn init(name: &'static str) {
             fpu,
             ring3: None,
             root: 0,
+            // The boot stack, which the firmware handed over. Not ours to free
+            // and nothing ever exits task 0 anyway.
+            stack: core::ptr::null_mut(),
+            exiting: false,
+            wake_at: 0,
+            woken: false,
+            guest: 0,
         };
     }
     // **`fetch_max` and not `store`.** By the time this runs the application
@@ -347,6 +419,42 @@ pub fn init(name: &'static str) {
 }
 
 // --- proving migration works, without risking anything that matters -----
+
+/// How many ticks the sleeper actually slept, and whether it finished.
+static SLEPT: AtomicU64 = AtomicU64::new(0);
+static SLEEP_DONE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+/// How long the sleeper is told to sleep, in ticks.
+static SLEEP_FOR: AtomicU64 = AtomicU64::new(0);
+
+/// Sleeps for `SLEEP_FOR` ticks and records what it cost, then exits.
+///
+/// Exits rather than parking, so this doubles as a second run through the
+/// reclaim path above.
+fn sleeper() {
+    let began = crate::dev::lapic::ticks();
+    sleep_until(began.saturating_add(SLEEP_FOR.load(Ordering::Relaxed)));
+    SLEPT.store(crate::dev::lapic::ticks().saturating_sub(began), Ordering::Release);
+    SLEEP_DONE.store(true, Ordering::Release);
+}
+
+/// What the helper saw and set, for the per-task guest-index claim.
+static GI_SAW: AtomicU64 = AtomicU64::new(u64::MAX);
+static GI_SET: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Claims a guest index, records what it had been, and keeps it set for a
+/// while so the task that spawned it can look at its own.
+fn guest_index_helper() {
+    GI_SAW.store(crate::linux::syscall::current_guest() as u64, Ordering::Release);
+    crate::linux::syscall::set_current_guest(7);
+    GI_SET.store(true, Ordering::Release);
+    // Held across several switches, which is the whole point: the claim is
+    // about what the *other* task sees while this one is suspended holding a
+    // guest index.
+    sleep_us(300_000);
+    crate::linux::syscall::set_current_guest(0);
+}
 
 static MIG_SEEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static MIG_LOOPS: AtomicUsize = AtomicUsize::new(0);
@@ -477,7 +585,243 @@ pub fn migration_selftest() -> bool {
         claim(&mut ok, mask == 1 << cpu, "and ran only there");
     }
 
+    // --- a finished task gives its slot and its stack back -----------------
+    //
+    // `trampoline` ended in `loop { yield_now() }` under the comment "a task
+    // that returns just stops being scheduled onto". True, and it kept the
+    // slot and its 64 KiB stack forever: with `MAX_TASKS` at 40 and 37
+    // committed at sixteen cores, anything that spawns and finishes repeatedly
+    // ran out of tasks. Background processes cannot be built on that, which is
+    // why this is the first of the three the 1.4.0 plan orders.
+    //
+    // What makes the claim worth making rather than reading: reclaim happens
+    // on *another* core's pass through `finish_handoff`, so a bug here is a
+    // slot that comes back sometimes.
+    {
+        let before = crate::mem::heap::HEAP.stats().0;
+        let first = spawn("reaped", || {});
+        claim(&mut ok, first.is_some(), "a task that returns immediately can be spawned");
+
+        // It has to be switched away from before its slot comes back, and this
+        // task is the one holding the core. Bounded rather than waiting
+        // forever, so a reclaim that never happens fails instead of hanging.
+        let mut freed = false;
+        if let Some(i) = first {
+            for _ in 0..200 {
+                crate::time::delay_us(5_000);
+                if state_of(i) == Some(State::Unused) {
+                    freed = true;
+                    break;
+                }
+            }
+        }
+        claim(&mut ok, freed, "and its slot goes back to unused once it has run");
+
+        // The slot is reusable, which is the whole point: an `Unused` slot that
+        // `spawn` never looks at is a leak with a tidier name.
+        let second = spawn("reaped2", || {});
+        claim(
+            &mut ok,
+            second.is_some() && second == first,
+            "and the next spawn takes that very slot, rather than a new one",
+        );
+        if let Some(i) = second {
+            for _ in 0..200 {
+                crate::time::delay_us(5_000);
+                if state_of(i) == Some(State::Unused) {
+                    break;
+                }
+            }
+        }
+
+        // The stack and the extended-state image go back too. Both are heap,
+        // and a reclaim that returned the slot and leaked 64 KiB a time would
+        // pass every claim above it.
+        //
+        // Against a baseline rather than zero, and `<=` rather than `==`: this
+        // is a live machine with a clock task and a compositor on it, so
+        // another task may legitimately have allocated during the delays. What
+        // is being asserted is that two 64 KiB stacks did not stay resident,
+        // which a slack of one stack is still tight enough to catch.
+        let after = crate::mem::heap::HEAP.stats().0;
+        let grew = after.saturating_sub(before);
+        crate::kprintln!("  heap {} -> {} B, grew {} B", before, after, grew);
+        claim(
+            &mut ok,
+            grew < STACK_SIZE,
+            "and the stacks went back, rather than the slot alone",
+        );
+    }
+
+    // --- a task that waits stands down, rather than holding its core --------
+    //
+    // `nanosleep` was the one wait in this kernel that genuinely spun:
+    // `while ticks() < until { spin_loop() }`, with no yield in it at all. One
+    // foreground guest made that invisible, and background processes would make
+    // it a CPU sink per sleeping guest.
+    //
+    // The claim that separates a sleep from a spin is the second one. A
+    // spinning task is `Running` for the whole wait, so seeing it `asleep` from
+    // *another* task is the thing no busy loop can produce -- the elapsed time
+    // alone would pass either way.
+    {
+        SLEEP_DONE.store(false, Ordering::Release);
+        SLEPT.store(0, Ordering::Release);
+        // 30 ticks is 300 ms at TIMER_HZ, long enough to be caught mid-sleep
+        // from here without making the suite slow.
+        SLEEP_FOR.store(30, Ordering::Release);
+
+        let who = spawn("sleeper", sleeper);
+        claim(&mut ok, who.is_some(), "a task that sleeps can be spawned");
+
+        let mut seen_asleep = false;
+        if let Some(i) = who {
+            for _ in 0..60 {
+                crate::time::delay_us(10_000);
+                if state_of(i) == Some(State::Asleep) {
+                    seen_asleep = true;
+                    break;
+                }
+            }
+        }
+        claim(
+            &mut ok,
+            seen_asleep,
+            "and is seen asleep from another task, which a spin could not be",
+        );
+
+        let mut done = false;
+        for _ in 0..200 {
+            crate::time::delay_us(10_000);
+            if SLEEP_DONE.load(Ordering::Acquire) {
+                done = true;
+                break;
+            }
+        }
+        let slept = SLEPT.load(Ordering::Acquire);
+        crate::kprintln!("  slept {} tick(s) for a 30 tick request", slept);
+        claim(&mut ok, done, "and it wakes by itself, with nobody waking it");
+        // At least what it asked for. A sleep that returns early is a busy
+        // wait's failure mode wearing a sleep's name, and `>=` is the only
+        // honest direction -- the tick is 10 ms, so overshooting is expected and
+        // undershooting is a bug.
+        claim(&mut ok, slept >= 30, "and slept at least as long as it asked");
+    }
+
+    // Woken early, which is what the doom path needs: a guest being ended
+    // should not wait out a sleep it will never return from.
+    {
+        SLEEP_DONE.store(false, Ordering::Release);
+        SLEPT.store(0, Ordering::Release);
+        // Far longer than the suite would wait, so finishing at all is the
+        // evidence that `wake` and not the deadline is what ended it.
+        SLEEP_FOR.store(6_000, Ordering::Release);
+        let who = spawn("sleeper", sleeper);
+
+        let mut asleep = false;
+        if let Some(i) = who {
+            for _ in 0..60 {
+                crate::time::delay_us(10_000);
+                if state_of(i) == Some(State::Asleep) {
+                    asleep = true;
+                    break;
+                }
+            }
+            claim(&mut ok, asleep, "a long sleeper reaches asleep");
+            claim(&mut ok, wake(i), "and wake() reports having woken it");
+            let mut done = false;
+            for _ in 0..100 {
+                crate::time::delay_us(10_000);
+                if SLEEP_DONE.load(Ordering::Acquire) {
+                    done = true;
+                    break;
+                }
+            }
+            claim(&mut ok, done, "and it returns at once, sixty seconds early");
+            // Nothing is asleep now, so the same call must say so rather than
+            // reporting a second success.
+            claim(&mut ok, !wake(i), "while waking what is not asleep answers false");
+        }
+    }
+
+    // --- which guest a task speaks for is the task's, not the machine's ----
+    //
+    // `CURRENT_GUEST` was one machine-wide atomic. `fork` sets it before
+    // entering a child and restores it after, which reads as correct and is
+    // not: the child is preempted at ring 3, so while it is suspended any
+    // other task taking a syscall resolved `guest_slot()` through a global
+    // naming the child -- somebody else's memory, at every address. It could
+    // not bite while one guest ran in the foreground, because the shell was
+    // inside `run` and there was no second guest to be confused with. It is
+    // the first thing a background guest would have hit.
+    //
+    // This claim is the mechanism and not the bug: it needs no guest at all,
+    // only two tasks and an index, which is what makes it cheap enough to run
+    // on every boot.
+    {
+        GI_SAW.store(u64::MAX, Ordering::Release);
+        GI_SET.store(false, Ordering::Release);
+        let mine_before = crate::linux::syscall::current_guest();
+
+        let who = spawn("guestidx", guest_index_helper);
+        claim(&mut ok, who.is_some(), "a second task can be spawned to hold a guest index");
+
+        let mut set = false;
+        for _ in 0..100 {
+            crate::time::delay_us(10_000);
+            if GI_SET.load(Ordering::Acquire) {
+                set = true;
+                break;
+            }
+        }
+        claim(&mut ok, set, "and it claims one");
+
+        // The claim that would have failed before this was per-task: the other
+        // task is suspended *now*, holding index 7, and this task must still
+        // see its own.
+        let mine_now = crate::linux::syscall::current_guest();
+        crate::kprintln!(
+            "  helper took 7 and saw {}, while this task reads {} (was {})",
+            GI_SAW.load(Ordering::Acquire) as i64,
+            mine_now,
+            mine_before
+        );
+        claim(
+            &mut ok,
+            mine_now == mine_before,
+            "while this task's own index is untouched by it",
+        );
+        // And the helper started from a fresh index rather than inheriting
+        // whatever the machine last used, which is what a new task should see.
+        claim(
+            &mut ok,
+            GI_SAW.load(Ordering::Acquire) == 0,
+            "and a new task starts out speaking for no guest",
+        );
+
+        // Let it finish, so the slot and its stack go back before the suite
+        // ends -- and so a later run of this suite in the same boot starts
+        // from the same place. `diag` is run twice in one boot deliberately.
+        for _ in 0..100 {
+            crate::time::delay_us(10_000);
+            if who.and_then(state_of) == Some(State::Unused) {
+                break;
+            }
+        }
+    }
+
     ok
+}
+
+/// What state a slot is in, for a caller that is watching one come back.
+///
+/// Answers nothing for an index that is not a task, so a caller cannot read a
+/// bounds failure as a verdict about a task.
+pub fn state_of(index: usize) -> Option<State> {
+    if index >= MAX_TASKS {
+        return None;
+    }
+    Some(TASKS.lock_irq()[index].state)
 }
 
 /// Let a task run on any core.
@@ -544,6 +888,12 @@ pub fn adopt_idle(cpu: usize) -> bool {
             fpu,
             ring3: None,
             root: 0,
+            // Not ours: this core is standing on it.
+            stack: core::ptr::null_mut(),
+            exiting: false,
+            wake_at: 0,
+            woken: false,
+            guest: 0,
         };
     }
     CURRENT[cpu].store(slot, Ordering::Release);
@@ -625,10 +975,37 @@ pub fn spawn_on(name: &'static str, entry: fn(), cpu: usize) -> Option<usize> {
     if cpu >= MAX_CPUS || cpu >= crate::smp::online() {
         return None;
     }
-    let slot = COUNT.load(Ordering::Acquire);
-    if slot >= MAX_TASKS {
-        return None;
-    }
+    // A free slot, which is a reclaimed one before it is a new one.
+    //
+    // **Claimed under `TASKS` rather than off `COUNT`, and that is the
+    // difference reclaim makes.** `COUNT` is a high-water mark and the scan
+    // bound `schedule` uses; it never comes down, because lowering it would
+    // mean deciding that nothing above the new value is live, which is not a
+    // question a count can answer. So a reclaimed slot sits `Unused` *below*
+    // `COUNT`, and the only way to take one without racing another `spawn` is
+    // to look and claim in the same critical section.
+    //
+    // It also closes a window that was open before: the old form read `COUNT`,
+    // allocated a stack, and stored `slot + 1` afterwards, so an `adopt_idle`
+    // landing in between had its `fetch_add` discarded by that store -- the
+    // bug this file's own `COUNT` comment describes, still reachable by the
+    // other caller.
+    let slot = {
+        let tasks = TASKS.lock_irq();
+        let n = COUNT.load(Ordering::Acquire);
+        let reused = (0..n).find(|&i| tasks[i].state == State::Unused);
+        match reused {
+            Some(i) => i,
+            None if n < MAX_TASKS => {
+                // Published while the lock is held, so the slot this answers
+                // is already inside the scan bound by the time anybody else
+                // can look -- and it is still `Unused`, so nothing picks it.
+                COUNT.store(n + 1, Ordering::Release);
+                n
+            }
+            None => return None,
+        }
+    };
 
     let layout = Layout::from_size_align(STACK_SIZE, 16).ok()?;
     let stack = unsafe { alloc(layout) };
@@ -673,10 +1050,15 @@ pub fn spawn_on(name: &'static str, entry: fn(), cpu: usize) -> Option<usize> {
             fpu: alloc_fpu_area(),
             ring3: None,
             root: 0,
+            stack,
+            exiting: false,
+            wake_at: 0,
+            woken: false,
+            // A new task speaks for no guest until something enters one.
+            guest: 0,
         };
     }
 
-    COUNT.store(slot + 1, Ordering::Release);
     Some(slot)
 }
 
@@ -708,10 +1090,8 @@ extern "C" fn trampoline() -> ! {
         f();
     }
 
-    // A task that returns just stops being scheduled onto.
-    loop {
-        yield_now();
-    }
+    // A task that returns gives its slot back. See `exit`.
+    exit();
 }
 
 pub fn enable() {
@@ -849,14 +1229,201 @@ pub fn dump() {
 }
 
 fn finish_handoff(cpu: usize) {
+    // Both callers pass `this_cpu()` read *after* a context switch -- the one
+    // moment it is read on a stack another core's scheduling has been free to
+    // interleave with. `schedule` guards the identical read at its own top
+    // (`me >= MAX_CPUS`) and this did not, so a garbage index -- seen as
+    // 0xFFFFF600 under `-smp 2` while several ring-3 guests were torn down at
+    // once -- indexed `PENDING` and halted the whole machine. A core that
+    // cannot name itself clears nothing rather than killing everything; the
+    // task left in `Handoff` is leaked, not resumed onto, which is strictly the
+    // better failure for a machine meant to survive load. The corruption that
+    // produces the bad index is shared-scheduler-state SMP, and belongs to the
+    // audit the 1.4.0 plan holds, not to this guard.
+    if cpu >= MAX_CPUS {
+        return;
+    }
     let prev = PENDING[cpu].swap(NONE, Ordering::AcqRel);
     if prev == NONE {
         return;
     }
-    let mut t = TASKS.lock_irq();
-    if matches!(t[prev].state, State::Handoff(_)) {
-        t[prev].state = State::Ready;
+    // Freed outside the lock, below: `dealloc` can take the heap's own lock,
+    // and taking that under `TASKS` is a lock order nothing else in the kernel
+    // uses. The slot is already `Unused` by then, so nothing can pick the task
+    // up while its memory is going back.
+    let mut reclaim = (core::ptr::null_mut(), core::ptr::null_mut());
+    {
+        let mut t = TASKS.lock_irq();
+        if matches!(t[prev].state, State::Handoff(_)) {
+            if t[prev].exiting {
+                // **The one moment this is safe.** We are the incoming task on
+                // the core that just switched away from `prev`, so `prev`'s
+                // `rsp` has landed, nothing is executing on its stack, and
+                // nothing will: the slot goes `Unused`, which `schedule` never
+                // selects. A task cannot do this for itself -- it is standing
+                // on the stack in question -- which is why `exit` only raises a
+                // flag and yields.
+                reclaim = (t[prev].stack, t[prev].fpu);
+                // `root` is not freed here and must already be zero. A
+                // `Space` is owned by whoever installed it, as `set_root` says,
+                // so a task exiting with one set is a caller bug rather than
+                // something to tidy up -- freeing page tables the kernel may
+                // still be walking is the failure `Space::drop` orders against.
+                t[prev] = EMPTY;
+            } else if t[prev].wake_at != 0 {
+                // Asleep rather than Ready, so nothing picks it up until its
+                // deadline passes. Same seam as `exiting` and for the same
+                // reason: this is the one place that sees a task *after* it
+                // has stopped running.
+                t[prev].state = State::Asleep;
+            } else {
+                t[prev].state = State::Ready;
+            }
+        }
     }
+    let (stack, fpu) = reclaim;
+    if !stack.is_null() {
+        if let Ok(l) = Layout::from_size_align(STACK_SIZE, 16) {
+            unsafe { dealloc(stack, l) };
+        }
+    }
+    if !fpu.is_null() {
+        if let Ok(l) = Layout::from_size_align(crate::cpu::xsave_area_size(), 64) {
+            unsafe { dealloc(fpu, l) };
+        }
+    }
+}
+
+/// End this task, giving its slot and its stack back.
+///
+/// **It raises a flag and yields rather than doing the work**, because the work
+/// is freeing the stack this function is running on. `finish_handoff` does it
+/// on the core that switches away from here, which is the first moment this
+/// task's `rsp` has been written down and nothing is standing on it.
+///
+/// The loop is not belt-and-braces: `yield_now` returns normally when there was
+/// nothing else to switch to, and with the flag already set this task is still
+/// the one running. So it asks again, and the first switch that does happen
+/// never comes back.
+///
+/// What this replaced was `loop { yield_now() }` with no flag, under the
+/// comment "a task that returns just stops being scheduled onto" -- true, and
+/// it kept the slot and its 64 KiB stack forever. With `MAX_TASKS` at 40 and
+/// 37 committed at sixteen cores, a kernel that spawns and finishes anything
+/// repeatedly runs out of tasks rather than leaking quietly.
+pub fn exit() -> ! {
+    {
+        let me = crate::smp::this_cpu() as usize;
+        if me < MAX_CPUS {
+            let cur = CURRENT[me].load(Ordering::Acquire);
+            if cur != NONE {
+                TASKS.lock_irq()[cur].exiting = true;
+            }
+        }
+    }
+    loop {
+        yield_now();
+    }
+}
+
+/// Set or clear the current task's wake deadline. Answers whether it took.
+fn set_wake(tick: u64) -> bool {
+    let me = crate::smp::this_cpu() as usize;
+    if me >= MAX_CPUS {
+        return false;
+    }
+    let cur = CURRENT[me].load(Ordering::Acquire);
+    if cur == NONE {
+        return false;
+    }
+    TASKS.lock_irq()[cur].wake_at = tick;
+    true
+}
+
+/// Stand down until `tick`, letting every other task have the core.
+///
+/// **This is a loop and not a single yield**, which is not defensiveness:
+/// `yield_now` returns normally when there was nothing else to switch to, and
+/// then this task is still the one running with its deadline still in the
+/// future. So it asks again. The sleep is only as precise as the tick, which at
+/// `TIMER_HZ` is 10 ms, and a caller wanting better precision wants a busy wait
+/// and should say so.
+///
+/// Falls back to a spin when the deadline cannot be recorded -- before the
+/// scheduler is enabled, or on a core that cannot name itself. That is no worse
+/// than what every caller did before there was a sleep queue, and it keeps the
+/// one bad case bounded rather than returning early and having the caller
+/// believe it slept.
+pub fn sleep_until(tick: u64) -> bool {
+    let mut woken = false;
+    while crate::dev::lapic::ticks() < tick {
+        if !set_wake(tick) {
+            core::hint::spin_loop();
+            continue;
+        }
+        yield_now();
+        // Somebody wanted this task back before its deadline. Checked after the
+        // yield and before the loop condition, because the condition is still
+        // true -- that is the whole of what `woken` exists to say.
+        if take_woken() {
+            woken = true;
+            break;
+        }
+    }
+    // Cleared unconditionally. `schedule` clears it when it promotes a
+    // sleeper, but a task that came back because nothing else was runnable was
+    // never promoted and would otherwise carry a stale deadline into its next
+    // handoff -- and be put to sleep by it.
+    set_wake(0);
+    !woken
+}
+
+/// Read and clear this task's wake flag.
+fn take_woken() -> bool {
+    let me = crate::smp::this_cpu() as usize;
+    if me >= MAX_CPUS {
+        return false;
+    }
+    let cur = CURRENT[me].load(Ordering::Acquire);
+    if cur == NONE {
+        return false;
+    }
+    let mut t = TASKS.lock_irq();
+    let was = t[cur].woken;
+    t[cur].woken = false;
+    was
+}
+
+/// Stand down for roughly this many microseconds.
+pub fn sleep_us(us: u64) -> bool {
+    let hz = crate::TIMER_HZ as u64;
+    // Rounded *up*, so a sleep shorter than a tick still yields the core once
+    // rather than returning immediately. A zero-tick sleep is how a caller
+    // asking for 100 us would otherwise become a busy loop that never yields.
+    let ticks = (us.saturating_mul(hz) + 999_999) / 1_000_000;
+    sleep_until(crate::dev::lapic::ticks().saturating_add(ticks.max(1)))
+}
+
+/// Wake a sleeping task now, whatever its deadline said.
+///
+/// For the paths that have to reach a task that is standing down: a guest being
+/// doomed should not wait out a sleep it will never return from. Answers
+/// whether this woke anything, so a caller cannot read "no such task" as "woken".
+pub fn wake(index: usize) -> bool {
+    if index >= MAX_TASKS {
+        return false;
+    }
+    let mut t = TASKS.lock_irq();
+    if t[index].state != State::Asleep {
+        return false;
+    }
+    t[index].state = State::Ready;
+    t[index].wake_at = 0;
+    // The flag, not merely the state. Making it `Ready` alone put it back in
+    // the scheduler and left `sleep_until`'s own loop condition unchanged, so
+    // it slept again immediately.
+    t[index].woken = true;
+    true
 }
 
 /// Pick a task for `cpu` and switch to it.
@@ -874,9 +1441,22 @@ fn schedule() {
         return;
     }
 
-    let (save, load, out_fpu, in_fpu, out_r3, in_r3, out_root, in_root) = {
+    let (save, load, out_fpu, in_fpu, out_r3, in_r3, out_root, in_root, out_guest, in_guest) = {
         let mut t = TASKS.lock_irq();
         let n = COUNT.load(Ordering::Acquire);
+
+        // Anything whose deadline has passed is runnable again, decided here
+        // rather than from the timer. The scan bound is already being walked to
+        // pick a task, so this costs one comparison per slot and needs no
+        // second data structure that could disagree with `state` about who is
+        // runnable -- the bug `State::name` exists to keep one spelling of.
+        let now = crate::dev::lapic::ticks();
+        for i in 0..n {
+            if t[i].state == State::Asleep && now >= t[i].wake_at {
+                t[i].state = State::Ready;
+                t[i].wake_at = 0;
+            }
+        }
 
         // `Ready` is the only claimable state. `Running` belongs to a core,
         // and `Handoff` is a stack whose pointer has not landed yet.
@@ -932,6 +1512,12 @@ fn schedule() {
             t[next].ring3,
             t[cur].root,
             t[next].root,
+            // A pointer rather than a value, the way the `Ring3` slot above
+            // is one: the write happens after this lock is dropped, and
+            // re-taking `TASKS` between the xrstor and the stack switch is a
+            // lock acquisition nothing else on that path makes.
+            &mut t[cur].guest as *mut usize,
+            t[next].guest,
         )
     };
 
@@ -961,6 +1547,27 @@ fn schedule() {
             }
             crate::linux::syscall::ring3_load(in_r3);
         }
+        // Which guest the syscall path speaks for, on the same seam and for the
+        // same reason. Guarded on both being zero so a machine with no guest
+        // anywhere pays one comparison and no stores -- the bargain `root` and
+        // `ring3` already make one branch up.
+        //
+        // The live value is read back from the global rather than taken from
+        // the field: the field is where this task's index was *parked*, and the
+        // global is what it has been since, because `set_current_guest` writes
+        // the global. Reading the field here would write back a stale index and
+        // undo every `set_current_guest` made since the last switch.
+        //
+        // **Unconditional, where `root` and `ring3` above are guarded.** Their
+        // guard reads the outgoing task's parked field, and for this one the
+        // parked field and the live value legitimately differ: a task that
+        // entered a guest since its last switch has `set_current_guest(3)` in
+        // the global and 0 still in its field, so a guard on the field skips
+        // the save and loses the index. Two stores on a path that runs a
+        // hundred times a second is not worth a branch that can be wrong.
+        let live = crate::linux::syscall::current_guest();
+        *out_guest = live;
+        crate::linux::syscall::set_current_guest(in_guest);
         if !in_fpu.is_null() {
             crate::cpu::xrstor_from(in_fpu);
         }

@@ -78,6 +78,15 @@ pub trait Wlan {
     /// with no chip behind it says so and every window showing an adapter
     /// shows the word it chose.
     fn radio_name(&self) -> &'static str;
+    /// How many times this station has reached a working link. A change is a
+    /// new association, possibly to another network.
+    fn joins(&self) -> u32 {
+        0
+    }
+    /// Recovering a dropped link, and how many tries in.
+    fn rejoining(&self) -> Option<u32> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -193,6 +202,27 @@ pub struct Interface {
     pub arp: [Option<(Ipv4, Mac)>; ARP_ENTRIES],
     pub arp_next: usize,
     pub stats: Stats,
+    /// A wireless station is behind `nic`. Its link state and address are then
+    /// read from the two fields below rather than from the station, which
+    /// belongs to whoever holds the wifi claim: `route` asking the station
+    /// directly was a `&mut` to it taken with no claim, from any task.
+    pub wireless: bool,
+    /// The station's address, fixed when it was attached.
+    pub mac_cached: Mac,
+    /// Whether the station is associated and keyed, as of the last wifi poll.
+    pub link_cached: bool,
+    /// The station's association count as of the last poll.
+    pub joins_seen: u32,
+    /// Bumped on every change of link or address. **What anything holding a
+    /// lease or a connection keys on**: a different number is a different
+    /// network, possibly, and an address from the last one is stale.
+    pub link_gen: u32,
+    /// Addressed by somebody -- DHCP, or a default somebody chose on purpose --
+    /// rather than holding zeroes or another network's leftovers. Routing
+    /// prefers a configured interface for the default route.
+    pub configured: bool,
+    /// The link came up and nobody has asked for an address on it yet.
+    pub dhcp_wanted: bool,
 }
 
 impl Interface {
@@ -214,7 +244,34 @@ impl Interface {
                 tx_bytes: 0,
                 tx_dropped: 0,
             },
+            wireless: false,
+            mac_cached: [0; 6],
+            link_cached: false,
+            joins_seen: 0,
+            link_gen: 0,
+            configured: false,
+            dhcp_wanted: false,
         }
+    }
+
+    /// The interface's hardware address.
+    pub fn mac(&self) -> Option<Mac> {
+        if self.wireless {
+            return self.nic.is_some().then_some(self.mac_cached);
+        }
+        self.nic.as_ref().map(|d| d.mac())
+    }
+
+    /// Forget everything learnt on the link: addresses, neighbours.
+    pub fn forget(&mut self) {
+        self.arp = [None; ARP_ENTRIES];
+        self.arp_next = 0;
+        self.ip = [0; 4];
+        self.netmask = [0; 4];
+        self.gateway = [0; 4];
+        self.dns = [0; 4];
+        self.configured = false;
+        self.link_gen = self.link_gen.wrapping_add(1);
     }
 
     pub fn present(&self) -> bool {
@@ -222,6 +279,9 @@ impl Interface {
     }
 
     pub fn usable(&mut self) -> bool {
+        if self.wireless {
+            return self.up && self.nic.is_some() && self.link_cached;
+        }
         self.up && self.nic.as_mut().map(|n| n.link_up()).unwrap_or(false)
     }
 

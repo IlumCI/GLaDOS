@@ -599,6 +599,8 @@ const CSR_LTR_LONG_VAL_AD: u64 = 0x0d4;
 const CSR_GP_CNTRL: u64 = 0x024;
 const HBUS_TARG_PRPH_WADDR: u64 = 0x400 + 0x044;
 const HBUS_TARG_PRPH_WDAT: u64 = 0x400 + 0x04c;
+const HBUS_TARG_PRPH_RADDR: u64 = 0x400 + 0x048;
+const HBUS_TARG_PRPH_RDAT: u64 = 0x400 + 0x050;
 
 const GP_CNTRL_MAC_ACCESS_REQ: u32 = 0x0000_0008;
 const GP_CNTRL_MAC_ACCESS_EN: u32 = 0x0000_0001;
@@ -820,6 +822,16 @@ pub unsafe fn kick(bar0: u64, b: &Boot) -> Result<(), KickFault> {
 pub unsafe fn prph_write(bar0: u64, addr: u32, val: u32) {
     core::ptr::write_volatile((bar0 + HBUS_TARG_PRPH_WADDR) as *mut u32, prph_waddr(addr));
     core::ptr::write_volatile((bar0 + HBUS_TARG_PRPH_WDAT) as *mut u32, val);
+}
+
+/// Read one word out of peripheral space. The read half of `prph_write`, with
+/// the same rule: the address is already in the space it names.
+///
+/// # Safety
+/// `bar0` must be a mapped aperture for a part holding the MAC access lock.
+pub unsafe fn prph_read(bar0: u64, addr: u32) -> u32 {
+    core::ptr::write_volatile((bar0 + HBUS_TARG_PRPH_RADDR) as *mut u32, prph_waddr(addr));
+    core::ptr::read_volatile((bar0 + HBUS_TARG_PRPH_RDAT) as *const u32)
 }
 
 /// Release the MAC access lock.

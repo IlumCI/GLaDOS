@@ -404,6 +404,18 @@ pub fn unbind(path: &str) {
 pub fn checks() -> Vec<(&'static str, bool)> {
     let mut out: Vec<(&'static str, bool)> = Vec::new();
 
+    // What the table held before this suite touched it, because the closing
+    // claim is about *this* name and `bound_names()` is machine-wide.
+    //
+    // It asserted a global zero and so passed exactly once per boot: the
+    // Wayland server binds `/run/glados/wayland-0` through this same table,
+    // and `syscall` and `load` run after this function inside the one `diag
+    // linux`, so the first run saw an empty table and every run after it saw a
+    // legitimately occupied one. `diag linux` twice in a boot reported
+    // `the name is free once unbound` as a failure on the second, with the
+    // other 278 claims passing -- a suite that cannot be re-run, which is the
+    // thing `main::section` takes a `fn` to avoid.
+    let names_before = bound_names();
     let listener = Rc::new(RefCell::new(Sock::Fresh));
     out.push(("a fresh socket binds a name", bind(&listener, "/tmp/t.sock").is_ok()));
     out.push((
@@ -422,11 +434,17 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 
     let Ok((cp, cs)) = connect("/tmp/t.sock") else {
         out.push(("a connection could be made", false));
+        // Give the name back on the way out. A suite that bails holding it
+        // makes the *next* run fail at `a fresh socket binds a name` with
+        // `EADDRINUSE`, which reads as a bind that broke rather than as a
+        // connect that did -- one failure wearing the next one's clothes.
+        unbind("/tmp/t.sock");
         return out;
     };
     out.push(("a connection could be made", true));
     let Ok(Some((sp, ss))) = accept(&listener) else {
         out.push(("and accepted", false));
+        unbind("/tmp/t.sock");
         return out;
     };
     out.push(("and accepted", true));
@@ -506,6 +524,6 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     ));
 
     unbind("/tmp/t.sock");
-    out.push(("the name is free once unbound", bound_names() == 0));
+    out.push(("the name is free once unbound", bound_names() == names_before));
     out
 }

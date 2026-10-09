@@ -13,6 +13,8 @@ Usage:
     drive.py [--timeout N] [--memory 2048M] [cmd ...]
     drive.py --stage-iso MODEL.BIN [--tokenizer TOK.BIN] [--memory 3072M] [cmd ...]
     drive.py --no-payload "diag all"      # no checkpoint, tokenizer or roots
+                                          # (device firmware is still mirrored:
+                                          # it is small, and `fw` needs it)
 
 Each positional argument is one shell line. With none, it just captures the
 boot log and exits at the first prompt.
@@ -401,6 +403,7 @@ def ports_held():
     spent two ten-minute runs on it.
     """
     held = []
+    lingering = []
     for what, port in (("serial", PORT), ("monitor", MONITOR_PORT)):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         # Deliberately no SO_REUSEADDR. On Windows it permits binding a port
@@ -409,10 +412,50 @@ def ports_held():
         try:
             s.bind(("127.0.0.1", port))
         except OSError:
-            held.append(f"{what} on {port}")
+            # **Bindability is not the question, and answering it cost two more
+            # runs.** A killed run leaves its accepted socket in TIME_WAIT for
+            # a minute or so, and a TIME_WAIT remnant refuses a bind while no
+            # process is listening at all -- so this reported "another QEMU
+            # still owns it" about a machine that had already exited, which is
+            # the one thing the message must never be wrong about.
+            #
+            # So the bind failure is a suspicion and a successful *connect* is
+            # the confirmation: something accepting a connection is a live
+            # listener, and nothing accepting one is a remnant to wait out.
+            try:
+                probe = socket.create_connection(("127.0.0.1", port), timeout=0.5)
+                probe.close()
+                held.append(f"{what} on {port}")
+            except OSError:
+                lingering.append(f"{what} on {port}")
         finally:
             s.close()
+    if lingering and not held:
+        # Nothing is listening, so this is a remnant and waiting is the whole
+        # fix. Said out loud with how long, because a silent pause here looks
+        # exactly like the hang this function exists to prevent.
+        print("[drive] " + " and ".join(lingering)
+              + " is in TIME_WAIT from a run that was killed -- nothing is"
+              + " listening, waiting for it to clear")
+        for _ in range(90):
+            time.sleep(1)
+            if not ports_held_raw():
+                return []
+        print("[drive] it did not clear; carrying on and letting the bind decide")
     return held
+
+
+def ports_held_raw():
+    """Can both ports be bound right now. Used only to wait out a TIME_WAIT."""
+    for port in (PORT, MONITOR_PORT):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            return True
+        finally:
+            s.close()
+    return False
 
 
 def main():
@@ -681,6 +724,26 @@ def main():
                 target.unlink()
             print(f"[drive] no {dst} -- TLS will encrypt and authenticate nothing")
 
+    # Device firmware is mirrored whole, as deploy copies it: `dev::firmware`
+    # reads every file under \GLADOS\FW and a stale one left here would be
+    # an image the kernel picks up that the deploy tree no longer has.
+    fw_src = ROOT / "esp/GLADOS/FW"
+    fw_dst = esp / "GLADOS/FW"
+    want = {p.name: p for p in fw_src.iterdir() if p.is_file()} if fw_src.is_dir() else {}
+    if want:
+        fw_dst.mkdir(exist_ok=True)
+    if fw_dst.is_dir():
+        for old in fw_dst.iterdir():
+            if old.name not in want:
+                if old.is_dir():
+                    shutil.rmtree(old)
+                else:
+                    old.unlink()
+    for name, src in want.items():
+        target = fw_dst / name
+        if not target.exists() or differs(src, target):
+            target.write_bytes(src.read_bytes())
+
     for src, dst in staged:
         # **Refused rather than skipped, unless somebody said so.** A run that
         # quietly booted without the checkpoint would look like a run where the
@@ -740,6 +803,16 @@ def main():
         # which is precisely the two-boot flow the image exists to test.
         if esp_image.exists() and not esp_force:
             print(f"[drive] reusing {esp_image} (--esp-rebuild to start clean)")
+            # A reused image is a disk, so nothing staged since reaches it --
+            # which is the point for what the guest wrote and a trap for
+            # firmware changed on the host.
+            built_at = esp_image.stat().st_mtime
+            fw_dir = ROOT / "esp/GLADOS/FW"
+            newer = [p.name for p in fw_dir.iterdir()
+                     if p.is_file() and p.stat().st_mtime > built_at] if fw_dir.is_dir() else []
+            if newer:
+                print(f"[drive] {len(newer)} firmware file(s) changed since {esp_image} was built "
+                      f"and are NOT on it: --esp-rebuild to carry them")
         else:
             fat, tot = mkesp.build(esp, esp_image)
             print(f"[drive] built {esp_image} ({tot / 1024 / 1024:.0f} MB, writable)")
@@ -789,6 +862,14 @@ def main():
         for f in sorted((esp / 'GLADOS').iterdir()):
             if f.is_file():
                 g.children.append(mkiso.Entry(f.name, f.stat().st_size, f))
+            elif f.name == 'FW':
+                # The firmware directory too, or a guest booted this way has
+                # none while a VVFAT guest from the same tree does.
+                fw = mkiso.Entry('FW', 0)
+                for x in sorted(f.iterdir()):
+                    if x.is_file():
+                        fw.children.append(mkiso.Entry(x.name, x.stat().st_size, x))
+                g.children.append(fw)
         root.children.append(g)
 
         cluster = 512
@@ -1048,6 +1129,26 @@ def main():
                     # put a do-nothing applet in the grammar the model decodes
                     # against, which is a real cost for a presentational
                     # problem. So the pause lives in the harness.
+                    # `@mouse <monitor command>` and `@shot <png>` are beats
+                    # too, in sequence with the commands: `--mouse` sends its
+                    # events only once every command has run and `--screenshot`
+                    # photographs only the end, so a click, then a typed line,
+                    # then another click could not be driven at all -- which
+                    # is exactly the shape of joining Wi-Fi from the miner's
+                    # screen.
+                    if line.startswith("@mouse ") or line.startswith("@shot "):
+                        verb, arg = line.split(None, 1)
+                        if verb == "@mouse":
+                            monitor([arg])
+                            print(f"[drive] mouse: {arg}")
+                        else:
+                            try:
+                                capture(arg)
+                            except Exception as e:
+                                print(f"[drive] screenshot failed: {e}", file=sys.stderr)
+                        time.sleep(0.4)
+                        force_send = True
+                        continue
                     if line.startswith("@wait "):
                         try:
                             secs = float(line.split(None, 1)[1])

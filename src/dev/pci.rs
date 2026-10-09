@@ -213,6 +213,144 @@ pub fn cfg_read32(ecam: u64, d: &Device, off: u64) -> u32 {
     unsafe { read32(cfg_addr(ecam, d.bus, d.dev, d.func), off) }
 }
 
+/// The standard capability list, walked through any reader of config space.
+///
+/// Pure over `read` so the walk can be asserted against a synthetic config space,
+/// including the malformed one that matters: **a list that points at itself.**
+/// Config space is 256 bytes of standard capabilities, so no honest walk is
+/// longer than 48 steps, and a pointer below 0x40 lands in the header. Either
+/// ends the walk with nothing rather than reading forever, which in ring 0 is a
+/// hung boot on a part whose firmware wrote one byte wrong.
+///
+/// The capability pointer is only meaningful when the status register says the
+/// list exists (bit 4 of the word at 0x04's high half), and an absent list reads
+/// back as whatever the header holds there.
+pub fn walk_caps(read: impl Fn(u64) -> u32, id: u8) -> Option<u64> {
+    const STATUS_CAP_LIST: u32 = 1 << (16 + 4);
+    if read(0x04) & STATUS_CAP_LIST == 0 {
+        return None;
+    }
+    let mut off = (read(0x34) & 0xfc) as u64;
+    for _ in 0..48 {
+        if off < 0x40 || off > 0xfc {
+            return None;
+        }
+        let hdr = read(off);
+        if (hdr & 0xff) as u8 == id {
+            return Some(off);
+        }
+        off = ((hdr >> 8) & 0xfc) as u64;
+    }
+    None
+}
+
+/// Where a function's capability `id` lives in its config space, if it has one.
+pub fn find_cap(ecam: u64, d: &Device, id: u8) -> Option<u64> {
+    walk_caps(|off| cfg_read32(ecam, d, off), id)
+}
+
+pub const CAP_PM: u8 = 0x01;
+pub const CAP_PCIE: u8 = 0x10;
+
+/// The power state from PMCSR: 0 is D0, 3 is D3hot. `None` when the function
+/// has no power-management capability, which is a legal thing to lack.
+pub fn power_state(ecam: u64, d: &Device) -> Option<u8> {
+    let pm = find_cap(ecam, d, CAP_PM)?;
+    Some((cfg_read32(ecam, d, pm + 4) & 0b11) as u8)
+}
+
+/// Bring a function to D0, answering the state it was found in.
+///
+/// **This is the fix for one of the two things an all-ones register read
+/// means.** A part parked in D3hot answers its config space and not its BARs, so
+/// a driver that reads `0xFFFFFFFF` from its first register cannot tell a sleeping
+/// part from one whose decoder is off -- and a laptop's firmware is entitled to
+/// leave its radio asleep when nothing in the boot path asked for it. D3cold is
+/// not fixable from here: the function has no power and its config space reads
+/// all ones too, which is what `None` from `find_cap` then looks like.
+///
+/// The 10 ms is the specification's recovery time from D3hot, and it is not a
+/// guess to tighten: the first access inside it may be dropped, and a dropped
+/// access to a BAR is the all-ones read this function exists to stop.
+pub fn set_d0(ecam: u64, d: &Device) -> Option<u8> {
+    let pm = find_cap(ecam, d, CAP_PM)?;
+    let csr = cfg_read32(ecam, d, pm + 4);
+    let was = (csr & 0b11) as u8;
+    if was != 0 {
+        // **D3hot to D0 resets the function unless it says it will not.** With
+        // No_Soft_Reset (bit 3) clear the transition is a reset: BARs, the
+        // command register and the interrupt line come back as power-on
+        // defaults, and a caller holding the address it read before would map
+        // nothing. So the header is saved first and put back after, which is
+        // what the specification asks of system software in exactly this case.
+        // Intel's radios usually set the bit; a generic helper cannot assume so.
+        let soft_reset = was == 3 && csr & (1 << 3) == 0;
+        let saved: [u32; 6] = core::array::from_fn(|i| cfg_read32(ecam, d, 0x10 + 4 * i as u64));
+        let cmd = cfg_read32(ecam, d, 0x04) & 0xffff;
+        let line = cfg_read32(ecam, d, 0x3c);
+        // Bit 15 is PME status, write-one-to-clear: writing it back as read
+        // would clear a wake event somebody else may be waiting on.
+        cfg_write32(ecam, d, pm + 4, csr & !0b11 & !(1 << 15));
+        crate::time::delay_us(10_000);
+        if soft_reset {
+            for (i, v) in saved.iter().enumerate() {
+                cfg_write32(ecam, d, 0x10 + 4 * i as u64, *v);
+            }
+            cfg_write32(ecam, d, 0x3c, line);
+            // The command register last: decoding turned on before the BARs are
+            // back would decode whatever the reset left in them.
+            cfg_write32(ecam, d, 0x04, cmd);
+        }
+    }
+    Some(was)
+}
+
+/// Clear bus mastering, so the function can no longer reach memory.
+///
+/// The half of `enable_bus_master` a driver needs on the way out: freeing memory
+/// a device was told it could write is the bug, and this is the step that makes
+/// freeing it safe.
+/// Answers whether the bit reads back clear. A configuration write may be
+/// posted, so the read is what orders it ahead of whatever the caller does next
+/// -- freeing the memory the device was mastering, usually -- and a device that
+/// has gone (all ones) answers `false`, which is the honest answer about it.
+pub fn disable_bus_master(ecam: u64, d: &Device) -> bool {
+    let cmd = cfg_read32(ecam, d, 0x04);
+    // Only the low half: the high half is status, write-one-to-clear.
+    cfg_write32(ecam, d, 0x04, cmd & 0xffff & !(1 << 2));
+    let back = cfg_read32(ecam, d, 0x04);
+    back != 0xffff_ffff && back & (1 << 2) == 0
+}
+
+/// The capability walk, against synthetic config spaces.
+pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
+    use alloc::vec::Vec;
+    // A config space as a sparse list of (offset, word).
+    fn space(words: &[(u64, u32)]) -> impl Fn(u64) -> u32 + '_ {
+        move |off| words.iter().find(|w| w.0 == off).map(|w| w.1).unwrap_or(0)
+    }
+    let caps = 1u32 << 20;
+    let mut out: Vec<(&'static str, bool)> = Vec::new();
+    // PM at 0x40 -> MSI at 0x50 -> PCIe at 0x70 -> end.
+    let good = [(0x04, caps), (0x34, 0x40), (0x40, 0x5001), (0x50, 0x7005), (0x70, 0x0010)];
+    out.push(("a capability at the head of the list is found", walk_caps(space(&good), CAP_PM) == Some(0x40)));
+    out.push(("and one at its tail, two hops on", walk_caps(space(&good), CAP_PCIE) == Some(0x70)));
+    out.push(("one the list does not carry is absent", walk_caps(space(&good), 0x11).is_none()));
+    let looping = [(0x04, caps), (0x34, 0x40), (0x40, 0x4005)];
+    out.push(("a list that points at itself ends rather than spinning", walk_caps(space(&looping), CAP_PCIE).is_none()));
+    let into_header = [(0x04, caps), (0x34, 0x40), (0x40, 0x1005)];
+    out.push(("a pointer back into the header ends the walk", walk_caps(space(&into_header), CAP_PCIE).is_none()));
+    let no_list = [(0x04, 0), (0x34, 0x40), (0x40, 0x0001)];
+    out.push((
+        "a pointer is not followed when the status register says there is no list",
+        walk_caps(space(&no_list), CAP_PM).is_none(),
+    ));
+    // The low two bits of the pointer are reserved and must be masked off.
+    let unaligned = [(0x04, caps), (0x34, 0x43), (0x40, 0x0001)];
+    out.push(("the reserved low bits of the pointer are masked", walk_caps(space(&unaligned), CAP_PM) == Some(0x40)));
+    out
+}
+
 /// Write a 32-bit word to a function's config space.
 pub fn cfg_write32(ecam: u64, d: &Device, off: u64, v: u32) {
     unsafe { write32(cfg_addr(ecam, d.bus, d.dev, d.func), off, v) }

@@ -165,8 +165,11 @@ impl Browser {
                     push_num(&mut self.status, status as usize);
                 }
                 let page = html::parse(&body, &url);
-                self.links.clear();
-                collect_links(&page, &mut self.links);
+                // `html::links_of` rather than a walk of its own: the model's
+                // reader numbers the same links, and two walks over one page
+                // are two chances to disagree about what link 3 is. It also
+                // resolves relative hrefs, which the local copy dropped.
+                self.links = html::links_of(&page, &url);
                 let n = self.links.len();
                 if status < 400 {
                     self.status = String::from("Loaded, ");
@@ -453,22 +456,6 @@ impl Browser {
 }
 
 // --- helpers --------------------------------------------------------------
-
-fn collect_links(page: &Page, out: &mut Vec<Url>) {
-    for b in &page.blocks {
-        let spans = match b {
-            Block::Heading(_, s) | Block::Para(s) | Block::Item(s) => s,
-            _ => continue,
-        };
-        for s in spans {
-            if let Span::Link { href, .. } = s {
-                if let Some(u) = html::parse_url(href) {
-                    out.push(u);
-                }
-            }
-        }
-    }
-}
 
 /// Wrap a block's spans into rows, assigning link numbers in document order.
 fn wrap(
