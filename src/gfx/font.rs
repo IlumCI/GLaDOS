@@ -389,6 +389,22 @@ static EXTRA: [(u32, [u8; 8]); 229] = [
 /// letter in the wrong colour, everywhere, at once.
 pub const MAX_INDEX: u16 = EXTRA_BASE + EXTRA.len() as u16 - 1;
 
+/// The codepoint a glyph index stands for: `index_of`'s inverse, so a cell that
+/// stores an index can still be set in an outline face. An index this font has
+/// no glyph for was stored as `UNKNOWN`, and comes back as U+FFFD.
+pub fn char_of(idx: u16) -> char {
+    if idx < UNKNOWN {
+        (FIRST + idx as u8) as char
+    } else if idx == UNKNOWN {
+        '\u{FFFD}'
+    } else {
+        EXTRA
+            .get((idx - EXTRA_BASE) as usize)
+            .and_then(|(cp, _)| char::from_u32(*cp))
+            .unwrap_or('\u{FFFD}')
+    }
+}
+
 /// The glyph index for a codepoint.
 ///
 /// Called once per character *printed*. `rows` is called once per character

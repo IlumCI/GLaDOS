@@ -49,11 +49,57 @@ pub const LTRED: u8 = 12;
 pub const LTGREEN: u8 = 10;
 pub const LTCYAN: u8 = 11;
 
-// 128x72 cells covers 2048x1152 at 2x scale, so it is enough for this panel's
-// native 1920x1080 with room to spare. Sized as a fixed array because there is
-// no heap until M3.
+// The boot grid: 128x72 cells covers 2048x1152 at the bitmap's 2x scale, so
+// it is enough for this panel's native 1920x1080 with room to spare. A static
+// in .bss because there is no heap when it is first written. A composed
+// console moves to a heap grid sized to its window (`Grid::Heap`), which is
+// how the outline face's 9-pixel cell gets the 200-odd columns a full-width
+// terminal has -- the cap was 128, and the right third of the window sat
+// empty beside it.
 const MAX_COLS: usize = 128;
 const MAX_ROWS: usize = 72;
+
+/// The most a heap grid may hold either way: 512 cells is a 4,600-pixel-wide
+/// terminal in the outline face. A bound so a window gone wrong (a zero cell,
+/// a corrupt rectangle) cannot ask for a grid the size of the heap.
+const MAX_WIDE: usize = 512;
+
+/// A cell of a row that may be shorter than the grid -- a history row kept
+/// from before the console grew -- reading past its end as blank.
+#[inline]
+fn cell_of(row: &[Cell], c: usize) -> Cell {
+    row.get(c).copied().unwrap_or(BLANK)
+}
+
+/// Every console's boot grid. In .bss, zero-filled, and a zero cell is a space:
+/// so it costs no image bytes and -- unlike the inline array it replaced --
+/// nothing on the boot stack, where `Console::new` used to build 18 KB as a
+/// temporary twelve lines before there was an IDT to report an overflow.
+static mut BOOT_GRIDS: [[Cell; MAX_COLS * MAX_ROWS]; NCONSOLE] = [[Cell(0); MAX_COLS * MAX_ROWS]; NCONSOLE];
+
+/// Where a console's cells live: the static boot grid, or a heap grid once
+/// the desktop sizes the console to a window. Row `r` is `stride` cells from
+/// `r * stride`.
+enum Grid {
+    Boot(&'static mut [Cell]),
+    Heap(alloc::vec::Vec<Cell>),
+}
+
+impl Grid {
+    fn cells(&self) -> &[Cell] {
+        match self {
+            Grid::Boot(b) => b,
+            Grid::Heap(v) => v,
+        }
+    }
+
+    fn cells_mut(&mut self) -> &mut [Cell] {
+        match self {
+            Grid::Boot(b) => b,
+            Grid::Heap(v) => v,
+        }
+    }
+}
 
 /// One cell: a glyph index and a palette colour, packed into two bytes.
 ///
@@ -190,7 +236,11 @@ impl Utf8 {
 
 pub struct Console {
     fb: Framebuffer,
-    cells: [[Cell; MAX_COLS]; MAX_ROWS],
+    cells: Grid,
+    /// Cells per grid row: the boot grid's 128, or the heap grid's width.
+    stride: usize,
+    /// Rows the grid can hold.
+    cap_rows: usize,
     cols: usize,
     rows: usize,
     col: usize,
@@ -225,7 +275,7 @@ pub struct Console {
     /// scroll and never during construction: by the time a row falls off the
     /// top the heap has been up for a long time, and if the allocation fails
     /// the console behaves precisely as it did before there was one.
-    history: alloc::vec::Vec<[Cell; MAX_COLS]>,
+    history: alloc::vec::Vec<alloc::vec::Vec<Cell>>,
     /// Where the next scrolled-off row goes.
     ///
     /// A ring rather than a queue, because a queue's `remove(0)` is a 128 KB
@@ -258,22 +308,65 @@ pub struct Console {
     surface: alloc::vec::Vec<u32>,
     /// Where the surface sits on screen.
     at: (u32, u32),
+    /// The cell, once the console is composed: set in Cascadia Code rather
+    /// than the 8x8 bitmap. `None` in direct mode, which is boot and the fault
+    /// path -- the outline path allocates and takes the atlas lock, and a
+    /// fault report must do neither.
+    mono: Option<Mono>,
+}
+
+/// A terminal cell set in an outline face: its size in whole pixels, and where
+/// the baseline sits inside it.
+///
+/// Whole pixels on purpose. A monospaced face's advance is fractional (9.17 px
+/// at 15 px for Cascadia), and a grid laid on fractional columns puts every
+/// glyph at a different phase and every box-drawing join between two pixels;
+/// a terminal is a grid first, so the cell is rounded and the glyph sits at
+/// the cell's left edge.
+#[derive(Clone, Copy)]
+struct Mono {
+    px: f32,
+    w: u32,
+    h: u32,
+    base: u32,
+}
+
+/// The terminal's text size, in physical pixels: 12 logical at the 125% scale
+/// this release defaults to. A constant until the scale is (Q8).
+const TERM_PX: f32 = 15.0;
+
+fn mono_cell(px: f32) -> Option<Mono> {
+    use super::text::{self, Face};
+    if !text::init() {
+        return None;
+    }
+    let adv = text::measure(Face::Mono, px, "M");
+    let (asc, desc, gap) = text::line(Face::Mono, px);
+    let h = (asc - desc + gap + 0.5) as u32;
+    // The leading split evenly above and below, so a block element filling
+    // the cell is centred on the text it sits among.
+    let base = ((h as f32 - (asc - desc)) / 2.0 + asc + 0.5) as u32;
+    Some(Mono { px, w: ((adv + 0.5) as u32).max(1), h: h.max(1), base: base.min(h) })
 }
 
 impl Console {
-    pub fn new(fb: Framebuffer, scale: u32, bg: Color) -> Self {
+    /// A console over the whole framebuffer, on its boot grid. `grid` is the
+    /// static it owns; `init` hands each console its own.
+    fn new(fb: Framebuffer, scale: u32, bg: Color, grid: &'static mut [Cell]) -> Self {
         let (w, h) = (fb.width(), fb.height());
-        Self::new_in(fb, scale, bg, 0, 0, w, h)
+        Self::new_in(fb, scale, bg, 0, 0, w, h, grid)
     }
 
     /// A console occupying one rectangle of the framebuffer.
-    pub fn new_in(fb: Framebuffer, scale: u32, bg: Color, x: u32, y: u32, w: u32, h: u32) -> Self {
+    fn new_in(fb: Framebuffer, scale: u32, bg: Color, x: u32, y: u32, w: u32, h: u32, grid: &'static mut [Cell]) -> Self {
         let scale = scale.max(1);
         let cols = ((w / (font::GLYPH_W * scale)) as usize).min(MAX_COLS);
         let rows = ((h / (font::GLYPH_H * scale)) as usize).min(MAX_ROWS);
         Self {
             fb,
-            cells: [[BLANK; MAX_COLS]; MAX_ROWS],
+            cells: Grid::Boot(grid),
+            stride: MAX_COLS,
+            cap_rows: MAX_ROWS,
             cols,
             rows,
             col: 0,
@@ -291,7 +384,60 @@ impl Console {
             utf8: Utf8::IDLE,
             surface: alloc::vec::Vec::new(),
             at: (0, 0),
+            mono: None,
         }
+    }
+
+    /// The cell's width and height in pixels, in whichever face is in use.
+    fn cell_w(&self) -> u32 {
+        self.mono.map_or(font::GLYPH_W * self.scale, |m| m.w)
+    }
+
+    fn cell_h(&self) -> u32 {
+        self.mono.map_or(font::GLYPH_H * self.scale, |m| m.h)
+    }
+
+    /// Grid row `r`, `stride` cells long.
+    fn grid_row(&self, r: usize) -> &[Cell] {
+        &self.cells.cells()[r * self.stride..(r + 1) * self.stride]
+    }
+
+    fn grid_row_mut(&mut self, r: usize) -> &mut [Cell] {
+        let s = self.stride;
+        &mut self.cells.cells_mut()[r * s..(r + 1) * s]
+    }
+
+    fn get(&self, r: usize, c: usize) -> Cell {
+        self.cells.cells()[r * self.stride + c]
+    }
+
+    fn set(&mut self, r: usize, c: usize, v: Cell) {
+        let s = self.stride;
+        self.cells.cells_mut()[r * s + c] = v;
+    }
+
+    /// Give the grid room for `cols` x `rows`, keeping what is in it. A boot
+    /// grid that is big enough stays; anything else becomes a heap grid of
+    /// exactly that size, the top-left of the old one copied in. Answers false
+    /// if the allocation failed, and then nothing changed.
+    fn regrid(&mut self, cols: usize, rows: usize) -> bool {
+        let fits_boot = matches!(self.cells, Grid::Boot(_)) && cols <= MAX_COLS && rows <= MAX_ROWS;
+        if fits_boot || (matches!(self.cells, Grid::Heap(_)) && cols == self.stride && rows == self.cap_rows) {
+            return true;
+        }
+        let mut v = alloc::vec::Vec::new();
+        if v.try_reserve_exact(cols * rows).is_err() {
+            return false;
+        }
+        v.resize(cols * rows, BLANK);
+        let keep_c = cols.min(self.stride);
+        for r in 0..rows.min(self.cap_rows) {
+            v[r * cols..r * cols + keep_c].copy_from_slice(&self.grid_row(r)[..keep_c]);
+        }
+        self.cells = Grid::Heap(v);
+        self.stride = cols;
+        self.cap_rows = rows;
+        true
     }
 
     /// Whether this console paints into a surface of its own.
@@ -339,6 +485,7 @@ impl Console {
         self.at = (self.ox, self.oy);
         self.ox = 0;
         self.oy = 0;
+        self.mono = mono_cell(TERM_PX);
     }
 
     /// Back to painting the screen directly, for the fault path: the
@@ -353,10 +500,14 @@ impl Console {
             return;
         }
         let Some(f) = super::primary() else { return };
-        self.ox = self.at.0;
-        self.oy = self.at.1;
-        self.fb = f;
+        // Back to the bitmap face as well, and the grid re-laid for it over
+        // the same rectangle: what is drawn from here on must not allocate.
+        let (w, h) = self.pixel_size();
+        self.mono = None;
         self.surface = alloc::vec::Vec::new();
+        self.fb = f;
+        let (ax, ay) = self.at;
+        self.reflow_grid(ax, ay, w, h);
         if show {
             self.redraw_all();
         }
@@ -398,10 +549,10 @@ impl Console {
     /// and repaints the log into it once. An unchanged geometry is a no-op,
     /// which matters because the desktop places every console every frame.
     fn reflow_composed(&mut self, x: u32, y: u32, w: u32, h: u32) {
-        let cols = ((w / (font::GLYPH_W * self.scale)) as usize).min(MAX_COLS);
-        let rows = ((h / (font::GLYPH_H * self.scale)) as usize).min(MAX_ROWS);
-        let pw = cols as u32 * font::GLYPH_W * self.scale;
-        let ph = rows as u32 * font::GLYPH_H * self.scale;
+        let cols = ((w / (self.cell_w())) as usize).min(MAX_WIDE);
+        let rows = ((h / (self.cell_h())) as usize).min(MAX_WIDE);
+        let pw = cols as u32 * self.cell_w();
+        let ph = rows as u32 * self.cell_h();
         self.at = (x, y);
         if (self.fb.width(), self.fb.height()) == (pw.max(1), ph.max(1)) && cols == self.cols && rows == self.rows {
             return;
@@ -420,8 +571,11 @@ impl Console {
     }
 
     fn reflow_grid(&mut self, x: u32, y: u32, w: u32, h: u32) {
-        let cols = ((w / (font::GLYPH_W * self.scale)) as usize).min(MAX_COLS);
-        let rows = ((h / (font::GLYPH_H * self.scale)) as usize).min(MAX_ROWS);
+        // A composed console may grow past the boot grid; a direct one is the
+        // fault path and must not allocate, so it keeps whatever it has.
+        let (cap_c, cap_r) = if self.composed() { (MAX_WIDE, MAX_WIDE) } else { (self.stride, self.cap_rows) };
+        let cols = ((w / (self.cell_w())) as usize).min(cap_c);
+        let rows = ((h / (self.cell_h())) as usize).min(cap_r);
         // Keep the tail rather than the head: the interesting part of a boot
         // log is the end of it, and a shrinking grid would otherwise scroll the
         // most recent lines off the bottom.
@@ -435,15 +589,19 @@ impl Console {
             // desktop appeared, which is why scrolling back from a fresh boot
             // found nothing to scroll to.
             for r in 0..drop {
-                self.push_history(self.cells[r]);
+                let kept = self.grid_row(r)[..self.cols].to_vec();
+                self.push_history(kept);
             }
-            for r in 0..rows {
-                self.cells[r] = self.cells[r + drop];
-            }
-            for r in rows..MAX_ROWS {
-                self.cells[r] = [BLANK; MAX_COLS];
+            let s = self.stride;
+            self.cells.cells_mut().copy_within(drop * s..(drop + rows) * s, 0);
+            for r in rows..self.cap_rows {
+                self.grid_row_mut(r).fill(BLANK);
             }
             self.row -= drop;
+        }
+        if !self.regrid(cols, rows) {
+            // No memory for a wider grid: keep the one there is.
+            return;
         }
         self.cols = cols;
         self.rows = rows;
@@ -457,8 +615,8 @@ impl Console {
     /// Pixel size of the grid as currently laid out.
     pub fn pixel_size(&self) -> (u32, u32) {
         (
-            self.cols as u32 * font::GLYPH_W * self.scale,
-            self.rows as u32 * font::GLYPH_H * self.scale,
+            self.cols as u32 * self.cell_w(),
+            self.rows as u32 * self.cell_h(),
         )
     }
 
@@ -468,9 +626,8 @@ impl Console {
 
     pub fn clear(&mut self) {
         for r in 0..self.rows {
-            for c in 0..self.cols {
-                self.cells[r][c] = BLANK;
-            }
+            let n = self.cols;
+            self.grid_row_mut(r)[..n].fill(BLANK);
         }
         self.col = 0;
         self.row = 0;
@@ -541,12 +698,14 @@ impl Console {
         if r >= self.rows || c >= self.cols {
             return;
         }
-        let s = self.scale;
-        let ox = self.ox + c as u32 * font::GLYPH_W * s;
-        let oy = self.oy + r as u32 * font::GLYPH_H * s;
-        let w = s.max(1);
-        self.fb.rect(ox, oy, w, font::GLYPH_H * s, super::theme::APERTURE);
-        self.push(ox, oy, font::GLYPH_W * s, font::GLYPH_H * s);
+        let (cw, ch) = (self.cell_w(), self.cell_h());
+        let ox = self.ox + c as u32 * cw;
+        let oy = self.oy + r as u32 * ch;
+        // A bar about a ninth of the line in an outline face, which is what a
+        // 15 px cell makes two pixels; the bitmap's stays one pixel a scale.
+        let w = self.mono.map_or(self.scale.max(1), |m| (m.h / 9).max(1));
+        self.fb.rect(ox, oy, w, ch, super::theme::APERTURE);
+        self.push(ox, oy, cw, ch);
     }
 
     /// Paint one cell, and tell the compositor about it.
@@ -560,10 +719,8 @@ impl Console {
             return;
         }
         self.paint_cell(r, c);
-        let s = self.scale;
-        let ox = self.ox + c as u32 * font::GLYPH_W * s;
-        let oy = self.oy + r as u32 * font::GLYPH_H * s;
-        self.push(ox, oy, font::GLYPH_W * s, font::GLYPH_H * s);
+        let (cw, ch) = (self.cell_w(), self.cell_h());
+        self.push(self.ox + c as u32 * cw, self.oy + r as u32 * ch, cw, ch);
     }
 
     /// The pixels alone. Split out because `redraw_all` flushes the whole
@@ -578,7 +735,7 @@ impl Console {
         if !self.paints() {
             return;
         }
-        self.paint_at(r, c, self.cells[r][c]);
+        self.paint_at(r, c, self.get(r, c));
     }
 
     /// The pixels for one cell's worth of content at one screen position.
@@ -590,6 +747,26 @@ impl Console {
     /// draw the live tail underneath the view.
     fn paint_at(&self, r: usize, c: usize, cell: Cell) {
         if !self.paints() {
+            return;
+        }
+        if let Some(m) = self.mono {
+            let ox = self.ox + c as u32 * m.w;
+            let oy = self.oy + r as u32 * m.h;
+            // Scissored to the cell, so a glyph that overhangs its advance
+            // cannot leave ink in a neighbour that a later single-cell repaint
+            // would not clear.
+            let cell_fb = self.fb.clipped(ox, oy, m.w, m.h);
+            cell_fb.rect(ox, oy, m.w, m.h, self.bg);
+            if cell.glyph() == font::SPACE {
+                return;
+            }
+            let fg = PALETTE[cell.fg() as usize];
+            let chr = font::char_of(cell.glyph());
+            if !draw_box(&cell_fb, chr, ox, oy, m.w, m.h, fg, self.bg) {
+                let mut b = [0u8; 4];
+                super::text::draw(&cell_fb, ox as f32, (oy + m.base) as i32, super::text::Face::Mono, m.px,
+                                  chr.encode_utf8(&mut b), fg);
+            }
             return;
         }
         let rows = font::rows(cell.glyph());
@@ -656,10 +833,11 @@ impl Console {
         for r in 0..self.rows {
             let row = self.row_at(r);
             for c in 0..self.cols {
-                if row[c].glyph() == font::SPACE {
+                let cell = cell_of(row, c);
+                if cell.glyph() == font::SPACE {
                     continue;
                 }
-                self.paint_at(r, c, row[c]);
+                self.paint_at(r, c, cell);
             }
         }
         // Last, so it is over the cell rather than under it -- a total
@@ -680,7 +858,8 @@ impl Console {
         // Kept before it is overwritten. It grows to `HISTORY` and is written
         // in place after that, so the steady state allocates nothing and moves
         // nothing -- the whole point of the index.
-        self.push_history(self.cells[0]);
+        let top = self.grid_row(0)[..self.cols].to_vec();
+        self.push_history(top);
 
         // A view that is not at the tail follows the content instead of the
         // window, and it costs nothing to do it: with one more row in the
@@ -698,12 +877,10 @@ impl Console {
             self.view += 1;
         }
 
-        for r in 1..self.rows {
-            self.cells[r - 1] = self.cells[r];
-        }
-        for c in 0..self.cols {
-            self.cells[self.rows - 1][c] = BLANK;
-        }
+        let s = self.stride;
+        let rows = self.rows;
+        self.cells.cells_mut().copy_within(s..rows * s, 0);
+        self.grid_row_mut(rows - 1).fill(BLANK);
         self.row = self.rows - 1;
         self.col = 0;
 
@@ -711,7 +888,7 @@ impl Console {
         // rectangle rather than the whole panel -- the panel height is rarely a
         // whole number of rows, and the console now has a window frame beside
         // it that must not be dragged upwards.
-        let cell_h = font::GLYPH_H * self.scale;
+        let cell_h = self.cell_h();
         if held {
             // Nothing moved on screen. See above.
         } else if self.view > 0 {
@@ -772,7 +949,8 @@ impl Console {
                 // Backspace: erase in place so the shell can edit a line.
                 if self.col > 0 {
                     self.col -= 1;
-                    self.cells[self.row][self.col] = Cell::new(font::SPACE, self.fg);
+                    let (r, c, fg) = (self.row, self.col, self.fg);
+                    self.set(r, c, Cell::new(font::SPACE, fg));
                     self.draw_cell(self.row, self.col);
                 }
                 return;
@@ -786,7 +964,8 @@ impl Console {
         if self.col >= self.cols {
             self.newline();
         }
-        self.cells[self.row][self.col] = Cell::new(glyph, self.fg);
+        let (r, c, fg) = (self.row, self.col, self.fg);
+        self.set(r, c, Cell::new(glyph, fg));
         self.draw_cell(self.row, self.col);
         self.col += 1;
     }
@@ -796,7 +975,10 @@ impl Console {
     /// It grows to `HISTORY` and is written in place after that, so the steady
     /// state allocates nothing and moves nothing -- the whole point of the
     /// index.
-    fn push_history(&mut self, row: [Cell; MAX_COLS]) {
+    fn push_history(&mut self, row: alloc::vec::Vec<Cell>) {
+        // Each row as wide as it was when it left, so a grid that changed
+        // width since keeps its history legible; readers treat a short row as
+        // ending in blanks (`cell_of`).
         if self.history.len() < HISTORY {
             self.history.push(row);
         } else {
@@ -812,11 +994,11 @@ impl Console {
     /// what is on screen. The split is exact: the first `view` rows come from
     /// the tail of the history and the rest from the top of the live grid, so
     /// scrolling back by one shows one remembered row and loses one live one.
-    fn row_at(&self, r: usize) -> &[Cell; MAX_COLS] {
+    fn row_at(&self, r: usize) -> &[Cell] {
         if r < self.view {
             let cap = self.history.len();
             if cap == 0 {
-                return &self.cells[0];
+                return self.grid_row(0);
             }
             // `back` counts from the newest, so 1 is the row that just left the
             // screen. One expression for both phases of the ring: while it is
@@ -825,7 +1007,7 @@ impl Console {
             let back = (self.view - r).min(cap);
             return &self.history[(self.hist_next + cap - back) % cap];
         }
-        &self.cells[r - self.view]
+        self.grid_row(r - self.view)
     }
 
     /// Move the view. Positive is back into the history.
@@ -917,15 +1099,26 @@ impl Console {
             // and marking them would tick rows that say nothing.
             let row = self.row_at(r);
             *slot = want.len() <= self.cols
-                && want.iter().enumerate().all(|(c, g)| row[c].glyph() == *g);
+                && want.iter().enumerate().all(|(c, g)| cell_of(row, c).glyph() == *g);
         }
-        font::GLYPH_H * self.scale
+        self.cell_h()
     }
 
     /// Where the grid starts, so a caller drawing beside it can line up with
     /// a row rather than with the window.
+    ///
+    /// On *screen*: a composed console paints its own surface at (0, 0) and is
+    /// placed at `at`, so answering `(ox, oy)` there gave the gutter a grid at
+    /// the top of the screen -- every prompt tick sat 71 pixels above its
+    /// prompt from the day consoles became composed (phase 7), and
+    /// `render verify` could not see it, since both of its paths drew the same
+    /// wrong place.
     pub fn origin(&self) -> (u32, u32) {
-        (self.ox, self.oy)
+        if self.composed() {
+            self.at
+        } else {
+            (self.ox, self.oy)
+        }
     }
 
     pub fn cols(&self) -> usize {
@@ -954,6 +1147,116 @@ impl Console {
         }
         self.move_caret();
     }
+}
+
+/// Box drawing and block elements, drawn on the cell's own whole pixels rather
+/// than from the font.
+///
+/// A font's box-drawing glyph is an outline like any other: at a fractional
+/// pen it straddles two pixels, its ends overlap its neighbour's by a sliver,
+/// and a horizontal rule comes out as a row of beads -- the proof sheet showed
+/// exactly that. Terminals that care (kitty, Alacritty, WezTerm) draw these
+/// themselves for that reason. Answers false for anything it does not draw,
+/// which then falls through to the face.
+fn draw_box(fb: &Framebuffer, c: char, x: u32, y: u32, w: u32, h: u32, fg: Color, bg: Color) -> bool {
+    let cp = c as u32;
+    if w < 3 || h < 3 {
+        return false;
+    }
+    // Blocks first: whole and fractional fills, and the three shades.
+    let mix = |n: u32| {
+        let m = |a: u8, b: u8| ((a as u32 * n + b as u32 * (4 - n) + 2) / 4) as u8;
+        Color::new(m(fg.r, bg.r), m(fg.g, bg.g), m(fg.b, bg.b))
+    };
+    match cp {
+        0x2588 => { fb.rect(x, y, w, h, fg); return true; }
+        0x2580 => { fb.rect(x, y, w, h / 2, fg); return true; }
+        0x2584 => { fb.rect(x, y + h / 2, w, h - h / 2, fg); return true; }
+        0x258C => { fb.rect(x, y, w / 2, h, fg); return true; }
+        0x2590 => { fb.rect(x + w / 2, y, w - w / 2, h, fg); return true; }
+        0x2591 | 0x2592 | 0x2593 => { fb.rect(x, y, w, h, mix(cp - 0x2590)); return true; }
+        0x2581..=0x2587 => {
+            let part = (h * (cp - 0x2580) + 4) / 8;
+            fb.rect(x, y + h - part, w, part, fg);
+            return true;
+        }
+        0x2589..=0x258F => {
+            let part = (w * (0x2590 - cp) + 4) / 8;
+            fb.rect(x, y, part, h, fg);
+            return true;
+        }
+        _ => {}
+    }
+    // Lines: arms left, right, up, down, each 1 light or 2 heavy.
+    const L: u8 = 1;
+    const H: u8 = 2;
+    let arms: [u8; 4] = match cp {
+        0x2500 => [L, L, 0, 0], 0x2502 => [0, 0, L, L],
+        0x250C | 0x256D => [0, L, 0, L], 0x2510 | 0x256E => [L, 0, 0, L],
+        0x2514 | 0x2570 => [0, L, L, 0], 0x2518 | 0x256F => [L, 0, L, 0],
+        0x251C => [0, L, L, L], 0x2524 => [L, 0, L, L],
+        0x252C => [L, L, 0, L], 0x2534 => [L, L, L, 0], 0x253C => [L, L, L, L],
+        0x2574 => [L, 0, 0, 0], 0x2575 => [0, 0, L, 0], 0x2576 => [0, L, 0, 0], 0x2577 => [0, 0, 0, L],
+        0x2501 => [H, H, 0, 0], 0x2503 => [0, 0, H, H],
+        0x250F => [0, H, 0, H], 0x2513 => [H, 0, 0, H], 0x2517 => [0, H, H, 0], 0x251B => [H, 0, H, 0],
+        0x2523 => [0, H, H, H], 0x252B => [H, 0, H, H], 0x2533 => [H, H, 0, H], 0x253B => [H, H, H, 0],
+        0x254B => [H, H, H, H],
+        0x2578 => [H, 0, 0, 0], 0x2579 => [0, 0, H, 0], 0x257A => [0, H, 0, 0], 0x257B => [0, 0, 0, H],
+        _ => return draw_double(fb, cp, x, y, w, h, fg),
+    };
+    let light = ((h + 7) / 16).max(1);
+    let t = |a: u8| if a == H { light * 2 } else { light };
+    // The centre square every arm runs into, so joins have no notch.
+    let heavy = arms.iter().any(|&a| a == H);
+    let tc = if heavy { light * 2 } else { light };
+    let (cx, cy) = (x + (w - tc) / 2, y + (h - tc) / 2);
+    let [l, r, u, d] = arms;
+    if l != 0 { fb.rect(x, cy + (tc - t(l)) / 2, cx - x + tc, t(l), fg); }
+    if r != 0 { fb.rect(cx, cy + (tc - t(r)) / 2, x + w - cx, t(r), fg); }
+    if u != 0 { fb.rect(cx + (tc - t(u)) / 2, y, t(u), cy - y + tc, fg); }
+    if d != 0 { fb.rect(cx + (tc - t(d)) / 2, cy, t(d), y + h - cy, fg); }
+    true
+}
+
+/// The double lines and their four corners. Tees and crosses in double fall
+/// through to the face: getting their inner joins right is its own table, and
+/// nothing in this tree prints one.
+fn draw_double(fb: &Framebuffer, cp: u32, x: u32, y: u32, w: u32, h: u32, fg: Color) -> bool {
+    let t = ((h + 7) / 16).max(1);
+    let g = t; // the gap between the two lines
+    let (cx, cy) = (x + w / 2, y + h / 2);
+    // Two parallel lines either side of the centre: `a` is the outer (up or
+    // left) one and `b` the inner.
+    if w < 2 * t + g + 2 || h < 2 * t + g + 2 {
+        return false;
+    }
+    let ya = cy - (2 * t + g) / 2;
+    let yb = ya + t + g;
+    let xa = cx - (2 * t + g) / 2;
+    let xb = xa + t + g;
+    let (r, b) = (x + w, y + h);
+    match cp {
+        0x2550 => { fb.rect(x, ya, w, t, fg); fb.rect(x, yb, w, t, fg); }
+        0x2551 => { fb.rect(xa, y, t, h, fg); fb.rect(xb, y, t, h, fg); }
+        0x2554 => { // right and down
+            fb.rect(xa, ya, r - xa, t, fg); fb.rect(xb, yb, r - xb, t, fg);
+            fb.rect(xa, ya, t, b - ya, fg); fb.rect(xb, yb, t, b - yb, fg);
+        }
+        0x2557 => { // left and down
+            fb.rect(x, ya, xb + t - x, t, fg); fb.rect(x, yb, xa + t - x, t, fg);
+            fb.rect(xb, ya, t, b - ya, fg); fb.rect(xa, yb, t, b - yb, fg);
+        }
+        0x255A => { // right and up
+            fb.rect(xa, yb, r - xa, t, fg); fb.rect(xb, ya, r - xb, t, fg);
+            fb.rect(xa, y, t, yb + t - y, fg); fb.rect(xb, y, t, ya + t - y, fg);
+        }
+        0x255D => { // left and up
+            fb.rect(x, yb, xb + t - x, t, fg); fb.rect(x, ya, xa + t - x, t, fg);
+            fb.rect(xb, y, t, yb + t - y, fg); fb.rect(xa, y, t, ya + t - y, fg);
+        }
+        _ => return false,
+    }
+    true
 }
 
 impl fmt::Write for Console {
@@ -1006,8 +1309,11 @@ static CURRENT: Racy<usize> = Racy::new(EXEC);
 /// Install both consoles. Call once, after `ExitBootServices`.
 pub fn init(fb: Framebuffer, scale: u32, bg: Color) {
     let all = &mut *CONSOLES.lock_irq();
-    for slot in all.iter_mut() {
-        let mut console = Console::new(fb.clone(), scale, bg);
+    for (i, slot) in all.iter_mut().enumerate() {
+        // Each console's own static, taken once: `init` runs once, and the
+        // boot grid is never handed out again (a heap grid replaces it).
+        let grid: &'static mut [Cell] = unsafe { &mut (*core::ptr::addr_of_mut!(BOOT_GRIDS))[i] };
+        let mut console = Console::new(fb.clone(), scale, bg, grid);
         console.clear();
         *slot = Some(console);
     }
