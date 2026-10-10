@@ -644,7 +644,11 @@ fn emit(sc: u16, pressed: bool) {
 fn mouse(report: &[u8; 8], n: u32) {
     let buttons = report[0];
     let dx = report[1] as i8 as i32;
-    let dy = report[2] as i8 as i32;
+    // HID counts y downward, the way the screen does; PS/2 counts it upward
+    // and `apply` takes PS/2's convention. Passed through raw, the pointer
+    // went up when the mouse came toward you -- the trip's first finding
+    // once a USB mouse moved at all.
+    let dy = -(report[2] as i8 as i32);
     // The wheel byte is optional and its absence is not an error, so it is
     // taken from the length the transfer actually returned rather than
     // assumed. A three-byte report read as four scrolls on every movement.

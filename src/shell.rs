@@ -7230,7 +7230,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         None => kprintln!("  usage: mouse move <dx> [dy]"),
                         Some(dx) => {
                             let s = crate::dev::mouse::peek();
-                            crate::dev::mouse::apply(dx, dy, s.left, s.right, 0);
+                            crate::dev::mouse::apply_exact(dx, dy, s.left, s.right, 0);
                             let now = crate::dev::mouse::peek();
                             kprintln!("  moved {},{} -- pointer now at {},{}", dx, dy, now.x, now.y);
                         }

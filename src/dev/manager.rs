@@ -453,6 +453,11 @@ pub fn selftest() -> bool {
     claim("every category has its own name", seen.len() == Category::ALL.len());
     let ordered = Category::ALL.windows(2).all(|w| w[0] < w[1]);
     claim("categories are listed in their sort order", ordered);
+    use super::mouse::gain;
+    claim("a slow hand at 100% moves one pixel a count", gain(1, 100) == 256 && gain(-2, 100) == 256);
+    claim("a fast one is accelerated, and the gain only ever grows", (1..64).all(|c| gain(c + 1, 100) >= gain(c, 100)) && gain(20, 100) > 256);
+    claim("the acceleration is capped at three times", gain(1000, 100) == 768);
+    claim("the speed setting scales the whole curve", gain(1, 200) == 512 && gain(1, 50) == 128);
     let list = snapshot();
     claim("a snapshot has the keyboard in it", list.iter().any(|d| d.name == "Built-in keyboard"));
     let sorted = list.windows(2).all(|w| w[0].category <= w[1].category);

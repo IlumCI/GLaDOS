@@ -140,11 +140,23 @@ pub fn position() -> Option<(u32, u32)> {
 /// signs in a flags byte, HID sends plain signed bytes, and neither of those
 /// belongs in here.
 pub fn apply(dx: i32, dy: i32, left: bool, right: bool, wheel: i32) {
+    apply_with(dx, dy, left, right, wheel, true)
+}
+
+/// `apply` one count to one pixel, for `mouse move`: a script aiming at a
+/// caption button by its coordinates is not a hand, and accelerating it
+/// would land it somewhere else.
+pub fn apply_exact(dx: i32, dy: i32, left: bool, right: bool, wheel: i32) {
+    apply_with(dx, dy, left, right, wheel, false)
+}
+
+fn apply_with(dx: i32, dy: i32, left: bool, right: bool, wheel: i32, hand: bool) {
     let s = unsafe { &mut *STATE.get() };
     let (w, h) = unsafe { *BOUNDS.get() };
     if dx != 0 || dy != 0 {
-        s.x = (s.x + dx).clamp(0, w - 1);
-        s.y = (s.y - dy).clamp(0, h - 1);
+        let (mx, my) = if hand { ballistics(dx, dy) } else { (dx, dy) };
+        s.x = (s.x + mx).clamp(0, w - 1);
+        s.y = (s.y - my).clamp(0, h - 1);
         s.moved = true;
         // The same motion, kept unclamped for a reader that wants how far the
         // hand moved rather than where the pointer ended up. Accumulated here
@@ -173,6 +185,48 @@ pub fn apply(dx: i32, dy: i32, left: bool, right: bool, wheel: i32) {
     crate::linux::input::pointer(dx, dy, wheel, left, right, s.left, s.right);
     s.left = left;
     s.right = right;
+}
+
+/// Pointer speed, in per cent of a count per pixel. Settings: `desk pointer`.
+static SPEED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(100);
+/// What the last move left over below a whole pixel, in 1/256ths, so slow
+/// motion at a speed under 100% still arrives rather than rounding to none.
+static CARRY: Racy<(i32, i32)> = Racy::new((0, 0));
+
+pub fn speed() -> u32 {
+    SPEED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_speed(pct: u32) {
+    SPEED.store(pct.clamp(25, 400), core::sync::atomic::Ordering::Relaxed);
+}
+
+/// The gain on one report, in 1/256ths: the speed setting times an
+/// acceleration that leaves slow motion one-to-one and lets a flick cross
+/// the screen. A desk mouse at 1080p one-to-one needs most of the desk to
+/// cross the screen, which is the "slow" the trip reported; a flat gain
+/// large enough to fix that makes pointing at a caption button shaky.
+///
+/// Pure, so `diag mouse`-style claims need no hardware.
+pub fn gain(counts: i32, speed_pct: u32) -> i32 {
+    let c = counts.unsigned_abs().min(64) as i32;
+    // 1x at rest, rising one eighth per count past two, capped at 3x.
+    let accel = (256 + (c - 2).max(0) * 32).min(768);
+    accel * speed_pct as i32 / 100
+}
+
+fn ballistics(dx: i32, dy: i32) -> (i32, i32) {
+    let speed = speed();
+    let mag = dx.abs().max(dy.abs());
+    let g = gain(mag, speed);
+    let carry = unsafe { &mut *CARRY.get() };
+    let fx = dx * g + carry.0;
+    let fy = dy * g + carry.1;
+    // Toward zero, keeping the remainder with its sign, so motion back and
+    // forth does not drift.
+    let (mx, my) = (fx / 256, fy / 256);
+    *carry = (fx - mx * 256, fy - my * 256);
+    (mx, my)
 }
 
 /// Take the motion accumulated since the last call, and forget it.

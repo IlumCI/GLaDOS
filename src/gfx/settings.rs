@@ -43,6 +43,7 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ("blur", "on|off", "whether glass shows the blurred wallpaper"),
     ("tile", "on|off", "whether a new window tiles or floats"),
     ("quality", "<floor> <ceiling>", "what the governor may shed, 0 everything .. 4 no motion"),
+    ("pointer", "25..400", "how fast the pointer moves, in per cent; fast motion is accelerated"),
 ];
 
 /// A setting's value now, as `desk` prints it and the file stores it.
@@ -64,6 +65,7 @@ pub fn get(key: &str) -> Option<String> {
             format!("{} {}", f, c)
         }
         "tile" => String::from(if super::desk::tile_new() { "on" } else { "off" }),
+        "pointer" => format!("{}", crate::dev::mouse::speed()),
         _ => return None,
     })
 }
@@ -114,6 +116,7 @@ fn apply(key: &str, val: &str) -> Result<(), &'static str> {
             let c = num(it.next().unwrap_or(""), 0, 4)?;
             super::quality::set_range(f as u8, c as u8);
         }
+        "pointer" => crate::dev::mouse::set_speed(num(val, 25, 400)?),
         _ => return Err("no such setting"),
     }
     GENERATION.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -195,6 +198,7 @@ pub fn rows() -> Vec<(String, Vec<(String, String)>)> {
                 (String::from("wider"), format!("desk gaps {} {}", (gi + 2).min(64), (go + 5).min(128))),
             ],
         ),
+        (format!("Pointer speed  {}%", crate::dev::mouse::speed()), step("pointer", crate::dev::mouse::speed(), 25, 25, 400)),
         (format!("Corners  {}", round), step("round", round, 2, 0, 16)),
         (format!("Blur  {}", get("blur").unwrap_or_default()), pick("blur", &["on", "off"])),
         (format!("New windows  {}", if super::desk::tile_new() { "tile" } else { "float" }), pick("tile", &["on", "off"])),
