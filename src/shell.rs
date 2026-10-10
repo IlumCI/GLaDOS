@@ -4873,6 +4873,25 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 kprintln!("  a request is already pending");
             }
         }
+        "intent" => {
+            // How far plain language typed at the prompt may reach.
+            use crate::ai::intent::{self, Reach};
+            match rest.split_whitespace().collect::<alloc::vec::Vec<_>>().as_slice() {
+                [] => {
+                    let r = match intent::reach() {
+                        Reach::ReadOnly => "readonly -- tasks that would change things are described, not run",
+                        Reach::Ask => "ask -- tasks that would change things are offered, and run on y",
+                        Reach::Full => "full -- tasks run, mutating ones included",
+                    };
+                    kprintln!("  plain language: {}", r);
+                    kprintln!("  operator-only commands are never reachable this way, at any setting");
+                }
+                ["trust", "readonly"] => intent::set_reach(Reach::ReadOnly),
+                ["trust", "ask"] => intent::set_reach(Reach::Ask),
+                ["trust", "full"] => intent::set_reach(Reach::Full),
+                _ => kprintln!("  usage: intent [trust readonly|ask|full]"),
+            }
+        }
         "agent" => {
             // `agent [-n steps] [--trust full] goal words...` -- flags first,
             // the goal verbatim after them. Read-only by default: the grammar
@@ -4971,10 +4990,9 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     _ => break,
                 }
             }
-            if crate::ai::mind_busy() {
-                kprintln!("  the mind is busy -- wait for it to finish first");
-                return;
-            }
+            // No longer refused while the mind thinks: an episode runs in the
+            // agent context, with its own cache and holder, so the two do not
+            // share anything that could collide.
             if !crate::sysbox::is_ready() {
                 kprintln!("  no namespace to act on");
                 return;
@@ -8624,9 +8642,24 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             }
         }
         _ => {
-            // Not a command, so it is code. This is the point of the whole
-            // exercise: there is no boundary between using the machine and
-            // programming it.
+            // Not a command. Code if it parses, and language if it does not --
+            // `ai::intent` says why the parser decides and not a guess.
+            if let Some(d) = crate::ai::intent::answer(line) {
+                run_decision(d, boot, acpi, interp);
+                return;
+            }
+            if let crate::ai::intent::Class::Prose = crate::ai::intent::classify(line, |n| interp.has_var(n)) {
+                if let Some(v) = crate::ai::intent::near_miss(line) {
+                    console::set_color(YELLOW);
+                    kprintln!("  not a command -- did you mean '{}'?", v);
+                    console::set_color(WHITE);
+                    return;
+                }
+                run_decision(crate::ai::intent::decide(line), boot, acpi, interp);
+                return;
+            }
+            // Code. This is the point of the whole exercise: there is no
+            // boundary between using the machine and programming it.
             match aiksi::eval_line(interp, line) {
                 Ok(aiksi::Value::Nil) => {}
                 Ok(v) => {
@@ -8640,6 +8673,23 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     console::set_color(WHITE);
                 }
             }
+        }
+    }
+}
+
+/// Carry out what `ai::intent` decided about a line of language, saying so.
+fn run_decision(d: crate::ai::intent::Decision, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi::Interp) {
+    match d {
+        crate::ai::intent::Decision::Run(cmd, why) => {
+            console::set_color(LTGRAY);
+            kprintln!("  ({})", why);
+            console::set_color(WHITE);
+            execute(&cmd, boot, acpi, interp);
+        }
+        crate::ai::intent::Decision::Say(what) => {
+            console::set_color(YELLOW);
+            kprintln!("  {}", what);
+            console::set_color(WHITE);
         }
     }
 }

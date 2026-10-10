@@ -1354,6 +1354,13 @@ impl Default for Interp {
 }
 
 impl Interp {
+    /// Whether a variable by this name is visible from the current scope.
+    /// For the shell, to tell a lone word that means something from one that
+    /// does not.
+    pub fn has_var(&self, name: &str) -> bool {
+        self.scopes.iter().rev().any(|s| s.contains_key(name))
+    }
+
     pub fn new() -> Self {
         Self {
             scopes: alloc::vec![BTreeMap::new()],

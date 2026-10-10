@@ -14,6 +14,7 @@ pub mod constrain;
 pub mod context;
 pub mod ctx;
 pub mod sched;
+pub mod intent;
 pub mod initiative;
 pub mod learn;
 pub mod train;

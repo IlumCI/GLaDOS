@@ -668,6 +668,9 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // rather than off the ESP.
     gfx::splash::stage("loading the model");
     ai::init(boot.model, boot.tokenizer);
+    // How far plain language at the prompt may reach, as the operator last
+    // set it. After the namespace, which is where it is kept.
+    ai::intent::load();
 
     // **The router fits itself, because waiting to be asked is not a feature.**
     //
