@@ -4457,30 +4457,64 @@ fn taskbar(fb: &Framebuffer, d: &Desktop, sel: Option<usize>) {
 
 /// Where the taskbar's hover tip goes, if one is showing. One formula for the
 /// painter and the scene.
+/// The largest a taskbar thumbnail is drawn.
+const THUMB_W: u32 = 200;
+const THUMB_H: u32 = 140;
+
+/// A hovered window's thumbnail size, from its image: the window's own
+/// proportions inside `THUMB_W` x `THUMB_H`. None when it has never been
+/// drawn -- a window minimised before it was ever shown -- and the tip is
+/// its title alone.
+fn thumb_size(w: &Window) -> Option<(u32, u32)> {
+    let im = w.image.borrow();
+    let im = im.as_ref()?;
+    let (iw, ih) = (im.frame.w.max(1), im.frame.h.max(1));
+    let k = (THUMB_W as f32 / iw as f32).min(THUMB_H as f32 / ih as f32).min(1.0);
+    Some((((iw as f32 * k) as u32).max(1), ((ih as f32 * k) as u32).max(1)))
+}
+
+/// Where a hovered task button's preview stands: a pane of glass over the
+/// button, the window's title along its top and the window itself below --
+/// Windows 7's, because a bar of icons says what kind of window each is and
+/// not which, and the preview is how the two of a kind are told apart.
 fn tip_rect(fb: &Framebuffer, d: &Desktop) -> Option<Rect> {
     let Hover::Task(i) = d.hover else { return None };
     let (r, _, _) = task_layout(fb, d).into_iter().nth(i)?;
-    let title = d.windows.get(i).map(|w| w.title.as_str())?;
-    let tw = theme::text_w_of(title);
-    let box_w = tw + 12;
-    let box_h = theme::text_h() + 8;
+    let win = d.windows.get(i)?;
+    let tw = theme::text_w_of(&win.title);
+    let (pw, ph) = thumb_size(win).unwrap_or((0, 0));
+    let box_w = (tw + 20).max(pw + 20).min(fb.width().saturating_sub(4));
+    let box_h = theme::text_h() + 14 + if ph > 0 { ph + 8 } else { 0 };
     // Clamped to the screen rather than centred blindly: the last button on a
     // full bar sits against the clock, and a tip centred on it would hang off
     // the edge.
     let want = r.x + r.w / 2 - (box_w / 2).min(r.x + r.w / 2);
     let x = want.min(fb.width().saturating_sub(box_w + 2)).max(2);
-    let y = r.y.saturating_sub(box_h + 4);
+    let y = r.y.saturating_sub(box_h + 8);
     Some(Rect::new(x, y, box_w, box_h))
 }
 
 fn taskbar_tip(fb: &Framebuffer, d: &Desktop) {
     let Hover::Task(i) = d.hover else { return };
     let Some(tr) = tip_rect(fb, d) else { return };
-    let Some(title) = d.windows.get(i).map(|w| w.title.as_str()) else { return };
+    let Some(win) = d.windows.get(i) else { return };
     fb.shade_rect(tr.x + 2, tr.y + 2, tr.w, tr.h, 96);
-    fb.vgrad(tr.x, tr.y, tr.w, tr.h, &theme::TITLE_OFF);
-    theme::outline(fb, tr, theme::EDGE);
-    theme::text_over(fb, tr.x + 6, tr.y + 4, title, theme::TEXT);
+    super::glass::fill(fb, tr.x as i32, tr.y as i32, tr.w, tr.h, 6, theme::caption_glass(true));
+    let shown = theme::fit(&win.title, tr.w.saturating_sub(20));
+    theme::text_over(fb, tr.x + 10, tr.y + 6, &shown, theme::TITLE_TEXT);
+    let Some((pw, ph)) = thumb_size(win) else { return };
+    let img = {
+        let slot = win.image.borrow();
+        match slot.as_ref() {
+            Some(im) => premultiplied(win, im),
+            None => return,
+        }
+    };
+    let mut mips = super::scale::Mips::new(img);
+    let level = mips.level_for(pw, ph).clone();
+    let x = tr.x + (tr.w - pw) / 2;
+    let y = tr.y + theme::text_h() + 12;
+    super::scale::draw(fb, &level, x as i32, y as i32, pw, ph, 255);
 }
 
 /// The Move/Size hint, when the keyboard is moving or sizing a window.
@@ -5030,6 +5064,8 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
         (d.mode, d.hover, d.query.as_str(), focus).hash(&mut st);
         if let Hover::Task(t) = d.hover {
             d.windows.get(t).map(|w| w.title.as_str()).hash(&mut st);
+            // The preview is live: it follows the window's image.
+            d.windows.get(t).and_then(|w| w.image.borrow().as_ref().map(|im| (im.key, im.frame, im.parts.clone()))).hash(&mut st);
         }
         out.push(Layer { id: LayerId::Overlay, bounds: b, stamp: core::hash::Hasher::finish(&st), parts: Vec::new() });
     }

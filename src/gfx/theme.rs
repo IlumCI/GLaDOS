@@ -816,7 +816,7 @@ pub fn caption_tint() -> &'static str {
 /// The glass a caption wears. The focused window's carries the tint; the
 /// rest are a neutral glass, darker, so focus reads at a glance -- the cue a
 /// title bar's colour has always been.
-fn caption_glass(active: bool) -> super::glass::Glass {
+pub fn caption_glass(active: bool) -> super::glass::Glass {
     use super::glass::Glass;
     // The tint takes a third of the colour here where Vista's default took
     // eight per cent. Measured on the night wallpaper: at Vista's balance all
