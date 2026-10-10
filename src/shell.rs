@@ -4882,6 +4882,19 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 kprintln!("  {}", crate::ai::agent::request_abort());
                 return;
             }
+            if rest.trim() == "queue" {
+                let q = crate::ai::agent::queued();
+                if let Some(what) = crate::ai::agent::doing() {
+                    kprintln!("  now: {}", what);
+                }
+                if q.is_empty() {
+                    kprintln!("  nothing waiting");
+                }
+                for (i, line) in q.iter().enumerate() {
+                    kprintln!("  {}. {}", i + 1, line);
+                }
+                return;
+            }
             // What the machine watched its own episodes do. Validity and
             // progress, and never whether the goal was met, because nothing
             // here can observe that.

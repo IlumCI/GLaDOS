@@ -234,6 +234,8 @@ fn widen_if_near_the_wall() {
 /// Returns the position reached, so a caller can tell an opening turn from a
 /// continuing one without asking twice.
 pub fn turn(message: &str, opts: &super::GenOpts) -> usize {
+    // The operator is waiting on this, so anything lower parks until it ends.
+    let _fg = super::sched::foreground();
     let opening = turns() == 0 || super::with_engine(|e| e.pos).unwrap_or(0) == 0;
     if !opening {
         widen_if_near_the_wall();

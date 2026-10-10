@@ -13,6 +13,7 @@ pub mod clade;
 pub mod constrain;
 pub mod context;
 pub mod ctx;
+pub mod sched;
 pub mod initiative;
 pub mod learn;
 pub mod train;
@@ -1984,13 +1985,18 @@ pub fn agent_busy() -> bool {
 /// whichever is asked second refuses, because both would fight over the
 /// engine otherwise.
 pub fn agent_run(goal: &str, trust: harness::Trust, max_steps: usize) {
+    let ahead = agent::queued().len() + agent::doing().is_some() as usize;
     if agent::queue_episode(goal, trust, max_steps) {
         console::set_color(LTGREEN);
-        kprintln!("  queued -- the shell stays yours; 'agent stop' cancels");
+        if ahead == 0 {
+            kprintln!("  queued -- the shell stays yours; 'agent stop' cancels");
+        } else {
+            kprintln!("  queued behind {} job(s) -- 'agent queue' lists them", ahead);
+        }
         console::set_color(LTGRAY);
     } else {
         console::set_color(YELLOW);
-        kprintln!("  an episode is already pending or running");
+        kprintln!("  the queue is full ({} waiting) -- 'agent queue' lists them", agent::QUEUE_MAX);
         console::set_color(LTGRAY);
     }
 }

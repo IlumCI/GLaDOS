@@ -313,6 +313,10 @@ pub fn selftest() -> bool {
         claim("after the trial puts its adapter back, chat is unchanged", after == chat);
     }
 
+    for (what, good) in super::sched::checks() {
+        rows.push((String::from(what), good));
+    }
+
     let mut ok = true;
     for (what, good) in &rows {
         console::set_color(if *good { LTGREEN } else { LTRED });

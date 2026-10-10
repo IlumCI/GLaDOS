@@ -2065,6 +2065,10 @@ impl Model {
 
     /// One decode step: token at position `pos` in, logits out.
     pub fn forward(&self, s: &mut State, token: usize, pos: usize) {
+        // A token boundary: where a lower-priority context waits for a higher
+        // one's foreground turn. Every decode loop passes through here, which
+        // is why the check lives here rather than in each loop.
+        super::sched::boundary();
         if self.cfg.hybrid() {
             self.forward_hybrid(s, token, pos)
         } else {
