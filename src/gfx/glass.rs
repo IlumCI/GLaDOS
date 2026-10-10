@@ -147,6 +147,19 @@ fn noise(x: u32, y: u32) -> i32 {
     (v % 7) as i32 - 3
 }
 
+/// Whether glass shows the blurred wallpaper (Settings; the quality
+/// governor's first rung turns it off). Off, a pane is its tint over a flat
+/// wall: the colourisation formula with nothing behind it.
+static BLUR: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+pub fn set_blur(on: bool) {
+    BLUR.store(on, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn blur_on() -> bool {
+    BLUR.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Paint a pane of glass over `(x, y, w, h)` with corners of `radius`.
 ///
 /// Where there is no backdrop yet -- before the wallpaper has been painted, or
@@ -161,7 +174,10 @@ pub fn fill(fb: &Framebuffer, x: i32, y: i32, w: u32, h: u32, radius: u32, g: Gl
     let (ri, bi) = if bgr { (2, 0) } else { (0, 2) };
     let tint = [g.tint.r as i32, g.tint.g as i32, g.tint.b as i32];
     let glow = [g.glow.r as i32, g.glow.g as i32, g.glow.b as i32];
-    let back = BACKDROP.lock_irq();
+    let guard = BACKDROP.lock_irq();
+    // Blur off (Settings, or the quality governor's first rung) is the
+    // formula with a flat wall behind it, which is what no backdrop gives.
+    let back = if blur_on() { guard.as_ref() } else { None };
     let r = radius.min(w / 2).min(h / 2);
     let mut row: Vec<u32> = alloc::vec![0; w as usize];
     let mut alpha: Vec<u8> = alloc::vec![0; w as usize];
@@ -175,7 +191,7 @@ pub fn fill(fb: &Framebuffer, x: i32, y: i32, w: u32, h: u32, radius: u32, g: Gl
         let gloss = if t < g.gloss_end { (g.gloss as f32 * (1.0 - t / g.gloss_end)) as i32 } else { 0 };
         for rx in 0..w {
             let sx = x + rx as i32;
-            let b = match back.as_ref() {
+            let b = match back {
                 Some(bd) if sx >= 0 && (sx as u32) < bd.w && (sy as u32) < bd.h => bd.px[(sy as u32 * bd.w + sx as u32) as usize],
                 _ => {
                     let c = tint;

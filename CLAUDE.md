@@ -5060,6 +5060,16 @@ the order a frame happens:
   leave. 2.5D -- each window is a quad whose near edge is taller -- and drawn
   row by row across every core. A stack that arrives between a frame's scene
   and its paint waits for the next frame (`FlipState::live`).
+- **Settings are one verb and one file** (`gfx::settings`, phase 16): `desk`
+  lists them, `desk <key> <value>` sets one -- scale, motion, glass, ring,
+  dim, gaps, round, blur, tile -- and writes all of them to `/etc/desk`,
+  read back when the desktop starts (durable by snapshot). The Settings
+  window's Desktop page (`win open set:desk`, Start > Settings) is that verb
+  with buttons. Every applied setting bumps `settings::generation`, which is
+  in every window's stamp: a setting is something every painter reads, and
+  the first one missed from the key (blur) left every window image stale.
+  `win anim` is deliberately *not* persisted, so a test slowing motion down
+  to photograph it does not write that into the machine.
 - **A program's pixels are kept** (`Window.app_surface`) and redrawn only when
   its `DeskApp::stamp`, focus, size or its own input changes. A program with
   no stamp is redrawn every frame, which is correct and costs time. A program

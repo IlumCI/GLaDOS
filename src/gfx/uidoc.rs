@@ -249,6 +249,20 @@ pub fn render(p: &Panel) -> String {
                 out.push_str(label);
                 out.push('\n');
             }
+            Widget::Choices { name, options, .. } => {
+                // The row, then one `choice` line per button, folding back
+                // into it on the way in as `item` lines fold into a list.
+                out.push_str("choices\t");
+                out.push_str(name);
+                out.push('\n');
+                for (label, action) in options {
+                    out.push_str("choice\t");
+                    out.push_str(&render_action(action));
+                    out.push('\t');
+                    out.push_str(label);
+                    out.push('\n');
+                }
+            }
         }
     }
     out
@@ -284,10 +298,10 @@ pub fn parse(text: &str, origin: Origin) -> Result<Panel, ParseError> {
         // Arity is checked once, here, so every arm below can index without
         // apologising for it.
         let want = match verb {
-            "panel" | "title" | "label" | "heading" | "note" => 1,
+            "panel" | "title" | "label" | "heading" | "note" | "choices" => 1,
             "sep" => 0,
             "status" => 3,
-            "item" | "button" => 2,
+            "item" | "button" | "choice" => 2,
             "field" => 3,
             _ => return Err(ParseError::at(line, "unknown verb")),
         };
@@ -361,6 +375,19 @@ pub fn parse(text: &str, origin: Origin) -> Result<Panel, ParseError> {
                 action: parse_action(line, ops[0], origin)?,
                 label: ops[1].to_string(),
             }),
+            "choices" => widgets.push(Widget::Choices { name: ops[0].to_string(), options: Vec::new(), sel: 0 }),
+            "choice" => {
+                let action = parse_action(line, ops[0], origin)?;
+                match widgets.last_mut() {
+                    Some(Widget::Choices { options, .. }) => {
+                        if options.len() >= MAX_ITEMS {
+                            return Err(ParseError::at(line, "too many choices to draw"));
+                        }
+                        options.push((ops[1].to_string(), action));
+                    }
+                    _ => return Err(ParseError::at(line, "a choice with no choices line before it")),
+                }
+            }
             _ => unreachable!("arity table and this match list the same verbs"),
         }
     }
@@ -394,6 +421,7 @@ fn fixture_for(w: &Widget) -> &'static str {
         Widget::List { .. } => "item\trun app done 0\tBuy milk\nitem\trun app done 1\tCall\n",
         Widget::Field { .. } => "field\tnew\tapply app add\t\n",
         Widget::Button { .. } => "button\trun app add\tAdd\n",
+        Widget::Choices { .. } => "choices\tSize\nchoice\trun app less\tless\nchoice\trun app more\tmore\n",
     }
 }
 
@@ -414,6 +442,7 @@ pub fn selftest() -> bool {
             submit: Action::None,
         },
         Widget::Button { label: String::new(), action: Action::None },
+        Widget::Choices { name: String::new(), options: Vec::new(), sel: 0 },
     ];
     let mut doc = String::from("panel\t1\ntitle\tEverything\n");
     for w in &all {

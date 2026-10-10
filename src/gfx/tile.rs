@@ -44,6 +44,25 @@ pub struct Tree {
 pub const GAPS_IN: u32 = 5;
 pub const GAPS_OUT: u32 = 20;
 
+/// The gaps in force, logical (Settings), before the scale.
+static GAPS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(((GAPS_IN as u64) << 32) | GAPS_OUT as u64);
+
+pub fn set_gaps(inner: u32, outer: u32) {
+    GAPS.store(((inner.min(64) as u64) << 32) | outer.min(128) as u64, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// `(inner, outer)`, logical.
+pub fn gaps_logical() -> (u32, u32) {
+    let g = GAPS.load(core::sync::atomic::Ordering::Relaxed);
+    ((g >> 32) as u32, g as u32)
+}
+
+/// `(inner, outer)` in pixels, at the interface's scale.
+pub fn gaps() -> (u32, u32) {
+    let (i, o) = gaps_logical();
+    (super::theme::px(i), super::theme::px(o))
+}
+
 impl Tree {
     pub const fn new() -> Tree {
         Tree { root: None }
@@ -143,10 +162,14 @@ impl Tree {
     /// and `GAPS_IN` either side of every split, so two neighbours stand
     /// twice that apart -- Hyprland's arithmetic.
     pub fn layout(&self, area: Rect) -> Vec<(u64, Rect)> {
+        let (gin, gout) = gaps();
+        self.layout_with(area, gin, gout)
+    }
+
+    /// `layout` with the gaps given rather than read: pure, for the suite.
+    pub fn layout_with(&self, area: Rect, gin: u32, gout: u32) -> Vec<(u64, Rect)> {
         let mut out = Vec::new();
         let Some(r) = &self.root else { return out };
-        // Logical gaps, at the interface's scale.
-        let (gin, gout) = (super::theme::px(GAPS_IN), super::theme::px(GAPS_OUT));
         let inner = Rect::new(
             area.x + gout,
             area.y + gout,
@@ -272,11 +295,11 @@ pub fn selftest() -> bool {
     let inside = |r: &Rect| r.x >= inner.x && r.y >= inner.y && r.x + r.w <= inner.x + inner.w && r.y + r.h <= inner.y + inner.h;
 
     let mut t = Tree::new();
-    claim("an empty tree lays out nothing", t.layout(area).is_empty());
+    claim("an empty tree lays out nothing", t.layout_with(area, GAPS_IN, GAPS_OUT).is_empty());
     t.insert(1, None);
-    claim("one window fills the area inside the outer gaps", t.layout(area) == alloc::vec![(1, inner)]);
+    claim("one window fills the area inside the outer gaps", t.layout_with(area, GAPS_IN, GAPS_OUT) == alloc::vec![(1, inner)]);
     t.insert(2, Some(1));
-    let l = t.layout(area);
+    let l = t.layout_with(area, GAPS_IN, GAPS_OUT);
     claim(
         "a second splits the first along its longer side",
         l.len() == 2 && l[0].1.y == l[1].1.y && l[0].1.h == inner.h && l[1].1.x > l[0].1.x,
@@ -284,7 +307,7 @@ pub fn selftest() -> bool {
     claim("two neighbours stand twice the inner gap apart", l[1].1.x - (l[0].1.x + l[0].1.w) == 2 * GAPS_IN);
     claim("and the two reach both edges", l[0].1.x == inner.x && l[1].1.x + l[1].1.w == inner.x + inner.w);
     t.insert(3, Some(2));
-    let l = t.layout(area);
+    let l = t.layout_with(area, GAPS_IN, GAPS_OUT);
     let r2 = l.iter().find(|(s, _)| *s == 2).unwrap().1;
     let r3 = l.iter().find(|(s, _)| *s == 3).unwrap().1;
     claim("a third halves the tall slot top to bottom", r2.x == r3.x && r3.y > r2.y && r2.w == r3.w);
@@ -294,7 +317,7 @@ pub fn selftest() -> bool {
     let mut tiles_exactly = true;
     for n in 1..=9u64 {
         t.insert(n, Some((n * 7) % n.max(1)));
-        let l = t.layout(area);
+        let l = t.layout_with(area, GAPS_IN, GAPS_OUT);
         tiles_exactly &= l.len() == n as usize && l.iter().all(|(_, r)| inside(r) && r.w > 0 && r.h > 0);
         for (i, (_, a)) in l.iter().enumerate() {
             for (_, b) in l.iter().skip(i + 1) {
@@ -315,28 +338,28 @@ pub fn selftest() -> bool {
         let mut t = Tree::new();
         t.insert(1, None);
         t.insert(2, Some(1));
-        t.layout(area)
+        t.layout_with(area, GAPS_IN, GAPS_OUT)
     };
     let mut t = Tree::new();
     t.insert(1, None);
     t.insert(2, Some(1));
     t.insert(3, Some(2));
     t.remove(3);
-    claim("closing a window gives its half back exactly", t.layout(area) == before);
+    claim("closing a window gives its half back exactly", t.layout_with(area, GAPS_IN, GAPS_OUT) == before);
     t.remove(1);
-    claim("and the last one left fills the area again", t.layout(area) == alloc::vec![(2, inner)]);
+    claim("and the last one left fills the area again", t.layout_with(area, GAPS_IN, GAPS_OUT) == alloc::vec![(2, inner)]);
     t.remove(2);
     claim("removing everything empties the tree", t.is_empty());
 
     let mut t = Tree::new();
     t.insert(1, None);
     t.insert(2, Some(1));
-    let l = t.layout(area);
+    let l = t.layout_with(area, GAPS_IN, GAPS_OUT);
     t.swap(1, 2);
-    let s = t.layout(area);
+    let s = t.layout_with(area, GAPS_IN, GAPS_OUT);
     claim("a swap exchanges two windows' places", s[0] == (2, l[0].1) && s[1] == (1, l[1].1));
     t.toggle(1, area);
-    let v = t.layout(area);
+    let v = t.layout_with(area, GAPS_IN, GAPS_OUT);
     claim("a pinned split turns the other way", v[0].1.x == v[1].1.x && v[0].1.w == inner.w);
     claim("inserting a window twice is a no-op", {
         let mut u = t.clone();

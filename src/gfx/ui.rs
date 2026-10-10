@@ -167,6 +167,24 @@ pub enum Widget {
     /// settings without either panel needing its own key handling.
     Field { name: String, text: String, cursor: usize, submit: Action },
     Button { label: String, action: Action },
+    /// A setting and its choices on one line: a name with its value, and a
+    /// small button per choice. Left and Right pick, Enter and a press run
+    /// the choice. One widget rather than a button per row, because a page
+    /// of settings as full-width buttons is three screens of buttons.
+    Choices { name: String, options: Vec<(String, Action)>, sel: usize },
+}
+
+/// Where each of a `Choices` row's buttons is: right-aligned, in order.
+fn choice_rects(r: Rect, options: &[(String, Action)]) -> Vec<Rect> {
+    let widths: Vec<u32> = options.iter().map(|(l, _)| theme::text_w_of(l) + PAD * 2).collect();
+    let total: u32 = widths.iter().sum::<u32>() + GAP * widths.len().saturating_sub(1) as u32;
+    let mut x = (r.x + r.w).saturating_sub(total);
+    let mut out = Vec::new();
+    for w in widths {
+        out.push(Rect::new(x, r.y, w, r.h.saturating_sub(GAP)));
+        x += w + GAP;
+    }
+    out
 }
 
 impl Widget {
@@ -180,11 +198,12 @@ impl Widget {
             Widget::List { items, .. } => items.len() as u32 * row_h() + 8,
             Widget::Field { .. } => text_h() + 14,
             Widget::Button { .. } => btn_h(),
+            Widget::Choices { .. } => btn_h(),
         }
     }
 
     fn focusable(&self) -> bool {
-        matches!(self, Widget::List { .. } | Widget::Field { .. } | Widget::Button { .. })
+        matches!(self, Widget::List { .. } | Widget::Field { .. } | Widget::Button { .. } | Widget::Choices { .. })
     }
 
     /// A one-line description for the serial transcript.
@@ -203,6 +222,7 @@ impl Widget {
             }
             Widget::Field { text, cursor, .. } => (mark, text.as_str(), *cursor),
             Widget::Button { label, .. } => (mark, label.as_str(), 0),
+            Widget::Choices { name, sel, .. } => (mark, name.as_str(), *sel),
         }
     }
 }
@@ -271,7 +291,7 @@ impl Panel {
                 }
                 a => Step::Do(a.clone()),
             },
-            Some(Widget::List { items, sel }) => match items.get(*sel) {
+            Some(Widget::List { items, sel }) | Some(Widget::Choices { options: items, sel, .. }) => match items.get(*sel) {
                 Some((_, Action::Close)) => Step::Close,
                 Some((_, a)) => Step::Do(a.clone()),
                 None => Step::Idle,
@@ -334,8 +354,17 @@ impl Panel {
         }
     }
 
-    /// Text editing inside a focused `Field`. Anything else leaves it alone.
+    /// Text editing inside a focused `Field`, and picking in a `Choices`.
+    /// Anything else leaves it alone.
     fn edit(&mut self, k: u8) -> Step {
+        if let Some(Widget::Choices { options, sel, .. }) = self.widgets.get_mut(self.focus) {
+            match k {
+                kbd::KEY_LEFT if *sel > 0 => *sel -= 1,
+                kbd::KEY_RIGHT if *sel + 1 < options.len() => *sel += 1,
+                _ => return Step::Idle,
+            }
+            return Step::Redraw;
+        }
         let Some(Widget::Field { text, cursor, .. }) = self.widgets.get_mut(self.focus) else {
             // Left and Right still have to do something sensible elsewhere:
             // in a list they mean nothing, so they mean nothing here.
@@ -438,6 +467,17 @@ impl Panel {
         self.focus = i;
         match &mut self.widgets[i] {
             Widget::Button { .. } => self.activate(),
+            Widget::Choices { options, sel, .. } => {
+                match choice_rects(r, options).iter().position(|b| {
+                    px >= b.x as i32 && px < (b.x + b.w) as i32 && py >= b.y as i32 && py < (b.y + b.h) as i32
+                }) {
+                    Some(j) => {
+                        *sel = j;
+                        self.activate()
+                    }
+                    None => Step::Redraw,
+                }
+            }
             Widget::List { items, sel } => {
                 let inner = r.shrink(2);
                 let row = (py - inner.y as i32) / row_h() as i32;
@@ -601,6 +641,15 @@ impl Panel {
                     let bw = (theme::text_w_of(label) + PAD * 4).min(w);
                     theme::button(fb, Rect::new(x, y, bw, h - GAP), label, focused, false);
                 }
+                Widget::Choices { name, options, sel } => {
+                    let ty = y + (h.saturating_sub(GAP + text_h())) / 2;
+                    let rects = choice_rects(r, options);
+                    let room = rects.first().map_or(w, |b| b.x.saturating_sub(x + GAP));
+                    theme::text(fb, x, ty, &theme::fit(name, room), theme::TEXT, theme::FACE);
+                    for (j, (b, (label, _))) in rects.iter().zip(options.iter()).enumerate() {
+                        theme::button(fb, *b, label, focused && j == *sel, false);
+                    }
+                }
             }
         }
     }
@@ -730,6 +779,9 @@ impl Panel {
                 // A field wants room to type in, not just room for its caption.
                 Widget::Field { name, .. } => name.len() + 28,
                 Widget::Button { label, .. } => label.len() + 4,
+                Widget::Choices { name, options, .. } => {
+                    name.len() + 2 + options.iter().map(|o| o.0.len() + 3).sum::<usize>()
+                }
                 Widget::Heading(t) => t.len(),
                 // Both columns, so a long value widens the window instead of
                 // being clipped by it.
@@ -772,7 +824,9 @@ pub fn panel_named(name: &str) -> Option<Panel> {
         "attention" | "window" => Some(attention_panel()),
         "diag" | "diagnostics" => Some(diagnostics_panel()),
         "files" => Some(file_browser("/")),
-        "settings" | "network" => Some(settings("net")),
+        "network" => Some(settings("net")),
+        // The Desktop page: the one an operator means by Settings.
+        "settings" | "desktop" => Some(settings("desk")),
         // The settings pages by name, so the shell can open any of them
         // directly. `win open wifi` is the one that matters: a page whose
         // whole job is explaining why something does not work is useless if
@@ -786,6 +840,10 @@ pub fn panel_named(name: &str) -> Option<Panel> {
         // `win open app:todo`. Guarded, so it goes before the bare arm it
         // would otherwise sit behind and never be reached from.
         n if n.starts_with("app:") => crate::app::panel(&n[4..]).map(|(_, p)| p),
+        // A route (`set:desk`, `files:/ai`) is a name too: the shell opens
+        // one as a routed window, which rebuilds itself when a command it
+        // ran changes what it shows.
+        route if route.contains(':') => panel_for_route(route).map(|(_, p)| p),
         _ => None,
     }
 }
@@ -1274,6 +1332,7 @@ pub fn settings(page: &str) -> Panel {
             (String::from("System"), Action::Browse(String::from("set:sys"))),
             (String::from("Power"), Action::Browse(String::from("set:power"))),
             (String::from("Updates"), Action::Browse(String::from("set:updates"))),
+            (String::from("Desktop"), Action::Browse(String::from("set:desk"))),
             (String::from("Programs"), Action::Browse(String::from("programs:"))),
         ],
         sel,
@@ -1288,6 +1347,23 @@ pub fn settings(page: &str) -> Panel {
         // beside System so that no existing index moves: the two lists agree
         // only because somebody keeps them agreeing.
         "updates" => (5usize, updates_rows()),
+        // Six, after Updates and before Programs, which is a link rather than
+        // a page. Each row is a setting and its choices; every choice runs
+        // `desk <key> <value>`, so the page is the verb with buttons on.
+        "desk" => (
+            6usize,
+            {
+                let mut v = alloc::vec![Widget::Heading(String::from("Desktop"))];
+                for (name, options) in crate::gfx::settings::rows() {
+                    v.push(Widget::Choices {
+                        name,
+                        options: options.into_iter().map(|(l, c)| (l, Action::Run(c))).collect(),
+                        sel: 0,
+                    });
+                }
+                v
+            },
+        ),
         "model" => (
             2usize,
             alloc::vec![

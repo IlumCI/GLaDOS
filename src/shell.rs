@@ -144,7 +144,7 @@ fn find_core(want: &str) -> Option<[u8; 32]> {
 }
 
 const KNOWN_COMMANDS: &[&str] = &[
-    "term", "todo", "paint", "write", "mines", "oracle", "enternet", "net", "dhcp", "mem",
+    "term", "desk", "todo", "paint", "write", "mines", "oracle", "enternet", "net", "dhcp", "mem",
     "mine", "uptime", "tasks", "status", "help", "app", "author", "video", "serial", "log", "snap",
     "update", "repair", "gpu", "abstract", "study", "work", "redqueen", "grammar",
     "forest",
@@ -6354,6 +6354,25 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
             }
         }
+        // The desktop's settings, the verb behind the Settings window's
+        // Desktop page: bare lists them, `desk <key> <value>` sets one and
+        // writes them all to /etc/desk.
+        "desk" => {
+            let rest = rest.trim();
+            match rest.split_once(' ') {
+                None if rest.is_empty() => {
+                    for (k, takes, what) in crate::gfx::settings::KEYS {
+                        let v = crate::gfx::settings::get(k).unwrap_or_default();
+                        kprintln!("  {:<7} {:<10} {:<18} {}", k, v, takes, what);
+                    }
+                }
+                None => kprintln!("  usage: desk [<key> <value>] -- bare lists them"),
+                Some((k, v)) => match crate::gfx::settings::set(k, v.trim()) {
+                    Ok(()) => kprintln!("  {} {}", k, crate::gfx::settings::get(k).unwrap_or_default()),
+                    Err(e) => kprintln!("  {}: {}", k, e),
+                },
+            }
+        }
         "mind" if rest.trim() == "open" => {
             // The workspace. One command because the arrangement is the point:
             // a machine reporting on itself in four places at once reads as a
@@ -6561,8 +6580,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     let want = it.next().unwrap_or("");
                     if want.is_empty() {
                         kprintln!("  caption glass: {} (of {})", crate::gfx::theme::caption_tint(), crate::gfx::theme::TINTS.join(", "));
-                    } else if crate::gfx::theme::set_caption_tint(want) {
-                        crate::gfx::render::damage_all();
+                    } else if crate::gfx::settings::set("glass", want).is_ok() {
                         kprintln!("  caption glass: {}", want);
                     } else {
                         kprintln!("  no tint '{}' -- {}", want, crate::gfx::theme::TINTS.join(", "));
@@ -6572,10 +6590,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // Windows' choice for this panel's density.
                 "scale" => {
                     match it.next().and_then(|t| t.parse::<u32>().ok()) {
-                        Some(p) => {
-                            crate::gfx::desk::set_scale(p * 10);
-                            kprintln!("  interface at {}%", crate::gfx::theme::scale() / 10);
-                        }
+                        Some(p) => match crate::gfx::settings::set("scale", &alloc::format!("{}", p)) {
+                            Ok(()) => kprintln!("  interface at {}%", crate::gfx::theme::scale() / 10),
+                            Err(e) => kprintln!("  {} -- 75 to 250", e),
+                        },
                         None => kprintln!("  interface at {}% -- win scale <percent>, 75 to 250", crate::gfx::theme::scale() / 10),
                     }
                 }
@@ -6585,6 +6603,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // whose screenshot takes seconds -- and 0 for none at all.
                 "anim" => {
                     match it.next().and_then(|t| t.parse::<u32>().ok()) {
+                        // Not through `settings`: a test slowing motion down to
+                        // photograph it must not write that into /etc/desk.
                         Some(p) => {
                             crate::gfx::anim::set_speed(p);
                             kprintln!("  motion at {}% of its configured duration", crate::gfx::anim::speed());

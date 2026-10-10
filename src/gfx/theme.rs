@@ -249,7 +249,18 @@ pub fn menu_gutter_w() -> u32 {
 /// bottom corners stay square: the bottom edge is something you drag, and a
 /// rounded one reads as a control that has come loose from the frame.
 pub fn win_round() -> u32 {
-    px(8)
+    px(ROUND.load(core::sync::atomic::Ordering::Relaxed))
+}
+
+/// How round a window's head is, logical (Settings): 8 by default, 0 square.
+static ROUND: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(8);
+
+pub fn set_round(logical: u32) {
+    ROUND.store(logical.min(16), core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn round_logical() -> u32 {
+    ROUND.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 // A window's shadow is `gfx::shadow` now, set in `desk::win_shadow`. It was a

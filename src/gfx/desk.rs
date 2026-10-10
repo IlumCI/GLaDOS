@@ -593,7 +593,7 @@ const ICONS: [(&str, &str); 10] = [
     ("Write", "write"),
     ("Mines", "mines"),
     ("Oracle", "oracle"),
-    ("Settings", "win open settings"),
+    ("Settings", "win open set:desk"),
 ];
 
 /// The Start menu, bottom of the bar upward -- the 98 half of the ancestry.
@@ -621,7 +621,7 @@ const START_ITEMS: [(&str, &str); 13] = [
     ("Write", "write"),
     ("Mines", "mines"),
     ("Oracle", "oracle"),
-    ("Settings", "win open settings"),
+    ("Settings", "win open set:desk"),
     ("Reboot", "reboot"),
     ("Shut down", "shutdown"),
 ];
@@ -930,6 +930,11 @@ pub fn init() {
     // mid-build, found the cache still empty and built a second copy at the
     // same time -- two `&mut` into one `Racy` from two tasks, and half a
     // second of frame anyway. Measured: two rebuilds, a 771 ms first frame.
+    // The operator's settings, before anything is sized from them.
+    let kept = super::settings::load();
+    if kept > 0 {
+        crate::serial_println!("[desk] {} setting(s) from /etc/desk", kept);
+    }
     if let Some(fb) = super::primary() {
         wallpaper_cached(&fb.clipped(0, 0, 0, 0));
     }
@@ -990,7 +995,7 @@ fn make_terminal(screen: Rect) -> Window {
         image: Default::default(),
         arrive: None,
         shown: Default::default(),
-        tiled: true,
+        tiled: tile_new(),
         slide: None,
         title: String::from("GLaDOS Terminal"),
         icon: ICO_TERM,
@@ -1226,7 +1231,7 @@ pub fn open(title: &str, panel: Panel) {
         image: Default::default(),
         arrive: None,
         shown: Default::default(),
-        tiled: true,
+        tiled: tile_new(),
         slide: None,
             title: String::from(title),
             // `open` is reached through `win open <name>` with the panel's
@@ -1296,7 +1301,7 @@ pub fn open_app(title: &str, icon: usize, app: Box<dyn DeskApp>, w: u32, h: u32)
         image: Default::default(),
         arrive: None,
         shown: Default::default(),
-        tiled: true,
+        tiled: tile_new(),
         slide: None,
             title: String::from(title),
             icon,
@@ -1511,7 +1516,7 @@ pub fn open_browser(url: &str) {
         image: Default::default(),
         arrive: None,
         shown: Default::default(),
-        tiled: true,
+        tiled: tile_new(),
         slide: None,
             title,
             icon: ICO_NET,
@@ -2624,7 +2629,7 @@ fn make_executive(screen: Rect) -> Window {
         image: Default::default(),
         arrive: None,
         shown: Default::default(),
-        tiled: true,
+        tiled: tile_new(),
         slide: None,
         title: String::from("Executive"),
         icon: ICO_TERM,
@@ -3752,7 +3757,7 @@ pub fn open_flourish() {
 
 /// The area the tiling layout fills: the screen above the taskbar. Its own
 /// rectangle rather than `screen_rect`, whose margin is a floating window's
-/// and not the layout's -- the layout's edge is `tile::GAPS_OUT`.
+/// and not the layout's -- the layout's edge is `tile::gaps`' outer gap.
 fn tile_area(fb: &Framebuffer) -> Rect {
     Rect::new(0, 0, fb.width(), fb.height().saturating_sub(task_h()))
 }
@@ -3901,12 +3906,8 @@ fn toggle_split() {
     with(|d| {
         let Some(f) = d.focus() else { return };
         let s = d.windows[f].serial;
-        let inner = Rect::new(
-            area.x + super::tile::GAPS_OUT,
-            area.y + super::tile::GAPS_OUT,
-            area.w.saturating_sub(2 * super::tile::GAPS_OUT),
-            area.h.saturating_sub(2 * super::tile::GAPS_OUT),
-        );
+        let (_, out) = super::tile::gaps();
+        let inner = Rect::new(area.x + out, area.y + out, area.w.saturating_sub(2 * out), area.h.saturating_sub(2 * out));
         d.tiles.toggle(s, inner);
     });
 }
@@ -5104,8 +5105,10 @@ fn window_key(
     (hot, menu_hover, open_menu, win.round).hash(&mut st);
     // The caption glass's tint is chrome the painter reads.
     theme::caption_tint().hash(&mut st);
-    // And the scale, which every metric in it is drawn at.
+    // And the scale, which every metric in it is drawn at, and every other
+    // setting (`settings::generation`).
     theme::scale().hash(&mut st);
+    super::settings::generation().hash(&mut st);
     for m in &win.menus {
         m.label.hash(&mut st);
     }
@@ -5193,6 +5196,7 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
         d.mode.hash(&mut st);
         d.hover.hash(&mut st);
         theme::scale().hash(&mut st);
+        super::settings::generation().hash(&mut st);
         // The readouts are parts of the bar: a new tenth of a second repaints
         // the clock's well and nothing else.
         let (clock, battery) = tray_strings();
@@ -5564,7 +5568,54 @@ pub fn image_stats() -> (u64, u64, usize) {
 /// How much an unfocused window is dimmed, of 256: Hyprland's
 /// `dim_inactive`, kept light -- the cue is which window is nearest the eye,
 /// and the others still have to be read.
-const DIM: u32 = 228;
+static DIM: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(228);
+/// The per cent it was set as, kept so it reads back as what was asked for
+/// rather than as a 256th rounded back.
+static DIM_PCT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(11);
+
+/// How dark an unfocused window goes, in per cent (Settings): 0 is off.
+pub fn set_dim(percent: u32) {
+    let p = percent.min(60);
+    DIM_PCT.store(p, core::sync::atomic::Ordering::Relaxed);
+    DIM.store(256 - (p * 256 + 50) / 100, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn dim_percent() -> u32 {
+    DIM_PCT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether a new window tiles (Settings); off, it floats where it opens.
+static TILE_NEW: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+pub fn set_tile_new(on: bool) {
+    TILE_NEW.store(on, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn tile_new() -> bool {
+    TILE_NEW.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// The focus ring's two colours (Settings), by name.
+pub const RINGS: [(&str, Color, Color); 3] = [
+    ("aperture", theme::APERTURE, Color::new(0xFF, 0xC8, 0x5A)),
+    ("sky", Color::new(0x33, 0xCC, 0xFF), Color::new(0x00, 0xFF, 0x99)),
+    ("ice", Color::new(0xB8, 0xD8, 0xFF), Color::new(0xFF, 0xFF, 0xFF)),
+];
+static RING: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+pub fn set_ring(name: &str) -> bool {
+    match RINGS.iter().position(|r| r.0 == name) {
+        Some(i) => {
+            RING.store(i as u8, core::sync::atomic::Ordering::Relaxed);
+            true
+        }
+        None => false,
+    }
+}
+
+pub fn ring_name() -> &'static str {
+    RINGS[RING.load(core::sync::atomic::Ordering::Relaxed) as usize % RINGS.len()].0
+}
 
 /// The focused window's ring: how wide it is, and how far its glow reaches.
 const RING_W: f32 = 2.0;
@@ -5624,7 +5675,7 @@ fn focus_ring(fb: &Framebuffer, frame: Rect, round: u32, alpha: f32, glow: bool)
     let y0 = frame.y.saturating_sub(reach).max(sy0);
     let y1 = (frame.y + frame.h + reach).min(sy1);
     let band = round + RING_W as u32 + 2;
-    let (a, b) = (theme::APERTURE, Color::new(0xFF, 0xC8, 0x5A));
+    let (_, a, b) = RINGS[RING.load(core::sync::atomic::Ordering::Relaxed) as usize % RINGS.len()];
     let span = (frame.w + frame.h).max(1) as f32;
     let mut row: Vec<u32> = Vec::new();
     let cov = |t: f32| (0.5 - t).clamp(0.0, 1.0);
@@ -5673,7 +5724,7 @@ fn dim_window(fb: &Framebuffer, win: &Window, frame: Rect) {
             return;
         }
         for y in y0.max(frame.y)..y1.min(frame.y + frame.h) {
-            fb.shade_span(xa, y, xb - xa, DIM);
+            fb.shade_span(xa, y, xb - xa, DIM.load(core::sync::atomic::Ordering::Relaxed));
         }
     });
 }
@@ -5943,7 +5994,7 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
                 let maxed = win.state == WinState::Maximised;
                 let alpha = unsafe { (*FOCUS_RING.get()).2 };
                 focus_ring(&fb, frame, if maxed { 0 } else { win.round }, alpha, !maxed);
-            } else {
+            } else if DIM.load(core::sync::atomic::Ordering::Relaxed) < 256 {
                 dim_window(&fb, win, frame);
             }
         }
