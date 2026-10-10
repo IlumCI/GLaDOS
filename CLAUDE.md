@@ -5075,8 +5075,9 @@ change of numbers.
 
 **The rule, where a rule was needed.** Aero is aqua, glass and saturation and
 this machine's colour is orange, so each got where it belongs: the surfaces the
-machine speaks through are warm -- captions, selection, links, focus -- and the
-room it sits in is cool -- wallpaper, taskbar glass, fields, menus. The wall is
+machine speaks through are warm -- selection, links, focus -- and the room it
+sits in is cool, captions included since 1.4.1's glass (Vista Sky by default;
+`win glass warm|sky|graphite` switches) -- wallpaper, taskbar glass, fields, menus. The wall is
 where they meet, a horizon from deep water to gold, with the Aperture mark lit
 as the sun on it.
 

@@ -6550,6 +6550,19 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // Alt and Shift, and a control with no typed form never gets
                 // tested.
                 "prev" => desk::cycle(true),
+                // What tints the focused caption's glass, until the Settings
+                // window owns it.
+                "glass" => {
+                    let want = it.next().unwrap_or("");
+                    if want.is_empty() {
+                        kprintln!("  caption glass: {} (of {})", crate::gfx::theme::caption_tint(), crate::gfx::theme::TINTS.join(", "));
+                    } else if crate::gfx::theme::set_caption_tint(want) {
+                        crate::gfx::render::damage_all();
+                        kprintln!("  caption glass: {}", want);
+                    } else {
+                        kprintln!("  no tint '{}' -- {}", want, crate::gfx::theme::TINTS.join(", "));
+                    }
+                }
                 // The typed equivalent of the wheel over the terminal. Serial
                 // cannot inject PS/2 packets, so a scrollback reachable only
                 // by a wheel is a scrollback nothing ever checks -- the same

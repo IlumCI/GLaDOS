@@ -4620,6 +4620,8 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
         let mut st = Stamp::new();
         (frame, win.title.as_str(), active, win.state == WinState::Maximised).hash(&mut st);
         (hot, menu_hover, open_menu, win.round).hash(&mut st);
+        // The caption glass's tint is chrome the painter reads.
+        theme::caption_tint().hash(&mut st);
         for m in &win.menus {
             m.label.hash(&mut st);
         }

@@ -656,11 +656,16 @@ pub fn window(
     hot_caption: Option<usize>,
 ) -> Chrome {
     let c = chrome(r, has_menus);
-    // The border is the caption's colour carried round the outside, painted as
-    // the whole window and then covered. Two fills rather than four strips,
-    // and the strip between the caption and the body comes out of it for
-    // free.
-    fb.rect(r.x, r.y, r.w, r.h, if active { BORDER_ON } else { BORDER_OFF });
+    // The frame and caption are glass (1.4.1): the blurred wallpaper behind
+    // them, colourised. Four strips -- the top one taking in the caption and
+    // the line under it -- rather than the whole window, because the body is
+    // solid by decision and glass under it would be computed and covered.
+    let g = caption_glass(active);
+    let top_h = c.body.y.saturating_sub(r.y);
+    super::glass::fill(fb, r.x as i32, r.y as i32, r.w, top_h, 0, g);
+    super::glass::fill(fb, r.x as i32, c.body.y as i32, FRAME, r.h.saturating_sub(top_h), 0, g);
+    super::glass::fill(fb, (r.x + r.w - FRAME) as i32, c.body.y as i32, FRAME, r.h.saturating_sub(top_h), 0, g);
+    super::glass::fill(fb, r.x as i32, (r.y + r.h - FRAME) as i32, r.w, FRAME, 0, g);
     if c.body.is_empty() {
         return c;
     }
@@ -773,20 +778,20 @@ pub fn menu_labels<'a>(
 /// button that highlights in one place and presses in another is the bug
 /// that duplicated layout always becomes.
 pub fn caption_buttons(bar: Rect) -> [Rect; 3] {
-    let s = bar.h.saturating_sub(9);
-    let y = bar.y + (bar.h.saturating_sub(s)) / 2;
-    let close_x = bar.x + bar.w.saturating_sub(s + 5);
-    // The close button sits apart from the pair, as it has since 95 -- the
-    // one you reach for blind should not share an edge with the one that
-    // merely tidies. XP itself puts all three flush and this keeps the gap:
-    // the argument for it did not stop being true because Redmond stopped
-    // making it.
-    let max_x = close_x.saturating_sub(s + 4);
-    let min_x = max_x.saturating_sub(s + 2);
+    // Vista's proportions: a short glass pair and a close button half as wide
+    // again as both, so the one reached for blind is the biggest target on the
+    // bar. The gap before close stays, for the argument it has always made.
+    let h = bar.h.saturating_sub(10);
+    let y = bar.y + (bar.h.saturating_sub(h)) / 2;
+    let small = h * 7 / 5;
+    let wide = h * 11 / 5;
+    let close_x = bar.x + bar.w.saturating_sub(wide + 6);
+    let max_x = close_x.saturating_sub(small + 4);
+    let min_x = max_x.saturating_sub(small + 2);
     [
-        Rect::new(min_x, y, s, s),
-        Rect::new(max_x, y, s, s),
-        Rect::new(close_x, y, s, s),
+        Rect::new(min_x, y, small, h),
+        Rect::new(max_x, y, small, h),
+        Rect::new(close_x, y, wide, h),
     ]
 }
 
@@ -798,12 +803,9 @@ pub fn title_bar(
     maximised: bool,
     hot_caption: Option<usize>,
 ) {
-    fb.vgrad(r.x, r.y, r.w, r.h, if active { &TITLE_ON } else { &TITLE_OFF });
-    // A one-pixel catchlight along the very top. The stop table is
-    // proportional and so cannot express an absolute one-pixel edge at any
-    // height, which is the intended division of labour between the ramp and
-    // the line drawn on top of it.
-    fb.rect(r.x, r.y, r.w, 1, if active { CAP_EDGE } else { EDGE_LIGHT });
+    // The caption is glass, laid by `window` with the frame; drawn again here
+    // only so `title_bar` stays callable on its own, as `mindwin` does.
+    super::glass::fill(fb, r.x as i32, r.y as i32, r.w, r.h, 0, caption_glass(active));
 
     let pad = 6;
     let cy = r.y + r.h / 2;
@@ -821,57 +823,138 @@ pub fn title_bar(
     let shown = fit(title, text_end.saturating_sub(tx));
     text_strong(fb, tx, ty, &shown, if active { TITLE_TEXT } else { TITLE_IDLE });
 
-    // The caption buttons: rounded ramps on the caption's own ramp, glyphs
-    // drawn by hand because the font has no box-drawing worth the name.
-    //
-    // **Close is red whether or not the pointer is on it.** That overturns the
-    // note on `CLOSE_HOT`, which argued the red was the hover feedback and
-    // that every other control here answers hover with a ring. Under Luna the
-    // red is the control's identity rather than its response, and an operator
-    // coming from any Windows since XP finds it by colour before they read the
-    // glyph. Hover still says something -- it brightens.
+    // The caption buttons, Vista's: glass minimise and maximise with dark
+    // glyphs, and a wider close in red with a soft glow -- red whether or not
+    // the pointer is on it, since under Vista as under Luna the colour is the
+    // control's identity and hover only brightens it.
     for (i, b) in btns.iter().enumerate() {
-        let hot = hot_caption == Some(i);
-        let close = i == 2;
-        let stops: &[(u8, Color)] = match (close, hot) {
-            (true, true) => &CAP_CLOSE_HOT,
-            (true, false) => &CAP_CLOSE,
-            (false, true) => &CAP_BTN_HOT,
-            (false, false) => &CAP_BTN,
-        };
-        control(fb, *b, stops, CAP_EDGE);
-        let ink = CAP_INK;
-        let g = b.shrink(4);
-        if g.is_empty() {
-            continue;
+        caption_button(fb, r, *b, i, hot_caption == Some(i), maximised);
+    }
+}
+
+/// What tints the caption and frame glass, chosen at run time (`win glass`)
+/// until the Settings window owns it.
+///
+/// Sky by default, chosen over Aperture orange against the three side by
+/// side: the accent still marks focus, selection and links, and a caption
+/// that is the colour of the room rather than of the machine lets it.
+static CAPTION_TINT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(1);
+
+pub const TINTS: [&str; 3] = ["warm", "sky", "graphite"];
+
+pub fn set_caption_tint(name: &str) -> bool {
+    match TINTS.iter().position(|t| *t == name) {
+        Some(i) => {
+            CAPTION_TINT.store(i as u8, core::sync::atomic::Ordering::Relaxed);
+            true
         }
-        match i {
-            // Minimise: the bar along the bottom.
-            0 => fb.rect(g.x, g.y + g.h.saturating_sub(3), g.w, 3, ink),
-            // Maximise, or restore when already maximised: one frame with a
-            // thick lid, or two overlapping ones.
-            1 => {
-                if maximised {
-                    let s = g.w.saturating_sub(4);
-                    fb.frame(g.x + 4, g.y, s, s, ink);
-                    fb.rect(g.x + 4, g.y, s, 2, ink);
-                    fb.rect(g.x, g.y + 4, s, s, stops[2].1);
-                    fb.frame(g.x, g.y + 4, s, s, ink);
-                    fb.rect(g.x, g.y + 4, s, 2, ink);
-                } else {
-                    fb.frame(g.x, g.y, g.w, g.h, ink);
-                    fb.rect(g.x, g.y, g.w, 2, ink);
+        None => false,
+    }
+}
+
+pub fn caption_tint() -> &'static str {
+    TINTS[CAPTION_TINT.load(core::sync::atomic::Ordering::Relaxed) as usize % TINTS.len()]
+}
+
+/// The glass a caption wears. The focused window's carries the tint; the
+/// rest are a neutral glass, darker, so focus reads at a glance -- the cue a
+/// title bar's colour has always been.
+fn caption_glass(active: bool) -> super::glass::Glass {
+    use super::glass::Glass;
+    // The tint takes a third of the colour here where Vista's default took
+    // eight per cent. Measured on the night wallpaper: at Vista's balance all
+    // three tints came out the same dark grey, because a blurred dark sky is
+    // what the other two terms are made of. Vista's walls were bright.
+    if !active {
+        // Unfocused: a pale, cool, plainly transparent glass, so the focused
+        // caption is the one with colour in it -- and dark text reads on it.
+        return Glass { tint: Color::new(206, 214, 226), glow: Color::new(226, 232, 242), blur: 26, afterglow: 14, color: 60, gloss: 40, gloss_end: 0.5 };
+    }
+    match CAPTION_TINT.load(core::sync::atomic::Ordering::Relaxed) {
+        // Aperture orange: the machine's own colour on the surface it speaks
+        // through. Offered, not the default.
+        0 => Glass { tint: Color::new(242, 128, 32), glow: Color::new(255, 176, 96), blur: 34, afterglow: 26, color: 40, gloss: 56, gloss_end: 0.5 },
+        // Vista's own "Sky", at this balance.
+        1 => Glass { tint: Color::new(0x74, 0xb8, 0xfc), glow: Color::new(0x74, 0xb8, 0xfc), blur: 34, afterglow: 26, color: 40, gloss: 56, gloss_end: 0.5 },
+        // Smoke.
+        _ => Glass { tint: Color::new(52, 58, 72), glow: Color::new(150, 160, 180), blur: 40, afterglow: 30, color: 30, gloss: 46, gloss_end: 0.5 },
+    }
+}
+
+/// One caption button, drawn per pixel from a rounded box's distance: a
+/// vertical ramp, a gloss on the upper half, a pale rim, and for close a red
+/// glow outside it, clipped to the caption so it never leaves the window.
+fn caption_button(fb: &Framebuffer, bar: Rect, b: Rect, kind: usize, hot: bool, maximised: bool) {
+    use super::blend::{opaque, over_px, premul};
+    let close = kind == 2;
+    let (top, bot, rim) = match (close, hot) {
+        (true, false) => ([236u8, 120, 100, 255], [170u8, 30, 20, 255], [255u8, 220, 210, 170]),
+        (true, true) => ([255, 150, 126, 255], [206, 44, 30, 255], [255, 236, 228, 200]),
+        (false, false) => ([214, 232, 250, 205], [120, 160, 200, 205], [255, 255, 255, 160]),
+        (false, true) => ([236, 246, 255, 230], [150, 190, 230, 230], [255, 255, 255, 200]),
+    };
+    let glow = if close { if hot { 150.0 } else { 110.0 } } else { 0.0 };
+    let reach = if close { 5i32 } else { 0 };
+    let clip = fb.clipped(bar.x, bar.y, bar.w, bar.h);
+    let (bx, by, bw, bh) = (b.x as f32, b.y as f32, b.w as f32, b.h as f32);
+    let rad = 4.0f32;
+    let enc = |c: [u8; 4]| premul(fb.encode(Color::new(c[0], c[1], c[2])) & 0x00FF_FFFF, c[3]);
+    let x0 = (b.x as i32 - reach).max(bar.x as i32);
+    let x1 = ((b.x + b.w) as i32 + reach).min((bar.x + bar.w) as i32);
+    let y0 = (b.y as i32 - reach).max(bar.y as i32);
+    let y1 = ((b.y + b.h) as i32 + reach).min((bar.y + bar.h) as i32);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let mut row: alloc::vec::Vec<u32> = alloc::vec![0; (x1 - x0) as usize];
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let d = super::shape::sd_rbox(px, py, bx + bw / 2.0, by + bh / 2.0, bw / 2.0, bh / 2.0, rad);
+            let mut p = 0u32;
+            if glow > 0.0 && d > 0.0 {
+                let a = glow * crate::ai::tensor::expf(-(d * d) / 8.0);
+                p = premul(fb.encode(Color::new(255, 70, 40)) & 0x00FF_FFFF, a as u8);
+            }
+            let cov = (0.5 - d).clamp(0.0, 1.0);
+            if cov > 0.0 {
+                let t = ((py - by) / bh).clamp(0.0, 1.0);
+                let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t) as u8;
+                let body = [lerp(top[0], bot[0]), lerp(top[1], bot[1]), lerp(top[2], bot[2]), lerp(top[3], bot[3])];
+                let a = (body[3] as f32 * cov) as u8;
+                p = over_px(premul(fb.encode(Color::new(body[0], body[1], body[2])) & 0x00FF_FFFF, a), p);
+                if py < by + bh * 0.48 {
+                    p = over_px(premul(opaque(fb.encode(Color::new(255, 255, 255))) & 0x00FF_FFFF, (60.0 * cov) as u8), p);
+                }
+                let edge = (0.5 - (d + 0.6).abs()).clamp(0.0, 1.0);
+                if edge > 0.0 {
+                    p = over_px(super::blend::scale_px(enc(rim), (edge * 255.0) as u32), p);
                 }
             }
-            // Close: the cross, two pixels wide so it reads at this size.
-            _ => {
-                let (x0, y0) = (g.x as i32, g.y as i32);
-                let (x1, y1) = ((g.x + g.w) as i32 - 1, (g.y + g.h) as i32 - 1);
-                fb.line(x0, y0, x1, y1, ink);
-                fb.line(x0 + 1, y0, x1, y1 - 1, ink);
-                fb.line(x0, y1, x1, y0, ink);
-                fb.line(x0 + 1, y1, x1, y0 + 1, ink);
+            row[(x - x0) as usize] = p;
+        }
+        clip.over_row(x0 as u32, y as u32, &row);
+    }
+    // The glyph, anti-aliased, white on red and dark on glass.
+    let ink = if close { premul(fb.encode(Color::new(255, 255, 255)) & 0x00FF_FFFF, 255) }
+              else { premul(fb.encode(Color::new(30, 45, 70)) & 0x00FF_FFFF, 255) };
+    let (cx, cy) = (bx + bw / 2.0, by + bh / 2.0);
+    let s = (bh * 0.22).max(3.0);
+    let lw = (bh * 0.09).max(1.4);
+    match kind {
+        0 => super::shape::line(&clip, cx - s, cy + s * 0.55, cx + s, cy + s * 0.55, lw * 1.1, ink),
+        1 => {
+            let bxx = |x: f32, y: f32, w: f32| super::shape::Box::new(x as i32, y as i32, w as u32, w as u32);
+            if maximised {
+                super::shape::ring(&clip, bxx(cx - s * 0.6, cy - s * 1.0, s * 1.6), 1, lw as u32, ink);
+                super::shape::ring(&clip, bxx(cx - s * 1.0, cy - s * 0.6, s * 1.6), 1, lw as u32, ink);
+            } else {
+                super::shape::ring(&clip, bxx(cx - s, cy - s, s * 2.0), 1, lw as u32, ink);
             }
+        }
+        _ => {
+            super::shape::line(&clip, cx - s, cy - s, cx + s, cy + s, lw * 1.2, ink);
+            super::shape::line(&clip, cx - s, cy + s, cx + s, cy - s, lw * 1.2, ink);
         }
     }
 }
