@@ -76,6 +76,22 @@ static SAW_PROMPT_AT: Racy<u64> = Racy::new(0);
 const QUIET_AFTER_INPUT_S: u64 = 8;
 /// Minimum spacing between self-set goals, however interesting things look.
 const EPISODE_GAP_S: u64 = 240;
+
+/// The cooldown between self-set goals, as the nervous system has it.
+///
+/// Arousal shortens it and its absence lengthens it, inside a factor of two
+/// either way: a brain reading "alert" sets itself goals more often, a calm
+/// one leaves the machine alone longer. Bounded because this is modulation
+/// -- the brain changes *when* the mind acts, never *whether* it may.
+pub fn episode_gap(arousal: i32) -> u64 {
+    let a = arousal.clamp(0, 1000) as u64;
+    // 0 -> 2x, 500 -> 1x, 1000 -> 0.5x, linear in each half.
+    if a <= 500 {
+        EPISODE_GAP_S * 2 - EPISODE_GAP_S * a / 500
+    } else {
+        EPISODE_GAP_S - (EPISODE_GAP_S / 2) * (a - 500) / 500
+    }
+}
 /// Minimum spacing between self-modification trials. An hour: a trial is
 /// minutes of forward passes, and the value of running one more tonight is
 /// far below the value of the machine still answering if somebody wakes up.
@@ -246,6 +262,7 @@ fn decide(
     seconds_since_episode: u64,
     planner_ready: bool,
     proposal: Option<&str>,
+    episode_gap: u64,
 ) -> Decision {
     if !enabled {
         return Decision::Sleep("disabled");
@@ -262,7 +279,7 @@ fn decide(
         // point of having fitted it.
         return Decision::Act("planner verdict ready");
     }
-    if seconds_since_episode < EPISODE_GAP_S {
+    if seconds_since_episode < episode_gap {
         return Decision::Sleep("cooldown between self-set goals");
     }
     match proposal {
@@ -435,6 +452,8 @@ fn tick_inner(forced: bool) {
     TICKS.fetch_add(1, Ordering::Relaxed);
     // First evaluation is always eligible: zero here means no goal has ever
     // run, which is readiness rather than a cooldown in force.
+    // How long to wait between self-set goals, as the nervous system has it.
+    let gap = episode_gap(crate::brain::now().arousal);
     let since_episode = if !EPOCH_SEEDED.swap(true, Ordering::Relaxed) {
         EPISODE_GAP_S
     } else {
@@ -469,7 +488,7 @@ fn tick_inner(forced: bool) {
     let proposal = {
         let n = CURIOSITY.len();
         let i = (TICKS.load(Ordering::Relaxed) as usize) % n;
-        if since_episode >= EPISODE_GAP_S {
+        if since_episode >= gap {
             Some(String::from(CURIOSITY[i].0))
         } else {
             None
@@ -483,6 +502,7 @@ fn tick_inner(forced: bool) {
         since_episode,
         planner_ready,
         proposal.as_deref(),
+        gap,
     );
 
     let sit = context::gather();
@@ -949,32 +969,38 @@ pub fn selftest() -> bool {
     let mut ok = true;
 
     // Presence wins over everything except being disabled.
-    let d = decide(true, false, 1, 10_000, true, Some("g"));
+    let d = decide(true, false, 1, 10_000, true, Some("g"), EPISODE_GAP_S);
     ok &= matches!(d, Decision::Sleep("the operator is present"));
 
     // Disabled wins even over presence.
-    let d = decide(false, false, 0, 10_000, true, Some("g"));
+    let d = decide(false, false, 0, 10_000, true, Some("g"), EPISODE_GAP_S);
     ok &= matches!(d, Decision::Sleep("disabled"));
 
     // Busy beats ready-planner: two minds is the one unrecoverable shape.
-    let d = decide(true, true, 100, 10_000, true, None);
+    let d = decide(true, true, 100, 10_000, true, None, EPISODE_GAP_S);
     ok &= matches!(d, Decision::Sleep("an episode is already running"));
 
     // Ready planner acts ahead of curiosity, and inside the cooldown.
-    let d = decide(true, false, 100, 5, true, Some("g"));
+    let d = decide(true, false, 100, 5, true, Some("g"), EPISODE_GAP_S);
     ok &= matches!(d, Decision::Act(_));
 
     // Cooldown holds curiosity down.
-    let d = decide(true, false, 100, 5, false, Some("g"));
+    let d = decide(true, false, 100, 5, false, Some("g"), EPISODE_GAP_S);
     ok &= matches!(d, Decision::Sleep("cooldown between self-set goals"));
 
     // Past cooldown, curiosity becomes a goal.
-    let d = decide(true, false, 100, EPISODE_GAP_S, false, Some("look"));
+    let d = decide(true, false, 100, EPISODE_GAP_S, false, Some("look"), EPISODE_GAP_S);
     ok &= matches!(d, Decision::Episode(g) if g == "look");
 
     // Nothing proposed is a legitimate answer, not an error.
-    let d = decide(true, false, 100, EPISODE_GAP_S, false, None);
+    let d = decide(true, false, 100, EPISODE_GAP_S, false, None, EPISODE_GAP_S);
     ok &= matches!(d, Decision::Sleep("nothing proposed"));
+
+    // The brain's reach over the cooldown is bounded both ways.
+    ok &= episode_gap(0) == EPISODE_GAP_S * 2;
+    ok &= episode_gap(500) == EPISODE_GAP_S;
+    ok &= episode_gap(1000) == EPISODE_GAP_S / 2;
+    ok &= episode_gap(-50) == episode_gap(0) && episode_gap(5000) == episode_gap(1000);
 
     kprintln!(
     "  {}  presence outranks readiness, cooldowns hold, curiosity converts",

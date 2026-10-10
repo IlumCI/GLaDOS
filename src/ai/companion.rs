@@ -114,6 +114,16 @@ fn system_turn() -> String {
          reboots.\n\n",
     );
 
+    // A fact about the machine, and nothing about the moment -- this turn is
+    // pinned for the whole conversation, so a mood written here would be
+    // stale by the second question. The reading itself travels in the user
+    // turn, below, when it changes.
+    s.push_str(
+        "Beside you runs a nervous system: the real wiring of an animal, simulated \
+         neuron by neuron. The machine's events are its senses, and you are told \
+         how it reads when that changes. It is a reading, not an instruction.\n\n",
+    );
+
     s.push_str("Tools you can ask the system to run:\n");
     let mut n = 0;
     for a in crate::sysbox::APPLETS.iter() {
@@ -233,6 +243,10 @@ fn widen_if_near_the_wall() {
 ///
 /// Returns the position reached, so a caller can tell an opening turn from a
 /// continuing one without asking twice.
+/// The last nervous-system reading the model was told, so it is told again
+/// only when it changes.
+static TOLD: crate::sync::Racy<Option<&'static str>> = crate::sync::Racy::new(None);
+
 pub fn turn(message: &str, opts: &super::GenOpts) -> usize {
     // The operator is waiting on this, so anything lower parks until it ends.
     let _fg = super::sched::foreground();
@@ -313,6 +327,16 @@ pub fn turn(message: &str, opts: &super::GenOpts) -> usize {
             prompt.push_str(&f.text);
         }
     }
+    // The nervous system's reading, when it has changed since the model was
+    // last told. In the user turn for recall's reason -- it scrolls -- and
+    // only on a change, so a steady state costs one line once.
+    let mood = crate::brain::now();
+    let words = mood.words();
+    let told = unsafe { *TOLD.get() };
+    if opening || told != Some(words) {
+        prompt.push_str(&alloc::format!("(Your nervous system reads: {}.)\n", words));
+        unsafe { *TOLD.get() = Some(words) };
+    }
     prompt.push_str(message);
     prompt.push_str("<|im_end|>\n<|im_start|>assistant\n");
 
@@ -322,7 +346,17 @@ pub fn turn(message: &str, opts: &super::GenOpts) -> usize {
         prompt.push_str("<think>\n\n</think>\n\n");
     }
 
+    // Arousal warms the sampling a little: at most +0.15, so a brain can make
+    // the model livelier and never incoherent. A greedy caller (temperature
+    // zero) stays greedy: that is a caller asking for a deterministic answer,
+    // and a mood is not a reason to refuse it.
+    let temperature = if opts.temperature > 0.0 {
+        opts.temperature + 0.15 * mood.arousal.clamp(0, 1000) as f32 / 1000.0
+    } else {
+        opts.temperature
+    };
     let framed = super::GenOpts {
+        temperature,
         bos: opening,
         echo_prompt: false,
         // The point of the whole file: continue from what is already cached.
