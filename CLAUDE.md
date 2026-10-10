@@ -5049,6 +5049,11 @@ the order a frame happens:
   a window whose slot moved slides there out of its image. Taking hold of a
   window, or Super-V, floats it. Super-arrows focus by direction, with Shift
   swap; Super-J turns a split; Super-F full screen.
+- **Metrics are logical** (`theme::px`, phase 14): every size in `theme` and
+  `desk` is written at 125% -- Windows' choice for this panel -- and goes
+  through the scale, so the default is pixel-identical to the constants and
+  `win scale <percent>` moves everything at once (75 to 250). Applications'
+  own layouts (Minesweeper's cells, Paint's canvas) are not converted yet.
 - **A program's pixels are kept** (`Window.app_surface`) and redrawn only when
   its `DeskApp::stamp`, focus, size or its own input changes. A program with
   no stamp is redrawn every frame, which is correct and costs time. A program

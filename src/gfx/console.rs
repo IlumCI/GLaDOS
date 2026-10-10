@@ -331,9 +331,11 @@ struct Mono {
     base: u32,
 }
 
-/// The terminal's text size, in physical pixels: 12 logical at the 125% scale
-/// this release defaults to. A constant until the scale is (Q8).
-const TERM_PX: f32 = 15.0;
+/// The terminal's text size, in physical pixels: 12 logical, which is 15 at
+/// the 125% this release defaults to, and follows the scale (`theme::px`).
+fn term_px() -> f32 {
+    15.0 * super::theme::scale() as f32 / 1250.0
+}
 
 fn mono_cell(px: f32) -> Option<Mono> {
     use super::text::{self, Face};
@@ -472,6 +474,14 @@ impl Console {
     /// Become a composed console: own a surface, and let the compositor place
     /// it. Called once, when the desktop comes up; `reflow` sizes the surface
     /// to the grid's window and repaints the whole log into it.
+    /// Take the terminal face at the scale now in force. The next placement
+    /// sees cells of a new size and reflows.
+    pub fn rescale(&mut self) {
+        if self.composed() {
+            self.mono = mono_cell(term_px());
+        }
+    }
+
     pub fn compose_mode(&mut self) {
         if self.composed() {
             return;
@@ -485,7 +495,7 @@ impl Console {
         self.at = (self.ox, self.oy);
         self.ox = 0;
         self.oy = 0;
-        self.mono = mono_cell(TERM_PX);
+        self.mono = mono_cell(term_px());
     }
 
     /// Back to painting the screen directly, for the fault path: the

@@ -145,24 +145,26 @@ impl Tree {
     pub fn layout(&self, area: Rect) -> Vec<(u64, Rect)> {
         let mut out = Vec::new();
         let Some(r) = &self.root else { return out };
+        // Logical gaps, at the interface's scale.
+        let (gin, gout) = (super::theme::px(GAPS_IN), super::theme::px(GAPS_OUT));
         let inner = Rect::new(
-            area.x + GAPS_OUT,
-            area.y + GAPS_OUT,
-            area.w.saturating_sub(2 * GAPS_OUT),
-            area.h.saturating_sub(2 * GAPS_OUT),
+            area.x + gout,
+            area.y + gout,
+            area.w.saturating_sub(2 * gout),
+            area.h.saturating_sub(2 * gout),
         );
-        fn walk(n: &Node, slot: Rect, out: &mut Vec<(u64, Rect)>) {
+        fn walk(n: &Node, slot: Rect, gap: u32, out: &mut Vec<(u64, Rect)>) {
             match n {
                 Node::Leaf(s) => out.push((*s, slot)),
                 Node::Split { pin, ratio, a, b } => {
                     let side = pin.unwrap_or(slot.w >= slot.h);
-                    let (sa, sb) = halves(slot, side, *ratio, GAPS_IN);
-                    walk(a, sa, out);
-                    walk(b, sb, out);
+                    let (sa, sb) = halves(slot, side, *ratio, gap);
+                    walk(a, sa, gap, out);
+                    walk(b, sb, gap, out);
                 }
             }
         }
-        walk(r, inner, &mut out);
+        walk(r, inner, gin, &mut out);
         out
     }
 }

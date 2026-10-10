@@ -41,9 +41,15 @@ use crate::dev::kbd;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-const TEXT_H: u32 = font::GLYPH_H * theme::CHROME_SCALE;
-const ROW_H: u32 = TEXT_H + 8;
-const BTN_H: u32 = TEXT_H + 16;
+fn text_h() -> u32 {
+    theme::text_h()
+}
+fn row_h() -> u32 {
+    text_h() + theme::px(8)
+}
+fn btn_h() -> u32 {
+    text_h() + theme::px(16)
+}
 const GAP: u32 = 6;
 const PAD: u32 = 10;
 /// Character column the value in a `Status` row starts at.
@@ -166,14 +172,14 @@ pub enum Widget {
 impl Widget {
     fn height(&self) -> u32 {
         match self {
-            Widget::Label(_) => TEXT_H + GAP,
+            Widget::Label(_) => text_h() + GAP,
             Widget::Sep => GAP * 2,
-            Widget::Heading(_) => TEXT_H + GAP + 6,
-            Widget::Status { .. } => TEXT_H + 4,
-            Widget::Note(lines) => lines.len() as u32 * TEXT_H + GAP,
-            Widget::List { items, .. } => items.len() as u32 * ROW_H + 8,
-            Widget::Field { .. } => TEXT_H + 14,
-            Widget::Button { .. } => BTN_H,
+            Widget::Heading(_) => text_h() + GAP + 6,
+            Widget::Status { .. } => text_h() + 4,
+            Widget::Note(lines) => lines.len() as u32 * text_h() + GAP,
+            Widget::List { items, .. } => items.len() as u32 * row_h() + 8,
+            Widget::Field { .. } => text_h() + 14,
+            Widget::Button { .. } => btn_h(),
         }
     }
 
@@ -434,7 +440,7 @@ impl Panel {
             Widget::Button { .. } => self.activate(),
             Widget::List { items, sel } => {
                 let inner = r.shrink(2);
-                let row = (py - inner.y as i32) / ROW_H as i32;
+                let row = (py - inner.y as i32) / row_h() as i32;
                 if row < 0 || row as usize >= items.len() {
                     return Step::Redraw;
                 }
@@ -509,7 +515,7 @@ impl Panel {
                 Widget::Heading(t) => {
                     theme::text(fb, x, y + 4, t, theme::TEXT, theme::FACE);
                     let uw = theme::text_w_of(t).min(w);
-                    fb.rect(x, y + 4 + TEXT_H + 2, uw, 2, theme::APERTURE);
+                    fb.rect(x, y + 4 + text_h() + 2, uw, 2, theme::APERTURE);
                 }
                 Widget::Status { name, value, tone } => {
                     // One column for every row on the page, so the values line
@@ -556,7 +562,7 @@ impl Panel {
                 }
                 Widget::Note(lines) => {
                     for (j, line) in lines.iter().enumerate() {
-                        theme::text(fb, x, y + j as u32 * TEXT_H, line, theme::TEXT_DIM, theme::FACE);
+                        theme::text(fb, x, y + j as u32 * text_h(), line, theme::TEXT_DIM, theme::FACE);
                     }
                 }
                 Widget::List { items, sel } => {
@@ -564,8 +570,8 @@ impl Panel {
                     theme::well(fb, r, theme::FACE);
                     let inner = r.shrink(2);
                     for (j, (label, _)) in items.iter().enumerate() {
-                        let row = Rect::new(inner.x, inner.y + j as u32 * ROW_H, inner.w, ROW_H);
-                        if row.y + ROW_H > inner.y + inner.h {
+                        let row = Rect::new(inner.x, inner.y + j as u32 * row_h(), inner.w, row_h());
+                        if row.y + row_h() > inner.y + inner.h {
                             break;
                         }
                         theme::list_row(fb, row, label, j == *sel, focused);
@@ -587,7 +593,7 @@ impl Panel {
                         theme::mono_text(fb, inner.x, inner.y, &text[off..end], theme::TEXT, theme::HILIGHT);
                         if focused {
                             let cx = inner.x + theme::mono_w(cursor - off);
-                            fb.rect(cx, inner.y, 2, TEXT_H, theme::TEXT);
+                            fb.rect(cx, inner.y, 2, text_h(), theme::TEXT);
                         }
                     }
                 }
@@ -733,8 +739,8 @@ impl Panel {
             text_cols = text_cols.max(cols);
         }
         (
-            theme::text_w(text_cols) + PAD * 4 + theme::FRAME * 2,
-            h + theme::TITLE_H + 2 + theme::FRAME * 2,
+            theme::text_w(text_cols) + PAD * 4 + theme::frame_w() * 2,
+            h + theme::title_h() + 2 + theme::frame_w() * 2,
         )
     }
 }

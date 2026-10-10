@@ -81,8 +81,8 @@ impl Paint {
 
     pub fn preferred() -> (u32, u32) {
         (
-            CW as u32 + 24 + theme::FRAME * 2,
-            CH as u32 + 96 + theme::TITLE_H + theme::FRAME * 2,
+            CW as u32 + 24 + theme::frame_w() * 2,
+            CH as u32 + 96 + theme::title_h() + theme::frame_w() * 2,
         )
     }
 

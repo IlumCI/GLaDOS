@@ -6568,6 +6568,17 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         kprintln!("  no tint '{}' -- {}", want, crate::gfx::theme::TINTS.join(", "));
                     }
                 }
+                // The interface's scale, in per cent: 125 by default, which is
+                // Windows' choice for this panel's density.
+                "scale" => {
+                    match it.next().and_then(|t| t.parse::<u32>().ok()) {
+                        Some(p) => {
+                            crate::gfx::desk::set_scale(p * 10);
+                            kprintln!("  interface at {}%", crate::gfx::theme::scale() / 10);
+                        }
+                        None => kprintln!("  interface at {}% -- win scale <percent>, 75 to 250", crate::gfx::theme::scale() / 10),
+                    }
+                }
                 // How long motion takes, in per cent of Hyprland's durations:
                 // 100 as configured, 2000 twenty times slower -- which is how
                 // an arrival lasting 410 ms gets photographed by a harness

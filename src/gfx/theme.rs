@@ -239,14 +239,18 @@ pub const MENU_EDGE: Color = Color::new(0x8F, 0xB2, 0xC2);
 /// How wide the gutter is. Nothing is drawn in it yet -- XP puts an icon or a
 /// tick there -- and it is here because a menu without one reads as a list
 /// box, which is a different control that does a different thing.
-pub const MENU_GUTTER_W: u32 = 20;
+pub fn menu_gutter_w() -> u32 {
+    px(20)
+}
 
 /// How far a window's top corners are rounded.
 ///
 /// Six pixels against a thirty-pixel caption is XP's proportion at 96 dpi. The
 /// bottom corners stay square: the bottom edge is something you drag, and a
 /// rounded one reads as a control that has come loose from the frame.
-pub const WIN_ROUND: u32 = 8;
+pub fn win_round() -> u32 {
+    px(8)
+}
 
 // A window's shadow is `gfx::shadow` now, set in `desk::win_shadow`. It was a
 // hard five-pixel band at 84%, under a comment that softness "needs the
@@ -269,26 +273,61 @@ pub const LINK: Color = APERTURE;
 pub const HEADING: Color = HILIGHT;
 
 pub const CHROME_SCALE: u32 = 2;
+
+/// The interface's scale, in thousandths: 1250 is 125%, Windows' choice for
+/// this panel's 141 pixels to the inch, and the size every metric in this
+/// file was drawn at -- so `px(n)` is `n` at the default, and the look moves
+/// only when somebody moves the scale. Every metric goes through it, which
+/// is the whole of "logical pixels": a number written here is a size at
+/// 125%, and the screen gets that size at whatever the scale is.
+static SCALE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1250);
+
+/// The scale, in thousandths (1250 is 125%).
+pub fn scale() -> u32 {
+    SCALE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Set it, between 75% and 250%. Everything sized from it follows on the
+/// next frame; the caller asks for that frame.
+pub fn set_scale(permille: u32) {
+    SCALE.store(permille.clamp(750, 2500), core::sync::atomic::Ordering::Relaxed);
+}
+
+/// A size drawn at 125%, at the scale in force.
+pub fn px(n: u32) -> u32 {
+    ((n as u64 * scale() as u64 + 625) / 1250) as u32
+}
+
+/// The interface face's size at the scale in force.
+pub fn ui_size() -> f32 {
+    UI_PX * scale() as f32 / 1250.0
+}
 /// Height of a title bar at `CHROME_SCALE`, with room above and below the text.
 ///
 /// Fourteen rather than eight above a 16-pixel line. A caption is the surface
 /// somebody looks at to know which window has the keyboard, and the 3.1
 /// proportion crowds it: XP put air around the same text and that air is most
 /// of why one reads as modern and the other does not.
-pub const TITLE_H: u32 = font::GLYPH_H * CHROME_SCALE + 14;
+pub fn title_h() -> u32 {
+    px(font::GLYPH_H * CHROME_SCALE + 14)
+}
 /// Height of a menu bar and of one row in a dropdown.
 ///
 /// **Its own constant, and that is the point of it.** It was
 /// `= theme::TITLE_H` over in `desk`, which is a coincidence and not a fact:
 /// the moment the caption grew, every menu row and every dropdown row would
 /// have grown with it, silently, to thirty pixels around sixteen of text.
-pub const MENU_H: u32 = font::GLYPH_H * CHROME_SCALE + 6;
+pub fn menu_h() -> u32 {
+    px(font::GLYPH_H * CHROME_SCALE + 6)
+}
 /// Thickness of a window's outer frame.
 ///
 /// Three, and it is a coloured border now rather than a grey slab. XP's frame
 /// says which window is active along its whole length; 3.1's said only that
 /// there was an edge here to grab.
-pub const FRAME: u32 = 3;
+pub fn frame_w() -> u32 {
+    px(3)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct Rect {
@@ -406,8 +445,8 @@ pub const UI_PX: f32 = 15.0;
 fn ui_px(scale: u32) -> f32 {
     match scale {
         0 | 1 => 10.5,
-        2 => UI_PX,
-        s => UI_PX * s as f32 / 2.0,
+        2 => ui_size(),
+        s => ui_size() * s as f32 / 2.0,
     }
 }
 
@@ -427,22 +466,22 @@ fn set(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color, bg: Option<Color>, 
 }
 
 pub fn text(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color, bg: Color) {
-    set(fb, x, y, s, fg, Some(bg), text::Face::Ui, UI_PX, text_h());
+    set(fb, x, y, s, fg, Some(bg), text::Face::Ui, ui_size(), text_h());
 }
 
 /// Interface text in the semibold weight: captions and headings.
 pub fn text_strong(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color) {
-    set(fb, x, y, s, fg, None, text::Face::UiStrong, UI_PX, text_h());
+    set(fb, x, y, s, fg, None, text::Face::UiStrong, ui_size(), text_h());
 }
 
 /// Editable or column-aligned text, monospaced, on a `bg` field.
 pub fn mono_text(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color, bg: Color) {
-    set(fb, x, y, s, fg, Some(bg), text::Face::Mono, UI_PX, text_h());
+    set(fb, x, y, s, fg, Some(bg), text::Face::Mono, ui_size(), text_h());
 }
 
 /// The width of `n` columns of `mono_text`.
 pub fn mono_w(n: usize) -> u32 {
-    let adv = text::measure(text::Face::Mono, UI_PX, "M");
+    let adv = text::measure(text::Face::Mono, ui_size(), "M");
     (n as f32 * adv + 0.5) as u32
 }
 
@@ -463,16 +502,16 @@ pub fn fit_at(s: &str, max: u32, scale: u32) -> String {
 
 /// `s` cut to fit `max` pixels of interface text, with an ellipsis if it was.
 pub fn fit(s: &str, max: u32) -> String {
-    text::ellipsize(text::Face::Ui, UI_PX, s, max as f32)
+    text::ellipsize(text::Face::Ui, ui_size(), s, max as f32)
 }
 
 /// Height of one line of chrome text, the companion to `text_w`.
 pub fn text_h() -> u32 {
-    font::GLYPH_H * CHROME_SCALE
+    px(font::GLYPH_H * CHROME_SCALE)
 }
 
 pub fn text_w(len: usize) -> u32 {
-    len as u32 * font::GLYPH_W * CHROME_SCALE
+    px(len as u32 * font::GLYPH_W * CHROME_SCALE)
 }
 
 /// How wide a particular string draws.
@@ -487,7 +526,7 @@ pub fn text_w(len: usize) -> u32 {
 pub fn text_w_of(s: &str) -> u32 {
     // Measured now, kerning and all: the face is proportional, so a count of
     // anything -- bytes or characters -- is not a width.
-    (text::measure(text::Face::Ui, UI_PX, s) + 0.999) as u32
+    (text::measure(text::Face::Ui, ui_size(), s) + 0.999) as u32
 }
 
 /// The first `n` characters, for a label that has to fit.
@@ -538,20 +577,20 @@ pub struct Chrome {
 }
 
 pub fn chrome(frame: Rect, has_menus: bool) -> Chrome {
-    let inner = frame.shrink(FRAME);
-    let title = Rect::new(inner.x, inner.y, inner.w, TITLE_H);
+    let inner = frame.shrink(frame_w());
+    let title = Rect::new(inner.x, inner.y, inner.w, title_h());
     // Two pixels of border show between the caption and the body, which under
     // Luna is a thin accent line rather than the gap it used to be.
     let body = Rect::new(
         inner.x,
-        inner.y + TITLE_H + 2,
+        inner.y + title_h() + 2,
         inner.w,
-        inner.h.saturating_sub(TITLE_H + 2),
+        inner.h.saturating_sub(title_h() + 2),
     );
     let (menubar, client) = if has_menus {
         (
-            Some(Rect::new(body.x, body.y, body.w, MENU_H)),
-            Rect::new(body.x, body.y + MENU_H, body.w, body.h.saturating_sub(MENU_H)),
+            Some(Rect::new(body.x, body.y, body.w, menu_h())),
+            Rect::new(body.x, body.y + menu_h(), body.w, body.h.saturating_sub(menu_h())),
         )
     } else {
         (None, body)
@@ -580,9 +619,9 @@ pub fn window(
     let g = caption_glass(active);
     let top_h = c.body.y.saturating_sub(r.y);
     super::glass::fill(fb, r.x as i32, r.y as i32, r.w, top_h, 0, g);
-    super::glass::fill(fb, r.x as i32, c.body.y as i32, FRAME, r.h.saturating_sub(top_h), 0, g);
-    super::glass::fill(fb, (r.x + r.w - FRAME) as i32, c.body.y as i32, FRAME, r.h.saturating_sub(top_h), 0, g);
-    super::glass::fill(fb, r.x as i32, (r.y + r.h - FRAME) as i32, r.w, FRAME, 0, g);
+    super::glass::fill(fb, r.x as i32, c.body.y as i32, frame_w(), r.h.saturating_sub(top_h), 0, g);
+    super::glass::fill(fb, (r.x + r.w - frame_w()) as i32, c.body.y as i32, frame_w(), r.h.saturating_sub(top_h), 0, g);
+    super::glass::fill(fb, r.x as i32, (r.y + r.h - frame_w()) as i32, r.w, frame_w(), 0, g);
     if c.body.is_empty() {
         return c;
     }
@@ -611,31 +650,33 @@ pub struct Popup {
 }
 
 /// Inset from the panel edge to the first row.
-const POPUP_PAD: u32 = 3;
+fn popup_pad() -> u32 {
+    px(3)
+}
 
 impl Popup {
     /// Sized from its widest label in columns and its row count, clamped to
     /// whatever room is left on the right.
     pub fn sized(x: u32, y: u32, cols: usize, rows: usize, max_w: u32) -> Popup {
-        Self::padded(x, y, cols, rows, max_w, POPUP_PAD)
+        Self::padded(x, y, cols, rows, max_w, popup_pad())
     }
 
     /// `sized`, with a frame of `pad` round the rows.
     pub fn padded(x: u32, y: u32, cols: usize, rows: usize, max_w: u32, pad: u32) -> Popup {
-        let w = (text_w(cols) + 24 + MENU_GUTTER_W + 2 * (pad - POPUP_PAD.min(pad))).min(max_w);
-        let h = rows as u32 * MENU_H + pad * 2;
+        let w = (text_w(cols) + 24 + menu_gutter_w() + 2 * (pad - popup_pad().min(pad))).min(max_w);
+        let h = rows as u32 * menu_h() + pad * 2;
         Popup { panel: Rect::new(x, y, w, h), rows, pad }
     }
 
     /// Where row `i` is drawn: to the right of the gutter, which is why a
     /// selection bar stops at it rather than running under it.
     pub fn row(&self, i: usize) -> Rect {
-        let inset = self.pad + MENU_GUTTER_W;
+        let inset = self.pad + menu_gutter_w();
         Rect::new(
             self.panel.x + inset,
-            self.panel.y + self.pad + i as u32 * MENU_H,
+            self.panel.y + self.pad + i as u32 * menu_h(),
             self.panel.w.saturating_sub(inset + self.pad),
-            MENU_H,
+            menu_h(),
         )
     }
 
@@ -651,7 +692,7 @@ impl Popup {
         if y < p.y as i32 || y >= (p.y + p.h) as i32 {
             return None;
         }
-        let row = (y - (p.y + self.pad) as i32) / MENU_H as i32;
+        let row = (y - (p.y + self.pad) as i32) / menu_h() as i32;
         if row >= 0 && (row as usize) < self.rows {
             Some(row as usize)
         } else {
@@ -665,7 +706,7 @@ impl Popup {
     /// width arithmetic on a narrow one used to wrap to four billion -- not a
     /// crash but a fill loop long enough to look like a hang.
     pub fn wide_enough(&self) -> bool {
-        self.panel.w >= MENU_GUTTER_W + 16
+        self.panel.w >= menu_gutter_w() + 16
     }
 }
 
@@ -677,7 +718,7 @@ pub fn start_popup(fb: &Framebuffer, p: &Popup) {
     let m = p.pad.saturating_sub(2);
     let body = Rect::new(r.x + m, r.y + m, r.w.saturating_sub(2 * m), r.h.saturating_sub(2 * m));
     fb.rect(body.x, body.y, body.w, body.h, MENU_BG);
-    fb.rect(body.x + 1, body.y + 1, MENU_GUTTER_W + 2, body.h.saturating_sub(2), MENU_GUTTER);
+    fb.rect(body.x + 1, body.y + 1, menu_gutter_w() + 2, body.h.saturating_sub(2), MENU_GUTTER);
     outline(fb, body, MENU_EDGE);
 }
 
@@ -700,7 +741,7 @@ pub const TASKBAR_GLASS: super::glass::Glass = super::glass::Glass {
 pub fn popup(fb: &Framebuffer, p: &Popup) {
     let r = p.panel;
     fb.rect(r.x, r.y, r.w, r.h, MENU_BG);
-    fb.rect(r.x + 1, r.y + 1, MENU_GUTTER_W, r.h.saturating_sub(2), MENU_GUTTER);
+    fb.rect(r.x + 1, r.y + 1, menu_gutter_w(), r.h.saturating_sub(2), MENU_GUTTER);
     outline(fb, r, MENU_EDGE);
 }
 

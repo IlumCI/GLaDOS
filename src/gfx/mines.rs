@@ -82,8 +82,8 @@ impl Mines {
     /// The window size that fits the board exactly.
     pub fn preferred() -> (u32, u32) {
         (
-            W as u32 * CELL + PAD * 2 + theme::FRAME * 2 + 8,
-            H as u32 * CELL + HEAD + PAD * 3 + theme::TITLE_H + theme::FRAME * 2 + 10,
+            W as u32 * CELL + PAD * 2 + theme::frame_w() * 2 + 8,
+            H as u32 * CELL + HEAD + PAD * 3 + theme::title_h() + theme::frame_w() * 2 + 10,
         )
     }
 

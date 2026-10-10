@@ -551,7 +551,9 @@ pub fn ops_len() -> usize {
     OPS.lock_irq().len()
 }
 
-const MARGIN: u32 = 8;
+fn margin() -> u32 {
+    theme::px(8)
+}
 const NUDGE: u32 = 16;
 /// A menu bar's height, which is the theme's and no longer the caption's.
 ///
@@ -559,14 +561,20 @@ const NUDGE: u32 = 16;
 /// became a trap the moment the caption grew: every menu row and every
 /// dropdown row would have gone to thirty pixels around sixteen of text,
 /// silently, because nothing here says a menu row is as tall as a title.
-const MENU_H: u32 = theme::MENU_H;
+fn menu_h() -> u32 {
+    theme::menu_h()
+}
 /// The bar along the bottom.
 ///
 /// A number rather than `TITLE_H + 10` for the same reason. A taskbar is its
 /// own surface and XP's is not a caption plus a constant.
-const TASK_H: u32 = 38;
+fn task_h() -> u32 {
+    theme::px(38)
+}
 /// Gap between task buttons.
-const TASK_GAP: u32 = 4;
+fn task_gap() -> u32 {
+    theme::px(4)
+}
 
 /// The icons on the wall, top to bottom, and what opening one runs.
 ///
@@ -733,15 +741,15 @@ fn shadowed(win: &Window, frame: Rect, active: bool, fb: &Framebuffer) -> Rect {
 
 fn screen_rect(fb: &Framebuffer) -> Rect {
     Rect::new(
-        MARGIN,
-        MARGIN,
-        fb.width().saturating_sub(MARGIN * 2),
-        fb.height().saturating_sub(MARGIN * 2 + TASK_H),
+        margin(),
+        margin(),
+        fb.width().saturating_sub(margin() * 2),
+        fb.height().saturating_sub(margin() * 2 + task_h()),
     )
 }
 
 fn taskbar_rect(fb: &Framebuffer) -> Rect {
-    Rect::new(0, fb.height().saturating_sub(TASK_H), fb.width(), TASK_H)
+    Rect::new(0, fb.height().saturating_sub(task_h()), fb.width(), task_h())
 }
 
 /// The Start button, left end of the bar.
@@ -811,7 +819,9 @@ fn is_query_row(item: usize) -> bool {
 
 const ICON_W: u32 = 132;
 /// The wall's icons, in pixels: 38 logical at the 1.25 scale.
-const ICON_PX: u32 = 48;
+fn icon_px() -> u32 {
+    theme::px(48)
+}
 const ICON_H: u32 = 84;
 
 /// The icon column, top-left of the wall, downwards -- the 98 half of the
@@ -821,7 +831,7 @@ fn icon_rects(fb: &Framebuffer) -> Vec<(Rect, usize)> {
     let mut x = 10u32;
     let mut y = 14u32;
     for (k, _) in ICONS.iter().enumerate() {
-        if y + ICON_H > fb.height().saturating_sub(TASK_H) {
+        if y + ICON_H > fb.height().saturating_sub(task_h()) {
             // Wrap to a second column, as the 98 desktop did. The terminal
             // reserves only the first column, so overflow icons sit behind
             // windows -- reachable, and always also in the Start menu.
@@ -846,12 +856,12 @@ fn icon_at(fb: &Framebuffer, x: i32, y: i32) -> Option<usize> {
 /// bitmap format is more machinery than six drawings justify.
 fn draw_icons(fb: &Framebuffer, hover: Hover) {
     for (r, k) in icon_rects(fb) {
-        let px = r.x + (r.w - ICON_PX) / 2;
-        pictogram(fb, k, px, r.y, ICON_PX);
+        let px = r.x + (r.w - icon_px()) / 2;
+        pictogram(fb, k, px, r.y, icon_px());
         let (label, _) = ICONS[k];
         let tw = theme::text_w_of(label);
         let tx = r.x + (r.w.saturating_sub(tw)) / 2;
-        let ty = r.y + ICON_PX + 6;
+        let ty = r.y + icon_px() + 6;
         if hover == Hover::Icon(k) {
             fb.rect(
                 tx.saturating_sub(3),
@@ -971,7 +981,7 @@ fn item(label: &str, cmd: &str) -> MenuItem {
 fn make_terminal(screen: Rect) -> Window {
     let icons_w = 10 + ICON_W + 10;
     let term_x = screen.x.max(icons_w);
-    let term_w = (screen.x + screen.w).saturating_sub(term_x + MARGIN);
+    let term_w = (screen.x + screen.w).saturating_sub(term_x + margin());
     Window {
         serial: next_serial(),
         app_surface: Default::default(),
@@ -986,7 +996,7 @@ fn make_terminal(screen: Rect) -> Window {
         state: WinState::Normal,
         snap_back: None,
         route: None,
-        round: theme::WIN_ROUND,
+        round: theme::win_round(),
         content: Content::Terminal(super::console::USER),
         menus: alloc::vec![
             Menu {
@@ -1182,7 +1192,7 @@ pub fn open(title: &str, panel: Panel) {
             .windows
             .iter()
             .find(|win| matches!(win.content, Content::Terminal(c) if c == super::console::USER))
-            .map(|win| win.rect.x + win.rect.w + MARGIN)
+            .map(|win| win.rect.x + win.rect.w + margin())
             .unwrap_or(screen.x);
         // Narrow it rather than slide it under the terminal.
         //
@@ -1224,7 +1234,7 @@ pub fn open(title: &str, panel: Panel) {
             state: WinState::Normal,
         snap_back: None,
         route: None,
-        round: theme::WIN_ROUND,
+        round: theme::win_round(),
             content: Content::Panel(panel),
             menus: Vec::new(),
             closable: true,
@@ -1265,8 +1275,8 @@ pub fn open_app(title: &str, icon: usize, app: Box<dyn DeskApp>, w: u32, h: u32)
     // is born usable, and the edge dragging added alongside means it stays
     // that way.
     let inner = app.min_size();
-    let need_w = inner.0 + theme::FRAME * 2;
-    let need_h = inner.1 + theme::TITLE_H + theme::FRAME * 2;
+    let need_w = inner.0 + theme::frame_w() * 2;
+    let need_h = inner.1 + theme::title_h() + theme::frame_w() * 2;
     let (w, h) = (
         w.max(need_w).min(screen.w),
         h.max(need_h).min(screen.h),
@@ -1292,7 +1302,7 @@ pub fn open_app(title: &str, icon: usize, app: Box<dyn DeskApp>, w: u32, h: u32)
             state: WinState::Normal,
         snap_back: None,
         route: None,
-        round: theme::WIN_ROUND,
+        round: theme::win_round(),
             content: Content::App(app),
             menus: Vec::new(),
             closable: true,
@@ -1371,7 +1381,7 @@ fn clear_of_terminal() {
             .windows
             .iter()
             .find(|w| matches!(w.content, Content::Terminal(c) if c == super::console::USER))
-            .map(|w| w.rect.x + w.rect.w + MARGIN)
+            .map(|w| w.rect.x + w.rect.w + margin())
         else {
             return;
         };
@@ -1507,7 +1517,7 @@ pub fn open_browser(url: &str) {
             state: WinState::Normal,
         snap_back: None,
         route: None,
-        round: theme::WIN_ROUND,
+        round: theme::win_round(),
             content: Content::Browser(b),
             menus: Vec::new(),
             closable: true,
@@ -2605,7 +2615,7 @@ pub fn show_executive() {
 fn make_executive(screen: Rect) -> Window {
     let icons_w = 10 + ICON_W + 10;
     let term_x = screen.x.max(icons_w);
-    let term_w = (screen.x + screen.w).saturating_sub(term_x + MARGIN);
+    let term_w = (screen.x + screen.w).saturating_sub(term_x + margin());
     Window {
         serial: next_serial(),
         app_surface: Default::default(),
@@ -2617,15 +2627,15 @@ fn make_executive(screen: Rect) -> Window {
         title: String::from("Executive"),
         icon: ICO_TERM,
         rect: Rect::new(
-            term_x + MARGIN,
-            screen.y + MARGIN,
-            term_w.saturating_sub(MARGIN * 2).max(320),
-            screen.h.saturating_sub(MARGIN * 4).max(200),
+            term_x + margin(),
+            screen.y + margin(),
+            term_w.saturating_sub(margin() * 2).max(320),
+            screen.h.saturating_sub(margin() * 4).max(200),
         ),
         state: WinState::Normal,
         snap_back: None,
         route: None,
-        round: theme::WIN_ROUND,
+        round: theme::win_round(),
         content: Content::Terminal(super::console::EXEC),
         menus: alloc::vec![Menu {
             label: String::from("View"),
@@ -2767,8 +2777,8 @@ fn min_size_of(w: &Window) -> (u32, u32) {
         _ => (240, 120),
     };
     (
-        inner.0 + theme::FRAME * 2,
-        inner.1 + theme::TITLE_H + theme::FRAME * 2,
+        inner.0 + theme::frame_w() * 2,
+        inner.1 + theme::title_h() + theme::frame_w() * 2,
     )
 }
 
@@ -3216,21 +3226,21 @@ fn dropdown_rows(fb: &Framebuffer, d: &Desktop, screen: Rect) -> Option<theme::P
     }
     let f = d.focus()?;
     let frame = d.windows[f].frame(screen);
-    let inner = frame.shrink(theme::FRAME);
+    let inner = frame.shrink(theme::frame_w());
     match d.mode {
         Mode::Menu { menu, .. } => {
             let m = d.windows[f].menus.get(menu)?;
-            let bar = Rect::new(inner.x, inner.y + theme::TITLE_H + 2, inner.w, MENU_H);
+            let bar = Rect::new(inner.x, inner.y + theme::title_h() + 2, inner.w, menu_h());
             let x = theme::menu_labels(bar, d.windows[f].menus.iter().map(|p| p.label.as_str()))
                 .nth(menu)?
                 .x;
             let cols = m.items.iter().map(|i| i.label.chars().count()).max().unwrap_or(4);
-            let y = inner.y + theme::TITLE_H + 2 + MENU_H;
+            let y = inner.y + theme::title_h() + 2 + menu_h();
             Some(theme::Popup::sized(x, y, cols, m.items.len(), fb.width().saturating_sub(x)))
         }
         Mode::Sys { .. } => {
             let cols = SYS_ITEMS.iter().map(|s| s.chars().count()).max().unwrap_or(4);
-            let y = inner.y + theme::TITLE_H;
+            let y = inner.y + theme::title_h();
             Some(theme::Popup::sized(
                 inner.x,
                 y,
@@ -3733,7 +3743,7 @@ pub fn open_flourish() {
 /// rectangle rather than `screen_rect`, whose margin is a floating window's
 /// and not the layout's -- the layout's edge is `tile::GAPS_OUT`.
 fn tile_area(fb: &Framebuffer) -> Rect {
-    Rect::new(0, 0, fb.width(), fb.height().saturating_sub(TASK_H))
+    Rect::new(0, 0, fb.width(), fb.height().saturating_sub(task_h()))
 }
 
 /// Bring the tiling tree in line with the windows, and every tiled window to
@@ -3811,6 +3821,17 @@ fn scaled(r: Rect, k: f32) -> Rect {
     let w = ((r.w as f32 * k) + 0.5) as u32;
     let h = ((r.h as f32 * k) + 0.5) as u32;
     Rect::new(r.x + (r.w - w.min(r.w)) / 2, r.y + (r.h - h.min(r.h)) / 2, w.max(1), h.max(1))
+}
+
+/// Change the interface's scale (`theme::set_scale`) and everything sized
+/// from it: the terminals take their face at the new size and reflow, every
+/// window's image is re-keyed through its stamp, and the next frame is whole.
+pub fn set_scale(permille: u32) {
+    theme::set_scale(permille);
+    for ch in [super::console::USER, super::console::EXEC] {
+        super::console::with_ch(ch, |c| c.rescale());
+    }
+    super::render::damage_all();
 }
 
 /// Super-V: float a tiled window, or tile a floating one. Afloat it keeps a
@@ -4356,7 +4377,7 @@ fn task_layout(fb: &Framebuffer, d: &Desktop) -> Vec<(Rect, usize, bool)> {
             break;
         }
         out.push((Rect::new(x, y, w, btn_h), icon, pressed));
-        x += w + TASK_GAP;
+        x += w + task_gap();
     }
     out
 }
@@ -4526,7 +4547,7 @@ fn hint_rect(fb: &Framebuffer, d: &Desktop) -> Option<Rect> {
         _ => return None,
     };
     let w = theme::text_w_of(msg);
-    Some(Rect::new((fb.width().saturating_sub(w)) / 2, MARGIN, w, MENU_H))
+    Some(Rect::new((fb.width().saturating_sub(w)) / 2, margin(), w, menu_h()))
 }
 
 const MOVE_HINT: &str = " Move: arrows, Enter to place, Esc to cancel ";
@@ -4872,6 +4893,8 @@ fn window_key(
     (hot, menu_hover, open_menu, win.round).hash(&mut st);
     // The caption glass's tint is chrome the painter reads.
     theme::caption_tint().hash(&mut st);
+    // And the scale, which every metric in it is drawn at.
+    theme::scale().hash(&mut st);
     for m in &win.menus {
         m.label.hash(&mut st);
     }
@@ -4943,7 +4966,7 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
         // stale. `render verify` found it on the first hover over Terminal.
         let pad = 8;
         let b = Rect::new(b.x.saturating_sub(pad), b.y.saturating_sub(pad), b.w + 2 * pad, b.h + 2 * pad);
-        out.push(Layer { id: LayerId::Icons, bounds: b, stamp: Stamp::of(d.hover), parts: Vec::new() });
+        out.push(Layer { id: LayerId::Icons, bounds: b, stamp: Stamp::of((d.hover, theme::scale())), parts: Vec::new() });
     }
 
     let focus = d.focus();
@@ -4958,6 +4981,7 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
         focus.hash(&mut st);
         d.mode.hash(&mut st);
         d.hover.hash(&mut st);
+        theme::scale().hash(&mut st);
         // The readouts are parts of the bar: a new tenth of a second repaints
         // the clock's well and nothing else.
         let (clock, battery) = tray_strings();
@@ -5709,8 +5733,8 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
             match d.mode {
                 Mode::Menu { menu, item } => {
                     if let Some(m) = d.windows[f].menus.get(menu) {
-                        let inner = frame.shrink(theme::FRAME);
-                        let bar = Rect::new(inner.x, inner.y + theme::TITLE_H + 2, inner.w, MENU_H);
+                        let inner = frame.shrink(theme::frame_w());
+                        let bar = Rect::new(inner.x, inner.y + theme::title_h() + 2, inner.w, menu_h());
                         // A label that cannot be placed skips its dropdown and
                         // nothing else. This was a `return` out of the whole
                         // painter, which ended the frame's overlays and its
@@ -5722,7 +5746,7 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
                             dropdown(
                                 &fb,
                                 lr.x,
-                                inner.y + theme::TITLE_H + 2 + MENU_H,
+                                inner.y + theme::title_h() + 2 + menu_h(),
                                 m.items.iter().map(|i| i.label.as_str()),
                                 item,
                             );
@@ -5730,11 +5754,11 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
                     }
                 }
                 Mode::Sys { item } => {
-                    let inner = frame.shrink(theme::FRAME);
+                    let inner = frame.shrink(theme::frame_w());
                     dropdown(
                         &fb,
                         inner.x,
-                        inner.y + theme::TITLE_H,
+                        inner.y + theme::title_h(),
                         SYS_ITEMS.iter().copied(),
                         item,
                     );

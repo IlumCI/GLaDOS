@@ -235,8 +235,8 @@ fn apply(e: Effect) {
                 title,
                 icon: desk::ICO_PROGRAMS,
                 app: Box::new(Window { key, frame }),
-                w: w + theme::FRAME * 2,
-                h: h + theme::TITLE_H + theme::FRAME * 2,
+                w: w + theme::frame_w() * 2,
+                h: h + theme::title_h() + theme::frame_w() * 2,
             });
         }
         Effect::Retitle { key, title } => desk::post(desk::Op::Retitle { tag: key, title }),
