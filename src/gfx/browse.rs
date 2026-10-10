@@ -356,7 +356,7 @@ impl Browser {
             return false;
         }
         let lh = theme::text_h().max(1) as i32;
-        let cw = theme::text_w(1).max(1) as usize;
+        let cw = theme::mono_col() as usize;
         let line = self.scroll + ((py - text.y as i32) / lh).max(0) as usize;
         let cols = (text.w as usize / cw).max(1);
         let rows = self.rows(cols);
@@ -378,7 +378,7 @@ impl Browser {
     /// the two places a press means something.
     fn metrics(client: Rect) -> (Rect, Rect) {
         let pad = 4;
-        let cw = theme::text_w(1).max(1);
+        let cw = theme::mono_col();
         let lh = theme::text_h().max(1);
         let bar = Rect::new(client.x + pad, client.y + pad, client.w - pad * 2, lh + 6);
         let cap = theme::text_w(4);
@@ -416,7 +416,7 @@ impl Browser {
     pub fn draw_in(&self, fb: &Framebuffer, client: Rect, focused: bool) {
         theme::panel(fb, client);
         let pad = 4;
-        let cw = theme::text_w(1).max(1);
+        let cw = theme::mono_col();
         let lh = theme::text_h().max(1);
 
         // Address bar across the top, then the page, then a status line.
@@ -432,7 +432,7 @@ impl Browser {
         if self.editing && focused {
             line.push('_');
         }
-        theme::text(fb, inner.x, inner.y, &line, theme::TEXT, theme::HILIGHT);
+        theme::mono_text(fb, inner.x, inner.y, &line, theme::TEXT, theme::HILIGHT);
 
         let status_h = lh + 4;
         let view = Rect::new(
@@ -468,7 +468,7 @@ impl Browser {
             } else {
                 (theme::SCREEN_TEXT, theme::SCREEN)
             };
-            theme::text(fb, text.x, y, &row.text, fg, bg);
+            theme::mono_text(fb, text.x, y, &row.text, fg, bg);
         }
 
         let sy = view.y + view.h + 3;

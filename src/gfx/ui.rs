@@ -453,13 +453,12 @@ impl Panel {
                 let cap = theme::text_w(name.len() + 1);
                 let well = Rect::new(r.x + cap, r.y, r.w.saturating_sub(cap), r.h - 2);
                 let inner = well.shrink(3);
-                let room = (inner.w / (font::GLYPH_W * theme::CHROME_SCALE)) as usize;
+                let room = (inner.w / theme::mono_col()) as usize;
                 if room > 0 {
                     // The same window the paint pass shows, so the caret lands
                     // on the character that was actually under the pointer.
                     let off = cursor.saturating_sub(room.saturating_sub(1));
-                    let col = ((px - inner.x as i32).max(0) as u32
-                        / (font::GLYPH_W * theme::CHROME_SCALE)) as usize;
+                    let col = ((px - inner.x as i32).max(0) as u32 / theme::mono_col()) as usize;
                     *cursor = (off + col).min(text.len());
                 }
                 Step::Redraw
@@ -509,7 +508,7 @@ impl Panel {
                 Widget::Sep => theme::separator(fb, x, y + GAP / 2, w),
                 Widget::Heading(t) => {
                     theme::text(fb, x, y + 4, t, theme::TEXT, theme::FACE);
-                    let uw = theme::text_w(t.chars().count()).min(w);
+                    let uw = theme::text_w_of(t).min(w);
                     fb.rect(x, y + 4 + TEXT_H + 2, uw, 2, theme::APERTURE);
                 }
                 Widget::Status { name, value, tone } => {
@@ -581,14 +580,13 @@ impl Panel {
                     // Scroll so the caret stays visible, exactly as the shell's
                     // own line editor does -- a field narrower than its
                     // contents is the normal case, not an error.
-                    let room = (inner.w / (font::GLYPH_W * theme::CHROME_SCALE)) as usize;
+                    let room = (inner.w / theme::mono_col()) as usize;
                     if room > 0 {
                         let off = cursor.saturating_sub(room.saturating_sub(1));
                         let end = (off + room).min(text.len());
-                        theme::text(fb, inner.x, inner.y, &text[off..end], theme::TEXT, theme::HILIGHT);
+                        theme::mono_text(fb, inner.x, inner.y, &text[off..end], theme::TEXT, theme::HILIGHT);
                         if focused {
-                            let cx = inner.x
-                                + (cursor - off) as u32 * font::GLYPH_W * theme::CHROME_SCALE;
+                            let cx = inner.x + theme::mono_w(cursor - off);
                             fb.rect(cx, inner.y, 2, TEXT_H, theme::TEXT);
                         }
                     }

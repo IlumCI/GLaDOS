@@ -756,7 +756,7 @@ impl DeskApp for Ask {
         let shown = theme::tail_chars(&self.typed, room);
         dtext(fb, field.x + 4, field.y + 6, shown, theme::TEXT);
         if focused {
-            let cx = field.x + 4 + theme::text_w_at(shown.chars().count(), dense());
+            let cx = field.x + 4 + theme::text_w_of_at(shown, dense());
             fb.rect(cx, field.y + 5, 2, theme::text_h_at(dense()), theme::APERTURE);
         }
         self.send.at.set(btn);

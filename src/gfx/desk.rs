@@ -3633,7 +3633,7 @@ fn terminal_status(fb: &super::Framebuffer, r: Rect) {
     // Right-aligned, and laid out from the right edge inwards so a long
     // model line runs out of room before it can overwrite the state --
     // which is the half that changes and therefore the half worth seeing.
-    let w = theme::text_w_at(right.chars().count(), 1);
+    let w = theme::text_w_of_at(&right, 1);
     if r.w > w + 24 {
         let x = r.x + r.w - w - 6;
         let tone = if engine { theme::APERTURE } else { theme::TITLE_TEXT };
@@ -5455,7 +5455,7 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
                 theme::text(&fb, row.x + 4, row.y + 4, &shown, fg, theme::HILIGHT);
                 // A caret, so a selected empty box does not read as inert.
                 if is_query_row(item) {
-                    let cx = row.x + 4 + theme::text_w(shown.chars().count());
+                    let cx = row.x + 4 + theme::text_w_of(&shown);
                     fb.rect(cx, row.y + 4, 2, theme::text_h(), theme::TEXT);
                 }
             }

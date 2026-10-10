@@ -60,6 +60,8 @@
 //! means one thing, so the bevel got new constants instead.
 
 use super::font;
+use super::text;
+use alloc::string::String;
 use super::{Color, Framebuffer};
 
 // --- surfaces ------------------------------------------------------------
@@ -536,8 +538,82 @@ pub fn well(fb: &Framebuffer, r: Rect, fill: Color) {
     outline(fb, r, WELL_EDGE);
 }
 
+// Interface text is Noto Sans and editable text is Cascadia Code, through
+// `gfx::text` (Q4c). The *layout* is still the bitmap's for now: `text_h` is
+// the 16-pixel row every window was laid out against, and `text_w(n)` is
+// still 16 pixels a character -- which stays a safe budget, since no glyph of
+// Noto Sans at 15 px is wider than 16, so a label sized by it can only come
+// out shorter than its room, never overlap what is beside it. The metrics
+// move to logical pixels with the restyle (Q8); this commit is the faces.
+//
+// Editable text is monospaced on purpose: a field and the Write window place
+// the caret at a *column*, and a column is a pixel offset only in a face
+// whose every advance is the same. `mono_w` is that advance.
+
+/// The interface face's size at `CHROME_SCALE`, and what a scale maps to.
+pub const UI_PX: f32 = 15.0;
+
+fn ui_px(scale: u32) -> f32 {
+    match scale {
+        0 | 1 => 10.5,
+        2 => UI_PX,
+        s => UI_PX * s as f32 / 2.0,
+    }
+}
+
+/// Set `s` in `face` with the top of its row at `y`, the cap height centred in
+/// a row of `row_h` pixels -- the vertical rule a 16-pixel bitmap cell used to
+/// supply for free. Fills `bg` behind the measured run when there is one.
+fn set(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color, bg: Option<Color>, face: text::Face, px: f32, row_h: u32) {
+    if let Some(bg) = bg {
+        let w = (text::measure(face, px, s) + 0.999) as u32;
+        fb.rect(x, y, w, row_h, bg);
+    }
+    // Cap height is about 0.71 em in both faces; centre that, and let
+    // descenders hang into the row's spare pixels below.
+    let cap = px * 0.714;
+    let base = y as f32 + (row_h as f32 + cap) / 2.0;
+    text::draw(fb, x as f32, (base + 0.5) as i32, face, px, s, fg);
+}
+
 pub fn text(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color, bg: Color) {
-    fb.draw_text(x, y, s, fg, bg, CHROME_SCALE);
+    set(fb, x, y, s, fg, Some(bg), text::Face::Ui, UI_PX, text_h());
+}
+
+/// Interface text in the semibold weight: captions and headings.
+pub fn text_strong(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color) {
+    set(fb, x, y, s, fg, None, text::Face::UiStrong, UI_PX, text_h());
+}
+
+/// Editable or column-aligned text, monospaced, on a `bg` field.
+pub fn mono_text(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color, bg: Color) {
+    set(fb, x, y, s, fg, Some(bg), text::Face::Mono, UI_PX, text_h());
+}
+
+/// The width of `n` columns of `mono_text`.
+pub fn mono_w(n: usize) -> u32 {
+    let adv = text::measure(text::Face::Mono, UI_PX, "M");
+    (n as f32 * adv + 0.5) as u32
+}
+
+/// The width of one column of `mono_text`, for hit-testing a press to a column.
+pub fn mono_col() -> u32 {
+    mono_w(1).max(1)
+}
+
+/// The measured width of `s` as `text_over_at` sets it at `scale`.
+pub fn text_w_of_at(s: &str, scale: u32) -> u32 {
+    (text::measure(text::Face::Ui, ui_px(scale), s) + 0.999) as u32
+}
+
+/// `fit` at a chosen scale.
+pub fn fit_at(s: &str, max: u32, scale: u32) -> String {
+    text::ellipsize(text::Face::Ui, ui_px(scale), s, max as f32)
+}
+
+/// `s` cut to fit `max` pixels of interface text, with an ellipsis if it was.
+pub fn fit(s: &str, max: u32) -> String {
+    text::ellipsize(text::Face::Ui, UI_PX, s, max as f32)
 }
 
 /// Height of one line of chrome text, the companion to `text_w`.
@@ -559,7 +635,9 @@ pub fn text_w(len: usize) -> u32 {
 /// model supplies; `text_w` still takes a count, for the callers that are
 /// asking about columns rather than about a string.
 pub fn text_w_of(s: &str) -> u32 {
-    text_w(s.chars().count())
+    // Measured now, kerning and all: the face is proportional, so a count of
+    // anything -- bytes or characters -- is not a width.
+    (text::measure(text::Face::Ui, UI_PX, s) + 0.999) as u32
 }
 
 /// The first `n` characters, for a label that has to fit.
@@ -899,23 +977,7 @@ pub fn text_over(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color) {
 /// crisp bitmap rather than a shrunk one, because the font *is* eight pixels
 /// and two was always a doubling.
 pub fn text_over_at(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color, scale: u32) {
-    let scale = scale.max(1);
-    let mut cx = x;
-    for b in s.chars() {
-        let rows = font::rows(font::index_of(b));
-        for (gy, bits) in rows.iter().enumerate() {
-            for gx in 0..font::GLYPH_W {
-                if bits & (0x80 >> gx) != 0 {
-                    for dy in 0..scale {
-                        for dx in 0..scale {
-                            fb.put(cx + gx * scale + dx, y + gy as u32 * scale + dy, fb.raw(fg));
-                        }
-                    }
-                }
-            }
-        }
-        cx += font::GLYPH_W * scale;
-    }
+    set(fb, x, y, s, fg, None, text::Face::Ui, ui_px(scale), text_h_at(scale));
 }
 
 /// Row height and column width at a chosen scale, the companions to
@@ -966,9 +1028,9 @@ pub fn button_at(
         }
     }
 
-    let room = (r.w.saturating_sub(6) / (font::GLYPH_W * scale.max(1))) as usize;
-    let label = head_chars(label, room);
-    let tw = text_w_at(label.chars().count(), scale);
+    let label = fit_at(label, r.w.saturating_sub(6), scale);
+    let label = label.as_str();
+    let tw = text_w_of_at(label, scale);
     let tx = r.x + (r.w.saturating_sub(tw)) / 2 + u32::from(pressed);
     let ty = r.y + (r.h.saturating_sub(text_h_at(scale))) / 2 + u32::from(pressed);
     // `text_over` rather than `text`: the face is a ramp now, so stamping one
