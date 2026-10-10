@@ -2211,7 +2211,26 @@ pub fn selftest() -> bool {
 /// arrow carries its outline in the bitmap; the resize glyphs are solid
 /// figures given a dark halo here, so each reads on both a dark title bar and
 /// the light wall.
-fn cursor_image(fb: &Framebuffer, shape: u8) -> [Option<u32>; (CUR_W * CUR_H) as usize] {
+/// The pointer plane's image for `shape`, premultiplied ARGB with the
+/// pointer's position at `(HOT_X, HOT_Y)`.
+///
+/// The arrow is drawn, not looked up: an anti-aliased outline with a dark rim
+/// and a soft shadow below and to the right, at the 1.25 scale this release
+/// lays everything out for -- the old one was an eleven-by-seventeen bitmap in
+/// two colours. It is built once and kept, because `cursor_show` runs on every
+/// pointer packet and the drawing is a few thousand distance evaluations. The
+/// resize glyphs are still bitmaps, converted, with their top-left where the
+/// pointer is, as it always was.
+fn cursor_image(fb: &Framebuffer, shape: u8) -> super::compose::Plane {
+    use super::compose::{HOT_X, HOT_Y, PLANE};
+    if shape == SHAPE_ARROW {
+        static ARROW: Racy<Option<super::compose::Plane>> = Racy::new(None);
+        let cache = unsafe { &mut *ARROW.get() };
+        if cache.is_none() {
+            *cache = Some(arrow_plane(fb));
+        }
+        return cache.unwrap();
+    }
     let bits = bitmap(shape);
     let set = |r: i32, c: i32| -> bool {
         if r < 0 || c < 0 || r >= CUR_H as i32 || c >= CUR_W as i32 {
@@ -2219,21 +2238,83 @@ fn cursor_image(fb: &Framebuffer, shape: u8) -> [Option<u32>; (CUR_W * CUR_H) as
         }
         matches!(bits[r as usize].as_bytes().get(c as usize), Some(b'X') | Some(b'.'))
     };
-    let mut out = [None; (CUR_W * CUR_H) as usize];
+    let mut out = [0u32; (PLANE * PLANE) as usize];
     for row in 0..CUR_H {
         let line = bits[row as usize].as_bytes();
         for col in 0..CUR_W {
-            let i = (row * CUR_W + col) as usize;
-            out[i] = match line.get(col as usize) {
-                Some(b'X') if shape == SHAPE_ARROW => Some(fb.raw(theme::TEXT)),
+            let v = match line.get(col as usize) {
                 Some(b'.') | Some(b'X') => Some(fb.raw(theme::HILIGHT)),
-                _ if shape != SHAPE_ARROW => {
+                _ => {
                     let (r, c) = (row as i32, col as i32);
                     let near = (-1..=1).any(|dr| (-1..=1).any(|dc| (dr, dc) != (0, 0) && set(r + dr, c + dc)));
                     near.then(|| fb.raw(theme::TEXT))
                 }
-                _ => None,
             };
+            if let Some(v) = v {
+                out[((row + HOT_Y) * PLANE + col + HOT_X) as usize] = super::blend::opaque(v);
+            }
+        }
+    }
+    out
+}
+
+/// The arrow's outline, in logical pixels from its tip: down the left edge,
+/// in to the notch, out along the tail, back to the notch, and across to the
+/// wing. The proportions are the familiar ones; only the drawing is new.
+const ARROW_PTS: [(f32, f32); 7] = [(0.0, 0.0), (0.0, 17.0), (4.0, 13.0), (7.0, 20.0), (10.0, 19.0), (7.0, 12.0), (12.0, 12.0)];
+
+/// Signed distance from `(x, y)` to the arrow at `scale`: negative inside.
+fn arrow_sd(x: f32, y: f32, scale: f32) -> f32 {
+    let n = ARROW_PTS.len();
+    let mut d = f32::MAX;
+    let mut inside = false;
+    for i in 0..n {
+        let (ax, ay) = (ARROW_PTS[i].0 * scale, ARROW_PTS[i].1 * scale);
+        let (bx, by) = (ARROW_PTS[(i + 1) % n].0 * scale, ARROW_PTS[(i + 1) % n].1 * scale);
+        let (ex, ey) = (bx - ax, by - ay);
+        let (px, py) = (x - ax, y - ay);
+        let t = ((px * ex + py * ey) / (ex * ex + ey * ey)).clamp(0.0, 1.0);
+        let (qx, qy) = (px - ex * t, py - ey * t);
+        d = d.min(qx * qx + qy * qy);
+        // Crossing number, for the sign.
+        if (ay > y) != (by > y) && x < ax + (y - ay) * ex / ey {
+            inside = !inside;
+        }
+    }
+    let d = super::shape::libm_sqrt(d);
+    if inside { -d } else { d }
+}
+
+fn arrow_plane(fb: &Framebuffer) -> super::compose::Plane {
+    use super::compose::{HOT_X, HOT_Y, PLANE};
+    let scale = 1.25f32;
+    let rim = 1.25f32;
+    let (sx, sy, sigma) = (1.0f32, 2.0f32, 1.6f32);
+    let fill = super::blend::opaque(fb.raw(Color::new(255, 255, 255)));
+    let ink = super::blend::opaque(fb.raw(Color::new(20, 24, 32)));
+    let mut out = [0u32; (PLANE * PLANE) as usize];
+    for py in 0..PLANE {
+        for px in 0..PLANE {
+            // Pixel centre, relative to the tip.
+            let (x, y) = (px as f32 + 0.5 - HOT_X as f32, py as f32 + 0.5 - HOT_Y as f32);
+            let d = arrow_sd(x, y, scale);
+            // The shadow: the outline, offset and softened by its own distance
+            // field rather than blurred -- a smoothstep across a sigma either
+            // side of the edge, at about half black.
+            let ds = arrow_sd(x - sx, y - sy, scale);
+            let t = ((ds + sigma) / (3.0 * sigma)).clamp(0.0, 1.0);
+            let shade = (1.0 - t * t * (3.0 - 2.0 * t)) * 0.55;
+            let mut p = super::blend::premul(0, (shade * 255.0 + 0.5) as u8);
+            // The rim, then the white body inside it.
+            let rim_cov = (0.5 - d).clamp(0.0, 1.0);
+            if rim_cov > 0.0 {
+                p = super::blend::over_px(super::blend::scale_px(ink, (rim_cov * 255.0 + 0.5) as u32), p);
+            }
+            let body = (0.5 - (d + rim)).clamp(0.0, 1.0);
+            if body > 0.0 {
+                p = super::blend::over_px(super::blend::scale_px(fill, (body * 255.0 + 0.5) as u32), p);
+            }
+            out[(py * PLANE + px) as usize] = p;
         }
     }
     out

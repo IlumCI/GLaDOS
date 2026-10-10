@@ -63,31 +63,54 @@ struct Compositor {
 /// The shadow includes the pointer, because the shadow describes the screen;
 /// so a frame that repaints the area under the pointer still compares equal
 /// wherever only the pointer was, and writes nothing there.
+/// The size of the bitmap pointer the no-compositor path still draws.
 pub const CUR_W: u32 = 11;
 pub const CUR_H: u32 = 17;
-struct Cursor {
-    at: Option<(u32, u32)>,
-    /// Encoded pixels, `None` where the pointer is transparent.
-    image: [Option<u32>; (CUR_W * CUR_H) as usize],
-}
-static CURSOR: Racy<Cursor> = Racy::new(Cursor { at: None, image: [None; (CUR_W * CUR_H) as usize] });
 
-/// Where the pointer is and what it looks like. Re-presents where it was and
-/// where it is now; the back buffer is untouched. `None` hides it.
-pub fn set_cursor(at: Option<(u32, u32)>, image: &[Option<u32>; (CUR_W * CUR_H) as usize]) {
+/// The pointer plane's image: premultiplied ARGB, `PLANE` square, laid over
+/// each row with OVER rather than copied in. 1.4.1's arrow is anti-aliased
+/// with a soft shadow, and both of those are partial alpha -- the old plane
+/// held opaque-or-nothing pixels and could carry neither.
+pub const PLANE: u32 = 32;
+/// Where in the image the pointer's position falls: the arrow's tip sits a
+/// little in from the corner so its shadow has room above and to the left.
+pub const HOT_X: u32 = 3;
+pub const HOT_Y: u32 = 3;
+pub type Plane = [u32; (PLANE * PLANE) as usize];
+
+struct Cursor {
+    /// The image's top-left on screen, which may be off its left or top edge.
+    at: Option<(i32, i32)>,
+    image: Plane,
+}
+static CURSOR: Racy<Cursor> = Racy::new(Cursor { at: None, image: [0; (PLANE * PLANE) as usize] });
+
+/// The screen rectangle the image covers when its top-left is at `(x, y)`.
+fn plane_rect(x: i32, y: i32) -> (u32, u32, u32, u32) {
+    let (x0, y0) = (x.max(0) as u32, y.max(0) as u32);
+    let (x1, y1) = ((x + PLANE as i32).max(0) as u32, (y + PLANE as i32).max(0) as u32);
+    (x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
+}
+
+/// The pointer is at `at` and looks like `image`. Re-presents where it was
+/// and where it is now; the back buffer is untouched. `None` hides it.
+pub fn set_cursor(at: Option<(u32, u32)>, image: &Plane) {
     let cur = unsafe { &mut *CURSOR.get() };
     let was = cur.at;
+    let now = at.map(|(x, y)| (x as i32 - HOT_X as i32, y as i32 - HOT_Y as i32));
     let changed_image = cur.image != *image;
-    if was == at && !changed_image {
+    if was == now && !changed_image {
         return;
     }
-    cur.at = at;
+    cur.at = now;
     cur.image = *image;
     if let Some((x, y)) = was {
-        flush_counted(x, y, CUR_W, CUR_H);
+        let (rx, ry, rw, rh) = plane_rect(x, y);
+        flush_counted(rx, ry, rw, rh);
     }
-    if let Some((x, y)) = at {
-        flush_counted(x, y, CUR_W, CUR_H);
+    if let Some((x, y)) = now {
+        let (rx, ry, rw, rh) = plane_rect(x, y);
+        flush_counted(rx, ry, rw, rh);
     }
 }
 
@@ -250,16 +273,17 @@ fn flush_counted(x: u32, y: u32, rw: u32, rh: u32) -> u64 {
         // buffer's pixels with the pointer's laid over them. That is what the
         // screen should show, so that is what is compared and written.
         if let Some((cx, cy)) = cur.at {
-            let cy = cy as usize;
-            if row >= cy && row < cy + CUR_H as usize {
-                let (cx0, cx1) = (cx as usize, cx as usize + CUR_W as usize);
-                if cx1 > x0 && cx0 < x1 {
+            let r = row as i32 - cy;
+            if r >= 0 && r < PLANE as i32 {
+                let (cx0, cx1) = (cx, cx + PLANE as i32);
+                if cx1 > x0 as i32 && cx0 < x1 as i32 {
                     let scratch = &mut c.row[x0..x1];
                     scratch.copy_from_slice(back);
-                    let line = (row - cy) * CUR_W as usize;
-                    for px in cx0.max(x0)..cx1.min(x1) {
-                        if let Some(v) = cur.image[line + (px - cx0)] {
-                            scratch[px - x0] = v;
+                    let line = r as usize * PLANE as usize;
+                    for px in (cx0.max(x0 as i32) as usize)..(cx1.min(x1 as i32) as usize) {
+                        let v = cur.image[line + (px as i32 - cx0) as usize];
+                        if v != 0 {
+                            scratch[px - x0] = super::blend::over_px(v, scratch[px - x0]);
                         }
                     }
                     back = &c.row[x0..x1];
@@ -313,29 +337,38 @@ pub fn present_region(r: &super::region::Region) {
 /// hiding it puts the shadow back to exactly what the back buffer holds.
 pub fn cursor_checks(claim: &mut dyn FnMut(&str, bool)) {
     let Some(c) = (unsafe { (*COMP.get()).as_ref() }) else {
-        crate::kprintln!("  ....  no compositor, so 3 claim(s) about the pointer plane did not run");
+        crate::kprintln!("  ....  no compositor, so 4 claim(s) about the pointer plane did not run");
         return;
     };
     if !super::lease::compositor_may_write() {
-        crate::kprintln!("  ....  the screen is leased, so 3 claim(s) about the pointer plane did not run");
+        crate::kprintln!("  ....  the screen is leased, so 4 claim(s) about the pointer plane did not run");
         return;
     }
     let (w, h) = (c.w as usize, c.h as usize);
     let (x, y) = (w / 3, h / 3);
+    let n = PLANE as usize;
     let span = |v: &Vec<u32>| -> Vec<u32> {
-        (0..CUR_H as usize).flat_map(|r| v[(y + r) * w + x..(y + r) * w + x + CUR_W as usize].to_vec()).collect()
+        (0..n).flat_map(|r| v[(y + r) * w + x..(y + r) * w + x + n].to_vec()).collect()
     };
     let saved = unsafe { (*CURSOR.get()).at };
     let image_saved = unsafe { (*CURSOR.get()).image };
     let back_before = span(&c.back);
-    let mut image = [None; (CUR_W * CUR_H) as usize];
-    image[0] = Some(0x00AB_CDEF);
-    set_cursor(Some((x as u32, y as u32)), &image);
+    let mut image = [0u32; (PLANE * PLANE) as usize];
+    // One opaque pixel at the image's corner, one half-transparent one beside
+    // it: the second is what the plane could not carry before 1.4.1.
+    image[0] = 0xFFAB_CDEF;
+    image[1] = 0x8000_0000;
+    let under = c.back[y * w + x + 1];
+    set_cursor(Some(((x + HOT_X as usize) as u32, (y + HOT_Y as usize) as u32)), &image);
     let c = unsafe { (*COMP.get()).as_ref().unwrap() };
     claim("moving the pointer leaves the back buffer exactly as it was", span(&c.back) == back_before);
-    claim("and the shadow describes the screen, pointer included", c.shadow[y * w + x] == 0x00AB_CDEF);
+    claim("and the shadow describes the screen, pointer included", c.shadow[y * w + x] == 0xFFAB_CDEF);
+    claim("a half-transparent pointer pixel is blended, not copied",
+        c.shadow[y * w + x + 1] == super::blend::over_px(0x8000_0000, under));
     set_cursor(None, &image);
     let c = unsafe { (*COMP.get()).as_ref().unwrap() };
     claim("hiding it puts the shadow back to the back buffer", span(&c.shadow) == span(&c.back));
+    // `at` is the image's top-left; the pointer was the hotspot inside it.
+    let saved = saved.map(|(x, y)| ((x + HOT_X as i32).max(0) as u32, (y + HOT_Y as i32).max(0) as u32));
     set_cursor(saved, &image_saved);
 }
