@@ -2397,6 +2397,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
     // they meant.
     match crate::ai::learn::operator_ran(cmd) {
         crate::ai::learn::Verdict::Learn(applet, task) => {
+            // Being corrected stings, a little: a short noxious drive.
+            crate::brain::stimulate(crate::brain::Sense::Noxious, 200);
             console::set_color(LTGREEN);
             kprintln!("  [learn] '{}' for: {}", applet, task);
             console::set_color(LTGRAY);
@@ -4871,6 +4873,30 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 kprintln!("  queued -- the shell stays yours while it runs");
             } else {
                 kprintln!("  a request is already pending");
+            }
+        }
+        "brain" => {
+            // The connectome: what it is, what it reads, and a way to drive
+            // it by hand -- the headless test, for the reason `linux feed`
+            // exists.
+            let w: alloc::vec::Vec<&str> = rest.split_whitespace().collect();
+            match w.as_slice() {
+                [] => {
+                    for line in crate::brain::report() {
+                        kprintln!("{}", line);
+                    }
+                }
+                ["on"] => crate::brain::set_on(true),
+                ["off"] => crate::brain::set_on(false),
+                ["poke", sense] | ["poke", sense, _] => match crate::brain::Sense::parse(sense) {
+                    Some(s) => {
+                        let ms = w.get(2).and_then(|m| m.parse().ok()).unwrap_or(500u64).min(60_000);
+                        crate::brain::stimulate(s, ms);
+                        kprintln!("  driving {} for {} ms of brain time", s.name(), ms);
+                    }
+                    None => kprintln!("  senses: touch voice food noxious thermal"),
+                },
+                _ => kprintln!("  usage: brain [on|off|poke <sense> [ms]]"),
             }
         }
         "intent" => {

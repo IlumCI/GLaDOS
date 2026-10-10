@@ -44,7 +44,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 /// `KNOWN_COMMANDS` did.
 pub const VERBS: &[&str] = &[
     "about", "abstract", "acpi", "act", "adapter", "agent", "agentlog", "answer", "app", "ask",
-    "author", "autosnap", "batt", "battery", "bench", "bringup", "census", "checklist",
+    "author", "autosnap", "batt", "battery", "bench", "brain", "bringup", "census", "checklist",
     "clear", "cont", "core", "cpu", "crypto", "ctx", "date", "deeptrain", "desk", "devices",
     "dhcp", "diag", "disk", "dmi", "dns", "ec", "echo", "edit", "enternet", "exec", "fat",
     "fault", "feature", "file", "firmware", "fit", "font", "forest", "fw", "gate", "gen", "godel",

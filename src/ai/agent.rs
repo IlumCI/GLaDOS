@@ -1031,6 +1031,16 @@ pub fn run(goal: &str, trust: Trust, max_steps: usize) {
     signal.append();
     console::set_color(LTGRAY);
     kprintln!("  [agent] {}", signal.render());
+    // What happened, felt: an episode that went well is food, one that went
+    // badly is noxious. By the same score the outcome row records, so the
+    // brain hears exactly what the log says and nothing a second rule
+    // decided.
+    let sc = signal.score();
+    if sc > 0.0 {
+        crate::brain::stimulate(crate::brain::Sense::Food, 500);
+    } else if sc < 0.0 {
+        crate::brain::stimulate(crate::brain::Sense::Noxious, 500);
+    }
     unsafe { *LAST_OUTCOME.get() = Some(signal) };
 
     // Transcript into the namespace. Content-addressed like everything else:

@@ -21,6 +21,7 @@ mod boot_report;
 mod checklist;
 mod repair;
 mod ai;
+mod brain;
 mod app;
 mod cpu;
 mod crypto;
@@ -93,12 +94,18 @@ pub struct BootInfo {
     /// A DER bundle of root certificates. `None` means TLS can encrypt and
     /// cannot authenticate, which is reported rather than assumed.
     pub roots: Option<Blob>,
+    /// A GLADOSB1 connectome. `None` is normal: the worm is compiled in, and
+    /// a staged file only replaces it with a larger animal.
+    pub brain: Option<Blob>,
 }
 
 /// Where the weights live on the boot volume. Backslashes: this is a UEFI path
 /// on the ESP, not a namespace path.
 pub const MODEL_PATH: &str = "\\GLADOS\\model.bin";
 pub const TOKENIZER_PATH: &str = "\\GLADOS\\tokenizer.bin";
+/// A connectome (`tools/connectome.py build`). Read whole, like the model: the
+/// fly is about 30 MB and `dev::firmware` caps a file at 8.
+pub const BRAIN_PATH: &str = "\\GLADOS\\brain.bin";
 
 #[no_mangle]
 pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
@@ -374,6 +381,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
 
     let model = uefi::read_file(bs, image, MODEL_PATH);
     let tokenizer = uefi::read_file(bs, image, TOKENIZER_PATH);
+    let brain = uefi::read_file(bs, image, BRAIN_PATH);
     // The root bundle comes off the same volume for the same reason: this is
     // the only moment there is a filesystem to read it from.
     let roots = uefi::read_file(bs, image, net::trust::ROOTS_PATH);
@@ -473,6 +481,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         model,
         tokenizer,
         roots,
+        brain,
     };
 
     console::init(boot.fb, 2, palette::BLACK);
@@ -671,6 +680,8 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // How far plain language at the prompt may reach, as the operator last
     // set it. After the namespace, which is where it is kept.
     ai::intent::load();
+    // A nervous system, before the mind that will read it.
+    brain::init(boot.brain.as_ref().map(|b| b.as_slice()));
 
     // **The router fits itself, because waiting to be asked is not a feature.**
     //

@@ -236,6 +236,8 @@ fn widen_if_near_the_wall() {
 pub fn turn(message: &str, opts: &super::GenOpts) -> usize {
     // The operator is waiting on this, so anything lower parks until it ends.
     let _fg = super::sched::foreground();
+    // Being spoken to is a sense.
+    crate::brain::stimulate(crate::brain::Sense::Voice, 300);
     let opening = turns() == 0 || super::with_engine(|e| e.pos).unwrap_or(0) == 0;
     if !opening {
         widen_if_near_the_wall();

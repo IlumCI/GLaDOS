@@ -128,3 +128,27 @@ with firmware and no licence, and `tools/wifi_fw.py stage` copies it in.
 The firmware is not covered by this tree's licence and is not open source; it
 is a binary Intel permits to be passed on unchanged, which is the whole of
 what is done with it here.
+
+## Connectome data (from 1.4.2)
+
+`assets/brain/worm.bin` is derived data compiled into the kernel, built by
+`tools/connectome.py build worm` from two sources:
+
+- **The C. elegans hermaphrodite chemical connectome**, Cook, S.J. et al.
+  (2019), "Whole-animal connectomes of both *Caenorhabditis elegans* sexes",
+  *Nature* 571:63-71, as redistributed in OpenWorm's ConnectomeToolbox
+  (`cect/data/herm_full_edgelist.csv`), MIT License, Copyright (c) 2026
+  OpenWorm.
+- **Neurotransmitter identity per neuron**, Wang, C. et al. (2024), "A
+  neurotransmitter atlas of *C. elegans* males and hermaphrodites", *eLife*
+  13:RP95402, supplementary file 2, licensed CC BY 4.0
+  (https://creativecommons.org/licenses/by/4.0/). Used to assign each
+  presynaptic neuron a sign; the table itself is not reproduced.
+
+The dynamics are Shiu, P.K. et al. (2024), "A *Drosophila* computational
+brain model reveals sensorimotor processing", *Nature* 634:210-219 -- its
+published constants, reimplemented here; no code from it is included.
+
+What was changed, as CC BY asks: synapse counts are summed per ordered pair
+of neurons, gap junctions and non-neuronal cells are dropped, and neuron names
+are normalised (`AS01` becomes `AS1`).
