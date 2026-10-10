@@ -33,7 +33,7 @@ use super::Framebuffer;
 
 /// Coverage of a pixel whose centre is `d` from the edge, in 0..=255.
 #[inline]
-fn cov(d: f32) -> u8 {
+pub(crate) fn cov(d: f32) -> u8 {
     let c = 0.5 - d;
     if c <= 0.0 {
         0
@@ -47,7 +47,7 @@ fn cov(d: f32) -> u8 {
 /// Signed distance from `(px, py)` to a rounded box centred at `(cx, cy)` with
 /// half-extents `(hx, hy)` and corner radius `r`. Negative inside.
 #[inline]
-fn sd_rbox(px: f32, py: f32, cx: f32, cy: f32, hx: f32, hy: f32, r: f32) -> f32 {
+pub(crate) fn sd_rbox(px: f32, py: f32, cx: f32, cy: f32, hx: f32, hy: f32, r: f32) -> f32 {
     let qx = (px - cx).abs() - hx + r;
     let qy = (py - cy).abs() - hy + r;
     let ox = qx.max(0.0);
@@ -69,7 +69,7 @@ fn ceilf(x: f32) -> f32 {
 }
 
 #[inline]
-fn libm_sqrt(x: f32) -> f32 {
+pub(crate) fn libm_sqrt(x: f32) -> f32 {
     // `sqrtss`: SSE is on for this target, and the result is correctly rounded.
     unsafe { core::arch::x86_64::_mm_cvtss_f32(core::arch::x86_64::_mm_sqrt_ss(core::arch::x86_64::_mm_set_ss(x))) }
 }

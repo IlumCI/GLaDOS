@@ -394,15 +394,11 @@ pub const MENU_GUTTER_W: u32 = 20;
 /// rounded one reads as a control that has come loose from the frame.
 pub const WIN_ROUND: u32 = 8;
 
-/// A window's drop shadow: how far it is offset, how wide it falls, and how
-/// much of the backdrop survives underneath it out of 256.
-///
-/// Aero's is soft and this one is not, because softness needs the backdrop at
-/// the moment the corner is drawn and the back-to-front repaint has already
-/// covered it. A hard band at 84% is what an opaque renderer can say honestly.
-pub const SHADOW_OFF: u32 = 3;
-pub const SHADOW_W: u32 = 5;
-pub const SHADOW_NUM: u32 = 214;
+// A window's shadow is `gfx::shadow` now, set in `desk::win_shadow`. It was a
+// hard five-pixel band at 84%, under a comment that softness "needs the
+// backdrop at the moment the corner is drawn and the back-to-front repaint has
+// already covered it" -- true of a renderer that painted straight to the
+// screen, and not of one that composes into a back buffer it can read.
 
 /// The console's own background, inside the terminal window's well.
 pub const SCREEN: Color = Color::new(0x0A, 0x0C, 0x10);
@@ -1135,8 +1131,7 @@ pub const ICON_GLOSS_NUM: u32 = 64;
 pub const ICON_GLOSS_SPAN: u32 = 110;
 
 /// How much a base shadow keeps of what is under it, out of 256. Higher is
-/// fainter; `SHADOW_NUM` is 214 for a window and an icon wants less weight
-/// than a window.
+/// fainter.
 pub const ICON_SHADE_NUM: u32 = 224;
 
 // The three ink wells on the paint palette, and the globe's water. These were

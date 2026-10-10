@@ -660,6 +660,34 @@ const SYS_ITEMS: [&str; 4] = ["Move", "Size", "Maximise / Restore", "Close"];
 /// Windows are laid out and maximised against this rather than the panel, so
 /// the taskbar is never covered. A bar that a maximised window hides is a bar
 /// that is not there when it is most wanted.
+/// The shadow a window casts: a blurred rounded box under it (`gfx::shadow`),
+/// deeper for the focused window, which reads as the one nearest the eye --
+/// the cue that took over from a title bar's colour in every desktop since
+/// Vista. None when it fills the work area, where there is nothing to fall on.
+fn win_shadow(win: &Window, active: bool) -> Option<(super::shadow::Spec, i32, i32, u8)> {
+    if win.state == WinState::Maximised {
+        return None;
+    }
+    let radius = win.round;
+    Some(if active {
+        (super::shadow::Spec { radius, sigma: 12.0 }, 0, 5, 102)
+    } else {
+        (super::shadow::Spec { radius, sigma: 7.0 }, 0, 3, 61)
+    })
+}
+
+/// A window's frame grown by everything its shadow reaches, clipped to the
+/// screen: the layer's bounds, and so its damage when it moves.
+fn shadowed(win: &Window, frame: Rect, active: bool, fb: &Framebuffer) -> Rect {
+    let Some((spec, dx, dy, _)) = win_shadow(win, active) else { return frame };
+    let (l, t, r, b) = super::shadow::reach(spec, dx, dy);
+    let x0 = frame.x.saturating_sub(l);
+    let y0 = frame.y.saturating_sub(t);
+    let x1 = (frame.x + frame.w + r).min(fb.width());
+    let y1 = (frame.y + frame.h + b).min(fb.height());
+    Rect::new(x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
+}
+
 fn screen_rect(fb: &Framebuffer) -> Rect {
     Rect::new(
         MARGIN,
@@ -4890,11 +4918,7 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
         }
         let active = Some(i) == focus;
         let frame = win.frame(screen);
-        let bounds = if win.state == WinState::Maximised {
-            frame
-        } else {
-            Rect::new(frame.x, frame.y, frame.w + theme::SHADOW_W, frame.h + theme::SHADOW_W)
-        };
+        let bounds = shadowed(win, frame, active, fb);
         let hot = match d.hover {
             Hover::Caption { win, which } if win == i => Some(which),
             _ => None,
@@ -5220,8 +5244,10 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
             }
             let active = Some(i) == focus;
             let frame = win.frame(screen);
-            // Nothing of this window falls in the area being repainted.
-            if !fb.touches(frame.x, frame.y, frame.w + theme::SHADOW_W, frame.h + theme::SHADOW_W) {
+            // Nothing of this window falls in the area being repainted -- its
+            // shadow counted, which is the same rectangle its layer claims.
+            let reach = shadowed(win, frame, active, &fb);
+            if !fb.touches(reach.x, reach.y, reach.w, reach.h) {
                 continue;
             }
             let hot = match d.hover {
@@ -5236,36 +5262,8 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
             // cover it afterwards is a window in front, which is exactly what
             // should. No compositing, no second pass, no order to get right
             // beyond the one the loop already has.
-            if win.state != WinState::Maximised {
-                let (off, wide) = (theme::SHADOW_OFF, theme::SHADOW_W);
-                let right = frame.x + frame.w;
-                let bottom = frame.y + frame.h;
-                // Clamped to the screen: `snap_release` can put a window flush
-                // against an edge, and `MARGIN` only protects the un-snapped
-                // case.
-                let edge_x = screen.x + screen.w;
-                let edge_y = screen.y + screen.h;
-                let band_w = wide.min(edge_x.saturating_sub(right));
-                let band_h = wide.min(edge_y.saturating_sub(bottom));
-                // The right band starts a radius below the top. Without that
-                // the offset silhouette leaves a three-pixel nub above the
-                // rounded top-right corner, which is the one place a hard
-                // shadow gives the rounding away.
-                let top = frame.y + off + win.round;
-                fb.shade_rect(
-                    right,
-                    top,
-                    band_w,
-                    (bottom + off).saturating_sub(top),
-                    theme::SHADOW_NUM,
-                );
-                fb.shade_rect(
-                    frame.x + off,
-                    bottom,
-                    (frame.w + band_w).saturating_sub(off),
-                    band_h,
-                    theme::SHADOW_NUM,
-                );
+            if let Some((spec, dx, dy, alpha)) = win_shadow(win, active) {
+                super::shadow::cast(&fb, frame.x as i32, frame.y as i32, frame.w, frame.h, spec, dx, dy, alpha);
             }
 
             // Confine this window's paint to its own outline. A rectangular
