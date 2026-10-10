@@ -156,7 +156,14 @@ pub fn set_blur(on: bool) {
     BLUR.store(on, core::sync::atomic::Ordering::Relaxed);
 }
 
+/// Whether glass shows the blur now: the setting, unless the quality
+/// governor has shed it.
 pub fn blur_on() -> bool {
+    blur_setting() && !super::quality::shed(1)
+}
+
+/// The setting, whatever the governor is doing.
+pub fn blur_setting() -> bool {
     BLUR.load(core::sync::atomic::Ordering::Relaxed)
 }
 
@@ -166,6 +173,12 @@ pub fn blur_on() -> bool {
 /// on a machine without the memory for it -- the tint stands in for the
 /// blurred backdrop, which is the formula with a flat wall behind it.
 pub fn fill(fb: &Framebuffer, x: i32, y: i32, w: u32, h: u32, radius: u32, g: Glass) {
+    fill_with(fb, x, y, w, h, radius, g, blur_on())
+}
+
+/// `fill`, saying whether to use the blur rather than asking the setting
+/// and the governor: the suite tests the formula, not the machine's mood.
+fn fill_with(fb: &Framebuffer, x: i32, y: i32, w: u32, h: u32, radius: u32, g: Glass, blur: bool) {
     if w == 0 || h == 0 {
         return;
     }
@@ -177,7 +190,7 @@ pub fn fill(fb: &Framebuffer, x: i32, y: i32, w: u32, h: u32, radius: u32, g: Gl
     let guard = BACKDROP.lock_irq();
     // Blur off (Settings, or the quality governor's first rung) is the
     // formula with a flat wall behind it, which is what no backdrop gives.
-    let back = if blur_on() { guard.as_ref() } else { None };
+    let back = if blur { guard.as_ref() } else { None };
     let r = radius.min(w / 2).min(h / 2);
     let mut row: Vec<u32> = alloc::vec![0; w as usize];
     let mut alpha: Vec<u8> = alloc::vec![0; w as usize];
@@ -335,23 +348,23 @@ pub fn selftest() -> bool {
     let mut px: Vec<u32> = alloc::vec![0; (w * h) as usize];
     let fb = unsafe { Framebuffer::over_ram(px.as_mut_ptr() as u64, w, h, w, Format::Bgrx) };
     let g = Glass { gloss: 0, ..Glass::SKY };
-    fill(&fb, 0, 0, w, h, 0, g);
+    fill_with(&fb, 0, 0, w, h, 0, g, true);
     // 128 grey: lum 128; red channel = (128*49 + 128*116/255*43 + 116*8)/100.
     let want_r = (128 * 49 + 128 * 0x74 / 255 * 43 + 0x74 * 8) / 100;
     let worst = px.iter().map(|&p| (((p >> 16) & 0xff) as i32 - want_r).abs()).max().unwrap_or(99);
     kprintln!("       red should be {} before noise; worst distance {}", want_r, worst);
     claim("glass over a flat grey is Vista's formula, within the noise", worst <= 3);
     let first = px.clone();
-    fill(&fb, 0, 0, w, h, 0, g);
+    fill_with(&fb, 0, 0, w, h, 0, g, true);
     claim("and draws identically twice, so the scene diff sees no change", px == first);
     // Rounded corners touch nothing outside the shape.
     px.iter_mut().for_each(|p| *p = 0xFF00_0000);
-    fill(&fb, 0, 0, w, h, 12, g);
+    fill_with(&fb, 0, 0, w, h, 12, g, true);
     claim("a rounded pane leaves its corner pixel alone", px[0] == 0xFF00_0000 && px[(w - 1) as usize] == 0xFF00_0000);
     claim("and fills its middle", px[((h / 2) * w + w / 2) as usize] != 0xFF00_0000);
     *BACKDROP.lock_irq() = None;
     px.iter_mut().for_each(|p| *p = 0);
-    fill(&fb, 0, 0, w, h, 0, g);
+    fill_with(&fb, 0, 0, w, h, 0, g, true);
     claim("with no backdrop the tint stands in, and nothing faults", px[0] != 0);
     *BACKDROP.lock_irq() = saved;
     ok

@@ -42,6 +42,7 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ("round", "0..16", "how round a window's head is"),
     ("blur", "on|off", "whether glass shows the blurred wallpaper"),
     ("tile", "on|off", "whether a new window tiles or floats"),
+    ("quality", "<floor> <ceiling>", "what the governor may shed, 0 everything .. 4 no motion"),
 ];
 
 /// A setting's value now, as `desk` prints it and the file stores it.
@@ -57,7 +58,11 @@ pub fn get(key: &str) -> Option<String> {
             format!("{} {}", i, o)
         }
         "round" => format!("{}", super::theme::round_logical()),
-        "blur" => String::from(if super::glass::blur_on() { "on" } else { "off" }),
+        "blur" => String::from(if super::glass::blur_setting() { "on" } else { "off" }),
+        "quality" => {
+            let (f, c) = super::quality::range();
+            format!("{} {}", f, c)
+        }
         "tile" => String::from(if super::desk::tile_new() { "on" } else { "off" }),
         _ => return None,
     })
@@ -103,6 +108,12 @@ fn apply(key: &str, val: &str) -> Result<(), &'static str> {
         "round" => super::theme::set_round(num(val, 0, 16)?),
         "blur" => super::glass::set_blur(onoff(val)?),
         "tile" => super::desk::set_tile_new(onoff(val)?),
+        "quality" => {
+            let mut it = val.split_whitespace();
+            let f = num(it.next().unwrap_or(""), 0, 4)?;
+            let c = num(it.next().unwrap_or(""), 0, 4)?;
+            super::quality::set_range(f as u8, c as u8);
+        }
         _ => return Err("no such setting"),
     }
     GENERATION.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -187,5 +198,22 @@ pub fn rows() -> Vec<(String, Vec<(String, String)>)> {
         (format!("Corners  {}", round), step("round", round, 2, 0, 16)),
         (format!("Blur  {}", get("blur").unwrap_or_default()), pick("blur", &["on", "off"])),
         (format!("New windows  {}", if super::desk::tile_new() { "tile" } else { "float" }), pick("tile", &["on", "off"])),
+        {
+            let (f, c) = super::quality::range();
+            let what = match (f, c) {
+                (0, 4) => String::from("auto"),
+                (0, 0) => String::from("always full"),
+                (4, 4) => String::from("always plain"),
+                _ => format!("{}..{}", f, c),
+            };
+            (
+                format!("Quality  {} (now: {})", what, super::quality::name(super::quality::level())),
+                alloc::vec![
+                    (String::from("auto"), String::from("desk quality 0 4")),
+                    (String::from("full"), String::from("desk quality 0 0")),
+                    (String::from("plain"), String::from("desk quality 4 4")),
+                ],
+            )
+        },
     ]
 }

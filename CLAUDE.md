@@ -5070,6 +5070,14 @@ the order a frame happens:
   the first one missed from the key (blur) left every window image stale.
   `win anim` is deliberately *not* persisted, so a test slowing motion down
   to photograph it does not write that into the machine.
+- **A governor sheds effects when motion runs slow** (`gfx::quality`, phase
+  17): blur, then dimming, then half-length motion, then none. It hears only
+  frames where something was animating, and not while `render verify` runs
+  (it measured verify's own repaint and shed everything). Two slow windows
+  of twelve frames shed a rung, five easy ones earn it back. `render` shows
+  the level; `desk quality <floor> <ceiling>` bounds it. Under KVM the
+  Flip 3D rise is slow enough to cost the blur, which is the governor being
+  right about those frames.
 - **A program's pixels are kept** (`Window.app_surface`) and redrawn only when
   its `DeskApp::stamp`, focus, size or its own input changes. A program with
   no stamp is redrawn every frame, which is correct and costs time. A program

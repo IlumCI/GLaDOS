@@ -3089,6 +3089,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
                 kprintln!();
             }
+            let (qf, qc) = crate::gfx::quality::range();
+            kprintln!(
+                "    quality       {} (level {} of 4, may range {}..{})",
+                crate::gfx::quality::name(crate::gfx::quality::level()),
+                crate::gfx::quality::level(),
+                qf,
+                qc
+            );
             let (whole, part, held) = crate::gfx::desk::image_stats();
             kprintln!("    window images {} whole, {} in part since boot, {} KiB held", whole, part, held / 1024);
             let reads = render::mmio_reads();

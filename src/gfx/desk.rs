@@ -4956,7 +4956,23 @@ pub fn draw() {
     if let Some((px, py)) = unsafe { *POS.get() } {
         cursor_show(&real, px, py);
     }
-    super::render::frame_timed(started, presenting, crate::time::rdtsc());
+    let ended = crate::time::rdtsc();
+    super::render::frame_timed(started, presenting, ended);
+    // A frame of something moving is a frame the budget is about; the
+    // governor hears of those and nothing else (`quality`).
+    //
+    // Not while `render verify` runs: its reference repaints the whole frame
+    // again inside the frame, and a governor fed that measured the
+    // instrument -- it shed every rung down to no motion on a machine with
+    // headroom to spare.
+    if ANIMATING.load(core::sync::atomic::Ordering::Relaxed) && !verifying() {
+        let us = ended.saturating_sub(started) / crate::time::tsc_mhz().max(1) as u64;
+        // No line on the serial port: one from the compositor lands after
+        // the shell's prompt and hides it from `drive.py`. `render` says.
+        if super::quality::observe(us.min(u32::MAX as u64) as u32) {
+            super::render::damage_all();
+        }
+    }
 }
 
 /// `render flash`: outline every rectangle a frame repaints, so damage can
@@ -5109,6 +5125,7 @@ fn window_key(
     // setting (`settings::generation`).
     theme::scale().hash(&mut st);
     super::settings::generation().hash(&mut st);
+    super::quality::level().hash(&mut st);
     for m in &win.menus {
         m.label.hash(&mut st);
     }
@@ -5197,6 +5214,7 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
         d.hover.hash(&mut st);
         theme::scale().hash(&mut st);
         super::settings::generation().hash(&mut st);
+        super::quality::level().hash(&mut st);
         // The readouts are parts of the bar: a new tenth of a second repaints
         // the clock's well and nothing else.
         let (clock, battery) = tray_strings();
@@ -5994,7 +6012,7 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
                 let maxed = win.state == WinState::Maximised;
                 let alpha = unsafe { (*FOCUS_RING.get()).2 };
                 focus_ring(&fb, frame, if maxed { 0 } else { win.round }, alpha, !maxed);
-            } else if DIM.load(core::sync::atomic::Ordering::Relaxed) < 256 {
+            } else if DIM.load(core::sync::atomic::Ordering::Relaxed) < 256 && !super::quality::shed(2) {
                 dim_window(&fb, win, frame);
             }
         }

@@ -158,14 +158,27 @@ pub fn set_speed(percent: u32) {
     SPEED.store(percent.min(10_000), core::sync::atomic::Ordering::Relaxed);
 }
 
+/// The setting.
 pub fn speed() -> u32 {
     SPEED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// What durations are actually scaled by: the setting, halved or zeroed by
+/// the quality governor's last two rungs.
+pub fn effective_speed() -> u32 {
+    if super::quality::shed(4) {
+        0
+    } else if super::quality::shed(3) {
+        speed() / 2
+    } else {
+        speed()
+    }
 }
 
 impl Tween {
     /// A tween starting now, `ms` long at 100% speed.
     pub fn new(ms: u32, curve: Curve) -> Tween {
-        let us = ms as u64 * 1000 * speed() as u64 / 100;
+        let us = ms as u64 * 1000 * effective_speed() as u64 / 100;
         Tween { start: now_us(), dur_us: us.min(u32::MAX as u64) as u32, curve }
     }
 
