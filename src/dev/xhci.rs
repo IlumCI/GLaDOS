@@ -1269,7 +1269,7 @@ impl Controller {
             port,
             bulk_in: None,
             bulk_out: None,
-            int_in: None,
+            int_in: Vec::new(),
         };
         let buf = dma(18, 16).ok_or("out of memory")?;
         // Eight bytes first, which every speed can carry in one packet, so
@@ -1930,7 +1930,10 @@ pub struct Device {
     /// types and a device can plausibly have both, and a field called
     /// `bulk_in` holding an interrupt endpoint is the kind of name that
     /// survives long enough to mislead somebody.
-    int_in: Option<(u8, Ring)>,
+    /// One per interrupt IN endpoint driven: a gaming mouse is a keyboard
+    /// interface (its macro keys) beside the mouse, and driving only one of
+    /// them is a mouse whose light is on and whose pointer never moves.
+    int_in: Vec<(u8, Ring)>,
 }
 
 impl Device {
@@ -1950,7 +1953,7 @@ impl Device {
             port: 0,
             bulk_in: None,
             bulk_out: None,
-            int_in: None,
+            int_in: Vec::new(),
         }
     }
 }
@@ -2181,7 +2184,11 @@ impl Controller {
             write_volatile((inp + 4) as *mut u32, 1 | (1 << d));
             let slot_ctx = inp + cb;
             let d0 = read_volatile(slot_ctx as *const u32);
-            write_volatile(slot_ctx as *mut u32, (d0 & 0x07FF_FFFF) | (d << 27));
+            // Context Entries is the highest endpoint in use, not the one
+            // being added: a second interface on a lower endpoint would
+            // otherwise cut off the first.
+            let entries = ((d0 >> 27) & 0x1F).max(d);
+            write_volatile(slot_ctx as *mut u32, (d0 & 0x07FF_FFFF) | (entries << 27));
 
             let c = inp + cb * (d as u64 + 1);
             write_volatile(c as *mut u32, (interval as u32) << 16);
@@ -2208,7 +2215,8 @@ impl Controller {
         if ev.code() != 1 {
             return Err("Configure Endpoint refused for the interrupt endpoint");
         }
-        dev.int_in = Some((ep.addr, ring));
+        dev.int_in.retain(|(a, _)| *a != ep.addr);
+        dev.int_in.push((ep.addr, ring));
         Ok(())
     }
 
@@ -2220,16 +2228,16 @@ impl Controller {
     /// nobody is expecting. A keyboard reports only when a key moves, so
     /// nearly every poll finds nothing and a waiting version would spend the
     /// idle loop asleep on a device that has nothing to say.
-    pub fn arm_interrupt(&mut self, dev: &mut Device, buf: u64, len: u32) -> bool {
-        let Some((addr, mut ring)) = dev.int_in.take() else { return false };
+    pub fn arm_interrupt(&mut self, dev: &mut Device, ep: u8, buf: u64, len: u32) -> bool {
+        let Some((addr, ring)) = dev.int_in.iter_mut().find(|(a, _)| *a == ep) else { return false };
         ring.push(Trb {
             lo: buf as u32,
             hi: (buf >> 32) as u32,
             status: len,
             control: (TRB_NORMAL << 10) | (1 << 5) | (1 << 2),
         });
-        self.doorbell(dev.slot, dci(addr));
-        dev.int_in = Some((addr, ring));
+        let d = dci(*addr);
+        self.doorbell(dev.slot, d);
         true
     }
 
@@ -2242,8 +2250,8 @@ impl Controller {
     /// *halted*: the controller will not touch its ring again until the
     /// endpoint is reset. One transaction error on the trackpad and the
     /// pointer was dead until the next boot.
-    pub fn take_interrupt(&mut self, dev: &Device, len: u32) -> Rx {
-        let Some(addr) = dev.int_in.as_ref().map(|(a, _)| *a) else { return Rx::Nothing };
+    pub fn take_interrupt(&mut self, dev: &Device, ep: u8, len: u32) -> Rx {
+        let Some(addr) = dev.int_in.iter().find(|(a, _)| *a == ep).map(|(a, _)| *a) else { return Rx::Nothing };
         let Some(ev) = self.wait_event_ep(TRB_TRANSFER_EVENT, dev.slot, dci(addr), 0) else {
             return Rx::Nothing;
         };
@@ -2263,8 +2271,8 @@ impl Controller {
     /// depends on the state the error left the endpoint in, and asking first
     /// costs a context read that answers the same question less reliably.
     /// Only the dequeue pointer is judged: if that took, the ring is live.
-    pub fn recover_interrupt(&mut self, dev: &Device) -> bool {
-        let Some((addr, ring)) = dev.int_in.as_ref() else { return false };
+    pub fn recover_interrupt(&mut self, dev: &Device, ep: u8) -> bool {
+        let Some((addr, ring)) = dev.int_in.iter().find(|(a, _)| *a == ep) else { return false };
         let (d, slot) = (dci(*addr), dev.slot as u32);
         let at = |kind: u32| (kind << 10) | (d << 16) | (slot << 24);
         let _ = self.command(Trb { control: at(TRB_RESET_EP), ..Default::default() }, 100);
@@ -2380,6 +2388,8 @@ pub struct Config {
     /// Every boot-protocol HID interface in this configuration. A plural,
     /// because one dongle commonly presents a keyboard and a mouse.
     pub hids: Vec<HidIface>,
+    /// HID interfaces that are not a boot keyboard or mouse.
+    pub other_hid: u8,
     /// String index of the adapter's MAC, from the Ethernet Networking
     /// Functional Descriptor. CDC puts the address in a *string*, in ASCII
     /// hex -- there is no binary field for it anywhere in the descriptors.
@@ -2407,6 +2417,7 @@ pub fn parse_config(buf: u64, total: usize) -> Config {
         ecm: false,
         rndis: None,
         hids: Vec::new(),
+        other_hid: 0,
         imac: 0,
     };
     let at = |o: usize| -> u8 { unsafe { read_volatile((buf + o as u64) as *const u8) } };
@@ -2469,6 +2480,11 @@ pub fn parse_config(buf: u64, total: usize) -> Config {
                     || (class == CLASS_CDC_COMM && isub == SUBCLASS_ACM && iproto == PROTOCOL_VENDOR)
                 {
                     cfg.rndis = Some(at(o + 2));
+                }
+                if class == CLASS_HID && !(at(o + 6) == SUBCLASS_BOOT && matches!(at(o + 7), 1 | 2)) {
+                    // HID with no boot form this driver can speak: counted so
+                    // `usb hid` can say a device has more than was driven.
+                    cfg.other_hid += 1;
                 }
                 if class == CLASS_HID && at(o + 6) == SUBCLASS_BOOT {
                     let protocol = at(o + 7);
