@@ -4886,6 +4886,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         kprintln!("{}", line);
                     }
                 }
+                ["pace", n] => match n.parse::<u64>() {
+                    Ok(p) if (1..=100).contains(&p) => {
+                        crate::brain::set_pace(p);
+                        kprintln!("  the brain may use {}% of a core", p);
+                    }
+                    _ => kprintln!("  pace wants a percent of one core, 1..100"),
+                },
                 ["on"] => crate::brain::set_on(true),
                 ["off"] => crate::brain::set_on(false),
                 ["poke", sense] | ["poke", sense, _] => match crate::brain::Sense::parse(sense) {
@@ -4896,7 +4903,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                     None => kprintln!("  senses: touch voice food noxious thermal"),
                 },
-                _ => kprintln!("  usage: brain [on|off|poke <sense> [ms]]"),
+                _ => kprintln!("  usage: brain [on|off|pace <percent>|poke <sense> [ms]]"),
             }
         }
         "intent" => {

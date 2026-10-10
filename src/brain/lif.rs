@@ -275,9 +275,17 @@ impl Sim {
     }
 
     /// A neuron the dense loop would leave exactly as it is, this step and
-    /// every step until something arrives: no conductance, not refractory,
-    /// and close enough to rest that the integer update moves it by nothing.
-    /// It cannot spike from there, because rest is below threshold.
+    /// every step until something arrives: not refractory, a conductance the
+    /// integer decay no longer moves, and a voltage the integer update no
+    /// longer moves either. Nothing about it changes, so nothing about it
+    /// will until input lands, and it is below threshold so it cannot spike.
+    ///
+    /// The first version asked for g == 0 and was exact but nearly useless:
+    /// truncating decay leaves a residue under `tau_syn` nanovolts that never
+    /// reaches zero, so after one sugar drive 125,772 of the fly's neurons
+    /// stayed awake forever doing nothing, and the brain ran at 1% of real
+    /// time stepping them. "Would this step change anything" is the right
+    /// question, and it is still exact.
     ///
     /// This is the whole of the optimisation and it is exact rather than
     /// approximate -- which `diag brain` checks by requiring the same digest
@@ -286,7 +294,10 @@ impl Sim {
     /// activity costs and not what the animal costs.
     #[inline]
     fn inert(&self, c: &Connectome, i: usize) -> bool {
-        self.g[i] == 0 && self.refr[i] == 0 && tdiv(c.v0 - self.v[i], c.tau_m) == 0
+        self.refr[i] == 0
+            && tdiv(self.g[i], c.tau_syn) == 0
+            && tdiv(c.v0 - self.v[i] + self.g[i], c.tau_m) == 0
+            && self.v[i] <= c.vth
     }
 
     /// One step. `driven` is (neuron, threshold) in drive order; `fired` is

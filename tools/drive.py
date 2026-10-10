@@ -663,6 +663,15 @@ def main():
         i = argv.index("--tokenizer")
         tokenizer_src = Path(argv[i + 1])
         del argv[i:i + 2]
+    # A connectome to stage as \GLADOS\brain.bin. Absent means the kernel
+    # runs its compiled-in worm, and a brain.bin left over from an earlier
+    # run is removed for the reason a stale model is: a file nothing asked for
+    # this time is a file somebody reads the result of by mistake.
+    brain_src = None
+    if "--brain" in argv:
+        i = argv.index("--brain")
+        brain_src = Path(argv[i + 1])
+        del argv[i:i + 2]
     # --stage-iso names the checkpoint it stages. Saying the model twice would
     # invite staging one while booting the other, so the flag carries both
     # meanings and an explicit --model still wins.
@@ -717,6 +726,13 @@ def main():
         (tokenizer_src, "tokenizer.bin"),
     ]
     optional = [(ROOT / "esp/GLADOS/roots.der", "roots.der")]
+    brain_target = esp / "GLADOS" / "brain.bin"
+    if brain_src is not None:
+        if not brain_target.exists() or differs(brain_src, brain_target):
+            brain_target.write_bytes(brain_src.read_bytes())
+        print(f"[drive] staged {brain_src} as \\GLADOS\\brain.bin")
+    elif brain_target.exists():
+        brain_target.unlink()
     # The WAD staging went with `src/doom/`. A stale copy on the ESP would be
     # a file nothing reads, so it is cleared rather than left.
     old_wad = esp / "GLADOS" / "DOOM.WAD"

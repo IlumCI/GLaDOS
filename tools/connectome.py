@@ -24,8 +24,13 @@ Rungs, smallest first:
            OpenWorm's ConnectomeToolbox (MIT). 300-odd neurons. Transmitter
            identity from Wang et al. 2024 (eLife 95402, CC BY 4.0): eat-4 is
            glutamate, unc-17 acetylcholine, unc-25/unc-47 GABA.
-    fly    adult Drosophila, FlyWire v783 (Dorkenwald et al. 2024, CC BY 4.0),
-           signs from Eckstein & Bates 2024. Not built by this version yet.
+    fly    adult Drosophila, FlyWire v783 (Dorkenwald et al. 2024, CC BY 4.0):
+           138,639 neurons, 15.1M connections, every synapse Shiu's model
+           keeps, signed as Shiu signed them (Eckstein & Bates 2024's
+           transmitter predictions; acetylcholine excites, GABA and
+           glutamate inhibit). Read from Shiu's own Connectivity_783.parquet
+           so the canary below is his experiment, not an imitation of it.
+           Cell types from Schlegel et al. 2024's annotations.
 
 Simplifications, stated so nobody has to discover them:
 
@@ -106,6 +111,35 @@ WORM_FILES = {
     "elife-95402-supp2-v1.xlsx": None,  # recorded on first fetch; see fetch()
 }
 WORM_URL = "https://raw.githubusercontent.com/openworm/ConnectomeToolbox/main/cect/data/"
+
+FLY_FILES = {
+    "Connectivity_783.parquet": "efeb23fb99098e9c390f6869969b2a121a2ee92c833cfc45ecb2c1d8e1af0347",
+    "Completeness_783.csv": "bbb847a4cc2caaa7a16349722d220c087317b946d148d4d592d94d250617a311",
+    "annotations.tsv": "b214970b55d2fbe0853bba536fdcb9e28730f4eb7ab06f600491df795da683cd",
+}
+FLY_URLS = {
+    "Connectivity_783.parquet": "https://raw.githubusercontent.com/philshiu/Drosophila_brain_model/main/Connectivity_783.parquet",
+    "Completeness_783.csv": "https://raw.githubusercontent.com/philshiu/Drosophila_brain_model/main/Completeness_783.csv",
+    "annotations.tsv": "https://raw.githubusercontent.com/flyconnectome/flywire_annotations/main/supplemental_files/Supplemental_file1_neuron_annotations.tsv",
+}
+
+# Shiu et al. 2024's own neuron lists (figures.ipynb), so the canary is his
+# experiment: labellar sugar GRNs, right hemisphere, drive MN9.
+FLY_SUGAR = [
+    720575940624963786, 720575940630233916, 720575940637568838, 720575940638202345, 720575940617000768,
+    720575940630797113, 720575940632889389, 720575940621754367, 720575940621502051, 720575940640649691,
+    720575940639332736, 720575940616885538, 720575940639198653, 720575940620900446, 720575940617937543,
+    720575940632425919, 720575940633143833, 720575940612670570, 720575940628853239, 720575940629176663,
+    720575940611875570,
+]
+FLY_BITTER = [
+    720575940621778381, 720575940602353632, 720575940617094208, 720575940619197093, 720575940626287336,
+    720575940618600651, 720575940627692048, 720575940630195909, 720575940646212996, 720575940610483162,
+    720575940645743412, 720575940627578156, 720575940622298631, 720575940621008895, 720575940629146711,
+    720575940610259370, 720575940610481370, 720575940619028208, 720575940614281266, 720575940613061118,
+    720575940604027168,
+]
+FLY_MN9 = [720575940660219265]  # Shiu's v783 example; CB0701 in the annotations
 
 
 # --- the format -----------------------------------------------------------
@@ -417,6 +451,94 @@ def worm_name(s: str) -> str:
     return re.sub(r"^([A-Z]+)0(\d)$", r"\1\2", s.strip())
 
 
+def fetch_fly(dst: Path):
+    import urllib.request
+    dst.mkdir(parents=True, exist_ok=True)
+    for name, want in FLY_FILES.items():
+        p = dst / name
+        if not p.exists():
+            urllib.request.urlretrieve(FLY_URLS[name], p)
+        got = sha256(p)
+        if got != want:
+            raise SystemExit(f"{name}: sha256 {got}, pinned {want}")
+        print(f"  {name}  {got}")
+
+
+def build_fly(src: Path, dst: Path):
+    import pyarrow.parquet as pq
+    for name, want in FLY_FILES.items():
+        if sha256(src / name) != want:
+            raise SystemExit(f"{name} does not match its pinned digest")
+    ids = [int(l.split(",")[0]) for l in (src / "Completeness_783.csv").read_text().splitlines()[1:]]
+    idx = {r: i for i, r in enumerate(ids)}
+    t = pq.read_table(src / "Connectivity_783.parquet",
+                      columns=["Presynaptic_Index", "Postsynaptic_Index", "Excitatory x Connectivity"])
+    pre = t.column(0).to_numpy()
+    post = t.column(1).to_numpy()
+    w = t.column(2).to_numpy()
+    edges = list(zip(pre.tolist(), post.tolist(), w.tolist()))
+
+    ann = list(csv.DictReader(open(src / "annotations.tsv"), delimiter="\t"))
+    def where(pred):
+        return sorted(idx[int(r["root_id"])] for r in ann if pred(r) and int(r["root_id"]) in idx)
+    def ids_of(roots, need_all=False):
+        # Shiu's lists were written against v630 and a root id changes when
+        # its neuron is re-proofread, so a few may not exist in v783. Dropped
+        # and said, never substituted -- guessing which v783 neuron a stale
+        # id became is exactly the silent mapping this file refuses to make.
+        missing = [r for r in roots if r not in idx]
+        if missing:
+            print(f"  {len(missing)} of {len(roots)} named neuron(s) absent from v783, dropped: {missing}")
+        if need_all and missing or len(missing) * 10 > len(roots):
+            raise SystemExit("too many named neurons are missing to call this the same experiment")
+        return [idx[r] for r in roots if r in idx]
+
+    sensors = {
+        # What a fly hears with: the auditory Johnston's organ neurons.
+        "voice": where(lambda r: r["cell_class"] == "mechanosensory" and r["cell_sub_class"] == "auditory"),
+        # Head bristle mechanosensory neurons.
+        "touch": where(lambda r: r["cell_class"] == "mechanosensory" and r["cell_sub_class"] == "head bristle"),
+        # Labellar sugar GRNs -- Shiu's list.
+        "food": ids_of(FLY_SUGAR),
+        # Labellar bitter GRNs -- Shiu's list.
+        "noxious": ids_of(FLY_BITTER),
+        # Antennal hot cells (TRN_VP2).
+        "thermal": where(lambda r: r["cell_type"] == "TRN_VP2"),
+    }
+    readouts = {
+        # Proboscis extension, the feeding motor neuron Shiu's model drives
+        # from sugar -- the canary.
+        # MN9 is annotated as cell type CB0701, one per side. Shiu's v630
+        # list named the other side by an id v783 no longer has; selecting
+        # by type finds both, and the check below insists the one his v783
+        # example uses is among them, so the canary is still his neuron.
+        "feeding": (ROLE_APPROACH, where(lambda r: r["cell_type"] == "CB0701")),
+        # The giant fibre and its escape partners.
+        "escape": (ROLE_AVOID, where(lambda r: r["cell_type"] in ("DNp01", "DNp02", "DNp11"))),
+        # The persistent internal state circuit (Deutsch et al. 2020).
+        "pC1-aIPg": (ROLE_AROUSAL, where(lambda r: r["cell_type"] in ("pC1a", "pC1b", "pC1c", "pC1d", "pC1e")
+                                         or r["cell_type"].startswith("aIPg") or r["hemibrain_type"].startswith("aIPg"))),
+        # Everything that leaves the brain for the body.
+        "descending": (ROLE_AROUSAL, where(lambda r: r["super_class"] == "descending")),
+    }
+    if idx[FLY_MN9[0]] not in readouts["feeding"][1]:
+        raise SystemExit("Shiu's MN9 is not among the CB0701 neurons -- the canary would not be his experiment")
+    for k, v in list(sensors.items()) + [(k, v[1]) for k, v in readouts.items()]:
+        if not v:
+            raise SystemExit(f"{k} resolves to no neuron")
+    digest = hashlib.sha256()
+    for name in sorted(FLY_FILES):
+        digest.update(bytes.fromhex(FLY_FILES[name]))
+    write(dst, ids, edges, sensors, readouts, digest.digest())
+    inh = int((w < 0).sum())
+    print(f"  {len(ids)} neurons, {len(edges)} connections ({int(abs(w).sum())} synapses), {inh} inhibitory")
+    for k, v in sensors.items():
+        print(f"  sense {k:8} {len(v)} neurons")
+    for k, (_, v) in readouts.items():
+        print(f"  readout {k:10} {len(v)} neurons")
+    print(f"  wrote {dst} ({dst.stat().st_size} bytes)")
+
+
 def build_worm(src: Path, dst: Path):
     tx = worm_transmitters(src / "elife-95402-supp2-v1.xlsx")
     edges_raw = {}
@@ -514,17 +636,14 @@ def main() -> int:
     if a.selftest:
         return 0 if selftest() else 1
     if a.cmd == "fetch":
-        if a.rung != "worm":
-            raise SystemExit("only the worm rung is built by this version")
-        fetch_worm(Path(a.dst)); return 0
+        {"worm": fetch_worm, "fly": fetch_fly}[a.rung](Path(a.dst)); return 0
     if a.cmd == "build":
-        if a.rung != "worm":
-            raise SystemExit("only the worm rung is built by this version")
-        build_worm(Path(a.src), Path(a.dst)); return 0
+        {"worm": build_worm, "fly": build_fly}[a.rung](Path(a.src), Path(a.dst)); return 0
     if a.cmd == "sim":
         b = Brain(Path(a.file).read_bytes())
         steps = a.ms * 1000 // b.dt_us
-        counts = simulate(b, steps, {k: a.rate for k in a.poke}, a.seed)
+        sim = simulate if b.n < 2000 else simulate_np
+        counts = sim(b, steps, {k: a.rate for k in a.poke}, a.seed)
         if a.emit:
             print(f"// connectome.py sim --poke {' --poke '.join(a.poke)} --rate {a.rate} --ms {a.ms} --seed {a.seed}")
             print(f"pub const ORACLE_STEPS: u64 = {steps};")
