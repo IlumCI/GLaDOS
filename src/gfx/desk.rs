@@ -2386,20 +2386,19 @@ fn paint_tray_text(fb: &Framebuffer) {
 /// count -- this tree has paid for that distinction in three separate places,
 /// and the charge string is the one here most likely to grow a symbol.
 fn tray_text(fb: &Framebuffer, well: Rect, text: &str, scale: u32) {
-    let width = text.chars().count() as u32 * super::font::GLYPH_W * scale;
+    // Measured in the interface face; a readout that does not fit is not
+    // drawn rather than cut, since half a clock is a wrong clock.
+    let width = theme::text_w_of_at(text, scale);
     if well.w <= width {
         return;
     }
     let x = well.x + (well.w - width) / 2;
-    let y = well.y + (well.h.saturating_sub(super::font::GLYPH_H * scale)) / 2;
-    // Through the compositor's back buffer, so the shadow agrees with the
-    // screen. Writing the aperture directly left the shadow describing pixels
-    // that were no longer there, and a later `present` comparing the two found
-    // them equal and wrote nothing -- so the compositor could never erase the
-    // clock, and digits stayed on screen the desktop had decided to cover.
-    // Light ink on the tray's own ground, and the background stays opaque: it
-    // is what erases the digit that was there a tenth of a second ago.
-    fb.draw_text(x, y, text, theme::TITLE_TEXT, theme::TRAY, scale);
+    let y = well.y + (well.h.saturating_sub(theme::text_h_at(scale))) / 2;
+    // Into the compositor's back buffer like everything else, on the tray's
+    // own ground: the inner well is laid down first, so a reading shorter
+    // than the last one leaves none of the last one's digits behind.
+    fb.rect(well.x + 1, well.y + 1, well.w.saturating_sub(2), well.h.saturating_sub(2), theme::TRAY);
+    theme::text_over_at(fb, x, y, text, theme::TITLE_TEXT, scale);
 }
 
 /// Put the arrow somewhere, without letting anything else paint while it does.

@@ -893,16 +893,14 @@ pub fn title_bar(
     let tx = r.x + pad + 22;
     let ty = r.y + (r.h - font::GLYPH_H * CHROME_SCALE) / 2;
     let btns = caption_buttons(r);
-    // Clip by characters rather than pixels, and stop short of the buttons:
-    // a title that runs under the close box reads as a title bar with no
-    // close box.
+    // Fitted by measuring, and stopped short of the buttons: a title that
+    // runs under the close box reads as a title bar with no close box. The
+    // one-pixel black shadow the bitmap needed is gone -- anti-aliased text
+    // reads on the ramp without it, and a hard offset copy is the most
+    // 1998 thing a caption can wear.
     let text_end = btns[0].x.saturating_sub(6);
-    let room = (text_end.saturating_sub(tx) / (font::GLYPH_W * CHROME_SCALE)) as usize;
-    let shown = head_chars(title, room);
-    // Over a gradient there is no one background colour, so the glyphs carry
-    // their own shadow instead of a box.
-    text_over(fb, tx + 1, ty + 1, shown, DARKEDGE);
-    text_over(fb, tx, ty, shown, if active { TITLE_TEXT } else { TITLE_IDLE });
+    let shown = fit(title, text_end.saturating_sub(tx));
+    text_strong(fb, tx, ty, &shown, if active { TITLE_TEXT } else { TITLE_IDLE });
 
     // The caption buttons: rounded ramps on the caption's own ramp, glyphs
     // drawn by hand because the font has no box-drawing worth the name.
@@ -1063,9 +1061,8 @@ pub fn list_row_at(
     };
     fb.rect(r.x, r.y, r.w, r.h, bg);
     let ty = r.y + (r.h.saturating_sub(text_h_at(scale))) / 2;
-    let room = (r.w / (font::GLYPH_W * scale.max(1))).saturating_sub(1) as usize;
-    let shown = head_chars(label, room);
-    text_over_at(fb, r.x + 4, ty, shown, fg, scale);
+    let shown = fit_at(label, r.w.saturating_sub(8), scale);
+    text_over_at(fb, r.x + 4, ty, &shown, fg, scale);
 }
 
 /// A vertical groove, for dividing a bar into sections.
@@ -1231,11 +1228,10 @@ pub fn tabs(fb: &Framebuffer, r: Rect, labels: &[&str], sel: usize) -> alloc::ve
             if on { &TITLE_ON } else { &BTN },
             if on { BTN_EDGE_HOT } else { BTN_EDGE },
         );
-        let room = (t.w / text_w(1)).saturating_sub(1) as usize;
-        let shown = head_chars(label, room);
-        let tx = t.x + (t.w.saturating_sub(text_w_of(shown))) / 2;
+        let shown = fit(label, t.w.saturating_sub(8));
+        let tx = t.x + (t.w.saturating_sub(text_w_of(&shown))) / 2;
         let ty = t.y + (t.h.saturating_sub(text_h())) / 2;
-        text_over(fb, tx, ty, shown, if on { TITLE_TEXT } else { TEXT });
+        text_over(fb, tx, ty, &shown, if on { TITLE_TEXT } else { TEXT });
         out.push(t);
     }
     out
@@ -1252,11 +1248,10 @@ pub fn pill(fb: &Framebuffer, r: Rect, label: &str, ok: bool) {
         if ok { &START } else { &CAP_CLOSE },
         if ok { START_EDGE } else { CAP_EDGE },
     );
-    let room = (r.w / text_w(1)).saturating_sub(1) as usize;
-    let shown = head_chars(label, room);
-    let tx = r.x + (r.w.saturating_sub(text_w_of(shown))) / 2;
+    let shown = fit(label, r.w.saturating_sub(8));
+    let tx = r.x + (r.w.saturating_sub(text_w_of(&shown))) / 2;
     let ty = r.y + (r.h.saturating_sub(text_h())) / 2;
-    text_over(fb, tx, ty, shown, CAP_INK);
+    text_over(fb, tx, ty, &shown, CAP_INK);
 }
 
 /// A name against a value, on one line.
@@ -1269,11 +1264,9 @@ pub fn kv(fb: &Framebuffer, r: Rect, name: &str, value: &str, tone: Color) {
         return;
     }
     let gutter = text_w(14);
-    let room = (r.w / text_w(1)) as usize;
-    text_over(fb, r.x, r.y, head_chars(name, room.min(13)), TEXT_DIM);
+    text_over(fb, r.x, r.y, &fit(name, r.w.min(gutter).saturating_sub(8)), TEXT_DIM);
     if r.w > gutter {
-        let vroom = ((r.w - gutter) / text_w(1)) as usize;
-        text_over(fb, r.x + gutter, r.y, head_chars(value, vroom), tone);
+        text_over(fb, r.x + gutter, r.y, &fit(value, r.w - gutter), tone);
     }
 }
 
