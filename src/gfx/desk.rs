@@ -758,6 +758,8 @@ fn is_query_row(item: usize) -> bool {
 // --- desktop icons ---------------------------------------------------------
 
 const ICON_W: u32 = 132;
+/// The wall's icons, in pixels: 38 logical at the 1.25 scale.
+const ICON_PX: u32 = 48;
 const ICON_H: u32 = 84;
 
 /// The icon column, top-left of the wall, downwards -- the 98 half of the
@@ -792,21 +794,12 @@ fn icon_at(fb: &Framebuffer, x: i32, y: i32) -> Option<usize> {
 /// bitmap format is more machinery than six drawings justify.
 fn draw_icons(fb: &Framebuffer, hover: Hover) {
     for (r, k) in icon_rects(fb) {
-        let px = r.x + (r.w - 40) / 2;
-        // The wall is one `vgrad` of `WALL` over the whole framebuffer
-        // (`wallpaper`), so that is exactly what shows through the mark.
-        pictogram(
-            fb,
-            k,
-            px,
-            r.y,
-            40,
-            super::splash::Cut::Sky { stops: &theme::WALL, top: 0, height: fb.height() },
-        );
+        let px = r.x + (r.w - ICON_PX) / 2;
+        pictogram(fb, k, px, r.y, ICON_PX);
         let (label, _) = ICONS[k];
         let tw = theme::text_w_of(label);
         let tx = r.x + (r.w.saturating_sub(tw)) / 2;
-        let ty = r.y + 46;
+        let ty = r.y + ICON_PX + 6;
         if hover == Hover::Icon(k) {
             fb.rect(
                 tx.saturating_sub(3),
@@ -825,256 +818,17 @@ fn draw_icons(fb: &Framebuffer, hover: Hover) {
     }
 }
 
-/// How much of a drawing survives at the size it is drawn.
+/// One pictogram at `(x, y)`, `s` pixels square, by icon index: `gfx::icons`,
+/// the lit objects the operator chose for 1.4.1, anti-aliased at any size and
+/// transparent around the object -- which is why there is no longer a `cut`
+/// to say what shows through the mark: whatever is behind it simply does.
 ///
-/// The same decision `mindwin::dense()` makes about text, for the same reason
-/// and stated the same way: the detail is chosen from the size rather than
-/// from the call site, so no caller has to know and two callers cannot
-/// disagree.
-///
-/// The floor is not a taste judgement. `m()` clamps a thickness to one pixel,
-/// so at 24 across every hairline is *already* at its minimum and a gloss band
-/// two units tall and a shadow offset two units right land on the same pixel
-/// as the thing they are meant to be offset from. Below 32 those flourishes
-/// are not subtle, they are noise, and the honest drawing is the silhouette.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Detail {
-    /// Silhouette and one accent. The taskbar.
-    Bar,
-    /// Lit body, gloss and a base shadow. The wall.
-    Wall,
-}
-
-/// One pictogram at `(x, y)`, `s` pixels square, by icon index.
-///
-/// Drawn in a 40-unit design space and scaled, so the wall (40) and the
-/// taskbar (24) share one set of drawings instead of two sets that drift.
-/// Thicknesses clamp to a pixel -- a hairline that rounds to zero is a detail
-/// that vanishes, and at 24 pixels every line is load-bearing.
-///
-/// `cut` is what shows through the mark's blades, and it is a `Cut` rather
-/// than a `Color` because a single colour is a lie everywhere it is used here.
-/// The wall is a six-stop gradient and the taskbar button is a ramp; the old
-/// parameter took `DESKTOP` and `FACE`, neither of which is any row of the
-/// thing actually behind the icon, so the Aperture mark stamped a flat patch
-/// of the wrong shade across both. `splash::Cut::Sky` samples the real ramp at
-/// the real row, and the wallpaper's own mark has always used it.
-fn pictogram(fb: &Framebuffer, k: usize, x: u32, y: u32, s: u32, cut: super::splash::Cut<'_>) {
-    let dark = theme::ICON_EDGE;
-    let hi = theme::HILIGHT;
-    // Rounded scale from the 40-unit space, and the same for thicknesses but
-    // never less than a pixel.
-    let c = |v: u32| (v * s + 20) / 40;
-    let m = |v: u32| ((v * s + 20) / 40).max(1);
-    let d = if s >= 32 { Detail::Wall } else { Detail::Bar };
-    let lit = d == Detail::Wall;
-
-    // A body: the ramp, its edge, and the gloss that makes it an object rather
-    // than a sticker. Taken as design-space units so every icon is written in
-    // the same coordinates as before.
-    let body = |bx: u32, by: u32, bw: u32, bh: u32, ramp: &[(u8, Color)]| {
-        let (px, py, pw, ph) = (x + c(bx), y + c(by), c(bw), c(bh));
-        if pw == 0 || ph == 0 {
-            return;
-        }
-        if lit {
-            // Under and right, and drawn first so the body covers the half of
-            // it that would otherwise sit on the object itself.
-            fb.shade_rect(px + m(2), py + m(2), pw, ph, theme::ICON_SHADE_NUM);
-        }
-        fb.vgrad(px, py, pw, ph, ramp);
-        if lit && ph > 4 {
-            let gh = (ph * theme::ICON_GLOSS_SPAN / 256).max(1);
-            fb.tint_rect(px + 1, py + 1, pw.saturating_sub(2), gh, hi, theme::ICON_GLOSS_NUM);
-        }
-        fb.frame(px, py, pw, ph, dark);
-    };
-
-    // The one highlight that says "lit from above and to the left". Skipped
-    // entirely on the bar, where its radius rounds to a pixel and it reads as
-    // a stray dot rather than as a shine.
-    let spec = |cx: u32, cy: u32, r: u32| {
-        if lit {
-            fb.fill_circle((x + c(cx)) as i32, (y + c(cy)) as i32, c(r).max(1) as i32, hi);
-        }
-    };
-
-    match k {
-        // Terminal: a lit screen with a prompt on it.
-        ICO_TERM => {
-            body(3, 5, 34, 24, &theme::ICON_DARK);
-            fb.rect(x + c(8), y + c(11), c(7), m(3), theme::APERTURE);
-            if lit {
-                fb.rect(x + c(8), y + c(17), c(13), m(2), theme::SCREEN_TEXT);
-                fb.rect(x + c(8), y + c(22), c(9), m(2), theme::SCREEN_TEXT);
-            }
-            body(16, 30, 8, 4, &theme::ICON_GLASS);
-            body(10, 34, 20, 4, &theme::ICON_GLASS);
-        }
-        // Programs: the mark itself, lit, with the real background showing
-        // through its blades. This is the Aperture program manager.
-        ICO_PROGRAMS => {
-            super::splash::aperture_with(
-                fb,
-                (x + c(20)) as i32,
-                (y + c(20)) as i32,
-                c(18) as i32,
-                if lit {
-                    super::splash::Face::Ramp(&theme::SUN)
-                } else {
-                    super::splash::Face::Flat(theme::APERTURE)
-                },
-                cut,
-            );
-        }
-        // Files: a folder, with the tab behind the face so the fold reads.
-        ICO_FILES => {
-            body(4, 8, 15, 6, &theme::ICON_WARM);
-            body(4, 12, 32, 23, &theme::ICON_WARM);
-            if lit {
-                // The lip: one lighter line where the front panel meets the
-                // back, which is the whole difference between a folder and an
-                // orange rectangle.
-                fb.rect(x + c(5), y + c(13), c(30), m(2), theme::APERTURE);
-            }
-        }
-        // ToDo: a card with ticked lines.
-        ICO_TODO => {
-            body(6, 2, 28, 36, &theme::ICON_PAPER);
-            for (i, done) in [true, true, false].iter().enumerate() {
-                let ly = y + c(9 + i as u32 * 10);
-                fb.frame(x + c(10), ly, m(7), m(7), dark);
-                if *done {
-                    fb.rect(x + c(11), ly + m(1), m(5), m(5), theme::APERTURE);
-                }
-                fb.rect(x + c(21), ly + m(2), c(9), m(2), theme::TEXT_DIM);
-            }
-        }
-        // Enternet: a globe, lit as a sphere.
-        ICO_NET => {
-            let (cx, cy, r) = ((x + c(20)) as i32, (y + c(20)) as i32, c(17) as i32);
-            // No drop shadow. `shade_rect` is a rectangle, and a rectangle
-            // behind a disc is a grey box with a ball in it -- which is what
-            // the first attempt looked like. There is no shaded-circle
-            // primitive and a round body does not need one: the ramp already
-            // turns it away from the light at the bottom.
-            fb.fill_circle_ramp(cx, cy, r, &theme::ICON_GLASS);
-            fb.circle(cx, cy, r, dark);
-            // Latitudes as chords of the same circle, so they narrow toward
-            // the poles the way a wireframe globe does.
-            for dy in [-9i32, 0, 9] {
-                let yy = cy + c(dy.unsigned_abs()) as i32 * dy.signum();
-                let half = crate::gfx::isqrt((r * r - (yy - cy) * (yy - cy)).max(0) as u32) as i32;
-                if half > 1 {
-                    fb.rect((cx - half) as u32, yy as u32, (half * 2) as u32, m(1), theme::WALL_RIM);
-                }
-            }
-            fb.rect((cx - m(1) as i32 / 2).max(0) as u32, (cy - r) as u32, m(1), (r * 2) as u32, theme::WALL_RIM);
-            spec(14, 13, 4);
-        }
-        // Paint: a palette with wells, and a brush laid across it.
-        ICO_PAINT => {
-            let (cx, cy, r) = ((x + c(19)) as i32, (y + c(22)) as i32, c(16) as i32);
-            fb.fill_circle_ramp(cx, cy, r, &theme::ICON_WOOD);
-            fb.circle(cx, cy, r, dark);
-            // The thumb hole, in the board's own shadow tone rather than in
-            // the background -- a palette is a solid object with a hole in it,
-            // and what shows through a hole in a held object is more board.
-            fb.fill_circle(cx + c(7) as i32, cy + c(5) as i32, c(4).max(1) as i32, Color::new(0x5E, 0x42, 0x24));
-            for (i, col) in [theme::APERTURE, theme::INK_BLUE, theme::INK_GREEN, theme::INK_RED]
-                .iter()
-                .enumerate()
-            {
-                let wx = cx + c(if i % 2 == 0 { 0 } else { 9 }) as i32 - c(6) as i32;
-                let wy = cy + c(if i / 2 == 0 { 0 } else { 9 }) as i32 - c(9) as i32;
-                fb.fill_circle(wx, wy, c(3).max(1) as i32, *col);
-                if lit {
-                    fb.put((wx - 1) as u32, (wy - 1) as u32, fb.raw(hi));
-                }
-            }
-            fb.rect(x + c(26), y + c(2), m(3), c(15), theme::TEXT_DIM);
-            body(24, 1, 6, 5, &theme::ICON_WARM);
-        }
-        // Write: a page with lines of text and a nib.
-        ICO_WRITE => {
-            body(8, 2, 24, 36, &theme::ICON_PAPER);
-            for i in 0..5u32 {
-                let w = if i == 4 { 10 } else { 16 };
-                fb.rect(x + c(12), y + c(8 + i * 6), c(w), m(2), theme::TEXT_DIM);
-            }
-            fb.rect(x + c(12), y + c(32), c(8), m(2), theme::APERTURE);
-        }
-        // Mines: a grid with one uncovered mine.
-        ICO_MINES => {
-            body(2, 2, 36, 36, &theme::ICON_PAPER);
-            for i in 1..4u32 {
-                fb.rect(x + c(2 + i * 12), y + c(2), m(1), c(36), theme::EDGE);
-                fb.rect(x + c(2), y + c(2 + i * 12), c(36), m(1), theme::EDGE);
-            }
-            let (cx, cy, r) = ((x + c(20)) as i32, (y + c(20)) as i32, c(9) as i32);
-            // Short, and only on the wall. At 24 across a spike is two pixels
-            // of grey crossing a grid line and reads as a smudge.
-            if lit {
-                let reach = r + c(2) as i32;
-                for (dx, dy) in [(0i32, 1i32), (1, 0), (1, 1), (1, -1)] {
-                    fb.line_thick(
-                        cx - dx * reach,
-                        cy - dy * reach,
-                        cx + dx * reach,
-                        cy + dy * reach,
-                        m(2) as i32,
-                        theme::ICON_EDGE,
-                    );
-                }
-            }
-            fb.fill_circle_ramp(cx, cy, r, &theme::ICON_DARK);
-            spec(17, 17, 2);
-        }
-        // Oracle: an eye. The lids are stacked rows, the iris the mark's
-        // colour, and it reads at both sizes because an eye is mostly its
-        // contrast.
-        ICO_ORACLE => {
-            for (i, w) in [8u32, 20, 30, 36, 30, 20, 8].iter().enumerate() {
-                let ly = y + c(8 + i as u32 * 4);
-                fb.rect(x + c(20) - c(*w) / 2, ly, c(*w), m(4), hi);
-            }
-            let (cx, cy) = ((x + c(20)) as i32, (y + c(20)) as i32);
-            fb.fill_circle_ramp(cx, cy, c(7).max(1) as i32, &theme::ICON_WARM);
-            fb.fill_circle(cx, cy, c(3).max(1) as i32, theme::DARKEDGE);
-            spec(17, 17, 2);
-        }
-        // Settings: three sliders, each a well with a lit knob in it.
-        ICO_SET => {
-            for i in 0..3u32 {
-                let ly = y + c(9 + i * 11);
-                fb.rect(x + c(4), ly, c(32), m(4), theme::WELL_EDGE);
-                fb.rect(x + c(4), ly + m(1), c(32), m(2), theme::TRAY);
-                let kx = 6 + (i * 11) % 24;
-                body(kx, 9 + i * 11 - 3, 7, 10, &theme::ICON_GLASS);
-            }
-        }
-        // Not an icon. Drawn rather than defaulted, because the arm this
-        // replaces *was* Settings -- an out-of-range index silently drew the
-        // sliders, which is the mistake the named constants exist to make
-        // unwriteable, wearing the costume of a working icon.
-        _ => {
-            body(4, 4, 32, 32, &theme::ICON_PAPER);
-            fb.line(
-                (x + c(8)) as i32,
-                (y + c(8)) as i32,
-                (x + c(32)) as i32,
-                (y + c(32)) as i32,
-                theme::BAD_TEXT,
-            );
-            fb.line(
-                (x + c(32)) as i32,
-                (y + c(8)) as i32,
-                (x + c(8)) as i32,
-                (y + c(32)) as i32,
-                theme::BAD_TEXT,
-            );
-        }
-    }
+/// They replaced drawings built from rectangles, frames and one-pixel
+/// glosses in a 40-unit space, with a `Detail` level to drop the flourishes
+/// that turned to noise below 32 pixels; a signed-distance drawing has no such
+/// floor, and the same one serves the wall, the taskbar and a title bar.
+fn pictogram(fb: &Framebuffer, k: usize, x: u32, y: u32, s: u32) {
+    super::icons::lay(fb, k, x, y, s);
 }
 
 impl Desktop {
@@ -4415,14 +4169,7 @@ fn taskbar(fb: &Framebuffer, d: &Desktop, sel: Option<usize>) {
         let off = u32::from(pressed);
         // The button face is the ramp chosen just above, not `FACE` -- which
         // is no row of any of them.
-        pictogram(
-            fb,
-            icon,
-            r.x + (r.w.saturating_sub(s)) / 2 + off,
-            r.y + 3 + off,
-            s,
-            super::splash::Cut::Sky { stops, top: r.y, height: r.h },
-        );
+        pictogram(fb, icon, r.x + (r.w.saturating_sub(s)) / 2 + off, r.y + 3 + off, s);
     }
 
     // What the button is for, which the bar itself cannot say.

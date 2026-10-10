@@ -223,10 +223,6 @@ impl Ramp {
         Ramp { lut }
     }
 
-    pub fn len(&self) -> usize {
-        self.lut.len()
-    }
-
     /// The undithered colour at entry `i`, in 8.8.
     pub fn at(&self, i: usize) -> [u16; 3] {
         self.lut[i.min(self.lut.len() - 1)]

@@ -7350,6 +7350,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 Some((ms, crate::gfx::scale::proof as fn(&crate::gfx::Framebuffer), "scale"))
             } else if let Some(ms) = rest.trim().strip_prefix("wall") {
                 Some((ms, crate::gfx::wall::proof as fn(&crate::gfx::Framebuffer), "wall"))
+            } else if let Some(ms) = rest.trim().strip_prefix("icons") {
+                Some((ms, crate::gfx::icons::proof as fn(&crate::gfx::Framebuffer), "icons"))
             } else if let Some(ms) = rest.trim().strip_prefix("text") {
                 Some((ms, crate::gfx::text::proof as fn(&crate::gfx::Framebuffer), "text"))
             } else {
