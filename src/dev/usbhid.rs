@@ -119,6 +119,43 @@ static DEVICES: Spin<Vec<Hid>> = Spin::new(Vec::new());
 /// what it declined instead of leaving a keyboard mysteriously dead.
 static DECLINED: Racy<Vec<(u16, u16)>> = Racy::new(Vec::new());
 
+/// What the device manager shows of one USB input device.
+pub struct Live {
+    pub vid: u16,
+    pub pid: u16,
+    pub port: u8,
+    pub ifaces: Vec<LiveIface>,
+    pub other: u8,
+}
+
+pub struct LiveIface {
+    pub mouse: bool,
+    pub reports: u64,
+    pub failures: u64,
+    pub recovered: u64,
+}
+
+/// Every USB input device held now. Waits for a walk in progress rather
+/// than skipping it, because an answer missing a device is the stale
+/// inventory the manager exists to replace.
+pub fn live() -> Vec<Live> {
+    DEVICES
+        .lock()
+        .iter()
+        .map(|h| Live {
+            vid: h.dev.vid,
+            pid: h.dev.pid,
+            port: h.dev.port,
+            ifaces: h
+                .ifaces
+                .iter()
+                .map(|i| LiveIface { mouse: i.protocol == MOUSE, reports: i.reports, failures: i.failures, recovered: i.recovered })
+                .collect(),
+            other: h.other,
+        })
+        .collect()
+}
+
 pub fn attached() -> usize {
     DEVICES.lock().len()
 }
@@ -148,6 +185,9 @@ pub fn probe(ecam: u64) -> Result<usize, &'static str> {
                 continue;
             }
         };
+        // Whatever the registry remembers on this port was a previous
+        // device, or this one under a slot it no longer has.
+        super::registry::forget_usb(port);
         xhci::note_device(&dev, (0, 0, 0));
         let mut claimed = false;
 
@@ -200,6 +240,7 @@ pub fn probe(ecam: u64) -> Result<usize, &'static str> {
                         .unwrap_or(false);
                 }
                 devices.push(entry);
+                super::manager::changed();
             }
             break;
         }
@@ -420,6 +461,8 @@ fn watch_ports(devices: &mut Vec<Hid>) -> bool {
             );
             xhci::with_ctl(|c| c.release(h.dev));
             xhci::unclaim_port(port);
+            super::registry::forget_usb(port);
+            super::manager::changed();
             rescan = true;
         } else if !xhci::port_claimed(port) {
             // Something new on a port nobody holds: maybe a mouse.
@@ -514,6 +557,8 @@ pub fn reset() -> Result<usize, &'static str> {
             let port = h.dev.port;
             xhci::with_ctl(|c| c.release(h.dev));
             xhci::unclaim_port(port);
+            super::registry::forget_usb(port);
+            super::manager::changed();
         }
     }
     let _ = xhci::with_ctl(|c| c.take_port_changes());

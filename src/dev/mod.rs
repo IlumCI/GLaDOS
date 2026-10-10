@@ -12,6 +12,7 @@ pub mod hda;
 pub mod iwx;
 pub mod pci;
 pub mod radio;
+pub mod manager;
 pub mod registry;
 pub mod pic;
 pub mod rtc;

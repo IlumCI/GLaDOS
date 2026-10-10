@@ -320,6 +320,11 @@ pub const SUITES: &[Suite] = &[
         run: crate::dev::usbhid::selftest,
     },
     Suite {
+        name: "devmgr",
+        about: "the device manager: categories, internal against external, a snapshot",
+        run: crate::dev::manager::selftest,
+    },
+    Suite {
         name: "text",
         about: "the glyph table, and decoding UTF-8 one byte at a time",
         run: crate::gfx::text_selftest,
@@ -765,7 +770,7 @@ fn web_selftest() -> bool {
 /// says it exists to prevent. A `static` cannot be read in a const context, so
 /// the array cannot be measured directly; naming its length is the next best
 /// thing and it is now the only place the number appears.
-const SLOTS: usize = 92;
+const SLOTS: usize = 93;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.

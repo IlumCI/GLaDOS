@@ -6051,7 +6051,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
                 None => kprintln!("  no MCFG, so nothing has swept PCI"),
             }
-            crate::dev::registry::report();
+            if rest.trim() == "table" {
+                crate::dev::registry::report();
+            } else {
+                crate::dev::manager::report();
+            }
         }
         "pci" => match acpi.as_ref().and_then(|a| a.mcfg) {
             Some(ecam) => {
