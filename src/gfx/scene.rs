@@ -42,6 +42,8 @@ pub enum LayerId {
     Overlay,
     /// A closed window fading out, by the serial it had.
     Ghost(u64),
+    /// Flip 3D's stack, over everything.
+    Flip,
 }
 
 #[derive(Clone, Debug)]

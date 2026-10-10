@@ -357,6 +357,8 @@ pub enum Mode {
     DragSize { from: Rect, edges: u8 },
     /// The Start menu is open above the taskbar.
     Start { item: usize },
+    /// Flip 3D (Super-Tab): the windows in a stack, and the keyboard turns it.
+    Flip,
 }
 
 /// What the pointer is over, for the paint pass.
@@ -2815,6 +2817,11 @@ fn window_at(x: i32, y: i32) -> Option<usize> {
 /// chrome, and finally the content under the point. This is the pointer's
 /// whole vocabulary.
 fn press_at(x: i32, y: i32) {
+    // A click anywhere while the stack is up takes the window at its front.
+    if unsafe { (*FLIP.get()).is_some() } {
+        flip_leave(true);
+        return;
+    }
     let Some(fb) = super::primary() else { return };
     let screen = screen_rect(&fb);
     let double = is_double(x, y);
@@ -3100,8 +3107,7 @@ pub fn retitle_tagged(tag: u64, title: &str) {
 /// Hyprland's binds where they do not collide with this desktop's: Enter a
 /// terminal, Q close, V float, J turn the split, F full screen, the arrows
 /// focus the window that way and with Shift swap places with it, D the
-/// desktop. Super-Tab becomes the Flip view (phase 15); until then it
-/// switches windows. A chord with no binding is still the desktop's and is
+/// desktop, and Tab the Flip 3D stack. A chord with no binding is still the desktop's and is
 /// dropped, so a reader of the plan does not find Super-V typing a 'v'.
 fn super_key(k: u8) {
     let Some((key, shift)) = kbd::chord_of(k) else { return };
@@ -3109,9 +3115,14 @@ fn super_key(k: u8) {
         (b'\n', _) => open_terminal(),
         (b'q', _) => close_focused(),
         (b'd', _) => show_desktop(),
+        // Flip 3D, and again to turn it.
         (b'\t', _) => {
-            with(|d| d.mode = Mode::Normal);
-            cycle(false);
+            if unsafe { (*FLIP.get()).is_some() } {
+                flip_turn(1.0);
+            } else {
+                with(|d| d.mode = Mode::Normal);
+                flip_open();
+            }
         }
         (b'v', _) => toggle_float(),
         (b'j', _) => toggle_split(),
@@ -3900,6 +3911,197 @@ fn toggle_split() {
     });
 }
 
+/// Flip 3D's state, while it is up.
+struct FlipState {
+    /// The windows, by serial, front first as the stack began: the
+    /// focused window, then down the z-order.
+    order: Vec<u64>,
+    /// Each window's image, outline as alpha, with its mip chain: taken
+    /// once when the stack opens, since a stack of windows is a picture of
+    /// them and four hundred milliseconds is no time to re-take it.
+    images: Vec<super::scale::Mips>,
+    /// Where the stack rests, and the turn on its way there.
+    offset: f32,
+    turn: Option<(f32, super::anim::Tween)>,
+    /// The stack rising out of the desktop, and going back into it -- with
+    /// the window to come to the front, if one was picked.
+    enter: super::anim::Tween,
+    leave: Option<(super::anim::Tween, Option<u64>)>,
+    /// The darkened blur the stack stands on.
+    bg: Vec<u32>,
+    /// This frame's offset and how far up the stack is, fixed by `layers`.
+    shown: (f32, f32),
+    /// Whether a frame's `layers` has seen the stack yet. Super-Tab can
+    /// arrive from the shell's task between a frame's scene and its paint,
+    /// and a stack painted by a frame whose scene does not have it is a
+    /// frame the reference -- and the next frame -- disagree with.
+    live: bool,
+}
+
+static FLIP: Racy<Option<FlipState>> = Racy::new(None);
+
+/// The glass the stack stands on: the wallpaper's blur, nearly black.
+const FLIP_GLASS: super::glass::Glass = super::glass::Glass {
+    tint: Color::new(8, 12, 20),
+    glow: Color::new(40, 60, 90),
+    blur: 40,
+    afterglow: 12,
+    color: 48,
+    gloss: 0,
+    gloss_end: 0.5,
+};
+
+/// Super-Tab: stand the windows up in a stack.
+fn flip_open() {
+    let Some(fb) = super::primary() else { return };
+    if !super::render::enabled() || super::exclusive() {
+        cycle(false);
+        return;
+    }
+    let (w, h) = (fb.width(), fb.height());
+    let mut picked: Vec<(u64, super::scale::Image)> = Vec::new();
+    with(|d| {
+        for win in d.windows.iter().rev() {
+            if win.state == WinState::Minimised {
+                continue;
+            }
+            if let Some(im) = win.image.borrow().as_ref() {
+                picked.push((win.serial, premultiplied(win, im)));
+            }
+        }
+    });
+    if picked.is_empty() {
+        return;
+    }
+    let mut bg = Vec::new();
+    if bg.try_reserve_exact(w as usize * h as usize).is_err() {
+        return;
+    }
+    bg.resize(w as usize * h as usize, 0u32);
+    let surf = unsafe { Framebuffer::over_ram(bg.as_mut_ptr() as u64, w, h, w, fb.format()) };
+    super::glass::fill(&surf, 0, 0, w, h, 0, FLIP_GLASS);
+    use super::anim::{Curve, Tween};
+    let state = FlipState {
+        order: picked.iter().map(|p| p.0).collect(),
+        images: picked.into_iter().map(|p| super::scale::Mips::new(p.1)).collect(),
+        offset: 0.0,
+        turn: None,
+        enter: Tween::new(420, Curve::EaseOutQuint),
+        leave: None,
+        bg,
+        shown: (0.0, 0.0),
+        live: false,
+    };
+    unsafe { *FLIP.get() = Some(state) };
+    with(|d| d.mode = Mode::Flip);
+    ANIMATING.store(true, core::sync::atomic::Ordering::Relaxed);
+    super::render::invalidate();
+}
+
+/// Turn the stack by one: the front window to the back, or back again.
+fn flip_turn(by: f32) {
+    let Some(f) = (unsafe { (*FLIP.get()).as_mut() }) else { return };
+    if f.leave.is_some() {
+        return;
+    }
+    let now = super::anim::now_us();
+    let from = match f.turn {
+        Some((a, t)) => a + (f.offset - a) * t.at(now),
+        None => f.offset,
+    };
+    f.offset += by;
+    f.turn = Some((from, super::anim::Tween::new(300, super::anim::Curve::EaseOutQuint)));
+    ANIMATING.store(true, core::sync::atomic::Ordering::Relaxed);
+    super::render::invalidate();
+}
+
+/// The window at the front of the stack at rest.
+fn flip_front(f: &FlipState) -> Option<u64> {
+    let n = f.order.len();
+    let k = (crate::ai::tensor::floorf(f.offset + 0.5) as i64).rem_euclid(n.max(1) as i64) as usize;
+    f.order.get(k).copied()
+}
+
+/// Lay the stack back down: on the window at the front when `pick`, or on
+/// the desktop as it was.
+fn flip_leave(pick: bool) {
+    let Some(f) = (unsafe { (*FLIP.get()).as_mut() }) else { return };
+    if f.leave.is_some() {
+        return;
+    }
+    let choice = if pick { flip_front(f) } else { None };
+    f.leave = Some((super::anim::Tween::new(300, super::anim::Curve::EaseOutQuint), choice));
+    ANIMATING.store(true, core::sync::atomic::Ordering::Relaxed);
+    super::render::invalidate();
+}
+
+/// The stack's offset and rise at `now`.
+fn flip_at(f: &FlipState, now: u64) -> (f32, f32) {
+    let offset = match f.turn {
+        Some((a, t)) => a + (f.offset - a) * t.at(now),
+        None => f.offset,
+    };
+    let up = f.enter.at(now) * f.leave.map_or(1.0, |(t, _)| 1.0 - t.at(now));
+    (offset, up)
+}
+
+/// Retire Flip's motion; true while any of it is still moving.
+fn flip_step(now: u64) -> bool {
+    let slot = unsafe { &mut *FLIP.get() };
+    let Some(f) = slot.as_mut() else { return false };
+    if let Some((_, t)) = f.turn {
+        if t.done(now) {
+            f.turn = None;
+        }
+    }
+    if let Some((t, pick)) = f.leave {
+        if t.done(now) {
+            *slot = None;
+            with(|d| {
+                d.mode = Mode::Normal;
+                if let Some(s) = pick {
+                    if let Some(i) = d.windows.iter().position(|w| w.serial == s) {
+                        d.raise(i);
+                    }
+                }
+            });
+            return false;
+        }
+        return true;
+    }
+    f.turn.is_some() || !f.enter.done(now)
+}
+
+/// Paint the stack. Over the desktop as it rises, with the darkened glass
+/// fading up beneath it; alone once it is up, since it covers everything.
+fn paint_flip(fb: &Framebuffer, d: &Desktop, screen: Rect) {
+    let Some(f) = (unsafe { (*FLIP.get()).as_mut() }) else { return };
+    let (offset, up) = f.shown;
+    let (w, h) = (fb.width(), fb.height());
+    let (x0, y0, x1, y1) = fb.scissor();
+    let a = (up.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+    let n = f.order.len();
+    let mut levels: Vec<(super::scale::Image, super::flip::Quad)> = Vec::with_capacity(n);
+    for (k, depth) in super::flip::order(n, offset) {
+        let serial = f.order[k];
+        let Some(win) = d.windows.iter().find(|w| w.serial == serial) else { continue };
+        let frame = win.frame(screen);
+        let mips = &mut f.images[k];
+        let (iw, ih) = (mips.base().w as f32, mips.base().h as f32);
+        let stood = super::flip::at_depth(iw, ih, depth, w as f32, h as f32);
+        let flat = super::flip::Quad::flat(frame.x as f32, frame.y as f32, frame.w as f32, frame.h as f32);
+        let q = super::flip::Quad::lerp(flat, stood, up);
+        let (qx0, qy0, qx1, qy1) = q.bounds();
+        if qx1 < x0 as f32 || qx0 > x1 as f32 || qy1 < y0 as f32 || qy0 > y1 as f32 {
+            continue;
+        }
+        let level = mips.level_for(((q.x1 - q.x0).max(1.0)) as u32, q.h0.max(q.h1).max(1.0) as u32).clone();
+        levels.push((level, q));
+    }
+    let items: Vec<(&super::scale::Image, super::flip::Quad)> = levels.iter().map(|(l, q)| (l, *q)).collect();
+    super::flip::paint(fb, Some((&f.bg, w, a)), &items);
+}
+
 /// Retire what has finished moving and keep frames coming while anything
 /// has not. The compositor's, after each frame.
 pub fn anim_step() {
@@ -3941,6 +4143,15 @@ pub fn anim_step() {
             moving = true;
         }
     }
+    if all {
+        unsafe { *FLIP.get() = None };
+        with(|d| {
+            if d.mode == Mode::Flip {
+                d.mode = Mode::Normal;
+            }
+        });
+    }
+    moving |= flip_step(now);
     ANIMATING.store(moving, core::sync::atomic::Ordering::Relaxed);
     // One more frame after the last tween ends, which is the one that draws
     // the window plainly or clears the last of a ghost.
@@ -5093,6 +5304,19 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
         }
         out.push(Layer { id: LayerId::Overlay, bounds: b, stamp: core::hash::Hasher::finish(&st), parts: Vec::new() });
     }
+    if let Some(f) = unsafe { (*FLIP.get()).as_mut() } {
+        let (o, u) = flip_at(f, now);
+        // Fixed to a 4096th, as every moving layer's values are (`q4096`).
+        let o = ((o * 4096.0) as i64) as f32 / 4096.0;
+        f.shown = (o, q4096(u));
+        f.live = true;
+        out.push(Layer {
+            id: LayerId::Flip,
+            bounds: Rect::new(0, 0, w, h),
+            stamp: Stamp::of(((f.shown.0 * 4096.0) as i64, (f.shown.1 * 4096.0) as u32, f.order.len())),
+            parts: Vec::new(),
+        });
+    }
     unsafe { *FRAME_INPUTS.get() = Some(inputs) };
     APP_WAKE.store(if wake == u32::MAX { 0 } else { wake }, core::sync::atomic::Ordering::Relaxed);
     out
@@ -5625,6 +5849,13 @@ fn paint_window_body(fb: &Framebuffer, d: &Desktop, i: usize, win: &Window, fram
 
 fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
     let fb = *target;
+    // Flip 3D, fully up, covers everything: nothing under it is painted.
+    if let Some(f) = unsafe { (*FLIP.get()).as_ref() } {
+        if f.live && f.shown.1 >= 1.0 {
+            paint_flip(&fb, d, screen);
+            return;
+        }
+    }
     use super::render::{cost, Cost};
     let mut t = crate::time::rdtsc();
     let lap = |what: Cost, t: &mut u64| {
@@ -5781,7 +6012,8 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
                 | Mode::Taskbar { .. }
                 | Mode::Drag { .. }
                 | Mode::DragSize { .. }
-                | Mode::Start { .. } => {}
+                | Mode::Start { .. }
+                | Mode::Flip => {}
             }
         }
         if let Mode::Start { item } = d.mode {
@@ -5819,6 +6051,10 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
             }
         }
         lap(Cost::Overlay, &mut t);
+    }
+    // Flip 3D on its way up or down, over the desktop it rises out of.
+    if unsafe { (*FLIP.get()).as_ref().is_some_and(|f| f.live) } {
+        paint_flip(&fb, d, screen);
     }
 }
 
@@ -6041,6 +6277,19 @@ pub fn key(k: u8) -> Route {
     let mode = with(|d| d.mode).unwrap_or(Mode::Normal);
 
     match mode {
+        // Flip takes every key while it is up: Tab and the arrows turn it,
+        // Enter brings the front window forward, Esc puts things back.
+        Mode::Flip => {
+            match k {
+                b'\t' => flip_turn(1.0),
+                k if k == kbd::KEY_RIGHT || k == kbd::KEY_DOWN => flip_turn(1.0),
+                k if k == kbd::KEY_BACKTAB || k == kbd::KEY_LEFT || k == kbd::KEY_UP => flip_turn(-1.0),
+                b'\n' | b'\r' => flip_leave(true),
+                27 => flip_leave(false),
+                _ => {}
+            }
+            Route::Handled
+        }
         Mode::Normal => {
             if k == kbd::KEY_SYSMENU {
                 with(|d| d.mode = Mode::Sys { item: 0 });

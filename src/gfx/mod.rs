@@ -18,6 +18,7 @@ pub mod glass;
 pub mod scale;
 pub mod wall;
 pub mod anim;
+pub mod flip;
 pub mod tile;
 pub mod icons;
 pub mod text;

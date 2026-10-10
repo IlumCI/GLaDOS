@@ -5054,6 +5054,12 @@ the order a frame happens:
   through the scale, so the default is pixel-identical to the constants and
   `win scale <percent>` moves everything at once (75 to 250). Applications'
   own layouts (Minesweeper's cells, Paint's canvas) are not converted yet.
+- **Super-Tab is Flip 3D** (`gfx::flip`, phase 15): the windows' images
+  stood in a stack leaning away, on a darkened blur of the wallpaper. Tab and
+  the arrows turn it, Enter brings the front window forward, Esc and a click
+  leave. 2.5D -- each window is a quad whose near edge is taller -- and drawn
+  row by row across every core. A stack that arrives between a frame's scene
+  and its paint waits for the next frame (`FlipState::live`).
 - **A program's pixels are kept** (`Window.app_surface`) and redrawn only when
   its `DeskApp::stamp`, focus, size or its own input changes. A program with
   no stamp is redrawn every frame, which is correct and costs time. A program
