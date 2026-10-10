@@ -27,7 +27,7 @@ fn lin(c: u8) -> f32 {
     (if v <= 0.04045 { v / 12.92 } else { super::grad::pow((v + 0.055) / 1.055, 2.4) }) as f32
 }
 
-fn lin3(c: (u8, u8, u8)) -> [f32; 3] {
+pub(crate) fn lin3(c: (u8, u8, u8)) -> [f32; 3] {
     [lin(c.0), lin(c.1), lin(c.2)]
 }
 
@@ -132,7 +132,7 @@ const SKY: [(f32, Color); 3] = [
 ];
 
 /// Coverage of the sun at a pixel centre, stripes included.
-fn sun_cov(x: f32, y: f32, cx: f32, cy: f32, r: f32) -> f32 {
+fn sun_cov(x: f32, y: f32, cx: f32, cy: f32, r: f32, stripes: f32) -> f32 {
     let c = super::splash::aperture_coverage(x - cx, y - cy, r);
     if c == 0.0 {
         return 0.0;
@@ -140,7 +140,7 @@ fn sun_cov(x: f32, y: f32, cx: f32, cy: f32, r: f32) -> f32 {
     // Synthwave bars across the lower part, widening toward the bottom, each
     // edge anti-aliased by its distance in y.
     let t = (y - cy) / r;
-    if t <= 0.1 {
+    if t <= 0.1 || stripes <= 0.0 {
         return c;
     }
     let k = ((t - 0.1) / 0.9).clamp(0.0, 1.0);
@@ -152,19 +152,231 @@ fn sun_cov(x: f32, y: f32, cx: f32, cy: f32, r: f32) -> f32 {
     // the next one's start).
     let d = if local < bar { -local.min(bar - local) } else { (local - bar).min(period - local) };
     let in_bar = (0.5 - d).clamp(0.0, 1.0);
-    c * (1.0 - in_bar)
+    c * (1.0 - in_bar * stripes)
 }
 
 /// Paint the wallpaper into `fb`, whole. Answers the milliseconds it took.
+///
+/// The base and then the sun over it, through the same `overlay_sun` the boot
+/// screen's glide uses for every one of its frames -- which is what makes the
+/// glide's last frame this picture bit for bit rather than nearly.
 pub fn paint(fb: &Framebuffer) -> u64 {
     let t0 = crate::time::rdtsc();
+    paint_base(fb);
+    let tables = Tables::new();
+    overlay_sun(fb, &Sun::rest(fb.width(), fb.height()), &tables);
+    let mhz = crate::time::tsc_mhz().max(1) as u64;
+    (crate::time::rdtsc() - t0) / mhz / 1000
+}
+
+/// What the sun's overlay needs and should not rebuild per frame.
+pub struct Tables {
+    enc: Encode,
+    dec: [f32; 256],
+}
+
+impl Tables {
+    pub fn new() -> Tables {
+        let mut dec = [0f32; 256];
+        for (i, d) in dec.iter_mut().enumerate() {
+            *d = lin(i as u8);
+        }
+        Tables { enc: Encode::new(), dec }
+    }
+}
+
+/// The sun at some moment: where, how big, how striped, in what colours.
+#[derive(Clone, Copy)]
+pub struct Sun {
+    pub cx: f32,
+    pub cy: f32,
+    pub r: f32,
+    /// 0 none, 1 the wallpaper's full bars.
+    pub stripes: f32,
+    pub top: [f32; 3],
+    pub bot: [f32; 3],
+}
+
+impl Sun {
+    /// Where the wallpaper keeps it.
+    pub fn rest(w: u32, h: u32) -> Sun {
+        let (wf, hf) = (w as f32, h as f32);
+        Sun {
+            cx: LAYOUT.sun_x * wf,
+            cy: LAYOUT.sun_y * hf,
+            r: LAYOUT.sun_r * hf,
+            stripes: 1.0,
+            top: lin3((255, 226, 120)),
+            bot: lin3((255, 84, 40)),
+        }
+    }
+}
+
+/// How far the halo reaches past the disc, as a multiple of its radius. It is
+/// windowed to exactly zero at that distance: a logistic tail is still a few
+/// tenths of a per cent of full light there, which on a night sky is a visible
+/// square where the box the overlay works in stops.
+const HALO_REACH: f32 = 1.05;
+
+/// The halo at distance `d` from the centre of a sun of radius `r`: a disc
+/// blurred by a Gaussian of 0.35 r, as the logistic approximation of its
+/// edge profile, with the opening darker -- what blurring the mark's own
+/// coverage gave, in closed form, so it can travel with the sun at no cost.
+fn halo(d: f32, r: f32) -> f32 {
+    let s = 0.35 * r;
+    let edge = |rad: f32, w: f32| 1.0 / (1.0 + crate::ai::tensor::expf(1.702 * (d - rad) / w));
+    let core = (edge(r, s) - 0.6 * edge(r * 0.46, s * 0.5)).max(0.0);
+    let end = r * (1.0 + HALO_REACH);
+    let window = ((end - d) / (0.35 * r)).clamp(0.0, 1.0);
+    core * window * window
+}
+
+/// Lay the sun -- halo and striped mark -- over what `fb` already holds, in
+/// linear light, behind the hills (which the base has drawn), vignetted as
+/// the base is. Reads the pixels back, so `fb` must be memory.
+pub fn overlay_sun(fb: &Framebuffer, sun: &Sun, t: &Tables) {
+    overlay_sun_behind(fb, sun, t, 1.0);
+}
+
+/// The same, with the hills hiding the sun only `hills` (0..=1) as much --
+/// the glide fades them in, and a sun cut by hills not yet visible is a sun
+/// with a bite out of it.
+pub fn overlay_sun_behind(fb: &Framebuffer, sun: &Sun, t: &Tables, hills: f32) {
+    let (w, h) = (fb.width(), fb.height());
+    let (wf, hf) = (w as f32, h as f32);
+    let reach = sun.r * (1.0 + HALO_REACH);
+    let x0 = ((sun.cx - reach).max(0.0)) as u32;
+    let x1 = ((sun.cx + reach).max(0.0) as u32 + 1).min(w);
+    let y0 = ((sun.cy - reach).max(0.0)) as u32;
+    let y1 = ((sun.cy + reach).max(0.0) as u32 + 1).min(h);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let bgr = fb.format() == super::Format::Bgrx;
+    let warm = lin3((255, 120, 40));
+    // Per column, the nearest crest; per quarter pixel of distance, the halo.
+    // Both are functions of one coordinate and were costing three sines and two
+    // exponentials a pixel -- most of 75 ms a glide frame.
+    let crest: Vec<f32> = (x0..x1)
+        .map(|x| {
+            let u = (x as f32 + 0.5) / wf;
+            HILLS.iter().map(|hl| hl.0(u) * hf).fold(f32::MAX, f32::min)
+        })
+        .collect();
+    let steps = (reach * 4.0) as usize + 2;
+    let halo_at: Vec<f32> = (0..steps).map(|i| halo(i as f32 / 4.0, sun.r) * 0.55).collect();
+    let job = Overlay {
+        fb: *fb,
+        sun: *sun,
+        tables: t as *const Tables,
+        hills,
+        crest: crest.as_ptr(),
+        halo: halo_at.as_ptr(),
+        halo_len: halo_at.len(),
+        x0,
+        x1,
+        y0,
+        bgr,
+        warm,
+    };
+    // Rows are the items: each is independent given the tables above, and
+    // chunks are disjoint row ranges, so no two cores write one pixel. The
+    // glide composes a million of these a frame and spent 31 ms doing it on
+    // one core. Serial when there is nobody to help.
+    let rows = (y1 - y0) as usize;
+    let ctx = &job as *const Overlay as usize;
+    if !crate::smp::parallel_split(ctx, overlay_rows, rows, (x1 - x0) as usize) {
+        unsafe { overlay_rows(ctx, 0, rows) };
+    }
+}
+
+/// Everything a chunk of the overlay reads, by pointer: `parallel_split` hands
+/// a context through a `usize`, and it outlives the call because the call
+/// does not return until every chunk has run.
+#[derive(Clone, Copy)]
+struct Overlay {
+    fb: Framebuffer,
+    sun: Sun,
+    tables: *const Tables,
+    hills: f32,
+    crest: *const f32,
+    halo: *const f32,
+    halo_len: usize,
+    x0: u32,
+    x1: u32,
+    y0: u32,
+    bgr: bool,
+    warm: [f32; 3],
+}
+
+/// Rows `lo..hi` of the overlay, counted from its top.
+unsafe fn overlay_rows(ctx: usize, lo: usize, hi: usize) {
+    let j = unsafe { *(ctx as *const Overlay) };
+    let t = unsafe { &*j.tables };
+    let width = (j.x1 - j.x0) as usize;
+    let crest = unsafe { core::slice::from_raw_parts(j.crest, width) };
+    let halo_at = unsafe { core::slice::from_raw_parts(j.halo, j.halo_len) };
+    let (fb, sun) = (&j.fb, &j.sun);
+    let (wf, hf) = (fb.width() as f32, fb.height() as f32);
+    let mut row: Vec<u32> = alloc::vec![0; width];
+    for y in j.y0 + lo as u32..j.y0 + hi as u32 {
+        let yc = y as f32 + 0.5;
+        let v = yc / hf;
+        for x in j.x0..j.x1 {
+            let xc = x as f32 + 0.5;
+            let u = xc / wf;
+            let p = fb.get(x, y);
+            row[(x - j.x0) as usize] = p;
+            // Behind the hills: whatever a hill covers here, the sun does not.
+            // The nearest crest is the highest, and hills are opaque, so it is
+            // the only one that matters.
+            let cover = (yc - crest[(x - j.x0) as usize] + 0.5).clamp(0.0, 1.0) * j.hills;
+            let open = 1.0 - cover;
+            if open <= 0.0 {
+                continue;
+            }
+            let (dx, dy) = (xc - sun.cx, yc - sun.cy);
+            let d = crate::gfx::shape::libm_sqrt(dx * dx + dy * dy);
+            let hv = halo_at.get((d * 4.0) as usize).copied().unwrap_or(0.0);
+            let c = if dx.abs() <= sun.r + 1.0 && dy.abs() <= sun.r + 1.0 {
+                sun_cov(xc, yc, sun.cx, sun.cy, sun.r, sun.stripes)
+            } else {
+                0.0
+            } * open;
+            if hv < 1e-4 && c == 0.0 {
+                continue;
+            }
+            let vg = vignette(u, v);
+            let lanes = if j.bgr { [2, 1, 0] } else { [0, 1, 2] };
+            let ty = ((yc - (sun.cy - sun.r)) / (2.0 * sun.r)).clamp(0.0, 1.0);
+            let mut fine = [0u16; 3];
+            for k in 0..3 {
+                let byte = ((p >> (8 * lanes[k])) & 0xff) as usize;
+                let bg = t.dec[byte] + hv * j.warm[k] * vg * open;
+                let ink = (sun.top[k] * (1.0 - ty) + sun.bot[k] * ty) * vg;
+                fine[k] = t.enc.at(bg * (1.0 - c) + ink * c);
+            }
+            let col = super::grad::dither(fine, x, y);
+            row[(x - j.x0) as usize] = super::blend::opaque(fb.encode(col));
+        }
+        fb.blit_span(j.x0, y, &row);
+    }
+}
+
+#[inline]
+fn vignette(u: f32, v: f32) -> f32 {
+    let (a, b) = ((u - 0.5) * 1.6, (v - 0.45) * 1.4);
+    (1.0 - 0.45 * (a * a + b * b)).clamp(0.3, 1.0)
+}
+
+/// Everything but the sun: sky, hills, their light, the vignette.
+pub fn paint_base(fb: &Framebuffer) {
     let (w, h) = (fb.width() as usize, fb.height() as usize);
     if w == 0 || h == 0 {
-        return 0;
+        return;
     }
     let (wf, hf) = (w as f32, h as f32);
     let scale = hf / 1080.0;
-    let (scx, scy, sr) = (LAYOUT.sun_x * wf, LAYOUT.sun_y * hf, LAYOUT.sun_r * hf);
 
     // The sky, one ramp entry per row, in linear light.
     let sky_ramp = super::grad::Ramp::bake(&SKY, h);
@@ -174,22 +386,6 @@ pub fn paint(fb: &Framebuffer) -> u64 {
             [lin((c[0] >> 8) as u8), lin((c[1] >> 8) as u8), lin((c[2] >> 8) as u8)]
         })
         .collect();
-
-    // The halo: the sun's coverage, blurred, over a crop just big enough.
-    let sigma = sr * 0.35;
-    let pad = (3.0 * sigma) as i32 + 2;
-    let (hx0, hy0) = ((scx - sr) as i32 - pad, (scy - sr) as i32 - pad);
-    let hw = (2.0 * sr) as usize + 2 * pad as usize + 1;
-    let mut halo = alloc::vec![0f32; hw * hw];
-    for j in 0..hw {
-        for i in 0..hw {
-            let (x, y) = (hx0 + i as i32, hy0 + j as i32);
-            halo[j * hw + i] = super::splash::aperture_coverage(x as f32 + 0.5 - scx, y as f32 + 0.5 - scy, sr);
-        }
-    }
-    blur_plane(&mut halo, hw, hw, sigma);
-    let warm = lin3((255, 120, 40));
-    let (ink_top, ink_bot) = (lin3((255, 226, 120)), lin3((255, 84, 40)));
 
     // Picture and glow, three planes each.
     let mut img = alloc::vec![0f32; w * h * 3];
@@ -205,26 +401,8 @@ pub fn paint(fb: &Framebuffer) -> u64 {
     for y in 0..h {
         let yc = y as f32 + 0.5;
         for x in 0..w {
-            let xc = x as f32 + 0.5;
             let i = (y * w + x) * 3;
             let mut px = sky_row[y];
-            // Halo, added to the sky.
-            let (hi, hj) = (x as i32 - hx0, y as i32 - hy0);
-            if hi >= 0 && hj >= 0 && (hi as usize) < hw && (hj as usize) < hw {
-                let hv = halo[hj as usize * hw + hi as usize] * 0.55;
-                for c in 0..3 {
-                    px[c] += hv * warm[c];
-                }
-            }
-            // The sun, over the sky.
-            let sc = if (yc - scy).abs() <= sr + 1.0 && (xc - scx).abs() <= sr + 1.0 { sun_cov(xc, yc, scx, scy, sr) } else { 0.0 };
-            if sc > 0.0 {
-                let t = ((yc - (scy - sr)) / (2.0 * sr)).clamp(0.0, 1.0);
-                for c in 0..3 {
-                    let ink = ink_top[c] * (1.0 - t) + ink_bot[c] * t;
-                    px[c] = px[c] * (1.0 - sc) + ink * sc;
-                }
-            }
             // Hills, back to front, each hiding what is behind it, its glow
             // included.
             let mut g = [0f32; 3];
@@ -265,14 +443,14 @@ pub fn paint(fb: &Framebuffer) -> u64 {
         }
     }
 
-    // A vignette, then encode with the same ordered dither the gradients use.
+    // The vignette, then encode with the same ordered dither the gradients use.
     let enc = Encode::new();
     let mut row: Vec<u32> = alloc::vec![0; w];
     for y in 0..h {
         let v = (y as f32 + 0.5) / hf;
         for x in 0..w {
             let u = (x as f32 + 0.5) / wf;
-            let vg = (1.0 - 0.45 * (((u - 0.5) * 1.6) * ((u - 0.5) * 1.6) + ((v - 0.45) * 1.4) * ((v - 0.45) * 1.4))).clamp(0.3, 1.0);
+            let vg = vignette(u, v);
             let i = (y * w + x) * 3;
             let fine = [enc.at(img[i] * vg), enc.at(img[i + 1] * vg), enc.at(img[i + 2] * vg)];
             let c = super::grad::dither(fine, x as u32, y as u32);
@@ -280,8 +458,6 @@ pub fn paint(fb: &Framebuffer) -> u64 {
         }
         fb.blit_span(0, y as u32, &row);
     }
-    let mhz = crate::time::tsc_mhz().max(1) as u64;
-    (crate::time::rdtsc() - t0) / mhz / 1000
 }
 
 /// `video wall`: the wallpaper alone, and how long it took.

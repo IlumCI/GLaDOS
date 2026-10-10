@@ -4899,6 +4899,15 @@ static WALL: Racy<Option<(Vec<u32>, u32, u32)>> = Racy::new(None);
 /// about twelve here; a little more reads as frosted rather than smeared.
 const GLASS_SIGMA: f32 = 14.0;
 
+/// Keep a wallpaper somebody else already painted -- the boot screen's glide
+/// ends on it -- rather than painting it again, and take the glass blur from
+/// it as `wallpaper_cached` would. Before the desktop exists, so nothing is
+/// composing from the cache while it is set.
+pub(crate) fn adopt_wallpaper(px: Vec<u32>, w: u32, h: u32) {
+    super::glass::set_backdrop(&px, w, h, GLASS_SIGMA);
+    unsafe { *WALL.get() = Some((px, w, h)) };
+}
+
 fn wallpaper_cached(fb: &Framebuffer) {
     let (w, h) = (fb.width(), fb.height());
     let cache = unsafe { &mut *WALL.get() };

@@ -67,6 +67,8 @@
 //! moment later. That matters more than the splash does: the framebuffer is
 //! the only diagnostic channel this machine has.
 
+use alloc::vec::Vec;
+
 use super::palette::{BLACK, WHITE};
 use super::{compose, font, primary, Color, Format, Framebuffer};
 use crate::sync::Racy;
@@ -815,14 +817,19 @@ pub fn finish() {
     render_core(None);
 
     if let Some(fb) = canvas() {
-        let (w, h) = (fb.width(), fb.height());
-        let l = layout(w, h);
-        let reach = (w + h) as i32; // past every corner
-        let frames = 14i32;
-        for f in 1..=frames {
-            let rr = l.r as i32 + (reach - l.r as i32) * f / frames;
-            render_core(Some(rr));
-            crate::time::delay_us(22_000);
+        if compose::active() {
+            glide(&fb);
+        } else {
+            // No back buffer to read from: the old bloom, which never reads.
+            let (w, h) = (fb.width(), fb.height());
+            let l = layout(w, h);
+            let reach = (w + h) as i32; // past every corner
+            let frames = 14i32;
+            for f in 1..=frames {
+                let rr = l.r as i32 + (reach - l.r as i32) * f / frames;
+                render_core(Some(rr));
+                crate::time::delay_us(22_000);
+            }
         }
     }
 
@@ -835,6 +842,155 @@ pub fn finish() {
     // boot log back at the new origin -- nothing logged during boot is lost by
     // gaining a frame around it.
     crate::gfx::desk::init();
+}
+
+/// The hand-off: the finished iris travels to where the wallpaper keeps its
+/// sun and becomes it, while the night and the hills come up around it.
+///
+/// It used to be a bloom from a mark that stayed put, because the old wall
+/// drew its mark on exactly the splash's pixels. The 1.4.1 wall puts a larger,
+/// striped sun up and to the left, and the operator chose for the logo to
+/// glide there rather than jump. Each frame is the boot field cross-faded into
+/// the wall's base (`wall::paint_base`: sky, hills, their light) with the sun
+/// laid over through `wall::overlay_sun` at an interpolated place, size,
+/// stripe weight and colour -- the same overlay `wall::paint` finishes with,
+/// so the last frame *is* the wallpaper, and it is handed to the desktop as
+/// such rather than painted a second time.
+fn glide(fb: &Framebuffer) {
+    let mhz = crate::time::tsc_mhz().max(1) as u64;
+    let began = crate::time::rdtsc();
+    let Some(g) = Glide::prepare(fb) else { return };
+    let ready = crate::time::rdtsc();
+    for f in 0..=GLIDE_FRAMES {
+        let t0 = crate::time::rdtsc();
+        g.frame(fb, f);
+        commit();
+        // About sixty a second where the machine can; slower where it cannot,
+        // which only lengthens the glide.
+        let until = t0 + 16_000 * mhz;
+        while crate::time::rdtsc() < until {
+            core::hint::spin_loop();
+        }
+    }
+    // The last frame is the wallpaper. Give it to the desktop whole.
+    let (w, h) = (fb.width(), fb.height());
+    let mut done = Vec::new();
+    if done.try_reserve_exact((w * h) as usize).is_ok() {
+        for y in 0..h {
+            for x in 0..w {
+                done.push(fb.get(x, y));
+            }
+        }
+        crate::gfx::desk::adopt_wallpaper(done, w, h);
+    }
+    let end = crate::time::rdtsc();
+    crate::serial_println!(
+        "[splash] glide: {} ms preparing, {} frames in {} ms",
+        (ready - began) / mhz / 1000,
+        GLIDE_FRAMES + 1,
+        (end - ready) / mhz / 1000
+    );
+}
+
+const GLIDE_FRAMES: u32 = 48;
+
+/// What every frame of the glide is made from, built once.
+struct Glide {
+    base: Vec<u32>,
+    field: Vec<u32>,
+    tables: crate::gfx::wall::Tables,
+    start: crate::gfx::wall::Sun,
+    rest: crate::gfx::wall::Sun,
+}
+
+impl Glide {
+    fn prepare(fb: &Framebuffer) -> Option<Glide> {
+        use crate::gfx::wall;
+        let (w, h) = (fb.width(), fb.height());
+        let n = (w * h) as usize;
+        let l = layout(w, h);
+        let (mut base, mut field) = (Vec::new(), Vec::new());
+        if base.try_reserve_exact(n).is_err() || field.try_reserve_exact(n).is_err() {
+            return None;
+        }
+        base.resize(n, 0u32);
+        field.resize(n, 0u32);
+        let bfb = unsafe { Framebuffer::over_ram(base.as_mut_ptr() as u64, w, h, w, fb.format()) };
+        wall::paint_base(&bfb);
+        // The field: the boot screen's background and words, without the
+        // mark, which travels on its own.
+        let ffb = unsafe { Framebuffer::over_ram(field.as_mut_ptr() as u64, w, h, w, fb.format()) };
+        ffb.vgrad(0, 0, w, h, FIELD);
+        centred_text(&ffb, l.cx, l.title_y, "GLaDOS", l.scale + 1, WHITE);
+        centred_text(&ffb, l.cx, l.sub_y, "a model in the kernel", l.scale.max(1), Color::new(190, 214, 240));
+        let first = SUN[0].1;
+        let last = SUN[SUN.len() - 1].1;
+        Some(Glide {
+            base,
+            field,
+            tables: wall::Tables::new(),
+            start: wall::Sun {
+                cx: l.cx as f32,
+                cy: l.cy as f32,
+                r: l.r as f32,
+                stripes: 0.0,
+                top: wall::lin3((first.r, first.g, first.b)),
+                bot: wall::lin3((last.r, last.g, last.b)),
+            },
+            rest: wall::Sun::rest(w, h),
+        })
+    }
+
+    /// Compose frame `f` of `GLIDE_FRAMES` into `fb`.
+    fn frame(&self, fb: &Framebuffer, f: u32) {
+        let (w, h) = (fb.width() as usize, fb.height() as usize);
+        let t = f.min(GLIDE_FRAMES) as f32 / GLIDE_FRAMES as f32;
+        // Ease in and out: a cubic that starts and lands at rest.
+        let e = if t < 0.5 { 4.0 * t * t * t } else { 1.0 - (-2.0 * t + 2.0) * (-2.0 * t + 2.0) * (-2.0 * t + 2.0) / 2.0 };
+        let k = (e * 256.0 + 0.5) as u32;
+        let mut row: Vec<u32> = alloc::vec![0; w];
+        for y in 0..h {
+            let (fr, br) = (&self.field[y * w..(y + 1) * w], &self.base[y * w..(y + 1) * w]);
+            for (o, (&a, &b)) in row.iter_mut().zip(fr.iter().zip(br.iter())) {
+                *o = if k >= 256 { b } else { mix(a, b, k) };
+            }
+            fb.blit_span(0, y as u32, &row);
+        }
+        let lerp = |a: f32, b: f32| a + (b - a) * e;
+        let lerp3 = |a: [f32; 3], b: [f32; 3]| [lerp(a[0], b[0]), lerp(a[1], b[1]), lerp(a[2], b[2])];
+        let (s, r) = (&self.start, &self.rest);
+        let sun = crate::gfx::wall::Sun {
+            cx: lerp(s.cx, r.cx),
+            cy: lerp(s.cy, r.cy),
+            r: lerp(s.r, r.r),
+            stripes: e,
+            top: lerp3(s.top, r.top),
+            bot: lerp3(s.bot, r.bot),
+        };
+        crate::gfx::wall::overlay_sun_behind(fb, &sun, &self.tables, e);
+    }
+}
+
+/// `splash glide <frame>`: compose one frame of the hand-off into the
+/// splash's canvas and show it, for photographing the glide frame by frame.
+/// Answers the canvas so the caller can say where its pixels are.
+pub fn demo_glide(f: u32) -> Option<Framebuffer> {
+    let fb = canvas()?;
+    let g = Glide::prepare(&fb)?;
+    g.frame(&fb, f);
+    commit();
+    Some(fb)
+}
+
+/// Each byte lane of `a` toward `b` by `k`/256.
+#[inline]
+fn mix(a: u32, b: u32, k: u32) -> u32 {
+    let mut out = 0u32;
+    for lane in 0..4 {
+        let (x, y) = ((a >> (8 * lane)) & 0xff, (b >> (8 * lane)) & 0xff);
+        out |= ((x * (256 - k) + y * k + 128) >> 8) << (8 * lane);
+    }
+    out
 }
 
 /// Abandon the splash immediately, keeping whatever is on screen.

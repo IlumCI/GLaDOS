@@ -7456,6 +7456,22 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 let held = SPLASH_LEASE.lock_irq().take();
                 drop(held);
                 kprintln!("  released");
+            } else if a0 == Some("glide") {
+                // One frame of the hand-off to the wallpaper, held like
+                // `hold`, and where its pixels are -- QEMU's picture of a held
+                // screen goes stale, so the frame is judged from `pmemsave`.
+                let f: u32 = a1.and_then(|s| s.parse().ok()).unwrap_or(0);
+                {
+                    let mut l = SPLASH_LEASE.lock_irq();
+                    if l.is_none() {
+                        *l = crate::gfx::lease::take(crate::gfx::lease::Owner::Splash);
+                    }
+                }
+                crate::gfx::compose::invalidate();
+                match crate::gfx::splash::demo_glide(f) {
+                    Some(fb) => kprintln!("  glide frame {} of 48; image at {:#x}, {}x{}", f, fb.addr(), fb.width(), fb.height()),
+                    None => kprintln!("  no canvas to glide on"),
+                }
             } else if a0 == Some("hold") {
                 // Draw one frame and keep the framebuffer held, returning to
                 // the prompt at once -- so a driver can shoot the sequence
