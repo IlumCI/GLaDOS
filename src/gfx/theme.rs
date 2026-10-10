@@ -119,13 +119,6 @@ pub const SUN: [(u8, Color); 5] = [
 
 pub const TEXT: Color = Color::new(0x00, 0x00, 0x00);
 pub const TEXT_DIM: Color = Color::new(0x76, 0x88, 0x90);
-/// The close button under the pointer.
-///
-/// The one control on a window that cannot be undone, and the one an operator
-/// coming from Windows identifies by colour before they read the glyph. Every
-/// other button here answers hover with a ring; this one answers with red,
-/// because "this is the destructive one" is worth saying twice.
-pub const CLOSE_HOT: Color = Color::new(0xE0, 0x43, 0x43);
 
 /// Status text on a panel face: working, needs attention, will not work.
 ///
@@ -177,40 +170,14 @@ pub const TITLE_OFF: [(u8, Color); 6] = [
     (246, Color::new(0xA6, 0xBB, 0xC6)),
     (255, Color::new(0xC8, 0xD8, 0xE0)),
 ];
-/// The window border, which is the caption's colour carried round the outside.
-pub const BORDER_ON: Color = Color::new(0xC4, 0x72, 0x14);
-pub const BORDER_OFF: Color = Color::new(0xA6, 0xBB, 0xC6);
 
-/// Minimise and maximise.
-pub const CAP_BTN: [(u8, Color); 5] = [
-    (0, Color::new(0xFF, 0xD9, 0xA6)),
-    (30, Color::new(0xF6, 0xA9, 0x3E)),
-    (128, Color::new(0xE6, 0x8D, 0x1C)),
-    (129, Color::new(0xCE, 0x7A, 0x14)),
-    (255, Color::new(0xB4, 0x65, 0x0F)),
-];
-pub const CAP_BTN_HOT: [(u8, Color); 5] = [
-    (0, Color::new(0xFF, 0xF0, 0xD8)),
-    (30, Color::new(0xFF, 0xC8, 0x78)),
-    (128, Color::new(0xF6, 0xA9, 0x3E)),
-    (129, Color::new(0xE6, 0x8D, 0x1C)),
-    (255, Color::new(0xCE, 0x7A, 0x14)),
-];
-/// Close. Red whether or not the pointer is on it -- see `CLOSE_HOT`.
+/// Close. Red whether or not the pointer is on it.
 pub const CAP_CLOSE: [(u8, Color); 5] = [
     (0, Color::new(0xFF, 0xA8, 0xA8)),
     (30, Color::new(0xE8, 0x5A, 0x5A)),
     (128, Color::new(0xD2, 0x3A, 0x3A)),
     (129, Color::new(0xBE, 0x2E, 0x2E)),
     (255, Color::new(0xA8, 0x24, 0x24)),
-];
-/// Its hovered form, built round `CLOSE_HOT` so the two cannot drift apart.
-pub const CAP_CLOSE_HOT: [(u8, Color); 5] = [
-    (0, Color::new(0xFF, 0xD0, 0xD0)),
-    (30, Color::new(0xF0, 0x80, 0x80)),
-    (128, CLOSE_HOT),
-    (129, Color::new(0xCE, 0x38, 0x38)),
-    (255, Color::new(0xB8, 0x2C, 0x2C)),
 ];
 /// The pale outline round a caption button, and the catchlight along the top
 /// row of the bar itself.
@@ -234,37 +201,11 @@ pub const BTN_DOWN: [(u8, Color); 5] = [
     (129, Color::new(0xE4, 0xF3, 0xF9)),
     (255, Color::new(0xF2, 0xFA, 0xFD)),
 ];
-/// Under the pointer. Aero's hover is a warm glow rather than a brighter
-/// grey, which is the one place the accent reaches a cool surface.
-pub const BTN_HOT: [(u8, Color); 5] = [
-    (0, Color::new(0xFF, 0xFF, 0xF4)),
-    (6, Color::new(0xFF, 0xF2, 0xCE)),
-    (128, Color::new(0xFF, 0xDF, 0x9C)),
-    (129, Color::new(0xFF, 0xC9, 0x6E)),
-    (255, Color::new(0xFF, 0xE6, 0xB4)),
-];
 /// The one-pixel outline XP puts round every button, and its lit form.
 pub const BTN_EDGE: Color = Color::new(0x6E, 0x9E, 0xB4);
 pub const BTN_EDGE_HOT: Color = APERTURE;
 
-/// The taskbar's pane, and how solid it is from top to foot.
-///
-/// A ramp of opacity rather than of colour, so the wall shows through it and
-/// the bar reads as a pane rather than as a painted strip. Most solid just
-/// under the gloss line and thinnest at the bottom, which is the shape every
-/// piece of Aero glass has.
-pub const GLASS: Color = Color::new(0x0E, 0x3E, 0x56);
-pub const GLASS_STOPS: [(u8, u32); 5] = [(0, 148), (12, 190), (128, 176), (129, 158), (255, 128)];
-/// The white gloss along the top of a pane, and how far down it reaches.
-pub const GLOSS: Color = Color::new(0xFF, 0xFF, 0xFF);
-pub const GLOSS_STOPS: [(u8, u32); 3] = [(0, 150), (40, 46), (255, 0)];
 
-/// One bright line where the bar meets the desktop.
-pub const TASK_EDGE: Color = Color::new(0xBF, 0xE8, 0xF6);
-/// The clock and battery recess. Darker than the bar, because a well on a
-/// coloured surface reads by being darker and not by being outlined.
-pub const TRAY: Color = Color::new(0x07, 0x2A, 0x3C);
-pub const TRAY_EDGE: Color = Color::new(0x9F, 0xCF, 0xE2);
 
 /// The terminal's status strip, which is the tray's colour given a ramp.
 ///
@@ -664,6 +605,9 @@ pub fn window(
 pub struct Popup {
     pub panel: Rect,
     pub rows: usize,
+    /// Inset from the panel's edge to the first row: a menu's three pixels,
+    /// or the Start menu's glass frame.
+    pub pad: u32,
 }
 
 /// Inset from the panel edge to the first row.
@@ -673,19 +617,24 @@ impl Popup {
     /// Sized from its widest label in columns and its row count, clamped to
     /// whatever room is left on the right.
     pub fn sized(x: u32, y: u32, cols: usize, rows: usize, max_w: u32) -> Popup {
-        let w = (text_w(cols) + 24 + MENU_GUTTER_W).min(max_w);
-        let h = rows as u32 * MENU_H + POPUP_PAD * 2;
-        Popup { panel: Rect::new(x, y, w, h), rows }
+        Self::padded(x, y, cols, rows, max_w, POPUP_PAD)
+    }
+
+    /// `sized`, with a frame of `pad` round the rows.
+    pub fn padded(x: u32, y: u32, cols: usize, rows: usize, max_w: u32, pad: u32) -> Popup {
+        let w = (text_w(cols) + 24 + MENU_GUTTER_W + 2 * (pad - POPUP_PAD.min(pad))).min(max_w);
+        let h = rows as u32 * MENU_H + pad * 2;
+        Popup { panel: Rect::new(x, y, w, h), rows, pad }
     }
 
     /// Where row `i` is drawn: to the right of the gutter, which is why a
     /// selection bar stops at it rather than running under it.
     pub fn row(&self, i: usize) -> Rect {
-        let inset = POPUP_PAD + MENU_GUTTER_W;
+        let inset = self.pad + MENU_GUTTER_W;
         Rect::new(
             self.panel.x + inset,
-            self.panel.y + POPUP_PAD + i as u32 * MENU_H,
-            self.panel.w.saturating_sub(inset + POPUP_PAD),
+            self.panel.y + self.pad + i as u32 * MENU_H,
+            self.panel.w.saturating_sub(inset + self.pad),
             MENU_H,
         )
     }
@@ -702,7 +651,7 @@ impl Popup {
         if y < p.y as i32 || y >= (p.y + p.h) as i32 {
             return None;
         }
-        let row = (y - (p.y + POPUP_PAD) as i32) / MENU_H as i32;
+        let row = (y - (p.y + self.pad) as i32) / MENU_H as i32;
         if row >= 0 && (row as usize) < self.rows {
             Some(row as usize)
         } else {
@@ -719,6 +668,33 @@ impl Popup {
         self.panel.w >= MENU_GUTTER_W + 16
     }
 }
+
+/// The Start menu's frame: Vista's, a pane of the focused caption's glass
+/// round a white body, so the menu reads as part of the bar it came out of.
+pub fn start_popup(fb: &Framebuffer, p: &Popup) {
+    let r = p.panel;
+    super::glass::fill(fb, r.x as i32, r.y as i32, r.w, r.h, 8, caption_glass(true));
+    let m = p.pad.saturating_sub(2);
+    let body = Rect::new(r.x + m, r.y + m, r.w.saturating_sub(2 * m), r.h.saturating_sub(2 * m));
+    fb.rect(body.x, body.y, body.w, body.h, MENU_BG);
+    fb.rect(body.x + 1, body.y + 1, MENU_GUTTER_W + 2, body.h.saturating_sub(2), MENU_GUTTER);
+    outline(fb, body, MENU_EDGE);
+}
+
+/// The light edge along the top of a strip that sits on the bar.
+pub const TRAY_EDGE: Color = Color::new(0x9F, 0xCF, 0xE2);
+
+/// The taskbar's glass: Vista's black, darker than any caption, so the bar
+/// reads as the floor the windows stand on.
+pub const TASKBAR_GLASS: super::glass::Glass = super::glass::Glass {
+    tint: Color::new(18, 24, 34),
+    glow: Color::new(80, 100, 130),
+    blur: 46,
+    afterglow: 14,
+    color: 40,
+    gloss: 34,
+    gloss_end: 0.5,
+};
 
 /// The ground a popup's rows sit on: white, a gutter, and one border.
 pub fn popup(fb: &Framebuffer, p: &Popup) {

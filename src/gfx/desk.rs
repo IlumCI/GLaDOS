@@ -770,15 +770,22 @@ fn start_menu_rect(fb: &Framebuffer) -> theme::Popup {
         .unwrap_or(4)
         .max(QUERY_COLS);
     let bar = taskbar_rect(fb);
-    let probe = theme::Popup::sized(bar.x + 2, 0, cols, n, fb.width());
-    theme::Popup::sized(
+    let probe = theme::Popup::padded(bar.x + 2, 0, cols, n, fb.width(), START_PAD);
+    theme::Popup::padded(
         bar.x + 2,
-        bar.y.saturating_sub(probe.panel.h),
+        bar.y.saturating_sub(probe.panel.h + 4),
         cols,
         n,
         fb.width(),
+        START_PAD,
     )
 }
+
+/// The Start menu's glass frame, round its rows.
+const START_PAD: u32 = 9;
+
+/// The Start menu's shadow, which its overlay layer's bounds reach to.
+const START_SHADOW: (super::shadow::Spec, i32, i32, u8) = (super::shadow::Spec { radius: 8, sigma: 9.0 }, 0, 4, 90);
 
 /// How many characters wide the query row is sized for.
 const QUERY_COLS: usize = 22;
@@ -2311,7 +2318,9 @@ fn tray_text(fb: &Framebuffer, well: Rect, text: &str, scale: u32) {
     // Into the compositor's back buffer like everything else, on the tray's
     // own ground: the inner well is laid down first, so a reading shorter
     // than the last one leaves none of the last one's digits behind.
-    fb.rect(well.x + 1, well.y + 1, well.w.saturating_sub(2), well.h.saturating_sub(2), theme::TRAY);
+    // Straight onto the glass: the frame repaints the clock's well from the
+    // bar up whenever its stamp moves, so nothing of the last reading is left
+    // to cover, and a box behind the digits was XP's tray.
     theme::text_over_at(fb, x, y, text, theme::TITLE_TEXT, scale);
 }
 
@@ -4364,13 +4373,16 @@ fn taskbar(fb: &Framebuffer, d: &Desktop, sel: Option<usize>) {
     // and the back-to-front repaint means what is underneath is already
     // composed -- which is the whole reason a translucent bar costs one blended
     // span per row and no second pass over anything.
-    fb.glass(bar.x, bar.y, bar.w, bar.h, theme::GLASS, &theme::GLASS_STOPS);
-    // The specular sheen over the top, and then one hard line where the pane
-    // meets the sky. The opacity table is proportional and cannot say "one
-    // pixel" at any height, which is the division of labour between a ramp and
-    // the line drawn on top of it.
-    fb.glass(bar.x, bar.y, bar.w, bar.h / 2, theme::GLOSS, &theme::GLOSS_STOPS);
-    fb.rect(bar.x, bar.y, bar.w, 1, theme::TASK_EDGE);
+    //
+    // Vista's glass now (1.4.1): the blurred sky behind it, darkened and
+    // glossed, where it was a ramp of tints blended over the wall. One light
+    // line where the pane meets the sky, and a dark one under it, which is
+    // the edge of the glass catching the light.
+    super::glass::fill(fb, bar.x as i32, bar.y as i32, bar.w, bar.h, 0, theme::TASKBAR_GLASS);
+    let lit = fb.encode(Color::new(255, 255, 255));
+    let shade = fb.encode(Color::new(0, 0, 0));
+    fb.over_span(bar.x, bar.y, bar.w, super::blend::premul(lit, 70));
+    fb.over_span(bar.x, bar.y + 1, bar.w, super::blend::premul(shade, 60));
 
     // The Start orb: Vista's, with the Aperture mark lit in it where Vista
     // had its flag. It replaced a green Luna pill with the name on it and a
@@ -4397,14 +4409,23 @@ fn taskbar(fb: &Framebuffer, d: &Desktop, sel: Option<usize>) {
         // `control` rather than `button`: a task button wants the hover wash,
         // and `button` reads its one boolean as keyboard focus. The two mean
         // different things and only here do they need telling apart.
-        let stops: &[(u8, Color)] = if pressed {
-            &theme::BTN_DOWN
-        } else if hot {
-            &theme::BTN_HOT
-        } else {
-            &theme::BTN
+        //
+        // Vista's and 7's: an icon standing on the glass, with a pane of
+        // light behind it only where it means something -- the window that
+        // has focus, and the one under the pointer. A tile behind every icon
+        // was XP's, and it made a bar of windows a row of buttons.
+        let wash = match (pressed, hot) {
+            (true, true) => 92,
+            (true, false) => 58,
+            (false, true) => 40,
+            (false, false) => 0,
         };
-        theme::control(fb, r, stops, if hot { theme::BTN_EDGE_HOT } else { theme::BTN_EDGE });
+        if wash > 0 {
+            let b = super::shape::Box::new(r.x as i32, r.y as i32, r.w, r.h);
+            let white = fb.encode(Color::new(255, 255, 255));
+            super::shape::rrect(fb, b, 4, super::blend::premul(white, wash));
+            super::shape::ring(fb, b, 4, 1, super::blend::premul(white, (wash + 50).min(255)));
+        }
         let s = r.h.saturating_sub(6);
         // Nudged a pixel when pressed, the same lie about depth the label
         // used to tell.
@@ -4492,23 +4513,17 @@ fn taskbar_tail(fb: &Framebuffer, d: &Desktop) {
         let bar = taskbar_rect(fb);
         if right > w + 6 {
             let r = Rect::new(right - w - 6, bar.y + 4, w, bar.h - 8);
-            theme::control(fb, r, &theme::BTN, theme::BTN_EDGE);
+            let b = super::shape::Box::new(r.x as i32, r.y as i32, r.w, r.h);
+            let white = fb.encode(Color::new(255, 255, 255));
+            super::shape::rrect(fb, b, 4, super::blend::premul(white, 40));
             let ty = r.y + (r.h.saturating_sub(theme::text_h())) / 2;
-            theme::text_over(fb, r.x + 4, ty, &label, theme::TEXT_DIM);
+            theme::text_over(fb, r.x + 4, ty, &label, theme::TITLE_TEXT);
         }
     }
 
-    // The tray recesses. Not `theme::well`: a well outlines a hole in a face,
-    // and on a coloured bar the thing that reads as a recess is being darker
-    // than what surrounds it.
-    let recess = |r: Rect| {
-        fb.rect(r.x, r.y, r.w, r.h, theme::TRAY);
-        theme::outline(fb, r, theme::TRAY_EDGE);
-    };
-    recess(clock_rect(fb));
-    if let Some(b) = battery_rect(fb) {
-        recess(b);
-    }
+    // The tray's readouts stand on the glass as the icons do (`tray_text`).
+    // They sat in dark recesses, which is XP's tray and its notification
+    // area's box.
 }
 
 /// Where the charge readout goes, when there is one.
@@ -4998,6 +5013,13 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
         grow(Rect::new(t.x, t.y, t.w + 2, t.h + 2));
     }
     if let Some(p) = dropdown_rows(fb, d, screen) {
+        if let Mode::Start { .. } = d.mode {
+            let (spec, dx, dy, _) = START_SHADOW;
+            let (l, t, r, b) = super::shadow::reach(spec, dx, dy);
+            let x0 = p.panel.x.saturating_sub(l);
+            let y0 = p.panel.y.saturating_sub(t);
+            grow(Rect::new(x0, y0, p.panel.x + p.panel.w + r - x0, (p.panel.y + p.panel.h + b).min(fb.height()) - y0));
+        }
         grow(p.panel);
     }
     if let Some(r) = hint_rect(fb, d) {
@@ -5708,7 +5730,9 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
             // then the items over it, then the query row last. It carries one
             // more row than it has items, which is why it builds its own
             // `Popup` rather than going through `dropdown`.
-            theme::popup(&fb, &p);
+            let (spec, dx, dy, alpha) = START_SHADOW;
+            super::shadow::cast(&fb, p.panel.x as i32, p.panel.y as i32, p.panel.w, p.panel.h, spec, dx, dy, alpha);
+            theme::start_popup(&fb, &p);
             if p.wide_enough() {
                 for (i, (label, _)) in START_ITEMS.iter().enumerate() {
                     theme::list_row(&fb, p.row(i), label, i == item, true);
