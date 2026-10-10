@@ -5036,6 +5036,13 @@ the order a frame happens:
   The terminal grid goes over it. `render verify`'s reference frame paints
   windows directly (`REFERENCE`), so a stale image is a mismatch rather than
   two copies of the same mistake agreeing.
+- **Motion is on the clock** (`gfx::anim`, phase 12): Hyprland's curves by
+  name, baked to 256 samples, and closed-form springs; a tween's progress is
+  the TSC's, never a frame count. A window pops in from 87% and fades up
+  (`windowsIn` 410 ms, `fadeIn` 173 ms) out of its image, and a closed one
+  leaves a ghost that shrinks and fades (`windowsOut`, `fadeOut`). `win anim
+  <percent>` scales every duration -- 3000 makes an arrival slow enough for
+  `@shot`, whose screendump takes seconds.
 - **A program's pixels are kept** (`Window.app_surface`) and redrawn only when
   its `DeskApp::stamp`, focus, size or its own input changes. A program with
   no stamp is redrawn every frame, which is correct and costs time. A program

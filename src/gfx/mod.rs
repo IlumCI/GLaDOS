@@ -17,6 +17,7 @@ pub mod shadow;
 pub mod glass;
 pub mod scale;
 pub mod wall;
+pub mod anim;
 pub mod icons;
 pub mod text;
 

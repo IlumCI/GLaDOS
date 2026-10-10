@@ -6565,6 +6565,19 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         kprintln!("  no tint '{}' -- {}", want, crate::gfx::theme::TINTS.join(", "));
                     }
                 }
+                // How long motion takes, in per cent of Hyprland's durations:
+                // 100 as configured, 2000 twenty times slower -- which is how
+                // an arrival lasting 410 ms gets photographed by a harness
+                // whose screenshot takes seconds -- and 0 for none at all.
+                "anim" => {
+                    match it.next().and_then(|t| t.parse::<u32>().ok()) {
+                        Some(p) => {
+                            crate::gfx::anim::set_speed(p);
+                            kprintln!("  motion at {}% of its configured duration", crate::gfx::anim::speed());
+                        }
+                        None => kprintln!("  motion at {}% of its configured duration -- win anim <percent>, 0 for none", crate::gfx::anim::speed()),
+                    }
+                }
                 // The typed equivalent of the wheel over the terminal. Serial
                 // cannot inject PS/2 packets, so a scrollback reachable only
                 // by a wheel is a scrollback nothing ever checks -- the same

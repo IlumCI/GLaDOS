@@ -1048,14 +1048,14 @@ fn comp_task() {
             }
         }
 
-        // A window arriving, one frame at a time.
+        // Windows arriving and leaving: retire what has finished, and ask
+        // for the next frame while anything has not. Progress is the clock's
+        // (`gfx::anim`), so this only decides whether there is a next frame.
         //
-        // After the frame, because each step paints chrome on top of a freshly
-        // composed desktop and the composed desktop is what erases the step
-        // before it. This ran as a blocking loop on whichever task opened the
-        // window, calling `draw` itself six times -- so every task that opened
-        // a window was a compositor for a tenth of a second.
-        gfx::desk::flourish_step();
+        // The arrival used to run as a blocking loop on whichever task opened
+        // the window, calling `draw` itself six times -- so every task that
+        // opened a window was a compositor for a tenth of a second.
+        gfx::desk::anim_step();
 
         // The taskbar's two readouts. They are a part of the taskbar layer now,
         // so a composed frame paints them rather than erasing them, and all

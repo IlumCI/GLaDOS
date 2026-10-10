@@ -166,6 +166,13 @@ pub struct Window {
     /// The whole window as it was last painted, chrome and client, so a frame
     /// that only exposes it copies rows. See `WinImage`.
     pub image: core::cell::RefCell<Option<WinImage>>,
+    /// A window on its way in: the pop-in's scale and the fade, each on its
+    /// own curve and duration, as Hyprland's `windowsIn` and `fadeIn` are.
+    pub arrive: Option<(super::anim::Tween, super::anim::Tween)>,
+    /// This frame's scale and opacity while it arrives, fixed once per frame
+    /// by `layers` so the frame and `render verify`'s reference of it draw
+    /// the same instant rather than two readings of the clock.
+    pub shown: core::cell::Cell<Option<(f32, f32)>>,
 }
 
 /// A window, painted off screen and kept (1.4.1, phase 11).
@@ -951,6 +958,8 @@ fn make_terminal(screen: Rect) -> Window {
         serial: next_serial(),
         app_surface: Default::default(),
         image: Default::default(),
+        arrive: None,
+        shown: Default::default(),
         title: String::from("GLaDOS Terminal"),
         icon: ICO_TERM,
         rect: Rect::new(term_x, screen.y, term_w, screen.h),
@@ -1183,6 +1192,8 @@ pub fn open(title: &str, panel: Panel) {
             serial: next_serial(),
             app_surface: Default::default(),
         image: Default::default(),
+        arrive: None,
+        shown: Default::default(),
             title: String::from(title),
             // `open` is reached through `win open <name>` with the panel's
             // name as the title, so the name is what there is to go by.
@@ -1249,6 +1260,8 @@ pub fn open_app(title: &str, icon: usize, app: Box<dyn DeskApp>, w: u32, h: u32)
             serial: next_serial(),
             app_surface: Default::default(),
         image: Default::default(),
+        arrive: None,
+        shown: Default::default(),
             title: String::from(title),
             icon,
             rect: Rect::new(x, y, w, h),
@@ -1460,6 +1473,8 @@ pub fn open_browser(url: &str) {
             serial: next_serial(),
             app_surface: Default::default(),
         image: Default::default(),
+        arrive: None,
+        shown: Default::default(),
             title,
             icon: ICO_NET,
             rect: Rect::new(x, y, w, h),
@@ -1959,37 +1974,6 @@ pub fn selftest() -> bool {
         claim("and no two icons share an index", distinct);
     }
 
-    // --- the opening curve -------------------------------------------------
-    //
-    // Pure arithmetic, and the last frame is the claim that matters: a final
-    // rectangle off by a pixel leaves a seam of chrome the real window does
-    // not cover, and nothing repaints it until something else happens to.
-    {
-        let to = Rect::new(100, 60, 300, 200);
-        claim("a window arrives exactly where it was going", open_rect(to, OPEN_STEPS - 1, OPEN_STEPS) == to);
-        claim("and one step is one step", open_rect(to, 0, 1) == to);
-        let first = open_rect(to, 0, OPEN_STEPS);
-        claim("it starts smaller than it ends", first.w < to.w && first.h < to.h);
-        // Concentric, because growing from a corner reads as a slide from
-        // somewhere -- and a window opened by a command came from nowhere.
-        claim(
-            "and grows from its own centre",
-            first.x + first.w / 2 == to.x + to.w / 2 && first.y + first.h / 2 == to.y + to.h / 2,
-        );
-        let mut prev = 0;
-        let mut grows = true;
-        for step in 0..OPEN_STEPS {
-            let r = open_rect(to, step, OPEN_STEPS);
-            grows &= r.w >= prev;
-            prev = r.w;
-        }
-        claim("monotonically", grows);
-        // A window too small to have chrome must not produce a rectangle with
-        // a negative or wrapped size -- every dimension here is unsigned.
-        let tiny = Rect::new(0, 0, 8, 8);
-        let t = open_rect(tiny, 0, OPEN_STEPS);
-        claim("and a tiny window does not wrap", t.w > 0 && t.h > 0 && t.w <= 24 && t.h <= 16);
-    }
     ok
 }
 
@@ -2598,6 +2582,8 @@ fn make_executive(screen: Rect) -> Window {
         serial: next_serial(),
         app_surface: Default::default(),
         image: Default::default(),
+        arrive: None,
+        shown: Default::default(),
         title: String::from("Executive"),
         icon: ICO_TERM,
         rect: Rect::new(
@@ -2983,7 +2969,7 @@ fn caption_action(f: usize, which: usize) {
             }
             _ => {
                 if d.windows[f].closable {
-                    d.windows.remove(f);
+                    close_at(d, f);
                 } else {
                     // The terminal is the shell: it keeps running with no
                     // window, so its X means "put it away", which is the
@@ -3120,7 +3106,7 @@ pub fn close_focused() {
     with(|d| {
         if let Some(f) = d.focus() {
             if d.windows[f].closable {
-                d.windows.remove(f);
+                close_at(d, f);
             } else {
                 d.windows[f].state = WinState::Minimised;
             }
@@ -3572,25 +3558,6 @@ fn status_text() -> (String, String, bool) {
     })
 }
 
-/// A window on its way in, and how far along it is.
-///
-/// **One static and not two.** This was an `ARRIVING` index beside a blocking
-/// animation loop, and the index was a flag somebody had to remember to clear
-/// -- its own comment said so: "a missed flourish is a window that appears
-/// instantly; a leaked flag is a window that never appears at all". There are
-/// three exits from that loop and each had to put it back. Holding the whole
-/// flight instead makes `arriving()` *derived*: there is no window arriving
-/// when there is no flight, which is the same bargain `draw` makes about
-/// console visibility one screen down.
-struct Flight {
-    win: usize,
-    to: Rect,
-    title: alloc::string::String,
-    step: u32,
-}
-
-static FLIGHT: crate::sync::Racy<Option<Flight>> = crate::sync::Racy::new(None);
-
 /// The shortest period, in milliseconds, at which an open program asked for
 /// its stamp to be looked at (`DeskApp::wake_ms`), as of the last frame; 0 for
 /// none. Read by the compositor's pacing.
@@ -3604,144 +3571,179 @@ pub fn app_wake_ms() -> Option<u32> {
 }
 
 /// Whether the compositor has work due within the next few milliseconds that
-/// no `invalidate` will announce: a window part-way through arriving, or a
-/// pointer paint the 4 ms pacing deferred. While either is true it must not
-/// sleep a whole timer tick, or the arrival stutters and the arrow lags.
+/// no `invalidate` will announce: something part-way through an animation,
+/// or a pointer paint the 4 ms pacing deferred. While either is true it must
+/// not sleep a whole timer tick, or the motion stutters and the arrow lags.
 pub fn busy() -> bool {
-    arriving().is_some() || unsafe { *CURSOR_PENDING.get() }
+    ANIMATING.load(core::sync::atomic::Ordering::Relaxed) || unsafe { *CURSOR_PENDING.get() }
 }
 
-/// Which window is still on its way, if any.
-fn arriving() -> Option<usize> {
-    unsafe { (*FLIGHT.get()).as_ref().map(|f| f.win) }
+/// Whether anything is moving: a window arriving or one leaving. Kept by
+/// `anim_step`, read by the compositor's pacing without the desktop.
+static ANIMATING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// A window that has closed and is still fading out: its last image, where
+/// it was, and its two tweens. It outlives the window by the length of the
+/// fade, which is the whole of Hyprland's `windowsOut` -- a window that
+/// vanished in the frame after the click would have nothing to fade.
+struct Ghost {
+    serial: u64,
+    frame: Rect,
+    img: super::scale::Image,
+    out: (super::anim::Tween, super::anim::Tween),
+    shown: core::cell::Cell<(f32, f32)>,
 }
 
-/// How many frames a window takes to arrive.
-///
-/// Six, which at one frame each is about a tenth of a second -- long enough to
-/// be seen and short enough that it is never something to wait through. It is
-/// bounded and one-shot rather than a running cost: six frames at ~2.2 ms is
-/// ~13 ms of painting for the whole gesture.
-const OPEN_STEPS: u32 = 6;
+static GHOSTS: Racy<Vec<Ghost>> = Racy::new(Vec::new());
 
-/// Where a window sits partway through arriving.
-///
-/// Pure, so the curve is checkable at boot with no framebuffer and no desktop.
-/// It grows from a small rectangle at the window's own centre, so the motion
-/// reads as the window coming forward rather than sliding in from an edge --
-/// which would be a claim about where it came from, and windows here come from
-/// a command.
-///
-/// The last step is `to` exactly and not `to` approximately: a final frame off
-/// by a pixel leaves a seam of chrome the real window does not cover, and it
-/// would be there until something else repainted.
-fn open_rect(to: Rect, step: u32, steps: u32) -> Rect {
-    if step + 1 >= steps || steps == 0 {
-        return to;
+/// A window's image with its outline as alpha: opaque inside the shape the
+/// direct paint is clipped to, clear outside it -- what a scaled or faded
+/// window has to be, since its corners now fall over something else.
+fn premultiplied(win: &Window, im: &WinImage) -> super::scale::Image {
+    let (w, h) = (im.frame.w, im.frame.h);
+    let shape = (win.round != 0 && win.state != WinState::Maximised)
+        .then(|| super::Shape::round_top(w, h, win.round));
+    let mut px = Vec::with_capacity(w as usize * h as usize);
+    for y in 0..h {
+        let (a, b) = match &shape {
+            Some(sh) => sh.span(y).unwrap_or((0, 0)),
+            None => (0, w),
+        };
+        let row = &im.px[(y * w) as usize..((y + 1) * w) as usize];
+        for (x, &p) in row.iter().enumerate() {
+            let x = x as u32;
+            px.push(if x >= a && x < b { p | 0xFF00_0000 } else { 0 });
+        }
     }
-    // Eased rather than linear: `f = 1 - (1-t)^2` starts fast and settles, so
-    // the frames cluster near the end where the shape is recognisable. Integer
-    // arithmetic throughout -- there is no float anywhere else in this file.
-    let t = (step + 1) * 256 / steps;
-    let inv = 256 - t;
-    let f = 256 - (inv * inv) / 256;
-    let f = f.clamp(40, 256);
-    let w = (to.w * f / 256).max(24);
-    let h = (to.h * f / 256).max(16);
-    let cx = to.x + to.w / 2;
-    let cy = to.y + to.h / 2;
-    Rect::new(cx.saturating_sub(w / 2), cy.saturating_sub(h / 2), w, h)
+    super::scale::Image { w, h, px }
 }
 
-/// Start a window's arrival. Records it; the compositor flies it.
+/// A window has closed: keep its image fading where it stood.
+fn depart(w: Window) {
+    if !super::render::enabled() || super::exclusive() {
+        return;
+    }
+    let img = {
+        let slot = w.image.borrow();
+        match slot.as_ref() {
+            Some(im) => Some((premultiplied(&w, im), im.frame)),
+            None => None,
+        }
+    };
+    let Some((img, frame)) = img else { return };
+    use super::anim::{preset, Tween};
+    let out = (Tween::new(preset::WINDOWS_OUT.0, preset::WINDOWS_OUT.1), Tween::new(preset::FADE_OUT.0, preset::FADE_OUT.1));
+    unsafe { (*GHOSTS.get()).push(Ghost { serial: w.serial, frame, img, out, shown: core::cell::Cell::new((1.0, 1.0)) }) };
+    ANIMATING.store(true, core::sync::atomic::Ordering::Relaxed);
+    super::render::invalidate();
+}
+
+/// Close window `i`, letting it fade.
+fn close_at(d: &mut Desktop, i: usize) {
+    if i < d.windows.len() {
+        let w = d.windows.remove(i);
+        depart(w);
+    }
+}
+
+/// Start the newest window's arrival: it pops in from `POPIN` of its size
+/// and fades up, on the clock (`anim`).
 ///
-/// **It used to run the animation here, and that made every task that opens a
-/// window a compositor.** The loop called `draw` six times on whichever task
-/// had asked -- the shell, the agent, `drain_ops` -- with a `delay_us(16_000)`
-/// between them, so opening a window both composed frames off the compositor
-/// and blocked its caller for a tenth of a second. Measured: `composers` went
-/// 1 -> 5 for one `paint` and 5 -> 9 for one `mines`, four handovers of the
-/// frame per window, on a machine whose whole design rests on there being one
-/// writer. Nothing caught it for a while because the two things that measure
-/// `composers` -- `render probe` and `diag all` -- open no windows.
-///
-/// The delay goes with it. A frame per compositor turn is ~16 ms at 60 Hz by
-/// construction, which is what the sleep was approximating.
+/// It was six frames of chrome only, a rectangle growing from the window's
+/// centre with the window itself withheld until the last -- because a
+/// window could not be drawn scaled until it had an image (phase 11). The
+/// window is in the scene throughout now, takes input throughout, and is
+/// drawn out of its image at this frame's scale and opacity.
 pub fn open_flourish() {
-    // With the compositor stood down there is nobody to fly it, and a flight
-    // nothing advances is a window that never appears. Arriving instantly is
-    // the right answer, and it is what `render off` means: back to what the
-    // machine did before any of this.
+    // With the compositor stood down there is nobody to animate it, and a
+    // tween nothing composes is a window that sits invisible until something
+    // else happens to repaint it. Arriving at once is what `render off` means.
     if !super::render::enabled() {
         return;
     }
-    let Some(fb) = super::primary() else { return };
-    let screen = screen_rect(&fb);
-    let mut what = None;
+    use super::anim::{preset, Tween};
     with(|d| {
-        let i = d.windows.len().checked_sub(1)?;
-        let w = &d.windows[i];
+        // The newest by serial, not the last in the stack: the stack's end is
+        // whatever has focus, and opening a window hands focus back to the
+        // terminal, so the last window is the shell and not the new one.
+        let w = d.windows.iter_mut().max_by_key(|w| w.serial)?;
         if w.state == WinState::Minimised {
             return None;
         }
-        what = Some((i, w.frame(screen), w.title.clone()));
+        w.arrive = Some((Tween::new(preset::WINDOWS_IN.0, preset::WINDOWS_IN.1), Tween::new(preset::FADE_IN.0, preset::FADE_IN.1)));
         Some(())
     });
-    let Some((i, to, title)) = what else { return };
-    if to.w < 64 || to.h < 48 {
+    ANIMATING.store(true, core::sync::atomic::Ordering::Relaxed);
+    super::render::invalidate();
+}
+
+/// Retire what has finished moving and keep frames coming while anything
+/// has not. The compositor's, after each frame.
+pub fn anim_step() {
+    if !ANIMATING.load(core::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    // A second window opened while the first is still arriving replaces it
-    // rather than queueing. The one it replaces appears instantly, which is
-    // the same outcome the old loop gave by blocking its caller until it had
-    // finished -- and it cannot strand an index, because the index and the
-    // flight are one object now.
-    unsafe { *FLIGHT.get() = Some(Flight { win: i, to, title, step: 0 }) };
-    super::render::invalidate();
-}
-
-/// Fly a window in by one frame. The compositor's, and nobody else's.
-///
-/// Answers whether one is still in flight, which the caller uses for nothing
-/// but a count -- the repaint is asked for here, because the desktop under the
-/// next rectangle has to be composed again or the previous step's chrome stays
-/// on the screen under it.
-pub fn flourish_step() -> bool {
-    let done = {
-        let held = unsafe { &mut *FLIGHT.get() };
-        let Some(f) = held.as_mut() else { return false };
-        // A full-screen program owns the screen, so the arrival is not on it.
-        // Abandoned rather than paused: it is a tenth of a second of
-        // decoration, and holding a flight across a long-running program
-        // would keep its window out of every frame until the program exited.
-        if super::exclusive() || f.step >= OPEN_STEPS.saturating_sub(1) {
-            true
-        } else {
-            f.step += 1;
-            false
+    let now = super::anim::now_us();
+    // A full-screen program owns the screen: everything lands at once rather
+    // than holding windows half-drawn across a program that may run for an
+    // hour.
+    let all = super::exclusive();
+    let mut moving = false;
+    with(|d| {
+        for w in d.windows.iter_mut() {
+            if let Some((a, b)) = w.arrive {
+                if all || (a.done(now) && b.done(now)) {
+                    w.arrive = None;
+                } else {
+                    moving = true;
+                }
+            }
         }
-    };
-    // The frame paints the arrival: it is a layer of the scene now
-    // (`LayerId::Flourish`), whose bounds are this step's rectangle, so each
-    // step damages where the last one was and where this one is and the
-    // desktop under it is repainted by the same pass. It used to paint the
-    // chrome into the back buffer here and flush it itself, after the frame.
-    if done {
-        unsafe { *FLIGHT.get() = None };
-    }
+    });
+    let g = unsafe { &mut *GHOSTS.get() };
+    g.retain(|gh| !all && !(gh.out.0.done(now) && gh.out.1.done(now)));
+    moving |= !g.is_empty();
+    ANIMATING.store(moving, core::sync::atomic::Ordering::Relaxed);
+    // One more frame after the last tween ends, which is the one that draws
+    // the window plainly or clears the last of a ghost.
     super::render::invalidate();
-    !done
 }
 
-/// Where the arriving window's chrome is this step, if one is arriving.
-fn flourish_rect() -> Option<(Rect, u32)> {
-    unsafe { (*FLIGHT.get()).as_ref().map(|f| (open_rect(f.to, f.step, OPEN_STEPS), f.step)) }
+/// An arriving window's scale and opacity at `now`.
+fn arrival_at(t: (super::anim::Tween, super::anim::Tween), now: u64) -> (f32, f32) {
+    let p = super::anim::preset::POPIN;
+    (p + (1.0 - p) * t.0.at(now), t.1.at(now))
 }
 
-fn paint_flourish(fb: &Framebuffer) {
-    let Some(f) = (unsafe { (*FLIGHT.get()).as_ref() }) else { return };
-    let r = open_rect(f.to, f.step, OPEN_STEPS);
-    theme::window(fb, r, &f.title, true, false, false, None);
+/// A departing one's.
+fn departure_at(t: (super::anim::Tween, super::anim::Tween), now: u64) -> (f32, f32) {
+    let p = super::anim::preset::POPIN;
+    (1.0 - (1.0 - p) * t.0.at(now), 1.0 - t.1.at(now))
+}
+
+/// A window, or a ghost, at scale `k` about its centre and at `opacity`,
+/// with its shadow faded along with it.
+fn paint_transformed(fb: &Framebuffer, img: &super::scale::Image, frame: Rect, k: f32, opacity: f32, shadow: Option<(super::shadow::Spec, i32, i32, u8)>) {
+    let w = ((frame.w as f32 * k) + 0.5) as u32;
+    let h = ((frame.h as f32 * k) + 0.5) as u32;
+    let x = frame.x as i32 + (frame.w as i32 - w as i32) / 2;
+    let y = frame.y as i32 + (frame.h as i32 - h as i32) / 2;
+    let o = (opacity.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+    if let Some((spec, dx, dy, alpha)) = shadow {
+        super::shadow::cast(fb, x, y, w, h, spec, dx, dy, (alpha as u32 * o / 255) as u8);
+    }
+    super::scale::draw(fb, img, x, y, w, h, o as u8);
+}
+
+fn paint_ghosts(fb: &Framebuffer) {
+    for gh in unsafe { (*GHOSTS.get()).iter() } {
+        let r = gh.frame;
+        if !fb.touches(r.x, r.y, r.w, r.h) {
+            continue;
+        }
+        let (k, o) = gh.shown.get();
+        paint_transformed(fb, &gh.img, r, k, o, None);
+    }
 }
 
 /// How close to a screen edge a move has to end to count as a snap.
@@ -4547,8 +4549,8 @@ fn place_consoles(d: &Desktop, screen: Rect) {
     // gap between the two reported nothing, and its cell stayed stale until
     // something else repainted that part of the terminal.
     let mut placed: [Option<Rect>; super::console::NCONSOLE] = [None; super::console::NCONSOLE];
-    for (i, win) in d.windows.iter().enumerate() {
-        if arriving() == Some(i) || win.state == WinState::Minimised {
+    for win in d.windows.iter() {
+        if win.state == WinState::Minimised {
             continue;
         }
         let Content::Terminal(ch) = win.content else { continue };
@@ -4660,6 +4662,7 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
     use super::scene::{Layer, LayerId, Stamp};
     use core::hash::Hash;
     let seq = FRAME_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let now = super::anim::now_us();
     let (w, h) = (fb.width(), fb.height());
     let mut out = Vec::new();
     let mut wake = u32::MAX;
@@ -4713,13 +4716,19 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
     }
 
     for (i, win) in d.windows.iter().enumerate() {
-        if arriving() == Some(i) || win.state == WinState::Minimised {
+        if win.state == WinState::Minimised {
             continue;
         }
         let active = Some(i) == focus;
         let frame = win.frame(screen);
         let bounds = shadowed(win, frame, active, fb);
-        let (stamp, parts) = window_key(d, i, win, active, frame, &inputs, seq, &mut wake);
+        let (mut stamp, parts) = window_key(d, i, win, active, frame, &inputs, seq, &mut wake);
+        // An arriving window is a different picture every frame. Its whole
+        // layer moves with the clock, fixed here for the frame.
+        win.shown.set(win.arrive.map(|t| arrival_at(t, now)));
+        if let Some((k, o)) = win.shown.get() {
+            stamp = Stamp::of((stamp, (k * 4096.0) as u32, (o * 4096.0) as u32));
+        }
         out.push(Layer {
             id: LayerId::Window(win.serial),
             bounds,
@@ -4731,8 +4740,16 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
     // Everything drawn over the windows: the taskbar tip, menus, the move and
     // size hint, the Start menu. One layer, because they come and go together
     // with the mode and the hover, and its bounds are their union.
-    if let Some((r, step)) = flourish_rect() {
-        out.push(Layer { id: LayerId::Flourish, bounds: r, stamp: Stamp::of(step), parts: Vec::new() });
+    // Windows on their way out, over the windows and under the popups.
+    for gh in unsafe { (*GHOSTS.get()).iter() } {
+        let (k, o) = departure_at(gh.out, now);
+        gh.shown.set((k, o));
+        out.push(Layer {
+            id: LayerId::Ghost(gh.serial),
+            bounds: gh.frame,
+            stamp: Stamp::of(((k * 4096.0) as u32, (o * 4096.0) as u32)),
+            parts: Vec::new(),
+        });
     }
 
     let mut over: Option<Rect> = None;
@@ -4913,7 +4930,7 @@ fn verify_frame(back: &Framebuffer, d: &Desktop, screen: Rect) {
     VERIFY_RUNS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let skip = [clock_rect(back), battery_rect(back).unwrap_or(Rect::new(0, 0, 0, 0))];
     let grids: Vec<Rect> = d.windows.iter().enumerate()
-        .filter(|(i, w)| arriving() != Some(*i) && w.state != WinState::Minimised)
+        .filter(|(_, w)| w.state != WinState::Minimised && w.arrive.is_none())
         .filter_map(|(_, w)| match w.content {
             Content::Terminal(ch) => {
                 let client = theme::chrome(w.frame(screen), !w.menus.is_empty()).client;
@@ -5005,6 +5022,28 @@ fn console_over(fb: &Framebuffer, win: &Window) {
 /// repainting. False when there is no image to be had, and the caller paints
 /// directly.
 fn from_image(fb: &Framebuffer, d: &Desktop, i: usize, win: &Window, frame: Rect, active: bool, hot: Option<usize>) -> bool {
+    if !ensure_image(fb.format(), d, i, win, frame, active, hot) {
+        return false;
+    }
+    let slot = win.image.borrow();
+    let Some(im) = slot.as_ref() else { return false };
+    with_window_shape(fb, win, frame, || {
+        let (x0, y0, x1, y1) = fb.scissor();
+        let xa = x0.max(frame.x);
+        let xb = x1.min(frame.x + frame.w);
+        if xa >= xb {
+            return;
+        }
+        for y in y0.max(frame.y)..y1.min(frame.y + frame.h) {
+            let r = (y - frame.y) as usize * frame.w as usize;
+            fb.blit_span(xa, y, &im.px[r + (xa - frame.x) as usize..r + (xb - frame.x) as usize]);
+        }
+    });
+    true
+}
+
+/// Bring a window's image up to date. False when there is none to be had.
+fn ensure_image(format: super::Format, d: &Desktop, i: usize, win: &Window, frame: Rect, active: bool, hot: Option<usize>) -> bool {
     use core::sync::atomic::Ordering::Relaxed;
     if frame.is_empty() {
         return false;
@@ -5031,7 +5070,7 @@ fn from_image(fb: &Framebuffer, d: &Desktop, i: usize, win: &Window, frame: Rect
                 v
             }
         };
-        let img = unsafe { Framebuffer::displaced(px.as_mut_ptr(), frame.x, frame.y, frame.w, frame.h, fb.format()) };
+        let img = unsafe { Framebuffer::displaced(px.as_mut_ptr(), frame.x, frame.y, frame.w, frame.h, format) };
         paint_window_body(&img, d, i, win, frame, active, hot);
         IMAGE_WHOLE.fetch_add(1, Relaxed);
         *slot = Some(WinImage { px, frame, key, parts });
@@ -5044,27 +5083,14 @@ fn from_image(fb: &Framebuffer, d: &Desktop, i: usize, win: &Window, frame: Rect
                 continue;
             }
             let (r, _) = *part;
-            let img = unsafe { Framebuffer::displaced(im.px.as_mut_ptr(), frame.x, frame.y, frame.w, frame.h, fb.format()) };
+            let img = unsafe { Framebuffer::displaced(im.px.as_mut_ptr(), frame.x, frame.y, frame.w, frame.h, format) };
             paint_window_body(&img.clipped(r.x, r.y, r.w, r.h), d, i, win, frame, active, hot);
             im.parts[k] = *part;
             IMAGE_PART.fetch_add(1, Relaxed);
         }
     }
     super::render::cost(super::render::Cost::WinImage, crate::time::rdtsc().saturating_sub(t0));
-    let Some(im) = slot.as_ref() else { return false };
-    with_window_shape(fb, win, frame, || {
-        let (x0, y0, x1, y1) = fb.scissor();
-        let xa = x0.max(frame.x);
-        let xb = x1.min(frame.x + frame.w);
-        if xa >= xb {
-            return;
-        }
-        for y in y0.max(frame.y)..y1.min(frame.y + frame.h) {
-            let r = (y - frame.y) as usize * frame.w as usize;
-            fb.blit_span(xa, y, &im.px[r + (xa - frame.x) as usize..r + (xb - frame.x) as usize]);
-        }
-    });
-    true
+    slot.is_some()
 }
 
 /// Everything a window paints inside its own outline but the terminal
@@ -5178,13 +5204,6 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
         lap(Cost::Taskbar, &mut t);
 
         for (i, win) in d.windows.iter().enumerate() {
-            // A window that exists and has not arrived yet. `open_flourish`
-            // paints its chrome itself, at a rectangle that is on its way to
-            // this one; drawing it here as well would put the finished window
-            // under the animation of it.
-            if arriving() == Some(i) {
-                continue;
-            }
             if win.state == WinState::Minimised {
                 continue;
             }
@@ -5208,6 +5227,18 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
             // cover it afterwards is a window in front, which is exactly what
             // should. No compositing, no second pass, no order to get right
             // beyond the one the loop already has.
+            // On its way in: out of its image, scaled and faded, shadow and
+            // all. The terminal's grid joins it when it lands -- the grid is
+            // not in the image, and a scaled console is not worth a second
+            // copy of it for four hundred milliseconds.
+            if let Some((k, o)) = win.shown.get() {
+                if ensure_image(fb.format(), d, i, win, frame, active, hot) {
+                    if let Some(im) = win.image.borrow().as_ref() {
+                        paint_transformed(&fb, &premultiplied(win, im), frame, k, o, win_shadow(win, active));
+                    }
+                    continue;
+                }
+            }
             if let Some((spec, dx, dy, alpha)) = win_shadow(win, active) {
                 super::shadow::cast(&fb, frame.x as i32, frame.y as i32, frame.w, frame.h, spec, dx, dy, alpha);
             }
@@ -5230,11 +5261,11 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
         // Over the windows, because the bar is drawn under them and a tip
         // stands above the bar.
         lap(Cost::Windows, &mut t);
-        // A window on its way in, above the windows it opens over and under
-        // the popups. It sat at the end of this function until a search for
-        // that end matched `dropdown`'s instead and put it inside that loop,
-        // where it painted only while a menu was open -- once per menu row.
-        paint_flourish(&fb);
+        // Windows on their way out, above the windows and under the popups.
+        // (Where the arrival used to be painted -- which sat at the end of
+        // this function until a search for that end matched `dropdown`'s
+        // instead and put it inside that loop, once per menu row.)
+        paint_ghosts(&fb);
         taskbar_tip(&fb, d);
 
         // Popups last, over everything, because that is what a popup is.
@@ -5458,7 +5489,7 @@ fn sys_action(d: &mut Desktop, f: usize, item: usize, screen: Rect) {
         }
         3 => {
             if d.windows[f].closable {
-                d.windows.remove(f);
+                close_at(d, f);
             } else {
                 // The terminal is the shell. Minimising is the honest thing to
                 // offer instead of pretending a close happened.
