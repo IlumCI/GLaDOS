@@ -5043,6 +5043,12 @@ the order a frame happens:
   leaves a ghost that shrinks and fades (`windowsOut`, `fadeOut`). `win anim
   <percent>` scales every duration -- 3000 makes an arrival slow enough for
   `@shot`, whose screendump takes seconds.
+- **Windows tile** (`gfx::tile`, phase 13): Hyprland's dwindle, gaps 5 and
+  20. The tree is reconciled with the windows before each frame
+  (`tile_sync`) rather than told by every place that opens or closes one, and
+  a window whose slot moved slides there out of its image. Taking hold of a
+  window, or Super-V, floats it. Super-arrows focus by direction, with Shift
+  swap; Super-J turns a split; Super-F full screen.
 - **A program's pixels are kept** (`Window.app_surface`) and redrawn only when
   its `DeskApp::stamp`, focus, size or its own input changes. A program with
   no stamp is redrawn every frame, which is correct and costs time. A program

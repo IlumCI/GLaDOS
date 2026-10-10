@@ -169,10 +169,18 @@ pub struct Window {
     /// A window on its way in: the pop-in's scale and the fade, each on its
     /// own curve and duration, as Hyprland's `windowsIn` and `fadeIn` are.
     pub arrive: Option<(super::anim::Tween, super::anim::Tween)>,
-    /// This frame's scale and opacity while it arrives, fixed once per frame
-    /// by `layers` so the frame and `render verify`'s reference of it draw
-    /// the same instant rather than two readings of the clock.
-    pub shown: core::cell::Cell<Option<(f32, f32)>>,
+    /// Where this window is drawn this frame and at what opacity, while it
+    /// is arriving or sliding -- fixed once per frame by `layers`, so the
+    /// frame and `render verify`'s reference of it draw the same instant
+    /// rather than two readings of the clock.
+    pub shown: core::cell::Cell<Option<(Rect, f32)>>,
+    /// In the tiling layout (`gfx::tile`), or floating over it. Every window
+    /// tiles unless it is put afloat -- Super-V, or by taking hold of it.
+    pub tiled: bool,
+    /// On its way from one place to another: where it set out from and the
+    /// tween (Hyprland's `windows`). The window is already at its new place
+    /// as far as input and its image go; it is drawn on the way there.
+    pub slide: Option<(Rect, super::anim::Tween)>,
 }
 
 /// A window, painted off screen and kept (1.4.1, phase 11).
@@ -388,6 +396,8 @@ pub struct Desktop {
     /// be cloned to be read. It lives as long as the menu is open and is
     /// cleared when it closes, which is the same lifetime either way.
     pub query: String,
+    /// The tiling layout: which windows tile, and how their slots split.
+    pub tiles: super::tile::Tree,
 }
 
 static DESK: Racy<Option<Desktop>> = Racy::new(None);
@@ -922,6 +932,7 @@ pub fn init() {
             mode: Mode::Normal,
             hover: Hover::None,
             query: String::new(),
+            tiles: super::tile::Tree::new(),
         })
     };
     // The compositor needs the heap, which exists by now; each console then
@@ -960,6 +971,8 @@ fn make_terminal(screen: Rect) -> Window {
         image: Default::default(),
         arrive: None,
         shown: Default::default(),
+        tiled: true,
+        slide: None,
         title: String::from("GLaDOS Terminal"),
         icon: ICO_TERM,
         rect: Rect::new(term_x, screen.y, term_w, screen.h),
@@ -1194,6 +1207,8 @@ pub fn open(title: &str, panel: Panel) {
         image: Default::default(),
         arrive: None,
         shown: Default::default(),
+        tiled: true,
+        slide: None,
             title: String::from(title),
             // `open` is reached through `win open <name>` with the panel's
             // name as the title, so the name is what there is to go by.
@@ -1262,6 +1277,8 @@ pub fn open_app(title: &str, icon: usize, app: Box<dyn DeskApp>, w: u32, h: u32)
         image: Default::default(),
         arrive: None,
         shown: Default::default(),
+        tiled: true,
+        slide: None,
             title: String::from(title),
             icon,
             rect: Rect::new(x, y, w, h),
@@ -1475,6 +1492,8 @@ pub fn open_browser(url: &str) {
         image: Default::default(),
         arrive: None,
         shown: Default::default(),
+        tiled: true,
+        slide: None,
             title,
             icon: ICO_NET,
             rect: Rect::new(x, y, w, h),
@@ -2584,6 +2603,8 @@ fn make_executive(screen: Rect) -> Window {
         image: Default::default(),
         arrive: None,
         shown: Default::default(),
+        tiled: true,
+        slide: None,
         title: String::from("Executive"),
         icon: ICO_TERM,
         rect: Rect::new(
@@ -2848,7 +2869,11 @@ fn press_at(x: i32, y: i32) {
         } else if state != WinState::Maximised {
             // Remember where inside the frame the pointer took hold, so the
             // window follows the grab instead of snapping a corner to it.
+            // Taking hold of a tiled window lifts it out of the layout, as
+            // Hyprland's drag does: a window under the pointer has to be
+            // free to follow it, and its slot closes up behind it.
             with(|d| {
+                d.windows[f].tiled = false;
                 d.mode = Mode::Drag {
                     dx: (x - frame.x as i32).max(0) as u32,
                     dy: (y - frame.y as i32).max(0) as u32,
@@ -2863,7 +2888,10 @@ fn press_at(x: i32, y: i32) {
     if state != WinState::Maximised {
         let e = edges_at(frame, x, y);
         if e != edge::NONE {
-            with(|d| d.mode = Mode::DragSize { from: frame, edges: e });
+            with(|d| {
+                d.windows[f].tiled = false;
+                d.mode = Mode::DragSize { from: frame, edges: e }
+            });
             super::render::invalidate();
             return;
         }
@@ -3050,9 +3078,10 @@ pub fn retitle_tagged(tag: u64, title: &str) {
 
 /// What a Super chord does.
 ///
-/// The few that need nothing that does not exist yet. The tiling binds --
-/// focus and move by arrow, float, fullscreen -- arrive with the tiling
-/// (phase 13), and Super-Tab becomes the Flip view (phase 15); until then it
+/// Hyprland's binds where they do not collide with this desktop's: Enter a
+/// terminal, Q close, V float, J turn the split, F full screen, the arrows
+/// focus the window that way and with Shift swap places with it, D the
+/// desktop. Super-Tab becomes the Flip view (phase 15); until then it
 /// switches windows. A chord with no binding is still the desktop's and is
 /// dropped, so a reader of the plan does not find Super-V typing a 'v'.
 fn super_key(k: u8) {
@@ -3065,6 +3094,20 @@ fn super_key(k: u8) {
             with(|d| d.mode = Mode::Normal);
             cycle(false);
         }
+        (b'v', _) => toggle_float(),
+        (b'j', _) => toggle_split(),
+        (b'f', _) => {
+            with(|d| {
+                if let Some(f) = d.focus() {
+                    let w = &mut d.windows[f];
+                    w.state = if w.state == WinState::Maximised { WinState::Normal } else { WinState::Maximised };
+                }
+            });
+        }
+        (k, shift) if k == kbd::KEY_LEFT => tile_move(0, shift),
+        (k, shift) if k == kbd::KEY_RIGHT => tile_move(1, shift),
+        (k, shift) if k == kbd::KEY_UP => tile_move(2, shift),
+        (k, shift) if k == kbd::KEY_DOWN => tile_move(3, shift),
         _ => {}
     }
     super::render::invalidate();
@@ -3677,6 +3720,143 @@ pub fn open_flourish() {
     super::render::invalidate();
 }
 
+/// The area the tiling layout fills: the screen above the taskbar. Its own
+/// rectangle rather than `screen_rect`, whose margin is a floating window's
+/// and not the layout's -- the layout's edge is `tile::GAPS_OUT`.
+fn tile_area(fb: &Framebuffer) -> Rect {
+    Rect::new(0, 0, fb.width(), fb.height().saturating_sub(TASK_H))
+}
+
+/// Bring the tiling tree in line with the windows, and every tiled window to
+/// its slot.
+///
+/// **Reconciled, not hooked.** Windows are opened, closed, minimised and
+/// restored from a dozen places in this file and from other tasks through
+/// `post`; teaching each of them to tell the layout would be a dozen places
+/// to forget one. So before each frame the tree is made to hold exactly the
+/// tiled windows that are showing -- new ones split the window nearest the
+/// top that already tiles, which is the one they were opened from -- and the
+/// layout is applied. A window whose slot moved slides there.
+fn tile_sync(d: &mut Desktop, area: Rect) {
+    let want = |w: &Window| w.tiled && w.state != WinState::Minimised;
+    for s in d.tiles.leaves() {
+        if !d.windows.iter().any(|w| w.serial == s && want(w)) {
+            d.tiles.remove(s);
+        }
+    }
+    let mut missing: Vec<u64> = d.windows.iter().filter(|w| want(w) && !d.tiles.contains(w.serial)).map(|w| w.serial).collect();
+    missing.sort_unstable();
+    for s in missing {
+        let beside = d.windows.iter().rev().map(|w| w.serial).find(|x| d.tiles.contains(*x));
+        d.tiles.insert(s, beside);
+    }
+    let now = super::anim::now_us();
+    let mut moved = false;
+    for (s, r) in d.tiles.layout(area) {
+        let Some(w) = d.windows.iter_mut().find(|w| w.serial == s) else { continue };
+        if w.rect == r {
+            continue;
+        }
+        // Slide from wherever it is drawn now, which mid-slide is part of the
+        // way along the last one. A window that has never been drawn -- one
+        // just opened, which arrives instead -- simply takes its place.
+        if w.image.borrow().is_some() && w.arrive.is_none() && super::render::enabled() {
+            let from = match w.slide {
+                Some((f, t)) => lerp_rect(f, w.rect, t.at(now)),
+                None => w.rect,
+            };
+            w.slide = Some((from, super::anim::Tween::new(super::anim::preset::WINDOWS_MOVE.0, super::anim::preset::WINDOWS_MOVE.1)));
+            moved = true;
+        }
+        w.rect = r;
+    }
+    if moved {
+        ANIMATING.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// `a` toward `b` by `t`, exactly `b` at 1.
+fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
+    if t >= 1.0 {
+        return b;
+    }
+    let l = |x: u32, y: u32| (x as f32 + (y as f32 - x as f32) * t + 0.5) as u32;
+    Rect::new(l(a.x, b.x), l(a.y, b.y), l(a.w, b.w).max(1), l(a.h, b.h).max(1))
+}
+
+/// `r` scaled by `k` about its centre.
+fn scaled(r: Rect, k: f32) -> Rect {
+    let w = ((r.w as f32 * k) + 0.5) as u32;
+    let h = ((r.h as f32 * k) + 0.5) as u32;
+    Rect::new(r.x + (r.w - w.min(r.w)) / 2, r.y + (r.h - h.min(r.h)) / 2, w.max(1), h.max(1))
+}
+
+/// Super-V: float a tiled window, or tile a floating one. Afloat it keeps a
+/// size of its own -- at most two thirds of the area, centred -- and slides
+/// there from its slot, as it slides back into one.
+fn toggle_float() {
+    let Some(fb) = super::primary() else { return };
+    let area = tile_area(&fb);
+    with(|d| {
+        let Some(f) = d.focus() else { return };
+        let w = &mut d.windows[f];
+        if w.state == WinState::Maximised {
+            w.state = WinState::Normal;
+        }
+        w.tiled = !w.tiled;
+        if !w.tiled {
+            let nw = w.rect.w.min(area.w * 2 / 3);
+            let nh = w.rect.h.min(area.h * 2 / 3);
+            let to = Rect::new(area.x + (area.w - nw) / 2, area.y + (area.h - nh) / 2, nw, nh);
+            if w.image.borrow().is_some() {
+                w.slide = Some((w.rect, super::anim::Tween::new(super::anim::preset::WINDOWS_MOVE.0, super::anim::preset::WINDOWS_MOVE.1)));
+                ANIMATING.store(true, core::sync::atomic::Ordering::Relaxed);
+            }
+            w.rect = to;
+        }
+    });
+}
+
+/// Super and an arrow: focus the window that way. With Shift: swap places
+/// with it, when both tile.
+fn tile_move(dir: u8, swap: bool) {
+    let Some(fb) = super::primary() else { return };
+    let screen = screen_rect(&fb);
+    with(|d| {
+        let Some(f) = d.focus() else { return };
+        let me = d.windows[f].serial;
+        let rects: Vec<(u64, Rect)> = d
+            .windows
+            .iter()
+            .filter(|w| w.state != WinState::Minimised)
+            .map(|w| (w.serial, w.frame(screen)))
+            .collect();
+        let Some(to) = super::tile::neighbour(&rects, me, dir) else { return };
+        if swap {
+            d.tiles.swap(me, to);
+        } else if let Some(i) = d.windows.iter().position(|w| w.serial == to) {
+            d.raise(i);
+        }
+    });
+}
+
+/// Super-J: turn the split the focused window sits in the other way.
+fn toggle_split() {
+    let Some(fb) = super::primary() else { return };
+    let area = tile_area(&fb);
+    with(|d| {
+        let Some(f) = d.focus() else { return };
+        let s = d.windows[f].serial;
+        let inner = Rect::new(
+            area.x + super::tile::GAPS_OUT,
+            area.y + super::tile::GAPS_OUT,
+            area.w.saturating_sub(2 * super::tile::GAPS_OUT),
+            area.h.saturating_sub(2 * super::tile::GAPS_OUT),
+        );
+        d.tiles.toggle(s, inner);
+    });
+}
+
 /// Retire what has finished moving and keep frames coming while anything
 /// has not. The compositor's, after each frame.
 pub fn anim_step() {
@@ -3694,6 +3874,13 @@ pub fn anim_step() {
             if let Some((a, b)) = w.arrive {
                 if all || (a.done(now) && b.done(now)) {
                     w.arrive = None;
+                } else {
+                    moving = true;
+                }
+            }
+            if let Some((_, t)) = w.slide {
+                if all || t.done(now) {
+                    w.slide = None;
                 } else {
                     moving = true;
                 }
@@ -3723,11 +3910,8 @@ fn departure_at(t: (super::anim::Tween, super::anim::Tween), now: u64) -> (f32, 
 
 /// A window, or a ghost, at scale `k` about its centre and at `opacity`,
 /// with its shadow faded along with it.
-fn paint_transformed(fb: &Framebuffer, img: &super::scale::Image, frame: Rect, k: f32, opacity: f32, shadow: Option<(super::shadow::Spec, i32, i32, u8)>) {
-    let w = ((frame.w as f32 * k) + 0.5) as u32;
-    let h = ((frame.h as f32 * k) + 0.5) as u32;
-    let x = frame.x as i32 + (frame.w as i32 - w as i32) / 2;
-    let y = frame.y as i32 + (frame.h as i32 - h as i32) / 2;
+fn paint_transformed(fb: &Framebuffer, img: &super::scale::Image, to: Rect, opacity: f32, shadow: Option<(super::shadow::Spec, i32, i32, u8)>) {
+    let (x, y, w, h) = (to.x as i32, to.y as i32, to.w, to.h);
     let o = (opacity.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
     if let Some((spec, dx, dy, alpha)) = shadow {
         super::shadow::cast(fb, x, y, w, h, spec, dx, dy, (alpha as u32 * o / 255) as u8);
@@ -3742,7 +3926,7 @@ fn paint_ghosts(fb: &Framebuffer) {
             continue;
         }
         let (k, o) = gh.shown.get();
-        paint_transformed(fb, &gh.img, r, k, o, None);
+        paint_transformed(fb, &gh.img, scaled(r, k), o, None);
     }
 }
 
@@ -4414,6 +4598,7 @@ pub fn draw() {
     let whole = Rect::new(0, 0, real.width(), real.height());
     let mut damage = super::region::Region::new();
     super::frame_clock(true);
+    with(|d| tile_sync(d, tile_area(&real)));
     with_ref(|d| {
         let next = layers(d, &real, screen);
         let prev = unsafe { &mut *PREV.get() };
@@ -4723,11 +4908,26 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
         let frame = win.frame(screen);
         let bounds = shadowed(win, frame, active, fb);
         let (mut stamp, parts) = window_key(d, i, win, active, frame, &inputs, seq, &mut wake);
-        // An arriving window is a different picture every frame. Its whole
-        // layer moves with the clock, fixed here for the frame.
-        win.shown.set(win.arrive.map(|t| arrival_at(t, now)));
-        if let Some((k, o)) = win.shown.get() {
-            stamp = Stamp::of((stamp, (k * 4096.0) as u32, (o * 4096.0) as u32));
+        // An arriving or sliding window is a different picture every frame.
+        // Its whole layer moves with the clock, fixed here for the frame, and
+        // a slide's layer reaches back to where it set out from.
+        let mut bounds = bounds;
+        win.shown.set(
+            win.arrive
+                .map(|t| {
+                    let (k, o) = arrival_at(t, now);
+                    (scaled(frame, k), o)
+                })
+                .or_else(|| win.slide.map(|(from, t)| (lerp_rect(from, frame, t.at(now)), 1.0))),
+        );
+        if let Some((r, o)) = win.shown.get() {
+            stamp = Stamp::of((stamp, r, (o * 4096.0) as u32));
+        }
+        if let Some((from, _)) = win.slide {
+            let b = shadowed(win, from, active, fb);
+            let x0 = bounds.x.min(b.x);
+            let y0 = bounds.y.min(b.y);
+            bounds = Rect::new(x0, y0, (bounds.x + bounds.w).max(b.x + b.w) - x0, (bounds.y + bounds.h).max(b.y + b.h) - y0);
         }
         out.push(Layer {
             id: LayerId::Window(win.serial),
@@ -4930,7 +5130,7 @@ fn verify_frame(back: &Framebuffer, d: &Desktop, screen: Rect) {
     VERIFY_RUNS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let skip = [clock_rect(back), battery_rect(back).unwrap_or(Rect::new(0, 0, 0, 0))];
     let grids: Vec<Rect> = d.windows.iter().enumerate()
-        .filter(|(_, w)| w.state != WinState::Minimised && w.arrive.is_none())
+        .filter(|(_, w)| w.state != WinState::Minimised && w.arrive.is_none() && w.slide.is_none())
         .filter_map(|(_, w)| match w.content {
             Content::Terminal(ch) => {
                 let client = theme::chrome(w.frame(screen), !w.menus.is_empty()).client;
@@ -5211,7 +5411,16 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
             let frame = win.frame(screen);
             // Nothing of this window falls in the area being repainted -- its
             // shadow counted, which is the same rectangle its layer claims.
-            let reach = shadowed(win, frame, active, &fb);
+            let reach = match win.shown.get() {
+                Some((r, _)) => {
+                    let a = shadowed(win, frame, active, &fb);
+                    let b = shadowed(win, r, active, &fb);
+                    let x0 = a.x.min(b.x);
+                    let y0 = a.y.min(b.y);
+                    Rect::new(x0, y0, (a.x + a.w).max(b.x + b.w) - x0, (a.y + a.h).max(b.y + b.h) - y0)
+                }
+                None => shadowed(win, frame, active, &fb),
+            };
             if !fb.touches(reach.x, reach.y, reach.w, reach.h) {
                 continue;
             }
@@ -5231,10 +5440,10 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
             // all. The terminal's grid joins it when it lands -- the grid is
             // not in the image, and a scaled console is not worth a second
             // copy of it for four hundred milliseconds.
-            if let Some((k, o)) = win.shown.get() {
+            if let Some((to, o)) = win.shown.get() {
                 if ensure_image(fb.format(), d, i, win, frame, active, hot) {
                     if let Some(im) = win.image.borrow().as_ref() {
-                        paint_transformed(&fb, &premultiplied(win, im), frame, k, o, win_shadow(win, active));
+                        paint_transformed(&fb, &premultiplied(win, im), to, o, win_shadow(win, active));
                     }
                     continue;
                 }
