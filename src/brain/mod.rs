@@ -396,8 +396,8 @@ pub fn report() -> Vec<String> {
 
 // connectome.py sim assets/brain/worm.bin --poke noxious --rate 150 --ms 500 --seed 1 --emit
 const ORACLE_STEPS: u64 = 5000;
-const ORACLE_TOTAL: u64 = 544;
-const ORACLE_DIGEST: u64 = 0xf684_5a30_2912_a6b5;
+const ORACLE_TOTAL: u64 = 2157;
+const ORACLE_DIGEST: u64 = 0x8930_01e0_06ec_52b6;
 
 fn readout_hz(c: &Connectome, sim: &Sim, name: &str) -> u64 {
     let Some(r) = c.readouts.iter().find(|r| r.name == name) else { return 0 };
@@ -446,9 +446,16 @@ pub fn selftest() -> bool {
             // reproduce a known effect before anything read off it is believed.
             // ASH, the polymodal nociceptor, drives the reversal command
             // interneurons (Kaplan & Horvitz 1993; Hilliard et al. 2005).
+            //
+            // Over, not "twice over": that was this claim's first form, and it
+            // held only under looser dynamics than Shiu's. With g frozen while
+            // refractory, as model.py has it, the command layer saturates and
+            // reverse reads 173 Hz against forward's 130. The direction is the
+            // animal's; the margin is the model's, and the model is not the
+            // animal.
             let rev = readout_hz(&c, &ns, "reverse");
             let fwd = readout_hz(&c, &ns, "forward");
-            claim("canary: the nociceptor drives reversal over forward, as in the animal", rev > fwd * 2 && rev > 10);
+            claim("canary: the nociceptor drives reversal over forward, as in the animal", rev > fwd && rev > 10);
             let again = run_fixed(&c, &["noxious"], ORACLE_STEPS, 1);
             claim("the same seed gives the same spikes", again.counts == ns.counts);
         }

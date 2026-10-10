@@ -235,10 +235,12 @@ def simulate(b: Brain, steps: int, drive: dict, seed: int = 1):
     One step, in exactly this order (the kernel's `lif::step` is the same):
       1. deliver the delay ring's slot for this step into g
       2. Poisson input to driven sensors, in table order, one draw each
-      3. v integrates g (or is held at reset while refractory)
-      4. a neuron at or over threshold spikes: reset, refractory, and its
-         row's weights enter the ring DELAY steps ahead
-      5. g decays
+      3. a refractory neuron is held at reset and its g does not decay --
+         Shiu's model.py marks both equations `(unless refractory)`; any
+         other neuron integrates v, then g decays
+      4. a neuron strictly over threshold (`v > v_th`, as model.py has it)
+         spikes: reset, refractory, and its row's weights enter the ring
+         DELAY steps ahead
     Returns spike counts per neuron."""
     n = b.n
     v = [b.v0] * n
@@ -270,7 +272,8 @@ def simulate(b: Brain, steps: int, drive: dict, seed: int = 1):
                 v[i] = b.vreset
             else:
                 v[i] += tdiv(b.v0 - v[i] + g[i], b.tau_m)
-                if v[i] >= b.vth:
+                g[i] -= tdiv(g[i], b.tau_syn)
+                if v[i] > b.vth:
                     v[i] = b.vreset
                     refr[i] = b.refr
                     counts[i] += 1
@@ -280,9 +283,57 @@ def simulate(b: Brain, steps: int, drive: dict, seed: int = 1):
             for i in fired:
                 for k in range(b.rows[i], b.rows[i + 1]):
                     out[b.col[k]] += b.w[k] * b.w_syn
-        for i in range(n):
-            g[i] -= tdiv(g[i], b.tau_syn)
     return counts
+
+
+def simulate_np(b: Brain, steps: int, drive: dict, seed: int = 1):
+    """`simulate`, vectorised, for an animal too large to loop over in
+    Python. Same arithmetic, same order of draws; the selftest requires the
+    two to agree exactly on a graph small enough for both."""
+    import numpy as np
+    n = b.n
+    rows = np.asarray(b.rows, dtype=np.int64)
+    col = np.asarray(b.col, dtype=np.int64)
+    w = np.asarray(b.w, dtype=np.int64) * b.w_syn
+    v = np.full(n, b.v0, dtype=np.int64)
+    g = np.zeros(n, dtype=np.int64)
+    refr = np.zeros(n, dtype=np.int64)
+    slots = b.delay + 1
+    ring = np.zeros((slots, n), dtype=np.int64)
+    counts = np.zeros(n, dtype=np.int64)
+    rng = Rng(seed)
+    driven = []
+    for name, rate in drive.items():
+        thr = (rate * b.dt_us * (1 << 32) // 1_000_000) << 32
+        for i in b.sensors[name]:
+            driven.append((i, thr))
+
+    def tdiv_np(a, d):
+        return np.sign(a) * (np.abs(a) // d)
+
+    for t in range(steps):
+        s = t % slots
+        g += ring[s]
+        ring[s] = 0
+        for i, thr in driven:
+            if rng.next() < thr:
+                g[i] += b.w_poi
+        r = refr > 0
+        refr[r] -= 1
+        v[r] = b.vreset
+        live = ~r
+        v[live] += tdiv_np(b.v0 - v[live] + g[live], b.tau_m)
+        g[live] -= tdiv_np(g[live], b.tau_syn)
+        fired = np.nonzero(live & (v > b.vth))[0]
+        if fired.size:
+            v[fired] = b.vreset
+            refr[fired] = b.refr
+            counts[fired] += 1
+            out = ring[(t + b.delay) % slots]
+            for i in fired:
+                a, z = rows[i], rows[i + 1]
+                np.add.at(out, col[a:z], w[a:z])
+    return [int(c) for c in counts]
 
 
 def oracle_digest(counts) -> int:
@@ -440,6 +491,7 @@ def selftest() -> bool:
         again = simulate(b, 2000, {"in": 150})
         claim("the same seed gives the same spikes", again == driven)
         claim("a different seed gives different ones", simulate(b, 2000, {"in": 150}, seed=2) != driven)
+        claim("the vectorised oracle agrees with the loop exactly", simulate_np(b, 2000, {"in": 150}) == driven)
         # One spike, by hand: at 150 Hz input weight W_POI pushes v from rest
         # by (W_POI) / TAU_M in the step it lands -- 343,750 nV.
         b2v = b.v0 + tdiv(b.v0 - b.v0 + b.w_poi, b.tau_m)

@@ -11,10 +11,10 @@
 //! One step, in exactly this order (the oracle's docstring says the same):
 //!   1. deliver the delay ring's slot for this step into g
 //!   2. Poisson input to driven sensors, in drive order, one draw each
-//!   3. v integrates g, or is held at reset while refractory
-//!   4. a neuron at or over threshold spikes, resets, goes refractory, and
-//!      its row's weights enter the ring `delay` steps ahead
-//!   5. g decays
+//!   3. a refractory neuron is held at reset with g frozen; any other
+//!      integrates v and then decays g
+//!   4. a neuron strictly over threshold spikes, resets, goes refractory,
+//!      and its row's weights enter the ring `delay` steps ahead
 
 use alloc::string::String;
 use alloc::vec;
@@ -235,7 +235,14 @@ pub struct Sim {
     pub g: Vec<i64>,
     pub refr: Vec<u16>,
     ring: Vec<i64>,
+    /// Which neurons each ring slot holds anything for, so delivery visits
+    /// those and not all of them.
+    touched: Vec<Vec<u32>>,
     slots: usize,
+    /// Neurons that can change this step. Everything else is at a fixed
+    /// point of the arithmetic -- see `inert` -- and skipping it is exact.
+    active: Vec<u32>,
+    on: Vec<bool>,
     pub t: u64,
     pub rng: Rng,
     pub counts: Vec<u32>,
@@ -249,58 +256,111 @@ impl Sim {
             g: vec![0; c.n],
             refr: vec![0; c.n],
             ring: vec![0; slots * c.n],
+            touched: (0..slots).map(|_| Vec::new()).collect(),
             slots,
+            active: Vec::new(),
+            on: vec![false; c.n],
             t: 0,
             rng: Rng::new(seed),
             counts: vec![0; c.n],
         }
     }
 
+    #[inline]
+    fn wake(&mut self, i: usize) {
+        if !self.on[i] {
+            self.on[i] = true;
+            self.active.push(i as u32);
+        }
+    }
+
+    /// A neuron the dense loop would leave exactly as it is, this step and
+    /// every step until something arrives: no conductance, not refractory,
+    /// and close enough to rest that the integer update moves it by nothing.
+    /// It cannot spike from there, because rest is below threshold.
+    ///
+    /// This is the whole of the optimisation and it is exact rather than
+    /// approximate -- which `diag brain` checks by requiring the same digest
+    /// as the oracle's dense loop. With no basal firing, almost every neuron
+    /// of a fly is inert almost all of the time, so a step costs what the
+    /// activity costs and not what the animal costs.
+    #[inline]
+    fn inert(&self, c: &Connectome, i: usize) -> bool {
+        self.g[i] == 0 && self.refr[i] == 0 && tdiv(c.v0 - self.v[i], c.tau_m) == 0
+    }
+
     /// One step. `driven` is (neuron, threshold) in drive order; `fired` is
-    /// cleared and filled with this step's spikes.
+    /// cleared and filled with this step's spikes, in no particular order --
+    /// what is done with them is a sum, and integer addition does not care.
     pub fn step(&mut self, c: &Connectome, driven: &[(u32, u64)], fired: &mut Vec<u32>) {
         let n = c.n;
-        let slot = (self.t as usize % self.slots) * n;
-        for i in 0..n {
-            let x = self.ring[slot + i];
+        let slot = self.t as usize % self.slots;
+        let base = slot * n;
+        let due = core::mem::take(&mut self.touched[slot]);
+        for &i in due.iter() {
+            let i = i as usize;
+            let x = self.ring[base + i];
             if x != 0 {
                 self.g[i] += x;
-                self.ring[slot + i] = 0;
+                self.ring[base + i] = 0;
+                self.wake(i);
             }
         }
+        let mut due = due;
+        due.clear();
+        self.touched[slot] = due;
         for &(i, thr) in driven {
             if self.rng.next() < thr {
                 self.g[i as usize] += c.w_poi;
+                self.wake(i as usize);
             }
         }
         fired.clear();
-        for i in 0..n {
+        let mut k = 0;
+        while k < self.active.len() {
+            let i = self.active[k] as usize;
             if self.refr[i] > 0 {
+                // Shiu's model.py marks both equations `(unless refractory)`:
+                // v is held and g does not decay.
                 self.refr[i] -= 1;
                 self.v[i] = c.vreset;
             } else {
                 self.v[i] += tdiv(c.v0 - self.v[i] + self.g[i], c.tau_m);
-                if self.v[i] >= c.vth {
+                self.g[i] -= tdiv(self.g[i], c.tau_syn);
+                if self.v[i] > c.vth {
                     self.v[i] = c.vreset;
                     self.refr[i] = c.refr;
                     self.counts[i] = self.counts[i].wrapping_add(1);
                     fired.push(i as u32);
                 }
             }
+            if self.inert(c, i) {
+                self.on[i] = false;
+                self.active.swap_remove(k);
+            } else {
+                k += 1;
+            }
         }
         if !fired.is_empty() {
-            let out = ((self.t as usize + c.delay) % self.slots) * n;
+            let os = (self.t as usize + c.delay) % self.slots;
+            let out = os * n;
             for &i in fired.iter() {
                 let (a, b) = (c.rows[i as usize] as usize, c.rows[i as usize + 1] as usize);
                 for k in a..b {
-                    self.ring[out + c.col[k] as usize] += c.w[k] as i64 * c.w_syn;
+                    let j = c.col[k] as usize;
+                    if self.ring[out + j] == 0 {
+                        self.touched[os].push(j as u32);
+                    }
+                    self.ring[out + j] += c.w[k] as i64 * c.w_syn;
                 }
             }
         }
-        for i in 0..n {
-            self.g[i] -= tdiv(self.g[i], c.tau_syn);
-        }
         self.t += 1;
+    }
+
+    /// Neurons awake right now, for `brain`.
+    pub fn awake(&self) -> usize {
+        self.active.len()
     }
 }
 
