@@ -4212,6 +4212,12 @@ fn wheel_at(x: i32, y: i32, notches: i32) {
 /// nobody can work in front of, and the cut wedges have to be painted in the
 /// wall's own colour anyway, so the mark is a two-colour figure by
 /// construction.
+/// The wallpaper, into any surface: `video glass` paints it to show glass on
+/// the real thing.
+pub(crate) fn paint_wallpaper(fb: &Framebuffer) {
+    wallpaper(fb);
+}
+
 fn wallpaper(fb: &Framebuffer) {
     let (w, h) = (fb.width(), fb.height());
     // A horizon rather than a fill. One `vgrad` is the same memset per row the
@@ -5036,6 +5042,11 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
 /// as it always did, which is slower and identical.
 static WALL: Racy<Option<(Vec<u32>, u32, u32)>> = Racy::new(None);
 
+/// How hard the glass blurs the wallpaper, in pixels at the screen's own
+/// resolution. Vista blurred a downsampled copy at a sigma of three, which is
+/// about twelve here; a little more reads as frosted rather than smeared.
+const GLASS_SIGMA: f32 = 14.0;
+
 fn wallpaper_cached(fb: &Framebuffer) {
     let (w, h) = (fb.width(), fb.height());
     let cache = unsafe { &mut *WALL.get() };
@@ -5047,6 +5058,9 @@ fn wallpaper_cached(fb: &Framebuffer) {
             px.resize(n, 0u32);
             let surf = unsafe { Framebuffer::over_ram(px.as_mut_ptr() as u64, w, h, w, fb.format()) };
             wallpaper(&surf);
+            // The blurred copy every pane of glass samples, made here because
+            // this is the one moment the wallpaper changes.
+            super::glass::set_backdrop(&px, w, h, GLASS_SIGMA);
             *cache = Some((px, w, h));
         }
     }

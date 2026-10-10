@@ -7344,6 +7344,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 Some((ms, crate::gfx::grad::proof as fn(&crate::gfx::Framebuffer), "gradients"))
             } else if let Some(ms) = rest.trim().strip_prefix("shadows") {
                 Some((ms, crate::gfx::shadow::proof as fn(&crate::gfx::Framebuffer), "shadows"))
+            } else if let Some(ms) = rest.trim().strip_prefix("glass") {
+                Some((ms, crate::gfx::glass::proof as fn(&crate::gfx::Framebuffer), "glass"))
             } else if let Some(ms) = rest.trim().strip_prefix("text") {
                 Some((ms, crate::gfx::text::proof as fn(&crate::gfx::Framebuffer), "text"))
             } else {
