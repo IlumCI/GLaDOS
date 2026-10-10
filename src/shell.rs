@@ -7212,6 +7212,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         if s.left { " left" } else { "" },
                         if s.right { " right" } else { "" }
                     );
+                    let (irqs, packets, resyncs, stale, rescued) = crate::dev::mouse::stats();
+                    kprintln!(
+                        "  ps/2    {} interrupt(s), {} packet(s), {} byte(s) dropped to resync, {} half-packet(s) abandoned, {} byte(s) rescued",
+                        irqs, packets, resyncs, stale, rescued
+                    );
+                    crate::dev::usbhid::report();
                 }
                 Some("move") => {
                     let dx = it.next().and_then(|t| t.parse::<i32>().ok());

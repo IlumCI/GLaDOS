@@ -323,17 +323,47 @@ pub fn poll() {
         }
         rescan
     };
-    // Outside the list's lock, because `probe` takes it: a device that came
-    // back is enumerated afresh, on whatever port it reappeared on.
+    // Asked for, not done: enumerating is control transfers with timeouts,
+    // and this is the task that draws the screen. `service` does it.
     if rescan {
-        let ecam = ECAM.load(core::sync::atomic::Ordering::Relaxed);
-        if let Ok(n) = probe(ecam) {
-            if n > 0 {
-                REJOINED.fetch_add(n as u64, core::sync::atomic::Ordering::Relaxed);
-                crate::kprintln!("[usb] {} input device(s) back on the bus", n);
-            }
-        }
+        RESCAN.store(true, core::sync::atomic::Ordering::Relaxed);
     }
+}
+
+/// A walk of the bus is owed.
+static RESCAN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Seconds to wait before the next walk, doubled by every walk that found
+/// nothing and reset by one that found something; and when that wait ends.
+static BACKOFF_S: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+static NEXT_WALK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The clock task's, once a second: walk the bus if a port changed.
+///
+/// Backing off is what makes this safe to leave running. A port whose device
+/// will not enumerate changes again with every attempt, and retrying at the
+/// rate the ports are watched would spend the machine on one broken device;
+/// so a walk that finds nothing doubles the wait, up to a minute.
+pub fn service() {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !RESCAN.load(Relaxed) {
+        return;
+    }
+    let now = crate::dev::lapic::ticks();
+    if now < NEXT_WALK.load(Relaxed) {
+        return;
+    }
+    RESCAN.store(false, Relaxed);
+    let ecam = ECAM.load(Relaxed);
+    let found = probe(ecam).unwrap_or(0);
+    let wait = if found > 0 {
+        REJOINED.fetch_add(found as u64, Relaxed);
+        crate::kprintln!("[usb] {} input device(s) on the bus", found);
+        1
+    } else {
+        (BACKOFF_S.load(Relaxed) * 2).min(60)
+    };
+    BACKOFF_S.store(wait, Relaxed);
+    NEXT_WALK.store(now + wait * crate::TIMER_HZ as u64, Relaxed);
 }
 
 /// A few times a second: has any port's connection changed? A device that

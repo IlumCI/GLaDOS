@@ -910,6 +910,9 @@ fn comp_task() {
         // reads the keyboard too, and a USB keyboard polled only while the
         // desktop owned the screen went dead the moment anything else did.
         dev::usbhid::poll();
+        // And the touchpad's keep-alive: a mouse byte whose interrupt was
+        // lost is collected here instead of jamming the controller for good.
+        dev::mouse::rescue();
         if !gfx::exclusive() {
             // The phase before each call that leaves this file, so a stall
             // names the thing it is stuck inside rather than the loop.
@@ -1191,6 +1194,11 @@ fn clock_task() {
                 }
 
                 ai::futures::sample();
+                // A USB device that came, went or came back is enumerated
+                // here, once a second at most and backing off while nothing
+                // answers -- never on the compositor, where a port that
+                // times out at every step froze the screen for ten seconds.
+                dev::usbhid::service();
                 // The thermal policy and the power-source policy, both of
                 // which were written and neither of which had a caller. A
                 // rule nothing runs is a rule that does not exist, and both
@@ -2165,6 +2173,15 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
         kprintln!("
 [power]");
         dev::power::report();
+        // **Ask for a clock.** Nothing did, and the GF63 read 630 MHz -- 23%
+        // of its base -- with every frame paying for it: with hardware-
+        // managed states off the part sits wherever the firmware left it.
+        // Balanced is the part's own judgement over its whole range, and it
+        // is inside this guard because enabling is the step that faulted on
+        // this laptop once.
+        if dev::power::set_governor(dev::power::governor()) {
+            kprintln!("  governor {} applied", dev::power::governor().name());
+        }
         true
     });
 

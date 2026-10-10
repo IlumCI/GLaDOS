@@ -90,6 +90,11 @@ pub struct Caps {
     pub max_slots: u8,
     pub max_intrs: u16,
     pub max_ports: u8,
+    /// Pages the controller wants for its own use, from HCSPARAMS2. Zero on
+    /// QEMU's model and not on Intel's, and a controller denied them answers
+    /// no command at all -- which is every port reading "no response to
+    /// Enable Slot", the GF63's whole USB story until this was read.
+    pub scratchpads: u32,
     /// 64-byte context structures rather than 32. The controller decides this
     /// and every context the driver builds has to match, so it is read here
     /// rather than assumed -- guessing wrong misaligns every field past the
@@ -138,8 +143,9 @@ pub fn probe(ecam: u64) -> Result<Caps, InitError> {
     let version = (cap0 >> 16) as u16;
     let _ = HCIVERSION;
     let hcs1 = unsafe { read_volatile((bar + HCSPARAMS1) as *const u32) };
-    let _hcs2 = unsafe { read_volatile((bar + HCSPARAMS2) as *const u32) };
+    let hcs2 = unsafe { read_volatile((bar + HCSPARAMS2) as *const u32) };
     let hcc1 = unsafe { read_volatile((bar + HCCPARAMS1) as *const u32) };
+    take_from_bios(bar, hcc1);
     let db = unsafe { read_volatile((bar + DBOFF) as *const u32) } as u64;
     let rt = unsafe { read_volatile((bar + RTSOFF) as *const u32) } as u64;
 
@@ -160,9 +166,57 @@ pub fn probe(ecam: u64) -> Result<Caps, InitError> {
         max_slots: (hcs1 & 0xFF) as u8,
         max_intrs: ((hcs1 >> 8) & 0x7FF) as u16,
         max_ports: ((hcs1 >> 24) & 0xFF) as u8,
+        scratchpads: (((hcs2 >> 21) & 0x1F) << 5) | ((hcs2 >> 27) & 0x1F),
         ctx64: hcc1 & (1 << 2) != 0,
         ac64: hcc1 & 1 != 0,
     })
+}
+
+/// Ask the firmware to let go of the controller, the USB Legacy Support
+/// handshake: set the OS-owned semaphore, wait for the BIOS-owned one to
+/// clear, and switch off the SMIs the firmware used to emulate a PS/2
+/// keyboard over USB.
+///
+/// **QEMU's controller has no such capability and the GF63's has.** Skipped,
+/// the firmware's system-management code goes on owning a controller this
+/// kernel has just reset and reprogrammed -- two drivers on one device, one
+/// of them invisible. Taken whatever the firmware says after a second, as
+/// Linux does: a BIOS that never answers is a BIOS that is not running.
+fn take_from_bios(bar: u64, hcc1: u32) {
+    let mut off = ((hcc1 >> 16) as u64) << 2;
+    let mut guard = 0;
+    while off != 0 && guard < 64 {
+        guard += 1;
+        let at = bar + off;
+        let cap = unsafe { read_volatile(at as *const u32) };
+        if cap & 0xFF == 1 {
+            if cap & (1 << 16) != 0 {
+                // OS-owned is the byte at +3; written alone so the BIOS byte
+                // beside it is not touched.
+                unsafe { write_volatile((at + 3) as *mut u8, 1) };
+                let mut waited = 0;
+                while unsafe { read_volatile(at as *const u32) } & (1 << 16) != 0 && waited < 1000 {
+                    delay_us(1000);
+                    waited += 1;
+                }
+                if waited >= 1000 {
+                    crate::kprintln!("  xhci   the firmware did not let go in a second; taking the controller");
+                    unsafe { write_volatile((at + 2) as *mut u8, 0) };
+                }
+            }
+            // USBLEGCTLSTS: SMI enables off, pending SMI events acknowledged.
+            let ctl = at + 4;
+            let v = unsafe { read_volatile(ctl as *const u32) };
+            let keep = (0x7 << 1) | (0xFF << 5) | (0x7 << 17);
+            unsafe { write_volatile(ctl as *mut u32, (v & keep) | (0x7 << 29)) };
+            return;
+        }
+        let next = ((cap >> 8) & 0xFF) as u64;
+        if next == 0 {
+            return;
+        }
+        off += next << 2;
+    }
 }
 
 /// Set once networking owns the controller.
@@ -502,6 +556,8 @@ pub fn report(ecam: u64) {
 const USBCMD: u64 = 0x00;
 const USBSTS: u64 = 0x04;
 const CRCR: u64 = 0x18;
+/// Bit n set means the controller's page size is 2^(n+12).
+const PAGESIZE: u64 = 0x08;
 const DCBAAP: u64 = 0x30;
 const CONFIG: u64 = 0x38;
 /// Port register sets begin here, 0x10 bytes each, one-based.
@@ -757,6 +813,20 @@ impl Controller {
         let n = caps.max_slots as usize + 1;
         c.dcbaa = dma(n * 8, 64).ok_or(InitError::NoMem)?;
         c.w32(CONFIG, (c.r32(CONFIG) & !0xFF) | caps.max_slots as u32);
+        // The scratchpad array goes in entry zero, one page per buffer at
+        // the controller's own page size. Never freed, like every other
+        // structure the controller holds a pointer to.
+        if caps.scratchpads > 0 {
+            let ps = c.r32(PAGESIZE) & 0xFFFF;
+            let page = if ps == 0 { 4096 } else { 4096usize << ps.trailing_zeros() };
+            let n = caps.scratchpads as usize;
+            let arr = dma(n * 8, 64).ok_or(InitError::NoMem)?;
+            for i in 0..n {
+                let buf = dma(page, page).ok_or(InitError::NoMem)?;
+                unsafe { write_volatile((arr as *mut u64).add(i), buf) };
+            }
+            unsafe { write_volatile(c.dcbaa as *mut u64, arr) };
+        }
         c.w64(DCBAAP, c.dcbaa);
 
         // Command ring. Bit 0 is the ring cycle state and must agree with the

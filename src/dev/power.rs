@@ -293,7 +293,11 @@ impl Governor {
         match self {
             Governor::Performance => 0,
             Governor::Balanced => 128,
-            Governor::Powersave => 255,
+            // Not 255. At the far end the GF63 held 630 MHz under load --
+            // the part reads it as "never hurry" -- and a machine on battery
+            // still has to answer a keystroke. The ceiling at base clock is
+            // what saves the power; this only leans the part toward it.
+            Governor::Powersave => 192,
         }
     }
 }
@@ -367,7 +371,7 @@ pub fn hwp_range() -> Option<(u8, u8, u8)> {
 
 /// Apply a policy. Answers false where the hardware will not take one.
 pub fn set_governor(g: Governor) -> bool {
-    if !allowed(CAP_HWP) {
+    if hwp_skipped() || !allowed(CAP_HWP) {
         return false;
     }
     // **Enable before reading the range, not after.** `hwp_range` reads

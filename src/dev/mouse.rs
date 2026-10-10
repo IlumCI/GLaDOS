@@ -301,10 +301,88 @@ fn init_quiet(acpi: &Acpi, apic_id: u8) -> InitReport {
 }
 
 extern "x86-interrupt" fn mouse_isr(_frame: idt::InterruptStackFrame) {
-    let byte = unsafe { inb(0x60) };
-    // The hand on the mouse feeds the Oracle's entropy ring exactly as the
-    // hand on the keyboard does -- TempleOS folded both into KbdMsEvtTime.
-    crate::ai::godbits::ins(crate::time::rdtsc());
+    IRQS.fetch_add(1, Relaxed);
+    // Only a byte that is there and is the mouse's. An edge can arrive for a
+    // byte the rescue below already took, and reading the port then hands the
+    // decoder whatever it last held -- a phantom byte that knocks every
+    // packet after it out of line.
+    let status = unsafe { inb(0x64) };
+    if status & 0x01 != 0 && status & 0x20 != 0 {
+        let byte = unsafe { inb(0x60) };
+        // The hand on the mouse feeds the Oracle's entropy ring exactly as
+        // the hand on the keyboard does -- TempleOS folded both into
+        // KbdMsEvtTime.
+        crate::ai::godbits::ins(crate::time::rdtsc());
+        take_byte(byte);
+    }
+    lapic::eoi();
+    // After the EOI, as the timer does: the switch may not come back for a
+    // while and the controller must not be left waiting on this vector.
+    crate::gfx::render::preempt_for_input();
+}
+
+use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+/// For `mouse`: interrupts taken, whole packets, bytes dropped to find the
+/// start of one, half-packets abandoned, and bytes the rescue took.
+static IRQS: AtomicU64 = AtomicU64::new(0);
+static PACKETS: AtomicU64 = AtomicU64::new(0);
+static RESYNCS: AtomicU64 = AtomicU64::new(0);
+static STALE: AtomicU64 = AtomicU64::new(0);
+static RESCUED: AtomicU64 = AtomicU64::new(0);
+/// TSC of the last byte, so a half-packet left lying can be recognised.
+static LAST_BYTE: AtomicU64 = AtomicU64::new(0);
+
+/// `(interrupts, packets, resyncs, stale half-packets, rescued bytes)`.
+pub fn stats() -> (u64, u64, u64, u64, u64) {
+    (
+        IRQS.load(Relaxed),
+        PACKETS.load(Relaxed),
+        RESYNCS.load(Relaxed),
+        STALE.load(Relaxed),
+        RESCUED.load(Relaxed),
+    )
+}
+
+/// **The pointer's keep-alive**, from the compositor's loop.
+///
+/// IRQ 12 is an edge. If one is lost -- taken while the line was masked, or
+/// swallowed by a controller that raised it for a byte somebody else read --
+/// the mouse's byte stays in the output buffer, and a full buffer is a
+/// controller that sends nothing more, ever: the touchpad is dead until
+/// reboot and nothing reports why. So the buffer is looked at here, and a
+/// mouse byte nobody collected is collected.
+///
+/// And a half-packet that has sat for a tenth of a second is abandoned: the
+/// three bytes of a packet arrive together, so a partial one that old is a
+/// lost byte, and keeping it reads every later packet one byte out.
+pub fn rescue() {
+    if !present() {
+        return;
+    }
+    let flags: u64;
+    unsafe { core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags) };
+    let status = unsafe { inb(0x64) };
+    if status & 0x01 != 0 && status & 0x20 != 0 {
+        let byte = unsafe { inb(0x60) };
+        RESCUED.fetch_add(1, Relaxed);
+        take_byte(byte);
+    }
+    let phase = unsafe { &mut *PHASE.get() };
+    if *phase != 0 {
+        let age = crate::time::rdtsc().saturating_sub(LAST_BYTE.load(Relaxed));
+        if age > crate::time::tsc_mhz().max(1) as u64 * 100_000 {
+            *phase = 0;
+            STALE.fetch_add(1, Relaxed);
+        }
+    }
+    if flags & (1 << 9) != 0 {
+        crate::cpu::enable_interrupts();
+    }
+}
+
+/// One byte of the stream, from the interrupt or the rescue.
+fn take_byte(byte: u8) {
+    LAST_BYTE.store(crate::time::rdtsc(), Relaxed);
     let phase = unsafe { &mut *PHASE.get() };
     let buf = unsafe { &mut *BUF.get() };
 
@@ -312,7 +390,7 @@ extern "x86-interrupt" fn mouse_isr(_frame: idt::InterruptStackFrame) {
     // start of a packet and the stream is out of sync; dropping the byte is
     // the only way back, because there is no framing to resynchronise against.
     if *phase == 0 && byte & 0x08 == 0 {
-        lapic::eoi();
+        RESYNCS.fetch_add(1, Relaxed);
         return;
     }
 
@@ -321,10 +399,10 @@ extern "x86-interrupt" fn mouse_isr(_frame: idt::InterruptStackFrame) {
 
     let want = if unsafe { *WHEEL.get() } { 4 } else { 3 };
     if *phase < want {
-        lapic::eoi();
         return;
     }
     *phase = 0;
+    PACKETS.fetch_add(1, Relaxed);
 
     let flags = buf[0];
     // Overflow means the counter saturated between packets. The delta is
@@ -361,8 +439,5 @@ extern "x86-interrupt" fn mouse_isr(_frame: idt::InterruptStackFrame) {
     }
 
     apply(dx, dy, flags & 0x01 != 0, flags & 0x02 != 0, wheel);
-    lapic::eoi();
-    // After the EOI, as the timer does: the switch may not come back for a
-    // while and the controller must not be left waiting on this vector.
-    crate::gfx::render::preempt_for_input();
 }
+
