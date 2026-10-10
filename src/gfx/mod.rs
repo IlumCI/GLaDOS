@@ -16,6 +16,7 @@ pub mod grad;
 pub mod shadow;
 pub mod glass;
 pub mod scale;
+pub mod wall;
 pub mod text;
 
 /// The time a frame is about, in milliseconds since boot (TSC), taken once

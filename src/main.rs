@@ -1801,8 +1801,12 @@ fn check_heap() -> bool {
     kprintln!("\n[selftest] heap:");
     console::set_color(LTGRAY_IDX);
     let (before, _) = mem::heap::HEAP.stats();
-    {
-        use alloc::format;
+    // Nothing is printed inside the measured window. Printing scrolls the
+    // console, and since the terminal's grid moved to the heap (1.4.1) every
+    // row that scrolls off is a small allocation the history keeps -- so two
+    // lines printed in here read as a 480-byte "leak" that was the scrollback
+    // doing its job, on every boot, in red.
+    let (len, v255, v16, used, total) = {
         use alloc::vec::Vec;
 
         // Pushing past capacity repeatedly forces grow-realloc-free cycles,
@@ -1811,15 +1815,15 @@ fn check_heap() -> bool {
         for i in 0..256u64 {
             v.push(i * i);
         }
-        let s = format!("  vec len {}  v[255]={}  v[16]={}", v.len(), v[255], v[16]);
-        kprintln!("{}", s);
         let (used, total) = mem::heap::HEAP.stats();
-        kprintln!("  in use {} B of {} B", used, total);
-    }
+        (v.len(), v[255], v[16], used, total)
+    };
     // Everything above is dropped. If alloc and dealloc round sizes the same
     // way this is exactly the baseline; any other number is a per-allocation
     // leak, and the sign says which way.
     let (after, _) = mem::heap::HEAP.stats();
+    kprintln!("  vec len {}  v[255]={}  v[16]={}", len, v255, v16);
+    kprintln!("  in use {} B of {} B", used, total);
     let ok = after == before;
     console::set_color(if ok { LTGREEN } else { LTRED });
     if ok {

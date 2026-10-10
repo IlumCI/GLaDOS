@@ -340,6 +340,45 @@ pub fn aperture_with(
     }
 }
 
+/// How much of the pixel centred at `(dx, dy)` (relative to the centre) the
+/// mark of radius `r` covers, 0.0 to 1.0, anti-aliased.
+///
+/// The *same* geometry as `aperture_with`, from the same constants, as signed
+/// distances rather than triangles: the disc; the opening, whose edges are
+/// the lines along `BLADE_DIR` at the inner radius (that is what the polygon
+/// through `OPEN_DIR` is); and each cut, a strip tangent to the opening. One
+/// definition of the logo, two ways of rasterising it -- the triangles for the
+/// boot screen and icons, where it is small and flat, and this where it is
+/// large enough for a staircase to show, which is the wallpaper's sun. `diag
+/// splash` checks the two agree everywhere but on an edge.
+pub fn aperture_coverage(dx: f32, dy: f32, r: f32) -> f32 {
+    let cov = |d: f32| (0.5 - d).clamp(0.0, 1.0);
+    let rin = r * OPEN_PCT as f32 / 100.0;
+    let disc = cov(crate::gfx::shape::libm_sqrt(dx * dx + dy * dy) - r);
+    if disc == 0.0 {
+        return 0.0;
+    }
+    // Inside the opening is inside every edge line.
+    let mut open = f32::MIN;
+    for (ux, uy) in BLADE_DIR {
+        let (ux, uy) = (ux as f32 / 1000.0, uy as f32 / 1000.0);
+        open = open.max(dx * ux + dy * uy - rin);
+    }
+    let mut keep = 1.0 - cov(open);
+    let reach = crate::gfx::shape::libm_sqrt(r * r - rin * rin) * 1.06;
+    let half = (r * CUT_PCT as f32 / 1000.0).max(1.0);
+    for (ux, uy) in BLADE_DIR {
+        let (ux, uy) = (ux as f32 / 1000.0, uy as f32 / 1000.0);
+        let (ax, ay) = (ux * rin, uy * rin);
+        let (px, py) = (dx - ax, dy - ay);
+        let along = px * -uy + py * ux;
+        let across = px * ux + py * uy;
+        let d = (across.abs() - half).max(-along).max(along - reach);
+        keep = keep.min(1.0 - cov(d));
+    }
+    disc * keep
+}
+
 /// The order blades appear in: clockwise from just right of twelve o'clock.
 ///
 /// `OPEN_DIR` is indexed from three o'clock going clockwise, so this is that

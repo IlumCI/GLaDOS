@@ -1100,6 +1100,22 @@ pub fn init() {
         return;
     }
 
+    // Paint the wallpaper and blur its glass copy now, during boot, rather
+    // than in the first frame the compositor composes: together they are about
+    // half a second, which as a frame is the desktop appearing and then
+    // standing still. Through a surface clipped to nothing, so this builds the
+    // caches and writes no pixel.
+    //
+    // **Before the desktop exists, and that order is the fix rather than
+    // tidiness.** The compositor task is already running and composes the
+    // moment `DESK` is set; warmed any later, its first frame arrived
+    // mid-build, found the cache still empty and built a second copy at the
+    // same time -- two `&mut` into one `Racy` from two tasks, and half a
+    // second of frame anyway. Measured: two rebuilds, a 771 ms first frame.
+    if let Some(fb) = super::primary() {
+        wallpaper_cached(&fb.clipped(0, 0, 0, 0));
+    }
+
     // A clean desktop: nothing open. The wallpaper, the icon column and the
     // taskbar are the whole of it, and the operator opens what they want from
     // the sidebar -- the machine covers its own wall with nothing. This is the
@@ -4202,181 +4218,17 @@ fn wheel_at(x: i32, y: i32, notches: i32) {
     }
 }
 
-/// The wall: a flat field, a sparse grid, and the mark in the middle.
+/// The wallpaper: `gfx::wall`, an Aperture sun over rim-lit hills.
 ///
-/// The same `splash::aperture` the boot screen draws, not a second copy of the
-/// geometry -- five earlier attempts at that logo were wrong in five different
-/// ways, and the way to stop a sixth is for there to be exactly one of it.
-///
-/// Drawn dim. A wallpaper competing with the windows on it is a wallpaper
-/// nobody can work in front of, and the cut wedges have to be painted in the
-/// wall's own colour anyway, so the mark is a two-colour figure by
-/// construction.
-/// The wallpaper, into any surface: `video glass` paints it to show glass on
-/// the real thing.
+/// It replaced a gradient horizon ruled with a graticule, a dial, three
+/// Bresenham ellipses and seven bubbles around the mark -- the busy wall the
+/// 1.4.1 plan names among the reasons the desktop looked 1998.
 pub(crate) fn paint_wallpaper(fb: &Framebuffer) {
     wallpaper(fb);
 }
 
 fn wallpaper(fb: &Framebuffer) {
-    let (w, h) = (fb.width(), fb.height());
-    // A horizon rather than a fill. One `vgrad` is the same memset per row the
-    // flat colour was, so the sky costs nothing over what it replaced -- and
-    // it is what gives a drop shadow somewhere to land, which a near-black
-    // wall never did.
-    fb.vgrad(0, 0, w, h, &theme::WALL);
-
-    // Ruled, fine and heavy. The dot grid that used to be here was a fixed
-    // colour, which is subtle over one part of a gradient and dirt over the
-    // rest; these are a percentage of white, so they are equally faint over
-    // near-black water and over gold. Span fills, not lines: a graticule of
-    // rectangles is memsets where a lattice of diagonals would be Bresenham.
-    let mut x = 0;
-    while x < w {
-        let n = if x % theme::WALL_MAJOR == 0 { theme::WALL_MAJOR_NUM } else { theme::WALL_MINOR_NUM };
-        fb.tint_rect(x, 0, 1, h, theme::WALL_INK, n);
-        x += theme::WALL_MINOR;
-    }
-    let mut y = 0;
-    while y < h {
-        let n = if y % theme::WALL_MAJOR == 0 { theme::WALL_MAJOR_NUM } else { theme::WALL_MINOR_NUM };
-        fb.tint_rect(0, y, w, 1, theme::WALL_INK, n);
-        y += theme::WALL_MINOR;
-    }
-
-    let (cx, cy) = ((w / 2) as i32, (h / 2) as i32);
-    let r = (h / 5).min(w / 5) as i32;
-
-    // The dial, and graduations pointing outward from it. Drawn before the
-    // atom and before the bubbles, so it sits behind both.
-    let dial = r * theme::WALL_DIAL as i32 / 100;
-    fb.circle(cx, cy, dial, theme::WALL_ORBIT);
-    for i in 0..theme::WALL_TICKS {
-        let (sx, sy) = unit(i, theme::WALL_TICKS);
-        let long = i % 6 == 0;
-        let out = dial + if long { r / 9 } else { r / 22 };
-        fb.line(
-            cx + sx * dial / 1024,
-            cy + sy * dial / 1024,
-            cx + sx * out / 1024,
-            cy + sy * out / 1024,
-            theme::WALL_ORBIT,
-        );
-    }
-
-    // The atom: three ellipses through the same nucleus at even tilts, and an
-    // electron on each. The mark itself is the nucleus and is drawn last,
-    // unchanged -- it is already a ring with a filled centre, which is what
-    // the middle of one of these diagrams has always been.
-    let (a, b) = (
-        r * theme::WALL_ORBIT_A as i32 / 100,
-        r * theme::WALL_ORBIT_B as i32 / 100,
-    );
-    let tilts = theme::WALL_ORBIT_TILTS;
-    for t in 0..tilts {
-        ellipse(fb, cx, cy, a, b, t, tilts * 2, theme::WALL_ORBIT);
-        let (px, py) = on_ellipse(cx, cy, a, b, t, tilts * 2, theme::WALL_ELECTRONS[t as usize]);
-        fb.fill_circle(px, py, (r / 20).max(3), theme::WALL_RIM);
-        fb.fill_circle(px - r / 60, py - r / 60, (r / 60).max(1), theme::WALL_SPEC);
-    }
-
-    // Light on it. A bubble is a wash rather than a fill, so the sky and the
-    // ruling both carry on through it -- which is the whole difference
-    // between glass and a dot.
-    for (bx, by, br) in theme::WALL_BUBBLES {
-        bubble(
-            fb,
-            (w * bx / 100) as i32,
-            (h * by / 100) as i32,
-            (h * br / 100).max(4) as i32,
-        );
-    }
-
-    // Filled blades, and the gaps between them filled with the sky that would
-    // have been there. Which is to say the gaps are the sky: a cut here takes
-    // its colour from the same ramp the wall was drawn from, row by row, so
-    // there is nothing standing in for the background because it is the
-    // background.
-    super::splash::aperture_with(
-        fb,
-        cx,
-        cy,
-        r,
-        super::splash::Face::Ramp(&theme::SUN),
-        super::splash::Cut::Sky { stops: &theme::WALL, top: 0, height: h },
-    );
-}
-
-/// A point on the unit circle, scaled by 1024, for step `i` of `n`.
-///
-/// Integer, and derived from one eighth of a turn by symmetry rather than
-/// from a table of `n` entries, so changing the graduation count needs no
-/// second table to keep in step with it.
-fn unit(i: u32, n: u32) -> (i32, i32) {
-    // 1024 * sin(k * pi / 32) for k in 0..=16: a quarter turn, and every other
-    // angle is one of these with a sign or the pair swapped.
-    const Q: [i32; 17] = [
-        0, 100, 200, 297, 391, 483, 569, 650, 724, 792, 851, 903, 946, 979, 1004, 1019, 1024,
-    ];
-    let step = (i * 64 / n.max(1)) % 64;
-    let (quad, k) = (step / 16, (step % 16) as usize);
-    let (s, c) = (Q[k], Q[16 - k]);
-    match quad {
-        0 => (c, s),
-        1 => (-s, c),
-        2 => (-c, -s),
-        _ => (s, -c),
-    }
-}
-
-/// One point of a tilted ellipse, scaled and rotated in integers.
-fn on_ellipse(cx: i32, cy: i32, a: i32, b: i32, ti: u32, tn: u32, i: u32) -> (i32, i32) {
-    let (tc, ts) = unit(ti, tn);
-    let (c, s) = unit(i, 64);
-    let (ex, ey) = (a * c / 1024, b * s / 1024);
-    (
-        cx + (ex * tc - ey * ts) / 1024,
-        cy + (ex * ts + ey * tc) / 1024,
-    )
-}
-
-/// A tilted ellipse, as sixty-four chords.
-///
-/// Sixty-four because that is the resolution of `unit`'s table, and it is
-/// already more than enough: on the largest orbit here the chord is about
-/// thirty pixels and its sagitta is under half of one, so the curve is smooth
-/// before it is drawn rather than by being subdivided until it looks it.
-fn ellipse(fb: &Framebuffer, cx: i32, cy: i32, a: i32, b: i32, ti: u32, tn: u32, col: Color) {
-    let mut prev = on_ellipse(cx, cy, a, b, ti, tn, 0);
-    for i in 1..=64 {
-        let p = on_ellipse(cx, cy, a, b, ti, tn, i % 64);
-        fb.line(prev.0, prev.1, p.0, p.1, col);
-        prev = p;
-    }
-}
-
-/// One glass bubble: a wash, a rim, and a specular.
-fn bubble(fb: &Framebuffer, cx: i32, cy: i32, r: i32) {
-    for dy in -r..=r {
-        let half = super::isqrt((r * r - dy * dy).max(0) as u32) as i32;
-        let y = cy + dy;
-        let x0 = (cx - half).max(0);
-        let x1 = cx + half;
-        if y < 0 || x1 <= x0 {
-            continue;
-        }
-        fb.tint_span(
-            x0 as u32,
-            y as u32,
-            (x1 - x0) as u32,
-            theme::WALL_INK,
-            theme::WALL_BUBBLE_NUM,
-        );
-    }
-    fb.circle(cx, cy, r, theme::WALL_RIM);
-    // Up and to the left, which is where every light source in this interface
-    // already is -- the bevel says so and so does the gloss on every ramp.
-    fb.fill_circle(cx - r / 3, cy - r / 3, (r / 6).max(1), theme::WALL_SPEC);
+    super::wall::paint(fb);
 }
 
 /// Buttons on the bar, one per window, in stacking order: the window's

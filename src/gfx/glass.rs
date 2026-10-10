@@ -81,12 +81,8 @@ pub fn set_backdrop(px: &[u32], w: u32, h: u32, sigma: f32) -> u64 {
     (crate::time::rdtsc() - t0) / mhz / 1000
 }
 
-pub fn has_backdrop() -> bool {
-    BACKDROP.lock_irq().is_some()
-}
-
 /// Box widths for `n` boxes whose sum of variances is `sigma^2`.
-fn box_sizes(sigma: f32, n: usize) -> Vec<usize> {
+pub(crate) fn box_sizes(sigma: f32, n: usize) -> Vec<usize> {
     let ideal = crate::ai::tensor::sqrtf(12.0 * sigma * sigma / n as f32 + 1.0);
     let mut wl = ideal as usize;
     if wl % 2 == 0 {
