@@ -3775,6 +3775,19 @@ fn tile_sync(d: &mut Desktop, area: Rect) {
     }
 }
 
+/// A progress fixed to a 4096th, which is what every stamp of a moving
+/// layer records.
+///
+/// **The stamp and the painter must read the same number.** They read the
+/// unrounded one at first and `render verify` found the gap: a ring fading
+/// up by less than a 4096th left the stamp where it was, so nothing was
+/// repainted -- and still moved one glow pixel's rounding by one, which the
+/// reference frame, painting at the new value, drew differently. Rounded
+/// once, here, a change too small to damage anything is too small to draw.
+fn q4096(x: f32) -> f32 {
+    ((x.clamp(0.0, 1.0) * 4096.0 + 0.5) as u32) as f32 / 4096.0
+}
+
 /// `a` toward `b` by `t`, exactly `b` at 1.
 fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
     if t >= 1.0 {
@@ -3890,6 +3903,14 @@ pub fn anim_step() {
     let g = unsafe { &mut *GHOSTS.get() };
     g.retain(|gh| !all && !(gh.out.0.done(now) && gh.out.1.done(now)));
     moving |= !g.is_empty();
+    let ring = unsafe { &mut *FOCUS_RING.get() };
+    if let Some(t) = ring.1 {
+        if all || t.done(now) {
+            ring.1 = None;
+        } else {
+            moving = true;
+        }
+    }
     ANIMATING.store(moving, core::sync::atomic::Ordering::Relaxed);
     // One more frame after the last tween ends, which is the one that draws
     // the window plainly or clears the last of a ghost.
@@ -4598,7 +4619,10 @@ pub fn draw() {
     let whole = Rect::new(0, 0, real.width(), real.height());
     let mut damage = super::region::Region::new();
     super::frame_clock(true);
-    with(|d| tile_sync(d, tile_area(&real)));
+    with(|d| {
+        tile_sync(d, tile_area(&real));
+        track_focus(d);
+    });
     with_ref(|d| {
         let next = layers(d, &real, screen);
         let prev = unsafe { &mut *PREV.get() };
@@ -4916,12 +4940,17 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
             win.arrive
                 .map(|t| {
                     let (k, o) = arrival_at(t, now);
-                    (scaled(frame, k), o)
+                    (scaled(frame, k), q4096(o))
                 })
                 .or_else(|| win.slide.map(|(from, t)| (lerp_rect(from, frame, t.at(now)), 1.0))),
         );
         if let Some((r, o)) = win.shown.get() {
             stamp = Stamp::of((stamp, r, (o * 4096.0) as u32));
+        }
+        if active {
+            let ring = unsafe { &mut *FOCUS_RING.get() };
+            ring.2 = q4096(ring.1.map_or(1.0, |t| t.at(now)));
+            stamp = Stamp::of((stamp, (ring.2 * 4096.0) as u32));
         }
         if let Some((from, _)) = win.slide {
             let b = shadowed(win, from, active, fb);
@@ -4943,6 +4972,7 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
     // Windows on their way out, over the windows and under the popups.
     for gh in unsafe { (*GHOSTS.get()).iter() } {
         let (k, o) = departure_at(gh.out, now);
+        let (k, o) = (q4096(k), q4096(o));
         gh.shown.set((k, o));
         out.push(Layer {
             id: LayerId::Ghost(gh.serial),
@@ -5054,6 +5084,15 @@ static VERIFY_BAD: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64
 static VERIFY_CONSOLE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static VERIFY_RUNS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static VERIFY_FIRST: Racy<Option<Rect>> = Racy::new(None);
+/// The first differing pixel of the first bad frame: where, what the frame
+/// had and what the reference had. A bounding box says where to look; two
+/// values say what is wrong -- a missing blend, a stale frame, a dim applied
+/// twice -- which a box never can.
+static VERIFY_PIXEL: Racy<Option<(u32, u32, u32, u32)>> = Racy::new(None);
+
+pub fn verify_pixel() -> Option<(u32, u32, u32, u32)> {
+    unsafe { *VERIFY_PIXEL.get() }
+}
 
 /// The verifier's reference frame. Written only under the paint claim.
 static VERIFY_BUF: Racy<Vec<u32>> = Racy::new(Vec::new());
@@ -5087,6 +5126,7 @@ pub fn set_verify(on: bool) {
         VERIFY_CONSOLE.store(0, core::sync::atomic::Ordering::Relaxed);
         VERIFY_RUNS.store(0, core::sync::atomic::Ordering::Relaxed);
         unsafe { *VERIFY_FIRST.get() = None };
+        unsafe { *VERIFY_PIXEL.get() = None };
     }
 }
 
@@ -5154,6 +5194,10 @@ fn verify_frame(back: &Framebuffer, d: &Desktop, screen: Rect) {
                 continue;
             }
             if a != px[(y * w + x) as usize] {
+                let pix = unsafe { &mut *VERIFY_PIXEL.get() };
+                if pix.is_none() {
+                    *pix = Some((x, y, a, px[(y * w + x) as usize]));
+                }
                 bad = Some(match bad {
                     None => Rect::new(x, y, 1, 1),
                     Some(r) => {
@@ -5209,6 +5253,123 @@ pub fn image_stats() -> (u64, u64, usize) {
         IMAGE_PART.load(core::sync::atomic::Ordering::Relaxed),
         held,
     )
+}
+
+/// How much an unfocused window is dimmed, of 256: Hyprland's
+/// `dim_inactive`, kept light -- the cue is which window is nearest the eye,
+/// and the others still have to be read.
+const DIM: u32 = 228;
+
+/// The focused window's ring: how wide it is, and how far its glow reaches.
+const RING_W: f32 = 2.0;
+const GLOW: f32 = 10.0;
+
+/// Which window the ring is on and how far it has faded up (Hyprland's
+/// `border`, 539 ms easeOutQuint), and this frame's opacity of it, fixed by
+/// `layers` as a window's position is.
+static FOCUS_RING: Racy<(u64, Option<super::anim::Tween>, f32)> = Racy::new((0, None, 1.0));
+
+/// Notice focus moving to a different window and fade the ring up on it.
+fn track_focus(d: &Desktop) {
+    let now = d.focus().map_or(0, |f| d.windows[f].serial);
+    let ring = unsafe { &mut *FOCUS_RING.get() };
+    if ring.0 != now {
+        ring.0 = now;
+        if super::render::enabled() {
+            use super::anim::{Curve, Tween};
+            ring.1 = Some(Tween::new(539, Curve::EaseOutQuint));
+            ANIMATING.store(true, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// Signed distance from a point to a window's outline -- square at the
+/// foot, corners of radius `r` at the head, as `Shape::round_top` cuts it.
+fn sd_frame(px: f32, py: f32, f: Rect, r: f32) -> f32 {
+    let (x0, y0, x1, y1) = (f.x as f32, f.y as f32, (f.x + f.w) as f32, (f.y + f.h) as f32);
+    if r > 0.0 && py < y0 + r {
+        let corner = |cx: f32| {
+            let (dx, dy) = (px - cx, py - (y0 + r));
+            super::shape::libm_sqrt(dx * dx + dy * dy) - r
+        };
+        if px < x0 + r {
+            return corner(x0 + r);
+        }
+        if px > x1 - r {
+            return corner(x1 - r);
+        }
+    }
+    (x0 - px).max(px - x1).max(y0 - py).max(py - y1)
+}
+
+/// The focused window's border: a thin ring just inside its outline, in a
+/// 45-degree ramp from Aperture orange to gold -- Hyprland's gradient
+/// border, in the accent the Look keeps for focus -- with a soft warm glow
+/// outside it. `glow` is false where there is nothing outside to glow on.
+fn focus_ring(fb: &Framebuffer, frame: Rect, round: u32, alpha: f32, glow: bool) {
+    if alpha <= 0.0 || frame.w < 8 || frame.h < 8 {
+        return;
+    }
+    let r = round as f32;
+    let reach = if glow { GLOW as u32 } else { 0 };
+    let x0 = frame.x.saturating_sub(reach);
+    let x1 = frame.x + frame.w + reach;
+    let (sx0, sy0, sx1, sy1) = fb.scissor();
+    let y0 = frame.y.saturating_sub(reach).max(sy0);
+    let y1 = (frame.y + frame.h + reach).min(sy1);
+    let band = round + RING_W as u32 + 2;
+    let (a, b) = (theme::APERTURE, Color::new(0xFF, 0xC8, 0x5A));
+    let span = (frame.w + frame.h).max(1) as f32;
+    let mut row: Vec<u32> = Vec::new();
+    let cov = |t: f32| (0.5 - t).clamp(0.0, 1.0);
+    let mut paint = |y: u32, xa: u32, xb: u32, row: &mut Vec<u32>| {
+        let (xa, xb) = (xa.max(sx0), xb.min(sx1));
+        if xa >= xb {
+            return;
+        }
+        row.clear();
+        let py = y as f32 + 0.5;
+        for x in xa..xb {
+            let d = sd_frame(x as f32 + 0.5, py, frame, r);
+            let ring = cov(d) - cov(d + RING_W);
+            let g = if glow && d > 0.0 { let k = (1.0 - d / GLOW).max(0.0); 0.30 * k * k } else { 0.0 };
+            let k = ring.max(g) * alpha;
+            if k <= 0.0 {
+                row.push(0);
+                continue;
+            }
+            let t = (((x as f32 - frame.x as f32) + (py - frame.y as f32)) / span).clamp(0.0, 1.0);
+            let mix = |p: u8, q: u8| (p as f32 + (q as f32 - p as f32) * t + 0.5) as u8;
+            let raw = fb.encode(Color::new(mix(a.r, b.r), mix(a.g, b.g), mix(a.b, b.b)));
+            row.push(super::blend::premul(raw, (k * 255.0 + 0.5) as u8));
+        }
+        fb.over_row(xa, y, row);
+    };
+    for y in y0..y1 {
+        let near_edge = y < frame.y + band || y + RING_W as u32 + 2 >= frame.y + frame.h;
+        if near_edge {
+            paint(y, x0, x1, &mut row);
+        } else {
+            // Between the head and the foot only the two sides carry a ring.
+            paint(y, x0, frame.x + RING_W as u32 + 2, &mut row);
+            paint(y, (frame.x + frame.w).saturating_sub(RING_W as u32 + 2), x1, &mut row);
+        }
+    }
+}
+
+/// An unfocused window, dimmed where it shows.
+fn dim_window(fb: &Framebuffer, win: &Window, frame: Rect) {
+    with_window_shape(fb, win, frame, || {
+        let (x0, y0, x1, y1) = fb.scissor();
+        let xa = x0.max(frame.x);
+        let xb = x1.min(frame.x + frame.w);
+        if xa >= xb {
+            return;
+        }
+        for y in y0.max(frame.y)..y1.min(frame.y + frame.h) {
+            fb.shade_span(xa, y, xb - xa, DIM);
+        }
+    });
 }
 
 /// A terminal's grid, over whatever the window under it was painted from.
@@ -5465,6 +5626,13 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
                 with_window_shape(&fb, win, frame, || paint_window_body(&fb, d, i, win, frame, active, hot));
             }
             with_window_shape(&fb, win, frame, || console_over(&fb, win));
+            if active {
+                let maxed = win.state == WinState::Maximised;
+                let alpha = unsafe { (*FOCUS_RING.get()).2 };
+                focus_ring(&fb, frame, if maxed { 0 } else { win.round }, alpha, !maxed);
+            } else {
+                dim_window(&fb, win, frame);
+            }
         }
 
         // Over the windows, because the bar is drawn under them and a tip

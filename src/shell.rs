@@ -2932,6 +2932,9 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 if let Some(r) = first {
                     console::set_color(LTRED);
                     kprintln!("  the first difference was inside {}x{} at ({}, {})", r.w, r.h, r.x, r.y);
+                    if let Some((x, y, got, want)) = crate::gfx::desk::verify_pixel() {
+                        kprintln!("  first pixel ({}, {}): frame {:08x}, reference {:08x}", x, y, got, want);
+                    }
                     console::set_color(LTGRAY);
                 }
                 return;
