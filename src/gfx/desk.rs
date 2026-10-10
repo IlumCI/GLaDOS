@@ -708,7 +708,9 @@ fn start_rect(fb: &Framebuffer) -> Rect {
     // does. A button inset from the corner gives away the pixels Fitts' law
     // makes the most valuable on the screen: the corner is infinitely large to
     // a pointer and a three-pixel margin throws that away.
-    Rect::new(bar.x, bar.y + 1, theme::text_w(6) + 34, bar.h.saturating_sub(2))
+    // The orb's own diameter plus a margin, still from the very corner.
+    let n = bar.h.saturating_sub(2);
+    Rect::new(bar.x, bar.y + 1, n + 12, n)
 }
 
 /// Where the Start menu pops, directly above its button. The width formula is
@@ -4132,20 +4134,22 @@ fn taskbar(fb: &Framebuffer, d: &Desktop, sel: Option<usize>) {
     fb.glass(bar.x, bar.y, bar.w, bar.h / 2, theme::GLOSS, &theme::GLOSS_STOPS);
     fb.rect(bar.x, bar.y, bar.w, 1, theme::TASK_EDGE);
 
-    // The Start button: the mark and the name. Held down while its menu is
-    // open, which is the one place the bar states a mode rather than a focus.
+    // The Start orb: Vista's, with the Aperture mark lit in it where Vista
+    // had its flag. It replaced a green Luna pill with the name on it and a
+    // ring round a dot for a mark, which is what the mark had to be when
+    // nothing here could draw a curve. Lit while its menu is open, which is
+    // the one place the bar states a mode rather than a focus.
     let s = start_rect(fb);
     let start_open = matches!(d.mode, Mode::Start { .. });
     let lit = start_open || d.hover == Hover::Start;
-    theme::control(
+    let n = s.h;
+    super::icons::lay(
         fb,
-        s,
-        if lit { &theme::START_HOT } else { &theme::START },
-        theme::START_EDGE,
+        if lit { super::icons::ORB_HOT } else { super::icons::ORB },
+        s.x + (s.w - n) / 2,
+        s.y,
+        n,
     );
-    theme::aperture_dot(fb, s.x + 15, s.y + s.h / 2, (s.h / 2) as i32 - 5);
-    let ty = s.y + (s.h.saturating_sub(theme::text_h())) / 2;
-    theme::text_over(fb, s.x + 30, ty, "GLaDOS", theme::START_TEXT);
 
     for (i, (r, icon, pressed)) in task_layout(fb, d).into_iter().enumerate() {
         // Keyboard selection and pointer hover draw the same way: both are "the

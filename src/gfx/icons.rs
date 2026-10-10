@@ -30,7 +30,16 @@ pub const WRITE: usize = 6;
 pub const MINES: usize = 7;
 pub const ORACLE: usize = 8;
 pub const SETTINGS: usize = 9;
-pub const COUNT: usize = 10;
+/// The Start orb, at rest and under the pointer: a sphere of dark glass with
+/// the Aperture mark lit inside it -- Vista's orb, carrying this machine's
+/// mark where Vista carried its flag.
+pub const ORB: usize = 10;
+pub const ORB_HOT: usize = 11;
+/// The mark alone, for a caption: light for the focused window's glass and
+/// dark for the pale glass of the others, as the title text beside it is.
+pub const MARK: usize = 12;
+pub const MARK_IDLE: usize = 13;
+pub const COUNT: usize = 14;
 
 type Rgba = [f32; 4];
 
@@ -258,6 +267,55 @@ fn draw(kind: usize, n: usize) -> Vec<u32> {
             let pupil = |x: f32, y: f32| circle(x, y, 24.0, 24.0, 3.8);
             cv.fill(&pupil, c(20, 18, 16), c(20, 18, 16), 20.0, 28.0, 1.0);
             cv.fill(&|x, y| circle(x, y, 21.0, 21.0, 1.8), [255.0, 255.0, 255.0, 230.0], [255.0, 255.0, 255.0, 230.0], 19.0, 23.0, 1.0);
+        }
+        ORB | ORB_HOT => {
+            let hot = kind == ORB_HOT;
+            let sphere = |x: f32, y: f32| circle(x, y, 24.0, 24.0, 22.0);
+            cv.shadow(&sphere, 1.5, 1.5, 0.5);
+            // Dark glass, deepest at the foot, as a sphere lit from above is.
+            if hot {
+                cv.fill(&sphere, c(58, 96, 150), c(14, 30, 58), 2.0, 46.0, 1.0);
+            } else {
+                cv.fill(&sphere, c(40, 66, 108), c(8, 16, 34), 2.0, 46.0, 1.0);
+            }
+            // The light that comes up through the bottom of Vista's orb:
+            // a glow inside the sphere's lower half, strongest at the rim.
+            let foot = |x: f32, y: f32| sphere(x, y).max(ellipse(x, y, 24.0, 40.0, 19.0, 12.0));
+            let glow = if hot { [120.0, 210.0, 255.0, 190.0] } else { [80.0, 170.0, 240.0, 130.0] };
+            cv.fill(&foot, [glow[0], glow[1], glow[2], 0.0], glow, 26.0, 46.0, 1.0);
+            // The mark, through the one geometry for it, asked in pixels.
+            let k = cv.k;
+            let mark = move |x: f32, y: f32| {
+                let cov = super::splash::aperture_coverage((x - 24.0) * k, (y - 24.0) * k, 14.5 * k);
+                (0.5 - cov) / k
+            };
+            if hot {
+                cv.fill(&mark, c(255, 240, 180), c(255, 140, 50), 9.0, 39.0, 1.0);
+            } else {
+                cv.fill(&mark, c(255, 222, 120), c(240, 96, 30), 9.0, 39.0, 1.0);
+            }
+            // The reflection: a bright cap over the top half, and a rim of
+            // light all the way round where the glass turns away.
+            let cap = |x: f32, y: f32| sphere(x, y).max(ellipse(x, y, 24.0, 14.0, 17.0, 11.0));
+            cv.fill(&cap, [255.0, 255.0, 255.0, 150.0], GLOSS_BOT, 3.0, 24.0, 1.0);
+            let rim = |x: f32, y: f32| sphere(x, y).abs() - 0.7;
+            cv.fill(&rim, [210.0, 230.0, 255.0, 170.0], [120.0, 190.0, 255.0, 120.0], 2.0, 46.0, 1.0);
+        }
+        MARK | MARK_IDLE => {
+            let k = cv.k;
+            let mark = move |x: f32, y: f32| {
+                let cov = super::splash::aperture_coverage((x - 24.0) * k, (y - 24.0) * k, 21.0 * k);
+                (0.5 - cov) / k
+            };
+            if kind == MARK {
+                // From the disc, not from `mark`: a distance rebuilt from
+                // coverage is the same half-unit everywhere outside the logo,
+                // so a shadow cast from it darkens the whole square.
+                cv.shadow(&|x, y| circle(x, y, 24.0, 24.0, 21.0), 1.5, 1.5, 0.35);
+                cv.fill(&mark, c(255, 255, 255), c(222, 232, 246), 3.0, 45.0, 1.0);
+            } else {
+                cv.fill(&mark, c(70, 92, 108), c(40, 60, 74), 3.0, 45.0, 1.0);
+            }
         }
         _ => {
             // Settings: a gear, machined, with an orange hub.

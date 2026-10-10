@@ -277,8 +277,8 @@ pub const STATUS_BAR: [(u8, Color); 3] = [
     (255, Color::new(0x05, 0x1F, 0x2D)),
 ];
 
-/// Start. Green in every real XP scheme, including the blue one, which is why
-/// it stays green here rather than following the accent.
+/// The green of an OK button: XP's Start green, kept for the one control that
+/// says yes since the Start button became an orb.
 pub const START: [(u8, Color); 7] = [
     (0, Color::new(0xD6, 0xF0, 0xA8)),
     (10, Color::new(0x9A, 0xDB, 0x62)),
@@ -288,17 +288,7 @@ pub const START: [(u8, Color); 7] = [
     (240, Color::new(0x3C, 0x84, 0x18)),
     (255, Color::new(0x6F, 0xBE, 0x3A)),
 ];
-pub const START_HOT: [(u8, Color); 7] = [
-    (0, Color::new(0xEC, 0xFB, 0xD2)),
-    (10, Color::new(0xBC, 0xEE, 0x8C)),
-    (120, Color::new(0x82, 0xCE, 0x50)),
-    (128, Color::new(0x6A, 0xB8, 0x3A)),
-    (129, Color::new(0x46, 0x90, 0x22)),
-    (240, Color::new(0x54, 0xA4, 0x28)),
-    (255, Color::new(0x8E, 0xD8, 0x56)),
-];
 pub const START_EDGE: Color = Color::new(0x8E, 0xD4, 0x6A);
-pub const START_TEXT: Color = Color::new(0xFF, 0xFF, 0xFF);
 
 /// A popup menu. White with a face-coloured gutter down its left and one
 /// border, which is what every Windows menu has been since XP.
@@ -584,20 +574,6 @@ pub fn tail_chars(s: &str, n: usize) -> &str {
     }
 }
 
-/// The Aperture mark, small enough for a title bar.
-///
-/// Not the full boot logo: at this size the six-slash aperture turns to mush,
-/// so this is the ring and the hexagonal opening only, which is what stays
-/// legible when it is sixteen pixels across.
-fn mark(fb: &Framebuffer, cx: i32, cy: i32, r: i32, fg: Color) {
-    if r < 3 {
-        return;
-    }
-    fb.circle_thick(cx, cy, r, 2, fg);
-    let inner = (r * 45 / 100).max(2);
-    fb.fill_circle(cx, cy, inner, fg);
-}
-
 /// Where every part of a window is.
 ///
 /// One formula, and it lives here rather than in `desk` because
@@ -809,7 +785,12 @@ pub fn title_bar(
 
     let pad = 6;
     let cy = r.y + r.h / 2;
-    mark(fb, (r.x + pad + 8) as i32, cy as i32, (r.h as i32 / 2) - 4, TITLE_TEXT);
+    // The Aperture mark itself, where this used to be a ring round a dot --
+    // which is what the mark became at sixteen pixels with no anti-aliasing,
+    // and stopped needing to be once the icons could draw it.
+    let n = 22u32.min(r.h.saturating_sub(4));
+    let kind = if active { super::icons::MARK } else { super::icons::MARK_IDLE };
+    super::icons::lay(fb, kind, (r.x + pad + 8).saturating_sub(n / 2), cy.saturating_sub(n / 2), n);
 
     let tx = r.x + pad + 22;
     let ty = r.y + (r.h - font::GLYPH_H * CHROME_SCALE) / 2;
@@ -1078,16 +1059,6 @@ pub fn separator_v(fb: &Framebuffer, x: u32, y: u32, h: u32) {
 // and inks that were here served the rectangle-and-frame drawings they
 // replaced.
 
-/// The Aperture mark at button size, on a raised face.
-///
-/// Small enough that the six blades are mush, so this is the ring and the
-/// opening -- the same reduction `mark` makes for a title bar, exposed because
-/// the app bar wants it too.
-/// White, not `APERTURE_DEEP`. Its one caller is the Start button, which is
-/// green now, and a deep orange on that green reads as mud.
-pub fn aperture_dot(fb: &Framebuffer, cx: u32, cy: u32, r: i32) {
-    mark(fb, cx as i32, cy as i32, r.max(3), HILIGHT);
-}
 
 // --- dashboard painters ---------------------------------------------------
 //
