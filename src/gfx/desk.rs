@@ -3390,6 +3390,11 @@ pub fn tile_focused(t: Tile) -> bool {
         w.snap_back = w.snap_back.or(Some(w.rect));
         w.state = WinState::Normal;
         w.rect = tile_rect(t, screen);
+        // Placed by hand is floating, as a drag is: left in the dwindle
+        // tree, the next frame's `tile_sync` put it straight back where the
+        // tree said, and `win tile right` answered "tiled right" about a
+        // window that had not moved.
+        w.tiled = false;
         true
     })
     .unwrap_or(false);
@@ -3421,6 +3426,7 @@ pub fn tile_all() -> usize {
             w.snap_back = w.snap_back.or(Some(w.rect));
             w.state = WinState::Normal;
             w.rect = tile_rect(ORDER[slot], screen);
+            w.tiled = false;
         }
         idx.len()
     })
