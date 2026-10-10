@@ -80,6 +80,15 @@ impl Mips {
     /// a thumbnail has halved the chain down to a few dozen pixels the last
     /// level is the wrong answer for anything larger -- the first version
     /// returned it, and a pop-in at 39% was upscaled from a 120-pixel copy.
+    /// The level `level_for` would answer, without building anything: for a
+    /// caller holding several chains at once, which can borrow them all
+    /// immutably once each has been built.
+    pub fn built_for(&self, w: u32, h: u32) -> &Image {
+        let (w, h) = (w.max(1), h.max(1));
+        let i = self.levels.iter().rposition(|l| l.w >= w && l.h >= h).unwrap_or(0);
+        &self.levels[i]
+    }
+
     pub fn level_for(&mut self, w: u32, h: u32) -> &Image {
         let (w, h) = (w.max(1), h.max(1));
         loop {
@@ -102,41 +111,98 @@ pub fn draw(fb: &Framebuffer, img: &Image, x: i32, y: i32, w: u32, h: u32, opaci
     if w == 0 || h == 0 || img.w == 0 || img.h == 0 || opacity == 0 {
         return;
     }
+    // Only what the surface will take: the destination rows and columns
+    // inside the scissor. Every pixel is a function of its own position, so
+    // the clipped part is exactly what the whole would have put there.
+    let (cx0, cy0, cx1, cy1) = fb.scissor();
+    let dx0 = (cx0 as i64 - x as i64).clamp(0, w as i64) as u32;
+    let dx1 = (cx1 as i64 - x as i64).clamp(0, w as i64) as u32;
+    let dy0 = (cy0 as i64 - y as i64).clamp(0, h as i64) as u32;
+    let dy1 = (cy1 as i64 - y as i64).clamp(0, h as i64) as u32;
+    if dx0 >= dx1 || dy0 >= dy1 {
+        return;
+    }
     // Source position of a destination pixel's centre, in 16.16:
     // u = (dx + 0.5) * sw / dw - 0.5. Stepped by addition across a row.
     let step_x = ((img.w as u64) << 16) / w as u64;
     let step_y = ((img.h as u64) << 16) / h as u64;
-    let start_x = (step_x as i64 / 2) - (1 << 15);
-    let start_y = (step_y as i64 / 2) - (1 << 15);
-    let mut row: Vec<u32> = alloc::vec![0; w as usize];
+    let job = Job {
+        fb: *fb,
+        img: img as *const Image,
+        x,
+        y,
+        dx0,
+        dx1,
+        dy0,
+        step_x: step_x as i64,
+        step_y: step_y as i64,
+        start_x: (step_x as i64 / 2) - (1 << 15),
+        start_y: (step_y as i64 / 2) - (1 << 15),
+        opacity: opacity as u32,
+    };
+    // Across every core: a window popping in or sliding is a million pixels
+    // of bilinear a frame at this screen's size, and one core spent most of
+    // a frame's budget on it.
+    let rows = (dy1 - dy0) as usize;
+    let ctx = &job as *const Job as usize;
+    if !crate::smp::parallel_split(ctx, rows_of, rows, (dx1 - dx0) as usize) {
+        unsafe { rows_of(ctx, 0, rows) };
+    }
+}
+
+/// One `draw`, by pointer, for `smp::parallel_split`; it outlives the call
+/// because the call does not return until every chunk has run.
+#[derive(Clone, Copy)]
+struct Job {
+    fb: Framebuffer,
+    img: *const Image,
+    x: i32,
+    y: i32,
+    dx0: u32,
+    dx1: u32,
+    dy0: u32,
+    step_x: i64,
+    step_y: i64,
+    start_x: i64,
+    start_y: i64,
+    opacity: u32,
+}
+
+/// Destination rows `lo..hi`, counted from the first visible one.
+unsafe fn rows_of(ctx: usize, lo: usize, hi: usize) {
+    let j = unsafe { *(ctx as *const Job) };
+    let img = unsafe { &*j.img };
     let (sw, sh) = (img.w as i64, img.h as i64);
-    for dy in 0..h {
-        let sy = y + dy as i32;
-        if sy < 0 || sy >= fb.height() as i32 {
+    let mut row: Vec<u32> = alloc::vec![0; (j.dx1 - j.dx0) as usize];
+    for r in lo..hi {
+        let dy = j.dy0 + r as u32;
+        let sy = j.y + dy as i32;
+        if sy < 0 || sy >= j.fb.height() as i32 {
             continue;
         }
-        let v = start_y + dy as i64 * step_y as i64;
+        let v = j.start_y + dy as i64 * j.step_y;
         let (v0, fy) = split(v, sh);
         let v1 = (v0 + 1).min(sh - 1);
         let r0 = &img.px[(v0 * sw) as usize..((v0 + 1) * sw) as usize];
         let r1 = &img.px[(v1 * sw) as usize..((v1 + 1) * sw) as usize];
-        let mut u = start_x;
+        let mut u = j.start_x + j.dx0 as i64 * j.step_x;
         for p in row.iter_mut() {
             let (u0, fx) = split(u, sw);
             let u1 = (u0 + 1).min(sw - 1);
             let top = lerp(r0[u0 as usize], r0[u1 as usize], fx);
             let bot = lerp(r1[u0 as usize], r1[u1 as usize], fx);
             *p = lerp(top, bot, fy);
-            u += step_x as i64;
+            u += j.step_x;
         }
-        if opacity != 255 {
+        if j.opacity != 255 {
             for p in row.iter_mut() {
-                *p = super::blend::scale_px(*p, opacity as u32);
+                *p = super::blend::scale_px(*p, j.opacity);
             }
         }
-        let skip = (-x).max(0) as usize;
+        let left = j.x + j.dx0 as i32;
+        let skip = (-left).max(0) as usize;
         if skip < row.len() {
-            fb.over_row((x + skip as i32) as u32, sy as u32, &row[skip..]);
+            j.fb.over_row((left + skip as i32) as u32, sy as u32, &row[skip..]);
         }
     }
 }
@@ -154,19 +220,19 @@ fn split(v: i64, len: i64) -> (i64, u32) {
     (i, ((v >> 8) & 0xff) as u32)
 }
 
-/// Each byte lane of `a` toward `b` by `f`/256, exactly at the ends.
+/// Each byte lane of `a` toward `b` by `f`/256, exactly at the ends: two
+/// lanes at a time, which is the same arithmetic per lane as one at a time
+/// -- each 16-bit half holds at most 255 * 256 + 128 -- and a quarter of the
+/// multiplies.
 #[inline]
 fn lerp(a: u32, b: u32, f: u32) -> u32 {
     if f == 0 {
         return a;
     }
-    let mut out = 0u32;
-    for lane in 0..4 {
-        let (x, y) = ((a >> (8 * lane)) & 0xff, (b >> (8 * lane)) & 0xff);
-        let v = (x * (256 - f) + y * f + 128) >> 8;
-        out |= v << (8 * lane);
-    }
-    out
+    let g = 256 - f;
+    let rb = (((a & 0x00FF_00FF) * g + (b & 0x00FF_00FF) * f + 0x0080_0080) >> 8) & 0x00FF_00FF;
+    let ag = (((a >> 8) & 0x00FF_00FF) * g + ((b >> 8) & 0x00FF_00FF) * f + 0x0080_0080) & 0xFF00_FF00;
+    rb | ag
 }
 
 /// Draw `img` at scale `k` with its top-left at `(x, y)`, picking the mip

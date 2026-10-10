@@ -221,6 +221,26 @@ pub fn active() -> bool {
 ///
 /// Answers `false` when there is no compositor, which is the caller's signal
 /// to fall back to its own saved pixels.
+/// Write `rows` rows of what is already on screen back to it, from the
+/// shadow, through the path `present` uses. Nothing on screen changes; what
+/// it is for is timing the aperture (`gfx::perf_report`). Answers the bytes
+/// written, nothing when a lease holds the screen.
+pub fn rewrite_rows(y0: u32, rows: u32) -> u64 {
+    if !super::lease::compositor_may_write() {
+        return 0;
+    }
+    let Some(fb) = super::primary() else { return 0 };
+    let Some(c) = (unsafe { (*COMP.get()).as_mut() }) else { return 0 };
+    let w = c.w as usize;
+    let mut n = 0u64;
+    for row in y0..(y0 + rows).min(c.h) {
+        let base = row as usize * w;
+        fb.blit_span(0, row, &c.shadow[base..base + w]);
+        n += w as u64 * 4;
+    }
+    n
+}
+
 pub fn repaint_rect(x: u32, y: u32, rw: u32, rh: u32) -> bool {
     if !super::lease::compositor_may_write() {
         return true;

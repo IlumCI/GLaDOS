@@ -144,7 +144,7 @@ fn find_core(want: &str) -> Option<[u8; 32]> {
 }
 
 const KNOWN_COMMANDS: &[&str] = &[
-    "term", "desk", "todo", "paint", "write", "mines", "oracle", "enternet", "net", "dhcp", "mem",
+    "term", "perf", "desk", "todo", "paint", "write", "mines", "oracle", "enternet", "net", "dhcp", "mem",
     "mine", "uptime", "tasks", "status", "help", "app", "author", "video", "serial", "log", "snap",
     "update", "repair", "gpu", "abstract", "study", "work", "redqueen", "grammar",
     "forest",
@@ -6362,6 +6362,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
             }
         }
+        // Why the desktop is fast or slow on this machine, in one screen.
+        "perf" => crate::gfx::perf_report(),
         // The desktop's settings, the verb behind the Settings window's
         // Desktop page: bare lists them, `desk <key> <value>` sets one and
         // writes them all to /etc/desk.

@@ -205,34 +205,46 @@ pub fn cast(fb: &Framebuffer, x: i32, y: i32, w: u32, h: u32, spec: Spec, dx: i3
     };
     let color = super::blend::premul(0, alpha);
     let r = spec.radius.min(w / 2).min(h / 2);
-    let mut row: Vec<u8> = alloc::vec![0; ow as usize];
     let (sx0, sy0) = (x + dx - e, y + dy - e);
-    for oy in 0..oh {
+    // Only the rows and columns the surface will take: a repaint of a few
+    // rows beside a window used to build every row of its shadow and let the
+    // write throw all but those away.
+    let (cx0, cy0, cx1, cy1) = fb.scissor();
+    let ox0 = (cx0 as i64 - sx0 as i64).clamp(0, ow as i64) as u32;
+    let ox1 = (cx1 as i64 - sx0 as i64).clamp(0, ow as i64) as u32;
+    let oy0 = (cy0 as i64 - sy0 as i64).clamp(0, oh as i64) as u32;
+    let oy1 = (cy1 as i64 - sy0 as i64).clamp(0, oh as i64) as u32;
+    if ox0 >= ox1 || oy0 >= oy1 {
+        return;
+    }
+    let mut row: Vec<u8> = alloc::vec![0; (ox1 - ox0) as usize];
+    let left = sx0 + ox0 as i32;
+    for oy in oy0..oy1 {
         let sy = sy0 + oy as i32;
         if sy < 0 || sy >= fb.height() as i32 {
             continue;
         }
         let ty = map(oy, oh, img.h);
         let src = &img.a[(ty * img.w) as usize..((ty + 1) * img.w) as usize];
-        for (ox, v) in row.iter_mut().enumerate() {
-            *v = src[map(ox as u32, ow, img.w) as usize];
+        for (i, v) in row.iter_mut().enumerate() {
+            *v = src[map(ox0 + i as u32, ow, img.w) as usize];
         }
         // Zero what the box itself covers on this row (in screen space, so
         // without the offset), interior only: an edge pixel the window only
         // partly covers keeps its shadow, since what shows between the window's
         // anti-aliased edge and the wall is meant to be shadow.
         if let Some((a, b)) = interior(sy - y, w, h, r) {
-            let lo = (x + a as i32 - sx0).clamp(0, ow as i32) as usize;
-            let hi = (x + b as i32 - sx0).clamp(0, ow as i32) as usize;
+            let lo = (x + a as i32 - left).clamp(0, row.len() as i32) as usize;
+            let hi = (x + b as i32 - left).clamp(0, row.len() as i32) as usize;
             if lo < hi {
                 row[lo..hi].fill(0);
             }
         }
-        let skip = (-sx0).max(0) as usize;
+        let skip = (-left).max(0) as usize;
         if skip >= row.len() {
             continue;
         }
-        fb.over_mask_row((sx0 + skip as i32) as u32, sy as u32, &row[skip..], color);
+        fb.over_mask_row((left + skip as i32) as u32, sy as u32, &row[skip..], color);
     }
 }
 

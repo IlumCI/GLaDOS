@@ -1758,6 +1758,87 @@ pub fn pat_selftest() -> bool {
     ok
 }
 
+/// `perf`: the two things that decide how fast this desktop can be on a real
+/// machine and that no emulator can show -- the processor's clock, and what
+/// a store to the screen costs -- measured, and then read out as a verdict.
+///
+/// Everything above the screen is drawn on the CPU into ordinary memory, so
+/// a frame is CPU time plus one copy to the aperture. Under KVM on this very
+/// laptop a typical frame is a third of a millisecond. If the machine feels
+/// slow on its own feet, one of these two is why, and this says which.
+pub fn perf_report() {
+    use crate::kprintln;
+    use crate::dev::power;
+    kprintln!("[perf]");
+    // The clock.
+    let base = power::base_mhz();
+    let now = power::measure_mhz(20_000);
+    match (now, base) {
+        (Some(n), Some(b)) => kprintln!("  cpu       running at {} MHz, base {} MHz ({}% of base)", n, b, n * 100 / b.max(1)),
+        _ => kprintln!("  cpu       clock not readable here ({})", power::why()),
+    }
+    kprintln!(
+        "  governor  {}{}{}",
+        if power::hwp_enabled() { "hardware-managed, " } else { "hardware-managed states OFF, " },
+        power::governor().name(),
+        match power::turbo() {
+            Some(true) => ", turbo on",
+            Some(false) => ", turbo OFF",
+            None => "",
+        }
+    );
+    // The screen's memory type, at its first byte.
+    if let (Some(fb), Some(snap)) = (primary(), crate::cpu::mtrr::read()) {
+        let slot = crate::mem::paging::pat_slot(fb.addr()).unwrap_or(0xFF);
+        let p = if slot == 0xFF { crate::cpu::mtrr::Kind::Reserved(0xFF) } else { crate::cpu::mtrr::pat_kind(snap.pat, slot) };
+        let m = crate::cpu::mtrr::mtrr_kind(snap.def_type, &snap.ranges, fb.addr()).unwrap_or(crate::cpu::mtrr::Kind::Reserved(0xFE));
+        kprintln!("  screen    {}x{} at {:#x}, memory type {}", fb.width(), fb.height(), fb.addr(), crate::cpu::mtrr::effective(p, m).name());
+    }
+    // What a store to it costs, against ordinary memory.
+    let rows = primary().map_or(0, |f| f.height().min(256));
+    let screen = desk::screen_write_bench(rows);
+    let ram = {
+        let n = 8 * 1024 * 1024 / 4;
+        let a: alloc::vec::Vec<u32> = alloc::vec![0x1234_5678; n];
+        let mut b: alloc::vec::Vec<u32> = alloc::vec![0; n];
+        let t0 = crate::time::rdtsc();
+        b.copy_from_slice(&a);
+        core::hint::black_box(&b);
+        let us = crate::time::rdtsc().saturating_sub(t0) / crate::time::tsc_mhz().max(1) as u64;
+        (n as u64 * 4, us.max(1))
+    };
+    let mbs = |(bytes, us): (u64, u64)| bytes / us; // bytes per microsecond is MB/s
+    kprintln!("  memory    {} MB/s copying ordinary RAM", mbs(ram));
+    match screen {
+        Some(s) => kprintln!("  to screen {} MB/s writing the framebuffer ({} rows)", mbs(s), rows),
+        None => kprintln!("  to screen not measured (a program holds the screen, or a frame was being drawn)"),
+    }
+    // The verdict.
+    kprintln!("  verdict:");
+    let mut fine = true;
+    if let Some(s) = screen {
+        if mbs(s) < 1000 {
+            fine = false;
+            kprintln!("    writes to the screen are slow -- {} MB/s, where write-combined memory", mbs(s));
+            kprintln!("    takes several thousand. Every frame pays this. Try 'video cache wc' then");
+            kprintln!("    'perf' again; 'video cache' prints what each 2 MiB of the aperture is.");
+        }
+    }
+    if let (Some(n), Some(b)) = (now, base) {
+        if n * 10 < b * 8 {
+            fine = false;
+            kprintln!("    the processor is running at {}% of its base clock. 'power governor", n * 100 / b.max(1));
+            kprintln!("    performance' asks it for full speed; 'perf' again shows whether it took.");
+        }
+    }
+    if fine {
+        kprintln!("    neither the clock nor the screen is the bottleneck; 'render top' splits a frame.");
+    }
+    if let Some(name) = crate::cpu::hypervisor_name() {
+        kprintln!("  (under {}: the screen is host memory and the clock is the host's)", name);
+    }
+}
+
 /// What the processor really does with a store to the framebuffer.
 ///
 /// Walks the aperture a 2 MiB step at a time, because the page tables map it

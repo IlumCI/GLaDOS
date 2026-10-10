@@ -204,6 +204,11 @@ pub struct WinImage {
     frame: Rect,
     key: u64,
     parts: Vec<(Rect, u64)>,
+    /// The same pixels with the outline as alpha, made the first time the
+    /// window is drawn scaled or faded and kept until the image changes:
+    /// it was rebuilt every frame of every arrival and slide, a million
+    /// pixels a window a frame at 1920 x 1080.
+    prem: core::cell::RefCell<Option<alloc::sync::Arc<super::scale::Image>>>,
 }
 
 /// What `Window::app_surface` holds: the pixels, their size, and the key they
@@ -3677,7 +3682,16 @@ static GHOSTS: Racy<Vec<Ghost>> = Racy::new(Vec::new());
 /// A window's image with its outline as alpha: opaque inside the shape the
 /// direct paint is clipped to, clear outside it -- what a scaled or faded
 /// window has to be, since its corners now fall over something else.
-fn premultiplied(win: &Window, im: &WinImage) -> super::scale::Image {
+fn premultiplied(win: &Window, im: &WinImage) -> alloc::sync::Arc<super::scale::Image> {
+    if let Some(p) = im.prem.borrow().as_ref() {
+        return p.clone();
+    }
+    let p = alloc::sync::Arc::new(premultiply(win, im));
+    *im.prem.borrow_mut() = Some(p.clone());
+    p
+}
+
+fn premultiply(win: &Window, im: &WinImage) -> super::scale::Image {
     let (w, h) = (im.frame.w, im.frame.h);
     let shape = (win.round != 0 && win.state != WinState::Maximised)
         .then(|| super::Shape::round_top(w, h, win.round));
@@ -3704,7 +3718,7 @@ fn depart(w: Window) {
     let img = {
         let slot = w.image.borrow();
         match slot.as_ref() {
-            Some(im) => Some((premultiplied(&w, im), im.frame)),
+            Some(im) => Some(((*premultiplied(&w, im)).clone(), im.frame)),
             None => None,
         }
     };
@@ -3837,6 +3851,16 @@ fn scaled(r: Rect, k: f32) -> Rect {
     let w = ((r.w as f32 * k) + 0.5) as u32;
     let h = ((r.h as f32 * k) + 0.5) as u32;
     Rect::new(r.x + (r.w - w.min(r.w)) / 2, r.y + (r.h - h.min(r.h)) / 2, w.max(1), h.max(1))
+}
+
+/// Time writing `rows` rows of the screen, under the painter's claim so no
+/// frame lands in the middle: `(bytes, microseconds)`.
+pub fn screen_write_bench(rows: u32) -> Option<(u64, u64)> {
+    let _claim = Claim::take()?;
+    let t0 = crate::time::rdtsc();
+    let n = super::compose::rewrite_rows(0, rows);
+    let us = crate::time::rdtsc().saturating_sub(t0) / crate::time::tsc_mhz().max(1) as u64;
+    (n > 0).then_some((n, us.max(1)))
 }
 
 /// Change the interface's scale (`theme::set_scale`) and everything sized
@@ -3972,7 +3996,7 @@ fn flip_open() {
                 continue;
             }
             if let Some(im) = win.image.borrow().as_ref() {
-                picked.push((win.serial, premultiplied(win, im)));
+                picked.push((win.serial, (*premultiplied(win, im)).clone()));
             }
         }
     });
@@ -3987,9 +4011,20 @@ fn flip_open() {
     let surf = unsafe { Framebuffer::over_ram(bg.as_mut_ptr() as u64, w, h, w, fb.format()) };
     super::glass::fill(&surf, 0, 0, w, h, 0, FLIP_GLASS);
     use super::anim::{Curve, Tween};
+    // Every halving the stack will reach for, built now rather than in the
+    // first frames of the rise: the deepest window is the smallest, so asking
+    // for its size builds the whole chain, and a frame that had to halve a
+    // million-pixel image three times was a frame over budget.
+    let n = picked.len();
+    let mut images: Vec<super::scale::Mips> = picked.iter().map(|p| super::scale::Mips::new(p.1.clone())).collect();
+    for m in images.iter_mut() {
+        let (iw, ih) = (m.base().w as f32, m.base().h as f32);
+        let q = super::flip::at_depth(iw, ih, (n.max(1) - 1) as f32, w as f32, h as f32);
+        let _ = m.level_for(((q.x1 - q.x0).max(1.0)) as u32, q.h1.max(1.0) as u32);
+    }
     let state = FlipState {
         order: picked.iter().map(|p| p.0).collect(),
-        images: picked.into_iter().map(|p| super::scale::Mips::new(p.1)).collect(),
+        images,
         offset: 0.0,
         turn: None,
         enter: Tween::new(420, Curve::EaseOutQuint),
@@ -4088,7 +4123,11 @@ fn paint_flip(fb: &Framebuffer, d: &Desktop, screen: Rect) {
     let (x0, y0, x1, y1) = fb.scissor();
     let a = (up.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
     let n = f.order.len();
-    let mut levels: Vec<(super::scale::Image, super::flip::Quad)> = Vec::with_capacity(n);
+    // Two passes: build whatever halvings this frame needs, then borrow them
+    // all at once. It cloned the chosen level of every window every frame --
+    // megabytes copied per window per frame, which is what kept the stack
+    // over budget after everything else about it was fast.
+    let mut plan: Vec<(usize, super::flip::Quad, u32, u32)> = Vec::with_capacity(n);
     for (k, depth) in super::flip::order(n, offset) {
         let serial = f.order[k];
         let Some(win) = d.windows.iter().find(|w| w.serial == serial) else { continue };
@@ -4102,10 +4141,12 @@ fn paint_flip(fb: &Framebuffer, d: &Desktop, screen: Rect) {
         if qx1 < x0 as f32 || qx0 > x1 as f32 || qy1 < y0 as f32 || qy0 > y1 as f32 {
             continue;
         }
-        let level = mips.level_for(((q.x1 - q.x0).max(1.0)) as u32, q.h0.max(q.h1).max(1.0) as u32).clone();
-        levels.push((level, q));
+        let (lw, lh) = (((q.x1 - q.x0).max(1.0)) as u32, q.h0.max(q.h1).max(1.0) as u32);
+        let _ = mips.level_for(lw, lh);
+        plan.push((k, q, lw, lh));
     }
-    let items: Vec<(&super::scale::Image, super::flip::Quad)> = levels.iter().map(|(l, q)| (l, *q)).collect();
+    let items: Vec<(&super::scale::Image, super::flip::Quad)> =
+        plan.iter().map(|&(k, q, lw, lh)| (f.images[k].built_for(lw, lh), q)).collect();
     let base = (a < 255 && !f.under.is_empty()).then_some(&f.under[..]);
     super::flip::paint(fb, base, Some((&f.bg, w, a)), &items);
 }
@@ -4746,7 +4787,7 @@ fn taskbar_tip(fb: &Framebuffer, d: &Desktop) {
     let img = {
         let slot = win.image.borrow();
         match slot.as_ref() {
-            Some(im) => premultiplied(win, im),
+            Some(im) => (*premultiplied(win, im)).clone(),
             None => return,
         }
     };
@@ -5827,7 +5868,7 @@ fn ensure_image(format: super::Format, d: &Desktop, i: usize, win: &Window, fram
         let img = unsafe { Framebuffer::displaced(px.as_mut_ptr(), frame.x, frame.y, frame.w, frame.h, format) };
         paint_window_body(&img, d, i, win, frame, active, hot);
         IMAGE_WHOLE.fetch_add(1, Relaxed);
-        *slot = Some(WinImage { px, frame, key, parts });
+        *slot = Some(WinImage { px, frame, key, parts, prem: Default::default() });
     } else if let Some(im) = slot.as_mut() {
         // Only the parts whose stamps moved, which is exactly the damage the
         // scene gave this window: the rest of the image is still what it
@@ -5840,6 +5881,7 @@ fn ensure_image(format: super::Format, d: &Desktop, i: usize, win: &Window, fram
             let img = unsafe { Framebuffer::displaced(im.px.as_mut_ptr(), frame.x, frame.y, frame.w, frame.h, format) };
             paint_window_body(&img.clipped(r.x, r.y, r.w, r.h), d, i, win, frame, active, hot);
             im.parts[k] = *part;
+            *im.prem.borrow_mut() = None;
             IMAGE_PART.fetch_add(1, Relaxed);
         }
     }

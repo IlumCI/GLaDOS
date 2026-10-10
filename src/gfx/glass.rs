@@ -192,9 +192,24 @@ fn fill_with(fb: &Framebuffer, x: i32, y: i32, w: u32, h: u32, radius: u32, g: G
     // formula with a flat wall behind it, which is what no backdrop gives.
     let back = if blur { guard.as_ref() } else { None };
     let r = radius.min(w / 2).min(h / 2);
-    let mut row: Vec<u32> = alloc::vec![0; w as usize];
-    let mut alpha: Vec<u8> = alloc::vec![0; w as usize];
-    for ry in 0..h {
+    // Only the part of the pane the surface will take. Every pixel is a
+    // function of its own position alone -- the backdrop under it, its noise,
+    // its corner -- so computing a clipped part gives exactly the pixels a
+    // whole pane would have put there. It computed the whole pane and let
+    // the write clip it, which made a clock tick on the taskbar recompute
+    // all 1920 x 48 pixels of the bar's glass to change four digits.
+    let (cx0, cy0, cx1, cy1) = fb.scissor();
+    let rx0 = (cx0 as i64 - x as i64).clamp(0, w as i64) as u32;
+    let rx1 = (cx1 as i64 - x as i64).clamp(0, w as i64) as u32;
+    let ry0 = (cy0 as i64 - y as i64).clamp(0, h as i64) as u32;
+    let ry1 = (cy1 as i64 - y as i64).clamp(0, h as i64) as u32;
+    if rx0 >= rx1 || ry0 >= ry1 {
+        return;
+    }
+    let cols = (rx1 - rx0) as usize;
+    let mut row: Vec<u32> = alloc::vec![0; cols];
+    let mut alpha: Vec<u8> = alloc::vec![0; cols];
+    for ry in ry0..ry1 {
         let sy = y + ry as i32;
         if sy < 0 || sy >= fb.height() as i32 {
             continue;
@@ -202,7 +217,7 @@ fn fill_with(fb: &Framebuffer, x: i32, y: i32, w: u32, h: u32, radius: u32, g: G
         // The gloss: white fading linearly to nothing at `gloss_end`.
         let t = ry as f32 / h as f32;
         let gloss = if t < g.gloss_end { (g.gloss as f32 * (1.0 - t / g.gloss_end)) as i32 } else { 0 };
-        for rx in 0..w {
+        for rx in rx0..rx1 {
             let sx = x + rx as i32;
             let b = match back {
                 Some(bd) if sx >= 0 && (sx as u32) < bd.w && (sy as u32) < bd.h => bd.px[(sy as u32 * bd.w + sx as u32) as usize],
@@ -224,22 +239,24 @@ fn fill_with(fb: &Framebuffer, x: i32, y: i32, w: u32, h: u32, radius: u32, g: G
                 (v + gloss * (255 - v) / 255 + n).clamp(0, 255) as u32
             };
             let (or, og, ob) = (mix(br, 0), mix(bg, 1), mix(bb, 2));
-            row[rx as usize] = 0xFF00_0000 | if bgr { ob | og << 8 | or << 16 } else { or | og << 8 | ob << 16 };
-            alpha[rx as usize] = corner_cov(rx, ry, w, h, r);
+            let i = (rx - rx0) as usize;
+            row[i] = 0xFF00_0000 | if bgr { ob | og << 8 | or << 16 } else { or | og << 8 | ob << 16 };
+            alpha[i] = corner_cov(rx, ry, w, h, r);
         }
-        let skip = (-x).max(0) as usize;
+        let left = x + rx0 as i32;
+        let skip = (-left).max(0) as usize;
         if skip >= row.len() {
             continue;
         }
         let full = alpha[skip..].iter().all(|&a| a == 255);
         if full {
-            fb.blit_span((x + skip as i32) as u32, sy as u32, &row[skip..]);
+            fb.blit_span((left + skip as i32) as u32, sy as u32, &row[skip..]);
         } else {
             // Premultiply by coverage and lay over what is there: the corners.
             for (p, &a) in row.iter_mut().zip(alpha.iter()) {
                 *p = super::blend::premul(*p & 0x00FF_FFFF, a);
             }
-            fb.over_row((x + skip as i32) as u32, sy as u32, &row[skip..]);
+            fb.over_row((left + skip as i32) as u32, sy as u32, &row[skip..]);
         }
     }
 }
