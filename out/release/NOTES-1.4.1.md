@@ -1,7 +1,7 @@
 # GLaDOS 1.4.1
 
 GLaDOS is an operating system with a language model living inside its kernel.
-It is written from nothing in Rust, it runs on one real laptop, and there is no
+It is written from nothing in Rust, it boots on real hardware, and there is no
 Linux underneath it and no wall between the model and the machine. A thought the
 model has is a function call. It boots, it decides, it rewrites its own source
 at night, and it mines its own keep.
