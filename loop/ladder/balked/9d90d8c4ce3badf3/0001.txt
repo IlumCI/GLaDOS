@@ -1,0 +1,1 @@
+ror: cast cannot be followed by indexing src/fmt/pixel_format.rs:37:86: error: cast cannot be followed by indexing src/fmt/pixel_format.rs:55:10: error: expected identifier, found `!`: expected identifier error: could not compile `glados` (bin "glados") due to 5 previous errors; 32 warnings emitted 

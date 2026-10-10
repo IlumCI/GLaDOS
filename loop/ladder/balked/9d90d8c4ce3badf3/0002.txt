@@ -1,0 +1,1 @@
+  refused: the assembled file prints no claim, which is a bug in `assemble` and not in the reply: the selftest prints no claim, so the boot's count cannot rise and J1 has nothing to read -- it is missing kprintln!, "ok ", "FAIL" 

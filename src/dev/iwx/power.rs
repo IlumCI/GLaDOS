@@ -40,7 +40,6 @@
 //! As the rest of `iwx`: numbers from OpenBSD's `iwx(4)`, Intel's dual BSD/GPLv2
 //! headers underneath, BSD arm, `NOTICE.md`.
 
-use alloc::string::String;
 use alloc::vec::Vec;
 
 /// The device's own policy. Four bytes, and what `init_hw` sends.
