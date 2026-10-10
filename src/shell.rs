@@ -5289,6 +5289,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             console::set_color(WHITE);
         }
         "usb" => match acpi.as_ref().and_then(|a| a.mcfg) {
+            Some(_) if rest.trim() == "hid reset" => {
+                // Typed, so it needs no pointer: the way back when one dies.
+                match crate::dev::usbhid::reset() {
+                    Ok(n) => kprintln!("  {} input device(s) found again", n),
+                    Err(e) => kprintln!("  {}", e),
+                }
+                crate::dev::usbhid::report();
+            }
             Some(ecam) if rest.trim() == "hid" => {
                 // Says nothing when it found nothing new, because the usual
                 // reason for that is that boot already took them, and "0

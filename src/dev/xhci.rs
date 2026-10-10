@@ -522,6 +522,11 @@ const PORTSC_PED: u32 = 1 << 1;
 const PORTSC_PR: u32 = 1 << 4;
 const PORTSC_PP: u32 = 1 << 9;
 const PORTSC_PRC: u32 = 1 << 21;
+/// Connect Status Change: the port saw a device arrive or leave since it was
+/// last acknowledged. A device that drops off the bus and comes back -- which
+/// a touchpad's own controller does after a firmware hiccup -- sets it, and
+/// that is the only sign the slot it had is gone.
+const PORTSC_CSC: u32 = 1 << 17;
 
 /// Interrupter 0's registers, relative to the runtime base.
 const IR0: u64 = 0x20;
@@ -540,6 +545,9 @@ const TRB_NORMAL: u32 = 1;
 const TRB_DISABLE_SLOT: u32 = 10;
 const TRB_CONFIG_EP: u32 = 12;
 const TRB_EVAL_CONTEXT: u32 = 13;
+const TRB_RESET_EP: u32 = 14;
+const TRB_STOP_EP: u32 = 15;
+const TRB_SET_TR_DEQ: u32 = 16;
 // ...and the ones the controller posts back.
 const TRB_TRANSFER_EVENT: u32 = 32;
 const TRB_CMD_COMPLETE: u32 = 33;
@@ -893,13 +901,16 @@ impl Controller {
     /// Reset one port and wait for it to enable.
     fn reset_port(&mut self, port: u8) -> bool {
         let off = self.portsc(port);
-        let v = self.r32(off) & !PORTSC_RW1C;
+        // PED is write-one-to-clear as well, so it is masked with the change
+        // bits: writing an enabled port's status back disables the port.
+        let v = self.r32(off) & !(PORTSC_RW1C | PORTSC_PED);
         self.w32(off, v | PORTSC_PP | PORTSC_PR);
         for _ in 0..500 {
             let s = self.r32(off);
             if s & PORTSC_PRC != 0 {
-                // Acknowledge the reset-change bit, and only that bit.
-                self.w32(off, (s & !PORTSC_RW1C) | PORTSC_PRC);
+                // Acknowledge the reset-change bit, and only that bit -- not
+                // PED, which the port has just set and a one would clear.
+                self.w32(off, (s & !(PORTSC_RW1C | PORTSC_PED | PORTSC_PR)) | PORTSC_PRC);
                 return s & PORTSC_PED != 0;
             }
             delay_us(1000);
@@ -1491,6 +1502,10 @@ pub fn ensure_started(ecam: u64) -> Result<(), &'static str> {
 
 pub fn claim_port(port: u8) {
     unsafe { *CLAIMED_PORTS.get() |= 1u32 << (port & 31) };
+}
+
+pub fn unclaim_port(port: u8) {
+    unsafe { *CLAIMED_PORTS.get() &= !(1u32 << (port & 31)) };
 }
 
 pub fn port_claimed(port: u8) -> bool {
@@ -2148,16 +2163,101 @@ impl Controller {
         true
     }
 
-    /// Bytes reported, if the armed transfer has completed. Never waits.
-    pub fn poll_interrupt(&mut self, dev: &Device, len: u32) -> Option<u32> {
-        let addr = dev.int_in.as_ref().map(|(a, _)| *a)?;
-        self.poll_rx(dev.slot, dci(addr), len)
+    /// Whether the armed transfer has completed, and how. Never waits.
+    ///
+    /// **A failure is an answer, not silence.** This answered `None` for a
+    /// completion with an error code, which the caller cannot tell from "no
+    /// report yet" -- so it waited forever on a transfer that had already
+    /// ended. And an interrupt endpoint that errors three times (CErr) is
+    /// *halted*: the controller will not touch its ring again until the
+    /// endpoint is reset. One transaction error on the trackpad and the
+    /// pointer was dead until the next boot.
+    pub fn take_interrupt(&mut self, dev: &Device, len: u32) -> Rx {
+        let Some(addr) = dev.int_in.as_ref().map(|(a, _)| *a) else { return Rx::Nothing };
+        let Some(ev) = self.wait_event_ep(TRB_TRANSFER_EVENT, dev.slot, dci(addr), 0) else {
+            return Rx::Nothing;
+        };
+        match ev.code() {
+            1 | 13 => Rx::Data(len.saturating_sub(ev.status & 0xFFFFFF)),
+            c => Rx::Failed(c),
+        }
+    }
+
+    /// Bring an interrupt endpoint back after a failed transfer: Reset
+    /// Endpoint takes it out of Halted, Stop covers the case where it was not
+    /// halted at all, and Set TR Dequeue points it at the ring's current
+    /// enqueue position, so whatever was queued before the failure is
+    /// skipped rather than replayed. The caller re-arms afterwards.
+    ///
+    /// Each command's refusal is tolerated, because which of them apply
+    /// depends on the state the error left the endpoint in, and asking first
+    /// costs a context read that answers the same question less reliably.
+    /// Only the dequeue pointer is judged: if that took, the ring is live.
+    pub fn recover_interrupt(&mut self, dev: &Device) -> bool {
+        let Some((addr, ring)) = dev.int_in.as_ref() else { return false };
+        let (d, slot) = (dci(*addr), dev.slot as u32);
+        let at = |kind: u32| (kind << 10) | (d << 16) | (slot << 24);
+        let _ = self.command(Trb { control: at(TRB_RESET_EP), ..Default::default() }, 100);
+        let _ = self.command(Trb { control: at(TRB_STOP_EP), ..Default::default() }, 100);
+        let deq = ring.base + (ring.idx * 16) as u64;
+        let ev = self.command(
+            Trb {
+                lo: (deq as u32) | ring.cycle,
+                hi: (deq >> 32) as u32,
+                control: at(TRB_SET_TR_DEQ),
+                ..Default::default()
+            },
+            100,
+        );
+        // Completions for the abandoned transfer (a Stopped event, or the
+        // error itself arriving twice) must not be read as the next report.
+        let s = dev.slot;
+        self.pending.retain(|t| !(t.kind() == TRB_TRANSFER_EVENT && t.slot() == s && t.endpoint() == d));
+        ev.map(|e| e.code() == 1).unwrap_or(false)
+    }
+
+    /// Ports whose connection changed since the last call, acknowledged as
+    /// they are read. A port listed here either has nothing on it now or has
+    /// something that arrived anew, and in both cases any slot a driver held
+    /// for it describes a device that is no longer there.
+    pub fn take_port_changes(&mut self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for port in 1..=self.max_ports {
+            let off = self.portsc(port);
+            let s = self.r32(off);
+            if s & PORTSC_CSC != 0 {
+                // Acknowledge that bit and only that bit. PED is cleared by
+                // writing one too, so it is masked as well: writing back the
+                // enabled port's own status would switch the port off.
+                self.w32(off, (s & !(PORTSC_RW1C | PORTSC_PED | PORTSC_PR)) | PORTSC_CSC);
+                out.push(port);
+            }
+        }
+        out
     }
 
     /// Whether the port this device sits on still reports something attached.
     pub fn still_there(&self, dev: &Device) -> bool {
         self.r32(self.portsc(dev.port)) & PORTSC_CCS != 0
     }
+
+    /// Whether the port still has the device on it *and* is enabled. A port
+    /// that is connected but disabled carries no traffic, so the device on
+    /// it suspends -- a mouse's light goes out -- and nothing it sends ever
+    /// arrives. Connected alone said "fine" about exactly that.
+    pub fn port_live(&self, port: u8) -> bool {
+        let s = self.r32(self.portsc(port));
+        s & PORTSC_CCS != 0 && s & PORTSC_PED != 0
+    }
+}
+
+/// How an armed interrupt transfer stands.
+pub enum Rx {
+    Nothing,
+    /// Completed, with this many bytes.
+    Data(u32),
+    /// Completed with this completion code, which is not success.
+    Failed(u32),
 }
 
 /// A bulk endpoint found in a configuration descriptor.

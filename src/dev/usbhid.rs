@@ -1,9 +1,9 @@
 //! USB keyboards and mice, on the HID boot protocol.
 //!
-//! The built-in keyboard and touchpad on the GF63 are i8042 devices and always
-//! were. This is for everything a person actually plugs in, which on a laptop
-//! with a dock is usually all of it, and for the machines where the i8042 does
-//! not exist at all.
+//! The GF63's built-in keyboard is an i8042 device, and its touchpad is *not*:
+//! the trip found the touchpad on USB, which makes this driver the only
+//! pointer that laptop has. So a dead endpoint here is a machine nobody can
+//! use, and the failure paths below are held to that.
 //!
 //! ### Boot protocol, and why that is a decision rather than a stage
 //!
@@ -75,7 +75,20 @@ struct Hid {
     last: [u8; 8],
     /// Reports seen, for `usb hid`.
     reports: u64,
+    /// Transfers that completed with an error, and how many of those the
+    /// endpoint was brought back from.
+    failures: u64,
+    recovered: u64,
 }
+
+/// Where PCI configuration space is, kept from the first probe so the
+/// compositor's poll can walk the bus again when a device comes back.
+static ECAM: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// TSC of the last look at the ports, so it is done a few times a second
+/// and not on every turn of the compositor's loop.
+static LAST_PORT_LOOK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Devices that dropped off the bus and were picked up again, for `usb hid`.
+static REJOINED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// **A lock, because two tasks reach it.** `poll` runs on the compositor so a
 /// USB mouse keeps moving while the shell is inside a command -- the same
@@ -103,6 +116,7 @@ pub fn attached() -> usize {
 /// ringing a doorbell the controller no longer associates with it.
 pub fn probe(ecam: u64) -> Result<usize, &'static str> {
     xhci::ensure_started(ecam)?;
+    ECAM.store(ecam, core::sync::atomic::Ordering::Relaxed);
     let mut found = 0usize;
     // Taken before the controller and released after it, every time: the one
     // lock order this file has, and `poll` keeps the same one.
@@ -172,6 +186,12 @@ pub fn probe(ecam: u64) -> Result<usize, &'static str> {
         // afterwards.
         xhci::with_ctl(|c| c.release(dev));
     }
+    // The connect changes up to now are the ones this walk just answered --
+    // the boot's own arrivals among them -- so they are acknowledged here,
+    // or the compositor's next look would read them as devices that left
+    // and tear down what was just set up.
+    drop(devices);
+    let _ = xhci::with_ctl(|c| c.take_port_changes());
     Ok(found)
 }
 
@@ -246,6 +266,8 @@ fn setup(devices: &mut Vec<Hid>, dev: &mut Device, hid: HidIface) -> Result<(), 
         armed: false,
         last: [0; 8],
         reports: 0,
+        failures: 0,
+        recovered: 0,
     };
     entry.armed = xhci::with_ctl(|c| c.arm_interrupt(&mut entry.dev, buf, REPORT_LEN))
         .unwrap_or(false);
@@ -290,52 +312,164 @@ fn encode_interval(b_interval: u8) -> u8 {
 /// task that paints the screen would stop the screen for the length of a bus
 /// walk.
 pub fn poll() {
-    let Some(mut devices) = DEVICES.try_lock() else { return };
-    if devices.is_empty() {
-        return;
-    }
-    for h in devices.iter_mut() {
-        if !h.armed {
-            h.armed = xhci::with_ctl(|c| c.arm_interrupt(&mut h.dev, h.buf, REPORT_LEN))
-                .unwrap_or(false);
-            continue;
+    let rescan = {
+        let Some(mut devices) = DEVICES.try_lock() else { return };
+        if devices.is_empty() && ECAM.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+            return;
         }
-        let Some(Some(n)) = xhci::with_ctl(|c| c.poll_interrupt(&h.dev, REPORT_LEN)) else {
-            continue;
-        };
-        h.armed = false;
-        h.reports += 1;
-        // The first one, once, out loud. A device that enumerates and
-        // configures perfectly and then never reports looks identical to one
-        // that is working until somebody presses a key, and there is no way to
-        // tell those apart from a boot log. This is also the only evidence
-        // that reaches a headless test, since a keystroke injected through the
-        // emulator arrives long after the last shell command.
-        if h.reports == 1 {
+        let rescan = watch_ports(&mut devices);
+        for h in devices.iter_mut() {
+            poll_one(h);
+        }
+        rescan
+    };
+    // Outside the list's lock, because `probe` takes it: a device that came
+    // back is enumerated afresh, on whatever port it reappeared on.
+    if rescan {
+        let ecam = ECAM.load(core::sync::atomic::Ordering::Relaxed);
+        if let Ok(n) = probe(ecam) {
+            if n > 0 {
+                REJOINED.fetch_add(n as u64, core::sync::atomic::Ordering::Relaxed);
+                crate::kprintln!("[usb] {} input device(s) back on the bus", n);
+            }
+        }
+    }
+}
+
+/// A few times a second: has any port's connection changed? A device that
+/// left takes its slot with it, and one that came back -- a touchpad whose
+/// own controller resets itself does exactly this -- is a new device the old
+/// slot does not describe. Either way the old entry goes, and the caller
+/// walks the bus again. Answers whether to.
+///
+/// This was not looked at at all: a device that dropped off and came back
+/// was polled forever through a slot the controller had stopped associating
+/// with it, which reads as a pointer that died for no reason.
+fn watch_ports(devices: &mut Vec<Hid>) -> bool {
+    use core::sync::atomic::Ordering::Relaxed;
+    let now = crate::time::rdtsc();
+    let gap = crate::time::tsc_mhz().max(1) as u64 * 250_000;
+    if now.saturating_sub(LAST_PORT_LOOK.load(Relaxed)) < gap {
+        return false;
+    }
+    LAST_PORT_LOOK.store(now, Relaxed);
+    let Some(mut changed) = xhci::with_ctl(|c| c.take_port_changes()) else { return false };
+    // And every port a device is held on, whether or not it says it
+    // changed: a port can go disabled without a connect change, and a held
+    // device on a dead port is the pointer that silently stopped.
+    for h in devices.iter() {
+        if !changed.contains(&h.dev.port) && !xhci::with_ctl(|c| c.port_live(h.dev.port)).unwrap_or(true) {
+            changed.push(h.dev.port);
+        }
+    }
+    let mut rescan = false;
+    for port in changed {
+        if let Some(i) = devices.iter().position(|h| h.dev.port == port) {
+            let h = devices.remove(i);
             crate::kprintln!(
-                "[usb] first report from {:04x}:{:04x}, the {} is live",
+                "[usb] {:04x}:{:04x} on port {} dropped off; finding it again",
                 h.dev.vid,
                 h.dev.pid,
-                if h.protocol == KEYBOARD { "keyboard" } else { "mouse" }
+                port
             );
+            xhci::with_ctl(|c| c.release(h.dev));
+            xhci::unclaim_port(port);
+            rescan = true;
+        } else if !xhci::port_claimed(port) {
+            // Something new on a port nobody holds: maybe a mouse.
+            rescan = true;
         }
+    }
+    rescan
+}
 
-        let mut report = [0u8; 8];
-        for i in 0..report.len().min(n as usize) {
-            report[i] = unsafe { core::ptr::read_volatile((h.buf + i as u64) as *const u8) };
-        }
-        match h.protocol {
-            KEYBOARD => keyboard(h, &report),
-            MOUSE => mouse(&report, n),
-            _ => {}
-        }
-
-        // Re-arm at once. A keyboard that is only listened to after being
-        // asked drops the release of the key it just reported, and a key whose
-        // release is lost is a key that stays down.
+/// One device: a report if there is one, and the endpoint brought back if
+/// the transfer failed.
+fn poll_one(h: &mut Hid) {
+    if !h.armed {
         h.armed = xhci::with_ctl(|c| c.arm_interrupt(&mut h.dev, h.buf, REPORT_LEN))
             .unwrap_or(false);
+        return;
     }
+    let n = match xhci::with_ctl(|c| c.take_interrupt(&h.dev, REPORT_LEN)) {
+        Some(xhci::Rx::Data(n)) => n,
+        Some(xhci::Rx::Failed(code)) => {
+            // The transfer is over and the endpoint is probably halted, so
+            // waiting for the next report would wait forever. Reset it and
+            // queue a fresh one. Said out loud the first few times, so a
+            // flaky device is visible rather than merely slow.
+            h.failures += 1;
+            let back = xhci::with_ctl(|c| c.recover_interrupt(&h.dev)).unwrap_or(false);
+            if back {
+                h.recovered += 1;
+            }
+            if h.failures <= 3 {
+                crate::kprintln!(
+                    "[usb] {:04x}:{:04x} transfer failed (code {}), endpoint {}",
+                    h.dev.vid,
+                    h.dev.pid,
+                    code,
+                    if back { "reset" } else { "did not reset" }
+                );
+            }
+            h.armed = xhci::with_ctl(|c| c.arm_interrupt(&mut h.dev, h.buf, REPORT_LEN))
+                .unwrap_or(false);
+            return;
+        }
+        _ => return,
+    };
+    h.armed = false;
+    h.reports += 1;
+    // The first one, once, out loud. A device that enumerates and
+    // configures perfectly and then never reports looks identical to one
+    // that is working until somebody presses a key, and there is no way to
+    // tell those apart from a boot log. This is also the only evidence
+    // that reaches a headless test, since a keystroke injected through the
+    // emulator arrives long after the last shell command.
+    if h.reports == 1 {
+        crate::kprintln!(
+            "[usb] first report from {:04x}:{:04x}, the {} is live",
+            h.dev.vid,
+            h.dev.pid,
+            if h.protocol == KEYBOARD { "keyboard" } else { "mouse" }
+        );
+    }
+
+    let mut report = [0u8; 8];
+    for i in 0..report.len().min(n as usize) {
+        report[i] = unsafe { core::ptr::read_volatile((h.buf + i as u64) as *const u8) };
+    }
+    match h.protocol {
+        KEYBOARD => keyboard(h, &report),
+        MOUSE => mouse(&report, n),
+        _ => {}
+    }
+
+    // Re-arm at once. A keyboard that is only listened to after being
+    // asked drops the release of the key it just reported, and a key whose
+    // release is lost is a key that stays down.
+    h.armed = xhci::with_ctl(|c| c.arm_interrupt(&mut h.dev, h.buf, REPORT_LEN))
+        .unwrap_or(false);
+}
+
+/// `usb hid reset`: let go of every input device and find them again. The
+/// last resort when a pointer is dead and nothing above noticed why --
+/// typed, so it needs no pointer.
+pub fn reset() -> Result<usize, &'static str> {
+    let ecam = ECAM.load(core::sync::atomic::Ordering::Relaxed);
+    if ecam == 0 {
+        return Err("the bus has not been walked this boot");
+    }
+    {
+        let mut devices = DEVICES.lock();
+        for h in devices.drain(..) {
+            let port = h.dev.port;
+            xhci::with_ctl(|c| c.release(h.dev));
+            xhci::unclaim_port(port);
+        }
+    }
+    let _ = xhci::with_ctl(|c| c.take_port_changes());
+    probe(ecam)
 }
 
 /// Modifier bit to scancode.
@@ -486,15 +620,21 @@ pub fn report() {
     for h in devices.iter() {
         let kind = if h.protocol == KEYBOARD { "keyboard" } else { "mouse" };
         crate::kprintln!(
-            "  {:04x}:{:04x}  {}  port {}  slot {}  {} report(s){}",
+            "  {:04x}:{:04x}  {}  port {}  slot {}  {} report(s), {} failed, {} recovered{}",
             h.dev.vid,
             h.dev.pid,
             kind,
             h.dev.port,
             h.dev.slot,
             h.reports,
+            h.failures,
+            h.recovered,
             if h.armed { "" } else { "  (not armed)" }
         );
+    }
+    let back = REJOINED.load(core::sync::atomic::Ordering::Relaxed);
+    if back > 0 {
+        crate::kprintln!("  {} device(s) left the bus and were found again", back);
     }
     for (vid, pid) in declined.iter() {
         crate::kprintln!("  {:04x}:{:04x}  HID without a boot interface, not driven", vid, pid);
@@ -546,6 +686,8 @@ pub fn selftest() -> bool {
         armed: false,
         last: [0; 8],
         reports: 0,
+        failures: 0,
+        recovered: 0,
     };
     // The compositor would otherwise route what this injects, as keystrokes.
     crate::dev::kbd::pause_routing(true);
