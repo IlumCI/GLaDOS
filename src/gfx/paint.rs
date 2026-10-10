@@ -80,14 +80,15 @@ impl Paint {
     }
 
     pub fn preferred() -> (u32, u32) {
-        (
-            CW as u32 + 24 + theme::frame_w() * 2,
-            CH as u32 + 96 + theme::title_h() + theme::frame_w() * 2,
-        )
+        let (w, h) = chrome_size();
+        (w + theme::frame_w() * 2, h + theme::title_h() + theme::frame_w() * 2)
     }
 
+    /// The canvas is image pixels at every scale -- a drawing is its pixels
+    /// -- and the toolbar above it is interface, sized from the theme.
     fn canvas_at(client: Rect) -> (i32, i32) {
-        ((client.x + 8) as i32, (client.y + 66) as i32)
+        let top = swatch_top() + theme::px(22) + theme::px(6);
+        ((client.x + theme::px(8)) as i32, (client.y + top) as i32)
     }
 
     fn stamp(&mut self, x: i32, y: i32) {
@@ -253,16 +254,27 @@ impl Paint {
     }
 }
 
+/// The client size the window wants: the canvas, and the interface round it.
+fn chrome_size() -> (u32, u32) {
+    let top = swatch_top() + theme::px(22) + theme::px(6);
+    (CW as u32 + theme::px(24), CH as u32 + top + theme::px(30))
+}
+
+/// Where the swatches start, below the tool buttons.
+fn swatch_top() -> u32 {
+    theme::px(6) + theme::text_h() + theme::px(10) + theme::px(6)
+}
+
 /// The toolbar's button rectangles, shared by paint and hit-test.
 fn tool_rects(client: Rect) -> Vec<(Rect, char)> {
-    let mut x = client.x + 8;
-    let y = client.y + 6;
+    let mut x = client.x + theme::px(8);
+    let y = client.y + theme::px(6);
     TOOLS
         .iter()
         .map(|(c, name)| {
-            let w = theme::text_w_of(name) + 14;
-            let r = Rect::new(x, y, w, theme::text_h() + 10);
-            x += w + 4;
+            let w = theme::text_w_of(name) + theme::px(14);
+            let r = Rect::new(x, y, w, theme::text_h() + theme::px(10));
+            x += w + theme::px(4);
             (r, *c)
         })
         .collect()
@@ -270,10 +282,10 @@ fn tool_rects(client: Rect) -> Vec<(Rect, char)> {
 
 /// The sixteen swatches, likewise shared.
 fn swatch_rects(client: Rect) -> Vec<(Rect, u8)> {
-    let s = 22u32;
-    let y = client.y + 38;
+    let s = theme::px(22);
+    let y = client.y + swatch_top();
     (0..16u8)
-        .map(|i| (Rect::new(client.x + 8 + i as u32 * (s + 2), y, s, s), i))
+        .map(|i| (Rect::new(client.x + theme::px(8) + i as u32 * (s + theme::px(2)), y, s, s), i))
         .collect()
 }
 
@@ -298,7 +310,7 @@ impl DeskApp for Paint {
     /// so neither shrinks. Dragging under this would hide the drawing behind
     /// the frame.
     fn min_size(&self) -> (u32, u32) {
-        (CW as u32 + 24, CH as u32 + 96)
+        chrome_size()
     }
 
     fn draw_in(&self, fb: &Framebuffer, client: Rect, focused: bool) {
@@ -311,9 +323,9 @@ impl DeskApp for Paint {
         // Brush width readout beside the tools.
         let tr = tool_rects(client);
         if let Some((last, _)) = tr.last() {
-            let bx = last.x + last.w + 12;
+            let bx = last.x + last.w + theme::px(12);
             let label = format!("brush {}  ([ ] resize)", self.brush);
-            theme::text(fb, bx, client.y + 10, &label, theme::TEXT, theme::FACE);
+            theme::text(fb, bx, client.y + theme::px(10), &label, theme::TEXT, theme::FACE);
         }
 
         for (r, i) in swatch_rects(client) {

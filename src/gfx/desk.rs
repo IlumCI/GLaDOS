@@ -3930,6 +3930,11 @@ struct FlipState {
     leave: Option<(super::anim::Tween, Option<u64>)>,
     /// The darkened blur the stack stands on.
     bg: Vec<u32>,
+    /// The desktop as it was when the stack opened, which it rises out of
+    /// and sinks back into: a still, because repainting the live desktop
+    /// under the stack every frame of the rise was what put those frames
+    /// over budget. Empty until a frame's `layers` takes it.
+    under: Vec<u32>,
     /// This frame's offset and how far up the stack is, fixed by `layers`.
     shown: (f32, f32),
     /// Whether a frame's `layers` has seen the stack yet. Super-Tab can
@@ -3990,6 +3995,7 @@ fn flip_open() {
         enter: Tween::new(420, Curve::EaseOutQuint),
         leave: None,
         bg,
+        under: Vec::new(),
         shown: (0.0, 0.0),
         live: false,
     };
@@ -4100,7 +4106,8 @@ fn paint_flip(fb: &Framebuffer, d: &Desktop, screen: Rect) {
         levels.push((level, q));
     }
     let items: Vec<(&super::scale::Image, super::flip::Quad)> = levels.iter().map(|(l, q)| (l, *q)).collect();
-    super::flip::paint(fb, Some((&f.bg, w, a)), &items);
+    let base = (a < 255 && !f.under.is_empty()).then_some(&f.under[..]);
+    super::flip::paint(fb, base, Some((&f.bg, w, a)), &items);
 }
 
 /// Retire what has finished moving and keep frames coming while anything
@@ -5331,6 +5338,17 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
         // Fixed to a 4096th, as every moving layer's values are (`q4096`).
         let o = ((o * 4096.0) as i64) as f32 / 4096.0;
         f.shown = (o, q4096(u));
+        if !f.live {
+            // The back buffer still holds the last frame -- the desktop as it
+            // stood when the stack was asked for.
+            if let Some(back) = super::compose::target() {
+                let n = (back.width() * back.height()) as usize;
+                if back.width() == w && back.height() == h && f.under.try_reserve_exact(n).is_ok() {
+                    let src = unsafe { core::slice::from_raw_parts(back.addr() as *const u32, n) };
+                    f.under.extend_from_slice(src);
+                }
+            }
+        }
         f.live = true;
         out.push(Layer {
             id: LayerId::Flip,
@@ -5920,7 +5938,7 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
     let fb = *target;
     // Flip 3D, fully up, covers everything: nothing under it is painted.
     if let Some(f) = unsafe { (*FLIP.get()).as_ref() } {
-        if f.live && f.shown.1 >= 1.0 {
+        if f.live && (f.shown.1 >= 1.0 || !f.under.is_empty()) {
             paint_flip(&fb, d, screen);
             return;
         }
@@ -6122,7 +6140,8 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
         lap(Cost::Overlay, &mut t);
     }
     // Flip 3D on its way up or down, over the desktop it rises out of.
-    if unsafe { (*FLIP.get()).as_ref().is_some_and(|f| f.live) } {
+    // Only when there is no still of the desktop to rise out of.
+    if unsafe { (*FLIP.get()).as_ref().is_some_and(|f| f.live && f.under.is_empty()) } {
         paint_flip(&fb, d, screen);
     }
 }

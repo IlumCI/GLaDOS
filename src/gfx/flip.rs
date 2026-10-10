@@ -116,7 +116,7 @@ pub fn order(n: usize, offset: f32) -> Vec<(usize, f32)> {
 
 /// Lay `img` (premultiplied) into quad `q`, OVER what is there.
 pub fn draw(fb: &Framebuffer, img: &Image, q: Quad) {
-    paint(fb, None, &[(img, q)]);
+    paint(fb, None, None, &[(img, q)]);
 }
 
 /// One quad, made ready for rows: for every column it covers, where in the
@@ -164,6 +164,7 @@ struct Job {
     bg: *const u32,
     bg_w: u32,
     bg_alpha: u32,
+    base: *const u32,
     items: *const Prepared<'static>,
     n: usize,
     x0: u32,
@@ -171,10 +172,11 @@ struct Job {
     y0: u32,
 }
 
-/// The stack: the backdrop (`bg`, a screen-sized image, at an opacity), then
-/// each quad, in the order given, row by row -- across every core there is,
+/// The stack: `base` (a still of the desktop, screen-sized, while the stack
+/// rises out of it), the backdrop (`bg`, screen-sized, at an opacity), then
+/// each quad in the order given, row by row -- across every core there is,
 /// since a stack covers the screen and every frame of a turn repaints it.
-pub fn paint(fb: &Framebuffer, bg: Option<(&[u32], u32, u32)>, items: &[(&Image, Quad)]) {
+pub fn paint(fb: &Framebuffer, base: Option<&[u32]>, bg: Option<(&[u32], u32, u32)>, items: &[(&Image, Quad)]) {
     let (sx0, sy0, sx1, sy1) = fb.scissor();
     if sx0 >= sx1 || sy0 >= sy1 {
         return;
@@ -189,6 +191,7 @@ pub fn paint(fb: &Framebuffer, bg: Option<(&[u32], u32, u32)>, items: &[(&Image,
         bg: bgp,
         bg_w,
         bg_alpha,
+        base: base.map_or(core::ptr::null(), |b| b.as_ptr()),
         items: prepared.as_ptr() as *const Prepared<'static>,
         n: prepared.len(),
         x0: sx0,
@@ -210,6 +213,10 @@ unsafe fn rows_of(ctx: usize, lo: usize, hi: usize) {
     let mut row: Vec<u32> = Vec::with_capacity(width);
     for r in lo..hi {
         let y = j.y0 + r as u32;
+        if !j.base.is_null() {
+            let src = unsafe { core::slice::from_raw_parts(j.base.add((y * j.bg_w + j.x0) as usize), width) };
+            j.fb.blit_span(j.x0, y, src);
+        }
         if !j.bg.is_null() && j.bg_alpha > 0 {
             let src = unsafe { core::slice::from_raw_parts(j.bg.add((y * j.bg_w + j.x0) as usize), width) };
             if j.bg_alpha >= 255 {

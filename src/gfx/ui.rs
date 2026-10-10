@@ -50,8 +50,12 @@ fn row_h() -> u32 {
 fn btn_h() -> u32 {
     text_h() + theme::px(16)
 }
-const GAP: u32 = 6;
-const PAD: u32 = 10;
+fn gap() -> u32 {
+    theme::px(6)
+}
+fn pad() -> u32 {
+    theme::px(10)
+}
 /// Character column the value in a `Status` row starts at.
 /// Characters reserved for a status row's name, before its value starts.
 ///
@@ -176,13 +180,13 @@ pub enum Widget {
 
 /// Where each of a `Choices` row's buttons is: right-aligned, in order.
 fn choice_rects(r: Rect, options: &[(String, Action)]) -> Vec<Rect> {
-    let widths: Vec<u32> = options.iter().map(|(l, _)| theme::text_w_of(l) + PAD * 2).collect();
-    let total: u32 = widths.iter().sum::<u32>() + GAP * widths.len().saturating_sub(1) as u32;
+    let widths: Vec<u32> = options.iter().map(|(l, _)| theme::text_w_of(l) + pad() * 2).collect();
+    let total: u32 = widths.iter().sum::<u32>() + gap() * widths.len().saturating_sub(1) as u32;
     let mut x = (r.x + r.w).saturating_sub(total);
     let mut out = Vec::new();
     for w in widths {
-        out.push(Rect::new(x, r.y, w, r.h.saturating_sub(GAP)));
-        x += w + GAP;
+        out.push(Rect::new(x, r.y, w, r.h.saturating_sub(gap())));
+        x += w + gap();
     }
     out
 }
@@ -190,11 +194,11 @@ fn choice_rects(r: Rect, options: &[(String, Action)]) -> Vec<Rect> {
 impl Widget {
     fn height(&self) -> u32 {
         match self {
-            Widget::Label(_) => text_h() + GAP,
-            Widget::Sep => GAP * 2,
-            Widget::Heading(_) => text_h() + GAP + 6,
+            Widget::Label(_) => text_h() + gap(),
+            Widget::Sep => gap() * 2,
+            Widget::Heading(_) => text_h() + gap() + 6,
             Widget::Status { .. } => text_h() + 4,
-            Widget::Note(lines) => lines.len() as u32 * text_h() + GAP,
+            Widget::Note(lines) => lines.len() as u32 * text_h() + gap(),
             Widget::List { items, .. } => items.len() as u32 * row_h() + 8,
             Widget::Field { .. } => text_h() + 14,
             Widget::Button { .. } => btn_h(),
@@ -425,16 +429,16 @@ impl Panel {
     /// not in this list is not on screen and must not be clickable.
     fn rects(&self, client: Rect) -> Vec<(usize, Rect)> {
         let mut out = Vec::new();
-        let mut y = client.y + PAD;
-        let x = client.x + PAD;
-        let w = client.w.saturating_sub(PAD * 2);
+        let mut y = client.y + pad();
+        let x = client.x + pad();
+        let w = client.w.saturating_sub(pad() * 2);
         for (i, widget) in self.widgets.iter().enumerate() {
             let h = widget.height();
             if y + h > client.y + client.h {
                 break;
             }
             out.push((i, Rect::new(x, y, w, h)));
-            y += h + GAP;
+            y += h + gap();
         }
         out
     }
@@ -551,7 +555,7 @@ impl Panel {
                 Widget::Label(t) => {
                     theme::text(fb, x, y, t, theme::TEXT, theme::FACE);
                 }
-                Widget::Sep => theme::separator(fb, x, y + GAP / 2, w),
+                Widget::Sep => theme::separator(fb, x, y + gap() / 2, w),
                 Widget::Heading(t) => {
                     theme::text(fb, x, y + 4, t, theme::TEXT, theme::FACE);
                     let uw = theme::text_w_of(t).min(w);
@@ -638,13 +642,13 @@ impl Panel {
                     }
                 }
                 Widget::Button { label, .. } => {
-                    let bw = (theme::text_w_of(label) + PAD * 4).min(w);
-                    theme::button(fb, Rect::new(x, y, bw, h - GAP), label, focused, false);
+                    let bw = (theme::text_w_of(label) + pad() * 4).min(w);
+                    theme::button(fb, Rect::new(x, y, bw, h - gap()), label, focused, false);
                 }
                 Widget::Choices { name, options, sel } => {
-                    let ty = y + (h.saturating_sub(GAP + text_h())) / 2;
+                    let ty = y + (h.saturating_sub(gap() + text_h())) / 2;
                     let rects = choice_rects(r, options);
-                    let room = rects.first().map_or(w, |b| b.x.saturating_sub(x + GAP));
+                    let room = rects.first().map_or(w, |b| b.x.saturating_sub(x + gap()));
                     theme::text(fb, x, ty, &theme::fit(name, room), theme::TEXT, theme::FACE);
                     for (j, (b, (label, _))) in rects.iter().zip(options.iter()).enumerate() {
                         theme::button(fb, *b, label, focused && j == *sel, false);
@@ -766,10 +770,10 @@ impl Panel {
     /// looked like -- they hug their content, and that is most of why they read
     /// as objects rather than as regions.
     pub fn preferred(&self) -> (u32, u32) {
-        let mut h = PAD * 2;
+        let mut h = pad() * 2;
         let mut text_cols = self.title.len() + 4;
         for w in &self.widgets {
-            h += w.height() + GAP;
+            h += w.height() + gap();
             let cols = match w {
                 Widget::Label(t) => t.len(),
                 Widget::Sep => 0,
@@ -791,7 +795,7 @@ impl Panel {
             text_cols = text_cols.max(cols);
         }
         (
-            theme::text_w(text_cols) + PAD * 4 + theme::frame_w() * 2,
+            theme::text_w(text_cols) + pad() * 4 + theme::frame_w() * 2,
             h + theme::title_h() + 2 + theme::frame_w() * 2,
         )
     }
