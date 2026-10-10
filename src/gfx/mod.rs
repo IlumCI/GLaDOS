@@ -503,6 +503,37 @@ impl Framebuffer {
                sx0: 0, sy0: 0, sx1: width, sy1: height }
     }
 
+    /// A buffer of `w` x `h` that answers to the screen rectangle at
+    /// `(x, y)`: a painter writes in screen coordinates and the pixel lands
+    /// in `buf`, at its offset into the rectangle. The scissor is exactly that
+    /// rectangle, so nothing outside it is ever addressed.
+    ///
+    /// For a window's image (`desk`): every painter in this tree works in
+    /// screen coordinates, and glass in particular samples the wallpaper by
+    /// screen position, so drawing a window off screen means lying about
+    /// where the buffer is rather than teaching forty painters an origin.
+    /// `base` points `y * w + x` pixels *before* `buf`, which is never read
+    /// or written through -- every access is clipped to the scissor first,
+    /// `get` and `blend` included.
+    ///
+    /// # Safety
+    /// `buf` must hold `w * h` pixels and outlive the returned value.
+    pub unsafe fn displaced(buf: *mut u32, x: u32, y: u32, w: u32, h: u32, format: Format) -> Self {
+        let back = y as usize * w as usize + x as usize;
+        Self {
+            base: buf.wrapping_sub(back),
+            width: x + w,
+            height: y + h,
+            stride: w,
+            format,
+            mmio: false,
+            sx0: x,
+            sy0: y,
+            sx1: x + w,
+            sy1: y + h,
+        }
+    }
+
     /// The same surface with writes confined to a rectangle, in the same
     /// coordinates. Narrowing an already narrowed one intersects the two, so a
     /// scissor can only ever shrink -- a painter handed a clipped surface
@@ -930,7 +961,9 @@ impl Framebuffer {
     #[inline]
     #[track_caller]
     pub fn get(&self, x: u32, y: u32) -> u32 {
-        if x >= self.width || y >= self.height {
+        // Outside the scissor answers nothing: a displaced surface has no
+        // memory there at all.
+        if x >= self.width || y >= self.height || x < self.sx0 || y < self.sy0 || x >= self.sx1 || y >= self.sy1 {
             return 0;
         }
         let off = (y as usize) * (self.stride as usize) + (x as usize);
@@ -950,7 +983,7 @@ impl Framebuffer {
     /// drawing stays on `put`/`rect`, which never read.
     #[inline]
     pub fn blend(&self, x: u32, y: u32, c: Color, a: u16) {
-        if a == 0 || x >= self.width || y >= self.height {
+        if a == 0 || x < self.sx0 || y < self.sy0 || x >= self.sx1 || y >= self.sy1 {
             return;
         }
         if a >= 256 {

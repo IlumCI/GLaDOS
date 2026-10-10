@@ -489,10 +489,11 @@ pub enum Cost {
     Taskbar,
     Windows,
     AppRender,
+    WinImage,
     Overlay,
 }
 
-const COSTS: usize = 6;
+const COSTS: usize = 7;
 static COST_CYCLES: [AtomicU64; COSTS] = [const { AtomicU64::new(0) }; COSTS];
 static COST_COUNT: [AtomicU64; COSTS] = [const { AtomicU64::new(0) }; COSTS];
 
@@ -505,7 +506,7 @@ pub fn cost(what: Cost, cycles: u64) {
 /// Each kind's name, its total microseconds and how many times it ran.
 pub fn costs() -> [(&'static str, u64, u64); COSTS] {
     let mhz = crate::time::tsc_mhz().max(1) as u64;
-    let names = ["wallpaper", "icons", "taskbar", "windows", "  app redraws", "overlays"];
+    let names = ["wallpaper", "icons", "taskbar", "windows", "  app redraws", "  window images", "overlays"];
     let mut out = [("", 0, 0); COSTS];
     for i in 0..COSTS {
         out[i] = (

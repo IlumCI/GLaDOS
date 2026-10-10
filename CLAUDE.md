@@ -5029,6 +5029,13 @@ the order a frame happens:
   `scene::diff` against the last frame's list is the damage: a `Region` of at
   most sixteen rectangles. Each is repainted by the same painters through a
   clipped `Framebuffer`, and `compose::present_region` writes those rows.
+- **A window is kept as an image** (`Window.image`, 1.4.1 phase 11): chrome
+  and client painted off screen through `Framebuffer::displaced` -- screen
+  coordinates, so glass still samples the right sky -- and redrawn whole when
+  the layer's stamp moves, in part when a part's does, and otherwise copied.
+  The terminal grid goes over it. `render verify`'s reference frame paints
+  windows directly (`REFERENCE`), so a stale image is a mismatch rather than
+  two copies of the same mistake agreeing.
 - **A program's pixels are kept** (`Window.app_surface`) and redrawn only when
   its `DeskApp::stamp`, focus, size or its own input changes. A program with
   no stamp is redrawn every frame, which is correct and costs time. A program

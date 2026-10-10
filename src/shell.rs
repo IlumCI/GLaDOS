@@ -3086,6 +3086,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
                 kprintln!();
             }
+            let (whole, part, held) = crate::gfx::desk::image_stats();
+            kprintln!("    window images {} whole, {} in part since boot, {} KiB held", whole, part, held / 1024);
             let reads = render::mmio_reads();
             console::set_color(if reads > 0 { YELLOW } else { LTGRAY });
             kprintln!("    aperture reads {:>5}   pixel(s) read back from write-combining memory since boot", reads);

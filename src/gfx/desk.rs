@@ -163,6 +163,32 @@ pub struct Window {
     /// that merely exposes or moves it is a row copy. Interior mutability
     /// because the painter holds the desktop shared.
     pub app_surface: core::cell::RefCell<Option<AppSurface>>,
+    /// The whole window as it was last painted, chrome and client, so a frame
+    /// that only exposes it copies rows. See `WinImage`.
+    pub image: core::cell::RefCell<Option<WinImage>>,
+}
+
+/// A window, painted off screen and kept (1.4.1, phase 11).
+///
+/// Keyed by exactly what the scene stamps the window's layer with
+/// (`window_key`): the layer's stamp moving re-draws all of it, a part's
+/// stamp moving re-draws that part, and anything else -- a window dragged
+/// across it, a menu closing over it, the pointer's plane -- is a copy out of
+/// here. The terminal's grid is not in it: the console paints its own
+/// surface and goes over the image, since text arrives at a rate chrome
+/// never does.
+///
+/// Pixels outside the window's outline are kept and never shown: the copy
+/// goes through the same shape the direct paint is clipped by, so the two
+/// agree pixel for pixel, which is what `render verify` holds them to -- its
+/// reference frame paints straight onto the frame (`REFERENCE`), so a stale
+/// image is a mismatch rather than two frames agreeing about the same stale
+/// copy.
+pub struct WinImage {
+    px: Vec<u32>,
+    frame: Rect,
+    key: u64,
+    parts: Vec<(Rect, u64)>,
 }
 
 /// What `Window::app_surface` holds: the pixels, their size, and the key they
@@ -924,6 +950,7 @@ fn make_terminal(screen: Rect) -> Window {
     Window {
         serial: next_serial(),
         app_surface: Default::default(),
+        image: Default::default(),
         title: String::from("GLaDOS Terminal"),
         icon: ICO_TERM,
         rect: Rect::new(term_x, screen.y, term_w, screen.h),
@@ -1155,6 +1182,7 @@ pub fn open(title: &str, panel: Panel) {
         d.windows.push(Window {
             serial: next_serial(),
             app_surface: Default::default(),
+        image: Default::default(),
             title: String::from(title),
             // `open` is reached through `win open <name>` with the panel's
             // name as the title, so the name is what there is to go by.
@@ -1220,6 +1248,7 @@ pub fn open_app(title: &str, icon: usize, app: Box<dyn DeskApp>, w: u32, h: u32)
         d.windows.push(Window {
             serial: next_serial(),
             app_surface: Default::default(),
+        image: Default::default(),
             title: String::from(title),
             icon,
             rect: Rect::new(x, y, w, h),
@@ -1430,6 +1459,7 @@ pub fn open_browser(url: &str) {
         d.windows.push(Window {
             serial: next_serial(),
             app_surface: Default::default(),
+        image: Default::default(),
             title,
             icon: ICO_NET,
             rect: Rect::new(x, y, w, h),
@@ -2567,6 +2597,7 @@ fn make_executive(screen: Rect) -> Window {
     Window {
         serial: next_serial(),
         app_surface: Default::default(),
+        image: Default::default(),
         title: String::from("Executive"),
         icon: ICO_TERM,
         rect: Rect::new(
@@ -4546,6 +4577,85 @@ fn place_consoles(d: &Desktop, screen: Rect) {
 /// contract, and the way it fails is a pixel that does not update when it
 /// should. `render verify on` composes a whole reference frame every frame and
 /// compares, which is how a missing input is found rather than guessed at.
+/// What a window's painter reads, as the scene stamps it: the whole layer's
+/// stamp, and the parts that repaint on their own. One function for `layers`,
+/// which turns it into damage, and for the window's image, which is re-drawn
+/// exactly where that damage says -- two copies of this would be two answers
+/// to "has this window changed", and a stale image is what the second would
+/// cost.
+fn window_key(
+    d: &Desktop,
+    i: usize,
+    win: &Window,
+    active: bool,
+    frame: Rect,
+    inputs: &(([bool; 96], u32, u32), (String, String, bool)),
+    seq: u64,
+    wake: &mut u32,
+) -> (u64, Vec<(Rect, u64)>) {
+    use super::scene::Stamp;
+    use core::hash::Hash;
+    let hot = match d.hover {
+        Hover::Caption { win, which } if win == i => Some(which),
+        _ => None,
+    };
+    let menu_hover = match d.hover {
+        Hover::MenuLabel { win, menu } if win == i => Some(menu),
+        _ => None,
+    };
+    let open_menu = match d.mode {
+        Mode::Menu { menu, .. } if active => Some(menu),
+        _ => None,
+    };
+    let mut st = Stamp::new();
+    (frame, win.title.as_str(), active, win.state == WinState::Maximised).hash(&mut st);
+    (hot, menu_hover, open_menu, win.round).hash(&mut st);
+    // The caption glass's tint is chrome the painter reads.
+    theme::caption_tint().hash(&mut st);
+    for m in &win.menus {
+        m.label.hash(&mut st);
+    }
+    let chrome = theme::chrome(frame, !win.menus.is_empty());
+    let client = chrome.client;
+    let mut parts = Vec::new();
+    if !client.is_empty() {
+        match &win.content {
+            Content::Terminal(ch) => {
+                let (well, grid, strip) = terminal_geometry(client, *ch);
+                // The well's border and the grid's own background are
+                // fixed by the geometry; the console repaints its text
+                // itself as it prints.
+                core::hash::Hasher::write_u64(&mut st, Stamp::of((well, grid)));
+                // The gutter marks where prompts start and the strip reads
+                // the machine's state, each stamped with exactly what its
+                // painter reads. The gutter belongs to the main terminal
+                // alone, as its painter does.
+                if *ch == super::console::USER {
+                    parts.push((Rect::new(well.x + 1, grid.y, 2, grid.h), Stamp::of(inputs.0)));
+                }
+                if let Some(strip) = strip {
+                    parts.push((strip, Stamp::of(&inputs.1)));
+                }
+            }
+            Content::Panel(p) => {
+                let hov = match d.hover {
+                    Hover::Widget { win, idx } if win == i => Some(idx),
+                    _ => None,
+                };
+                parts.push((client, Stamp::of((p.stamp(), active, hov))));
+            }
+            Content::Browser(b) => parts.push((client, Stamp::of((b.stamp(), active)))),
+            Content::App(a) => {
+                if let Some(ms) = a.wake_ms() {
+                    *wake = (*wake).min(ms.max(1));
+                }
+                parts.push((client, app_key(a.as_ref(), active, client, seq)))
+            }
+        }
+    }
+    (core::hash::Hasher::finish(&st), parts)
+}
+
 fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Layer> {
     use super::scene::{Layer, LayerId, Stamp};
     use core::hash::Hash;
@@ -4609,68 +4719,11 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
         let active = Some(i) == focus;
         let frame = win.frame(screen);
         let bounds = shadowed(win, frame, active, fb);
-        let hot = match d.hover {
-            Hover::Caption { win, which } if win == i => Some(which),
-            _ => None,
-        };
-        let menu_hover = match d.hover {
-            Hover::MenuLabel { win, menu } if win == i => Some(menu),
-            _ => None,
-        };
-        let open_menu = match d.mode {
-            Mode::Menu { menu, .. } if active => Some(menu),
-            _ => None,
-        };
-        let mut st = Stamp::new();
-        (frame, win.title.as_str(), active, win.state == WinState::Maximised).hash(&mut st);
-        (hot, menu_hover, open_menu, win.round).hash(&mut st);
-        // The caption glass's tint is chrome the painter reads.
-        theme::caption_tint().hash(&mut st);
-        for m in &win.menus {
-            m.label.hash(&mut st);
-        }
-        let chrome = theme::chrome(frame, !win.menus.is_empty());
-        let client = chrome.client;
-        let mut parts = Vec::new();
-        if !client.is_empty() {
-            match &win.content {
-                Content::Terminal(ch) => {
-                    let (well, grid, strip) = terminal_geometry(client, *ch);
-                    // The well's border and the grid's own background are
-                    // fixed by the geometry; the console repaints its text
-                    // itself as it prints.
-                    core::hash::Hasher::write_u64(&mut st, Stamp::of((well, grid)));
-                    // The gutter marks where prompts start and the strip reads
-                    // the machine's state, each stamped with exactly what its
-                    // painter reads. The gutter belongs to the main terminal
-                    // alone, as its painter does.
-                    if *ch == super::console::USER {
-                        parts.push((Rect::new(well.x + 1, grid.y, 2, grid.h), Stamp::of(inputs.0)));
-                    }
-                    if let Some(strip) = strip {
-                        parts.push((strip, Stamp::of(&inputs.1)));
-                    }
-                }
-                Content::Panel(p) => {
-                    let hov = match d.hover {
-                        Hover::Widget { win, idx } if win == i => Some(idx),
-                        _ => None,
-                    };
-                    parts.push((client, Stamp::of((p.stamp(), active, hov))));
-                }
-                Content::Browser(b) => parts.push((client, Stamp::of((b.stamp(), active)))),
-                Content::App(a) => {
-                    if let Some(ms) = a.wake_ms() {
-                        wake = wake.min(ms.max(1));
-                    }
-                    parts.push((client, app_key(a.as_ref(), active, client, seq)))
-                }
-            }
-        }
+        let (stamp, parts) = window_key(d, i, win, active, frame, &inputs, seq, &mut wake);
         out.push(Layer {
             id: LayerId::Window(win.serial),
             bounds,
-            stamp: core::hash::Hasher::finish(&st),
+            stamp,
             parts,
         });
     }
@@ -4854,7 +4907,9 @@ fn verify_frame(back: &Framebuffer, d: &Desktop, screen: Rect) {
         return;
     }
     let scratch = unsafe { Framebuffer::over_ram(px.as_mut_ptr() as u64, w, h, w, back.format()) };
+    REFERENCE.store(true, core::sync::atomic::Ordering::Relaxed);
     paint_scene(&scratch, d, screen);
+    REFERENCE.store(false, core::sync::atomic::Ordering::Relaxed);
     VERIFY_RUNS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let skip = [clock_rect(back), battery_rect(back).unwrap_or(Rect::new(0, 0, 0, 0))];
     let grids: Vec<Rect> = d.windows.iter().enumerate()
@@ -4917,6 +4972,188 @@ fn verify_frame(back: &Framebuffer, d: &Desktop, screen: Rect) {
 /// the rectangle. Windows wholly outside it are skipped. The order is the
 /// order, so a translucent shadow or glass band always blends over pixels
 /// repainted underneath it in the same pass.
+/// Set while `render verify` composes its reference frame, which paints
+/// every window straight onto the frame rather than out of its image.
+static REFERENCE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Window images drawn whole and in part since boot, for `render`.
+static IMAGE_WHOLE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static IMAGE_PART: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// `(whole, part, bytes held)`: how often window images were drawn, and what
+/// they hold now.
+pub fn image_stats() -> (u64, u64, usize) {
+    let held = with_ref(|d| {
+        d.windows.iter().map(|w| w.image.borrow().as_ref().map_or(0, |im| im.px.len() * 4)).sum()
+    })
+    .unwrap_or(0);
+    (
+        IMAGE_WHOLE.load(core::sync::atomic::Ordering::Relaxed),
+        IMAGE_PART.load(core::sync::atomic::Ordering::Relaxed),
+        held,
+    )
+}
+
+/// A terminal's grid, over whatever the window under it was painted from.
+fn console_over(fb: &Framebuffer, win: &Window) {
+    if let Content::Terminal(ch) = &win.content {
+        super::console::blit_ch(*ch, fb);
+    }
+}
+
+/// Bring a window's image up to date and copy the part of it the frame is
+/// repainting. False when there is no image to be had, and the caller paints
+/// directly.
+fn from_image(fb: &Framebuffer, d: &Desktop, i: usize, win: &Window, frame: Rect, active: bool, hot: Option<usize>) -> bool {
+    use core::sync::atomic::Ordering::Relaxed;
+    if frame.is_empty() {
+        return false;
+    }
+    let inputs = unsafe { (*FRAME_INPUTS.get()).clone() }.unwrap_or_else(|| (gutter_marks(), status_text()));
+    let mut wake = u32::MAX;
+    let (key, parts) = window_key(d, i, win, active, frame, &inputs, FRAME_SEQ.load(Relaxed), &mut wake);
+    let mut slot = win.image.borrow_mut();
+    let n = frame.w as usize * frame.h as usize;
+    let whole = match slot.as_ref() {
+        Some(im) => im.frame != frame || im.key != key || im.parts.len() != parts.len(),
+        None => true,
+    };
+    let t0 = crate::time::rdtsc();
+    if whole {
+        let mut px = match slot.take() {
+            Some(im) if im.px.len() == n => im.px,
+            _ => {
+                let mut v = Vec::new();
+                if v.try_reserve_exact(n).is_err() {
+                    return false;
+                }
+                v.resize(n, 0);
+                v
+            }
+        };
+        let img = unsafe { Framebuffer::displaced(px.as_mut_ptr(), frame.x, frame.y, frame.w, frame.h, fb.format()) };
+        paint_window_body(&img, d, i, win, frame, active, hot);
+        IMAGE_WHOLE.fetch_add(1, Relaxed);
+        *slot = Some(WinImage { px, frame, key, parts });
+    } else if let Some(im) = slot.as_mut() {
+        // Only the parts whose stamps moved, which is exactly the damage the
+        // scene gave this window: the rest of the image is still what it
+        // would draw.
+        for (k, part) in parts.iter().enumerate() {
+            if im.parts[k] == *part {
+                continue;
+            }
+            let (r, _) = *part;
+            let img = unsafe { Framebuffer::displaced(im.px.as_mut_ptr(), frame.x, frame.y, frame.w, frame.h, fb.format()) };
+            paint_window_body(&img.clipped(r.x, r.y, r.w, r.h), d, i, win, frame, active, hot);
+            im.parts[k] = *part;
+            IMAGE_PART.fetch_add(1, Relaxed);
+        }
+    }
+    super::render::cost(super::render::Cost::WinImage, crate::time::rdtsc().saturating_sub(t0));
+    let Some(im) = slot.as_ref() else { return false };
+    with_window_shape(fb, win, frame, || {
+        let (x0, y0, x1, y1) = fb.scissor();
+        let xa = x0.max(frame.x);
+        let xb = x1.min(frame.x + frame.w);
+        if xa >= xb {
+            return;
+        }
+        for y in y0.max(frame.y)..y1.min(frame.y + frame.h) {
+            let r = (y - frame.y) as usize * frame.w as usize;
+            fb.blit_span(xa, y, &im.px[r + (xa - frame.x) as usize..r + (xb - frame.x) as usize]);
+        }
+    });
+    true
+}
+
+/// Everything a window paints inside its own outline but the terminal
+/// grid: the frame, the caption, the menu bar and the client. Into the
+/// window's image normally, and straight onto the frame when there is no
+/// image -- `render verify`'s reference frame, or no memory for one.
+fn paint_window_body(fb: &Framebuffer, d: &Desktop, i: usize, win: &Window, frame: Rect, active: bool, hot: Option<usize>) {
+    let fb = *fb;
+    let c = theme::window(
+        &fb,
+        frame,
+        &win.title,
+        active,
+        win.state == WinState::Maximised,
+        !win.menus.is_empty(),
+        hot,
+    );
+    let client = c.client;
+    if client.is_empty() {
+        // Nothing left to draw inside the frame; the chrome is
+        // already painted.
+        return;
+    }
+
+    if let Some(bar) = c.menubar {
+        theme::panel(&fb, bar);
+        let open = match d.mode {
+            Mode::Menu { menu, .. } if active => Some(menu),
+            _ => None,
+        };
+        let labels = theme::menu_labels(bar, win.menus.iter().map(|m| m.label.as_str()));
+        for (mi, (m, lr)) in win.menus.iter().zip(labels).enumerate() {
+            let hot = Some(mi) == open
+                || d.hover == Hover::MenuLabel { win: i, menu: mi };
+            let (fg, bg) = if hot {
+                (theme::SELECT_TEXT, theme::SELECT)
+            } else {
+                (theme::TEXT, theme::FACE)
+            };
+            let ty = lr.y + (lr.h.saturating_sub(theme::text_h())) / 2;
+            fb.rect(lr.x, lr.y + 1, lr.w, lr.h.saturating_sub(2), bg);
+            theme::text(&fb, lr.x + 6, ty, &m.label, fg, bg);
+        }
+    }
+
+    match &win.content {
+        Content::Terminal(ch) => {
+            let well = client.shrink(2);
+            theme::well(&fb, well, theme::SCREEN);
+            let inner = well.shrink(3);
+            // A status strip along the foot of the *window*, with
+            // the grid reflowed into what is left. It goes on the
+            // main terminal only: the exec console is a transcript
+            // of one command and has no state of its own to
+            // report, and a second strip would be two rows of
+            // chrome saying the same thing.
+            let strip = if *ch == super::console::USER {
+                terminal_strip(well)
+            } else {
+                None
+            };
+            let grid = match strip {
+                Some(s) => Rect::new(inner.x, inner.y, inner.w, inner.h - s.h),
+                None => inner,
+            };
+            // The grid itself is the console's own surface, laid over
+            // this by `console_over` -- outside the window's image,
+            // because text arrives far more often than chrome changes.
+            let _ = grid;
+            if *ch == super::console::USER {
+                prompt_gutter(&fb, well, grid);
+            }
+            if let Some(strip) = strip {
+                terminal_status(&fb, strip);
+            }
+        }
+        Content::Panel(p) => {
+            theme::panel(&fb, client);
+            let hov = match d.hover {
+                Hover::Widget { win, idx } if win == i => Some(idx),
+                _ => None,
+            };
+            p.draw_in(&fb, client, active, hov);
+        }
+        Content::Browser(b) => b.draw_in(&fb, client, active),
+        Content::App(a) => paint_app(win, a.as_ref(), &fb, client, active),
+    }
+}
+
 fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
     let fb = *target;
     use super::render::{cost, Cost};
@@ -4979,93 +5216,16 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
             // window costs a load and a branch for the whole frame; a shaped
             // one simply does not write outside itself, and whatever the
             // back-to-front repaint already put there shows through.
-            with_window_shape(&fb, win, frame, || {
-                let c = theme::window(
-                    &fb,
-                    frame,
-                    &win.title,
-                    active,
-                    win.state == WinState::Maximised,
-                    !win.menus.is_empty(),
-                    hot,
-                );
-                let mut client = c.client;
-                if client.is_empty() {
-                    // Nothing left to draw inside the frame; the chrome is
-                    // already painted. `return` and not `continue`, because
-                    // this is the shape closure and not the loop.
-                    return;
-                }
-
-                if let Some(bar) = c.menubar {
-                    theme::panel(&fb, bar);
-                    let open = match d.mode {
-                        Mode::Menu { menu, .. } if active => Some(menu),
-                        _ => None,
-                    };
-                    let labels = theme::menu_labels(bar, win.menus.iter().map(|m| m.label.as_str()));
-                    for (mi, (m, lr)) in win.menus.iter().zip(labels).enumerate() {
-                        let hot = Some(mi) == open
-                            || d.hover == Hover::MenuLabel { win: i, menu: mi };
-                        let (fg, bg) = if hot {
-                            (theme::SELECT_TEXT, theme::SELECT)
-                        } else {
-                            (theme::TEXT, theme::FACE)
-                        };
-                        let ty = lr.y + (lr.h.saturating_sub(theme::text_h())) / 2;
-                        fb.rect(lr.x, lr.y + 1, lr.w, lr.h.saturating_sub(2), bg);
-                        theme::text(&fb, lr.x + 6, ty, &m.label, fg, bg);
-                    }
-                }
-
-                match &win.content {
-                    Content::Terminal(ch) => {
-                        let well = client.shrink(2);
-                        theme::well(&fb, well, theme::SCREEN);
-                        let inner = well.shrink(3);
-                        // A status strip along the foot of the *window*, with
-                        // the grid reflowed into what is left. It goes on the
-                        // main terminal only: the exec console is a transcript
-                        // of one command and has no state of its own to
-                        // report, and a second strip would be two rows of
-                        // chrome saying the same thing.
-                        let strip = if *ch == super::console::USER {
-                            terminal_strip(well)
-                        } else {
-                            None
-                        };
-                        let grid = match strip {
-                            Some(s) => Rect::new(inner.x, inner.y, inner.w, inner.h - s.h),
-                            None => inner,
-                        };
-                        // Each grid reflows into its own window. They are
-                        // different sizes and hold different text, so asking
-                        // for "the console" here would paint one of them
-                        // twice and the other never.
-                        // Placed before the frame by `place_consoles`; its
-                        // own surface laid in here, inside this pass's clip.
-                        let _ = grid;
-                        super::console::blit_ch(*ch, &fb);
-                        if *ch == super::console::USER {
-                            prompt_gutter(&fb, well, grid);
-                        }
-                        if let Some(strip) = strip {
-                            terminal_status(&fb, strip);
-                        }
-                    }
-                    Content::Panel(p) => {
-                        theme::panel(&fb, client);
-                        let hov = match d.hover {
-                            Hover::Widget { win, idx } if win == i => Some(idx),
-                            _ => None,
-                        };
-                        p.draw_in(&fb, client, active, hov);
-                    }
-                    Content::Browser(b) => b.draw_in(&fb, client, active),
-                    Content::App(a) => paint_app(win, a.as_ref(), &fb, client, active),
-                }
-            });
+            //
+            // The window itself comes out of its image (`WinImage`) when it
+            // has one, which turns a window that is merely exposed -- by
+            // something moving over it, or a part of it changing -- into row
+            // copies. The terminal's grid goes over either way.
+            if REFERENCE.load(core::sync::atomic::Ordering::Relaxed) || !from_image(&fb, d, i, win, frame, active, hot) {
+                with_window_shape(&fb, win, frame, || paint_window_body(&fb, d, i, win, frame, active, hot));
             }
+            with_window_shape(&fb, win, frame, || console_over(&fb, win));
+        }
 
         // Over the windows, because the bar is drawn under them and a tip
         // stands above the bar.
