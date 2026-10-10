@@ -62,7 +62,7 @@ fn from_linear(l: f64) -> f64 {
 // rather than changes to `tensor`'s, whose own note says altering them moves
 // every logit the model produces.
 
-fn pow(b: f64, e: f64) -> f64 {
+pub(crate) fn pow(b: f64, e: f64) -> f64 {
     if b <= 0.0 {
         return 0.0;
     }
