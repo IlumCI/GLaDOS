@@ -4169,7 +4169,7 @@ At boot the system runs **twenty-nine selftest sections** -- count the
 `[selftest]` headings in a boot log, which is the only figure that cannot go
 stale -- **seventeen** of which are wrapped in `main::section` so one that
 breaks marks itself unavailable instead of taking the machine, and `diag`
-offers **seventy-five named suites** on demand (`diag.rs`'s `SLOTS`, asserted
+offers **ninety-two named suites** on demand (`diag.rs`'s `SLOTS`, asserted
 against `SUITES.len()`), most of them the same checks (the `aiksi` section covers the capability gate by name and never by
 calling -- half that table pokes memory, drives I/O ports or paints over the
 screen, and a suite that called every row to prove it exists would be
@@ -4359,6 +4359,22 @@ GF63 is unknown; boot now prints the configuration as the mouse left it.
 `--qemu-late "-device usb-kbd,bus=xhci.0"` puts a USB keyboard on the bus
 instead, and `sendkey` then drives that: `--qemu-extra` comes before the
 machine's own devices, where the xhci bus does not exist yet.
+
+**A line printed by the compositor after the prompt hides the prompt from
+`drive.py`**, which then times out with commands unsent while the guest is
+perfectly well. `mouse down` and `mouse up` are the usual cause -- the
+desktop logs `[desk] press` once the shell has already printed its prompt --
+so send those with `@send mouse down\r` and an `@wait`. Two more about the
+shell's pointer verbs: `mouse move dx dy` takes **y upward**, so a negative
+dy moves down the screen, and `mouse click` presses and releases inside one
+packet window, which the compositor sees as no click at all; use `down`,
+a wait, then `up`.
+
+**A program holding the screen cannot be photographed with `@shot`**, since
+QEMU's screendump goes stale under a lease. `video <sheet> <ms>` prints the
+RAM address of what it drew; `pmemsave` that through the monitor instead.
+And `render verify` names the first differing pixel and both values, which
+is how every one of its findings in 1.4.1 was diagnosed.
 
 **`@send <text>` types raw into whatever has the keyboard**, with `\e` for
 Escape and `\r` for Enter, and does not wait for a prompt -- it is how a
@@ -5018,6 +5034,21 @@ still coalesces to `CURSOR_MIN_US`.
 described one where every frame repainted everything.** What it is now, in
 the order a frame happens:
 
+- **Pixels are premultiplied ARGB** (`gfx::blend`, exact `/255`), and
+  everything drawn is anti-aliased by signed distance (`gfx::shape`):
+  rounded boxes, rings, circles, capsules. Gradients are OKLab ramps baked
+  to 256 steps with a Bayer dither (`gfx::grad`), so a full-screen ramp does
+  not band. Text is Noto Sans and Cascadia Code through `fontdue`, cached in
+  an atlas by glyph, size and third-of-a-pixel phase (`gfx::text`).
+  Shadows are a closed-form blurred rounded box in a cached nine-slice
+  (`gfx::shadow`); glass is Vista's colourisation formula over a blurred
+  copy of the wallpaper (`gfx::glass`); scaling is bilinear on premultiplied
+  pixels with a mip chain below half (`gfx::scale`). The wallpaper
+  (`gfx::wall`), the icons (`gfx::icons`, lit objects, the Start orb and the
+  caption mark among them) and the pointer (a 32x32 plane in `compose`) are
+  drawn from these, not from bitmaps. Each module has a `diag` suite and a
+  `video <name> <ms>` proof sheet.
+
 - **Only the compositor writes the screen.** `comp_task` composes when
   something is dirty and sleeps otherwise (`render::pace`), woken by
   `render::invalidate`, a pointer packet, the tray's tenth of a second, or a
@@ -5053,11 +5084,13 @@ the order a frame happens:
   `desk` is written at 125% -- Windows' choice for this panel -- and goes
   through the scale, so the default is pixel-identical to the constants and
   `win scale <percent>` moves everything at once (75 to 250). Applications'
-  own layouts (Minesweeper's cells, Paint's canvas) are not converted yet.
+  layouts follow it too, except Paint's canvas, which is image pixels.
 - **Super-Tab is Flip 3D** (`gfx::flip`, phase 15): the windows' images
   stood in a stack leaning away, on a darkened blur of the wallpaper. Tab and
   the arrows turn it, Enter brings the front window forward, Esc and a click
-  leave. 2.5D -- each window is a quad whose near edge is taller -- and drawn
+  leave. The rise and fall draw over a still of the desktop taken from the
+  back buffer rather than the live desktop, which is what brought them inside
+  budget. 2.5D -- each window is a quad whose near edge is taller -- and drawn
   row by row across every core. A stack that arrives between a frame's scene
   and its paint waits for the next frame (`FlipState::live`).
 - **Settings are one verb and one file** (`gfx::settings`, phase 16): `desk`
@@ -5075,9 +5108,7 @@ the order a frame happens:
   frames where something was animating, and not while `render verify` runs
   (it measured verify's own repaint and shed everything). Two slow windows
   of twelve frames shed a rung, five easy ones earn it back. `render` shows
-  the level; `desk quality <floor> <ceiling>` bounds it. Under KVM the
-  Flip 3D rise is slow enough to cost the blur, which is the governor being
-  right about those frames.
+  the level; `desk quality <floor> <ceiling>` bounds it.
 - **A program's pixels are kept** (`Window.app_surface`) and redrawn only when
   its `DeskApp::stamp`, focus, size or its own input changes. A program with
   no stamp is redrawn every frame, which is correct and costs time. A program
