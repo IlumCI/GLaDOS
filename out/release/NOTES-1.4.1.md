@@ -32,6 +32,25 @@ renderer that only touches what changed.
   the part that draws, not the shell, so switching windows works in the middle
   of a long command.
 
+## It runs at full speed on the laptop, and the mouse works
+
+- **Full clock.** Nothing at boot asked the processor for a speed, and on the
+  laptop it sat at under a quarter of its base clock. It runs at full speed
+  now, and `perf` tells you how fast and whether the screen or the processor
+  is what limits a frame.
+- **USB mice and keyboards work.** Including gaming mice that present a
+  keyboard beside the mouse, plugged in before boot or after, and found again
+  if they are pulled out and put back. A failing device is reset rather than
+  left dead.
+- **Pointer speed with acceleration.** Slow movement is exact, a flick
+  crosses the screen, and the speed is a setting.
+- **A device manager.** `devices` lists everything the machine has, grouped
+  by kind, inside or plugged in, with whether it works and why not.
+- **The touchpad keeps going.** A missed signal from the touchpad used to
+  stop it until reboot; it is collected now.
+
+Scrolling is the next update.
+
 ## It looks like now
 
 - **Glass.** Window frames, title bars, the taskbar and the Start menu are

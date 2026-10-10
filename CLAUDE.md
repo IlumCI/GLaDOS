@@ -5019,8 +5019,38 @@ transfer events a waiter was not asking for are stashed for whoever is -- so
 the two tasks' transfers cannot take each other's completions. Not driven
 under QEMU, which has no USB mouse plugged into it; the trip is the test.
 
-**The trip found that the trackpad is that USB device, and that the cursor
-could not take the rate.** The arrow was written straight into the aperture
+**USB input had never run on the GF63, and the touchpad is the i8042's.**
+This said "the trip found that the trackpad is that USB device", and a later
+trip disproved it: every port answered `no response to Enable Slot`, because
+Intel's xHCI wants scratchpad pages (`HCSPARAMS2`) and the USB legacy
+handoff (`USBLEGSUP`) and QEMU's wants neither, so the controller had taken
+no command on this laptop, ever. Both are in `xhci::start` and
+`take_from_bios` now, and a USB mouse works there. Three more things the
+same trips found, all in `usbhid`: a device is driven on **every** boot
+interface rather than the first keyboard (a gaming mouse is a keyboard for
+its macro keys beside the mouse, and `258a:0033 keyboard` was the whole
+symptom); a failed transfer resets the endpoint rather than waiting forever
+on a halted one; and ports are watched, so a device that leaves, returns or
+arrives after boot is found -- enumerated on the clock task with backoff,
+never on the compositor, where Enable Slot timeouts once froze the screen
+for 10.7 s. HID counts y downward and `mouse::apply` takes PS/2's upward
+convention, so the decoder negates it; `apply` runs ballistics (1:1 below
+three counts, up to 3x, scaled by `desk pointer`), and `mouse move` is
+`apply_exact`. The i8042 path gained a keep-alive (`mouse::rescue`) for a
+lost IRQ 12 edge, and `mouse` prints its counters.
+
+**Boot applies a CPU governor.** Nothing did, and the GF63 read 630 MHz --
+23% of base -- with powersave's EPP of 255 holding it there under load; `perf`
+is the verb that says so. Balanced is applied inside the `power` section's
+guard, and powersave leans at 192.
+
+**`devices` is a device manager** (`src/dev/manager.rs`): every device from
+the registry, the i8042, USB input, NVMe, the battery and the framebuffer,
+grouped by category, internal or external, with a status and a reason.
+Built fresh on every ask; `generation()` moves on hotplug. `devices table`
+is the registry's own view.
+
+**The cursor could not take a USB mouse's report rate either.** The arrow was written straight into the aperture
 and erased from the back buffer, so it strobed, and an erase during a `draw()`
 on another task copied half a frame. It is a plane now (1.4.1, phase 6, the
 Haiku arrangement): the arrow never enters the back buffer, `compose` lays it
