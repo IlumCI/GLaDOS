@@ -317,6 +317,10 @@ fn take_request() -> Option<Req> {
 
 /// The resident agent task. Spawned once; never returns.
 pub fn agent_task() {
+    // Episodes run in their own context: their own KV cache, so an episode
+    // no longer rewinds `pos` under the conversation, and their own holder,
+    // so `ask` answers while an episode runs.
+    super::ctx::adopt(super::ctx::Ctx::Agent);
     loop {
         let Some(req) = take_request() else {
             crate::task::yield_now();

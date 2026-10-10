@@ -1673,7 +1673,7 @@ fn mine_task() {
         //
         // `park()` and not `idle()`, for the reason `park` gives: an unpinned
         // slice spinning is a whole core held at full power computing nothing.
-        if yield_to_model() && crate::ai::engine_holder().is_some() {
+        if yield_to_model() && crate::ai::any_holder() {
             YIELDED.fetch_add(1, Ordering::Relaxed);
             park();
             continue;

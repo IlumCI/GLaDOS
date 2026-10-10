@@ -26,6 +26,7 @@ use super::tensor::sqrtf;
 use alloc::vec;
 use alloc::vec::Vec;
 
+#[derive(Clone)]
 pub struct Probe {
     dim: usize,
     classes: usize,

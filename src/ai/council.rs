@@ -58,6 +58,7 @@ pub fn fnv1a(bytes: &[u8]) -> u32 {
 }
 
 /// Sparse multinomial naive Bayes.
+#[derive(Clone)]
 pub struct Bayes {
     classes: usize,
     features: usize,
@@ -212,6 +213,7 @@ pub fn char_features(text: &str) -> Vec<(u32, f32)> {
 }
 
 /// The council: one probe that answers, two counters that corroborate.
+#[derive(Clone)]
 pub struct Council {
     /// Token ids seen during training, sorted. Anything outside carries no
     /// evidence and would only dilute the smoothing mass.

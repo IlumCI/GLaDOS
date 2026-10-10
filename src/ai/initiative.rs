@@ -643,6 +643,12 @@ fn tick_inner(forced: bool) {
                     // predicts them well. It moves nothing until the head
                     // has at least as much evidence as the prior, and it
                     // cannot unwind more than `MAX_BACK` in one night.
+                    // Judged in its own context, so a candidate adapter is
+                    // never attached to the conversation while it is on trial,
+                    // and the mind's cache is left alone for the twenty
+                    // seconds a trial takes. An adoption reaches `Chat` by
+                    // publication, at the end of the borrow that made it.
+                    let _judging = super::ctx::scoped(super::ctx::Ctx::Judge);
                     let moved = match super::with_engine(|e| super::godel::reconsider(e)) {
                         Some(super::godel::Reconsidered::Went(n, _)) => Some(n),
                         Some(super::godel::Reconsidered::Stuck(n, _)) if n > 0 => Some(n),

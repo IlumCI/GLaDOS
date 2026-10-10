@@ -918,6 +918,7 @@ pub fn train_full(
         let k = 1.0 / set.len() as f32;
         scale_grads(&mut grads, k);
 
+        e.model.adapter_epoch += 1;
         if let Some(ad) = e.model.adapters.as_mut() {
             for (l, t) in ad.qkv.iter_mut().enumerate() {
                 for (i, site) in t.iter_mut().enumerate() {

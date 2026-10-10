@@ -12,6 +12,7 @@
 
 use super::tensor;
 use super::weights::{self, Mat};
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -1278,8 +1279,13 @@ struct ByteOffsets {
 /// fastest possible access. A GLADOSM2 checkpoint is 135 MB of mixed
 /// precision that the firmware already placed in RAM, so copying it would cost
 /// both the copy and a second 135 MB of heap for no benefit.
+///
+/// Every owned buffer is an `Arc` so that `Model::share` can hand a second
+/// context the same weights for the price of a refcount. Nothing writes a
+/// `Source` after load, which is the whole condition for that being sound.
+#[derive(Clone)]
 enum Source {
-    Flat(Vec<f32>),
+    Flat(Arc<[f32]>),
     Blob {
         bytes: &'static [u8],
         off: ByteOffsets,
@@ -1289,7 +1295,7 @@ enum Source {
         /// would be on the hot path -- and at 35K values out of 134M, copying
         /// them costs 140 KB. Layout: rms_att[L*dim], rms_ffn[L*dim],
         /// rms_final[dim].
-        norms: Vec<f32>,
+        norms: Arc<[f32]>,
     },
     /// A v4 hybrid, whose body is layer-major.
     ///
@@ -1305,8 +1311,8 @@ enum Source {
         /// above and rather more of them: the delta net keeps its convolution,
         /// its decay parameters and its gated norm in f32, which for
         /// Qwen3.5-0.8B is 1.09M values, 4.4 MB.
-        f: Vec<f32>,
-        layers: Vec<LayerOff>,
+        f: Arc<[f32]>,
+        layers: Arc<[LayerOff]>,
         embed: usize,
         rms_final: usize,
         wcls: usize,
@@ -1389,6 +1395,11 @@ pub struct Model {
     /// every hot-path check is a pointer test, and an unattached model runs
     /// the exact instruction stream it always ran.
     pub adapters: Option<super::adapter::Adapters>,
+    /// Bumped whenever `adapters` changes, so a context can tell that its
+    /// adapter moved and publish it to the others (`ai::ctx`). A counter and
+    /// not a hash, because hashing a 2.6 MB deep adapter at the end of every
+    /// borrow would cost more than the borrow.
+    pub adapter_epoch: u64,
 }
 
 impl Model {
@@ -1416,7 +1427,7 @@ impl Model {
         }
 
         let o = offsets(&cfg, false);
-        Some(Self { cfg, src: Source::Flat(w), o, adapters: None })
+        Some(Self { cfg, src: Source::Flat(w.into()), o, adapters: None, adapter_epoch: 0 })
     }
 
     /// Load a llama2.c checkpoint.
@@ -1498,7 +1509,7 @@ impl Model {
         }
 
         let o = offsets(&cfg, true);
-        Ok(Self { cfg, src: Source::Flat(w), o, adapters: None })
+        Ok(Self { cfg, src: Source::Flat(w.into()), o, adapters: None, adapter_epoch: 0 })
     }
 
     /// Load a GLADOSM2 checkpoint, referencing the blob in place.
@@ -1742,7 +1753,7 @@ impl Model {
             }
         }
 
-        Ok(Self { cfg, src: Source::Blob { bytes: data, off, norms }, o: Offsets::default(), adapters: None })
+        Ok(Self { cfg, src: Source::Blob { bytes: data, off, norms: norms.into() }, o: Offsets::default(), adapters: None, adapter_epoch: 0 })
     }
 
     /// Walk a v4 body and record where every tensor of every layer starts.
@@ -1836,10 +1847,23 @@ impl Model {
 
         Ok(Self {
             cfg,
-            src: Source::Hybrid { bytes: data, f, layers, embed, rms_final, wcls },
+            src: Source::Hybrid { bytes: data, f: f.into(), layers: layers.into(), embed, rms_final, wcls },
             o: Offsets::default(),
             adapters: None,
+            adapter_epoch: 0,
         })
+    }
+
+    /// A second view of these weights with no adapters attached.
+    ///
+    /// The weights are shared, not copied: a context gets its own KV cache
+    /// and its own adapter, and the bytes underneath are the one copy the
+    /// firmware loaded. Adapters are deliberately not carried over -- a
+    /// `godel` trial attaches to the judging context, and sharing the
+    /// incumbent's adapter by reference is exactly how a trial would leak
+    /// into the conversation.
+    pub fn share(&self) -> Model {
+        Model { cfg: self.cfg, src: self.src.clone(), o: self.o, adapters: None, adapter_epoch: 0 }
     }
 
     pub fn weight_bytes(&self) -> usize {
@@ -2666,6 +2690,7 @@ impl Model {
             );
         }
         self.adapters = Some(ad);
+        self.adapter_epoch += 1;
         Ok(())
     }
 
@@ -2690,6 +2715,7 @@ impl Model {
             return Err("hybrid adapters are not supported yet");
         }
         self.adapters = Some(ad);
+        self.adapter_epoch += 1;
         Ok(())
     }
 
@@ -2802,10 +2828,12 @@ impl Model {
 
         let n = parsed.sites.len();
         self.adapters = Some(ad);
+        self.adapter_epoch += 1;
         Ok(n)
     }
 
     pub fn detach_adapters(&mut self) -> Option<super::adapter::Adapters> {
+        self.adapter_epoch += 1;
         self.adapters.take()
     }
 

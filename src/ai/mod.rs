@@ -12,6 +12,7 @@ pub mod backward;
 pub mod clade;
 pub mod constrain;
 pub mod context;
+pub mod ctx;
 pub mod initiative;
 pub mod learn;
 pub mod train;
@@ -645,7 +646,9 @@ pub fn bench() {
 /// `State` is sized from the same config.
 pub struct Engine {
     pub model: model::Model,
-    pub tok: tokenizer::Tokenizer,
+    /// One tokenizer for every context. Nothing mutates it after load, so a
+    /// shared reference is exactly what it always was.
+    pub tok: &'static tokenizer::Tokenizer,
     pub state: model::State,
     pub rng: sample::Rng,
     /// The part that is allowed to change. Everything above it is frozen.
@@ -665,12 +668,41 @@ pub struct Engine {
     /// The last token emitted, so a resumed generation has something to feed
     /// the model when no new prompt is supplied.
     pub last_token: usize,
+    /// Bumped wherever `head`, `probe` or `council` change, so the end of a
+    /// borrow can tell the other contexts (`ctx::publish`). Missing a bump
+    /// leaves another context's router stale; it cannot corrupt anything.
+    pub router_epoch: u64,
+    /// What this engine last agreed with, per half. `ctx` owns it.
+    pub seen: ctx::Seen,
 }
 
-static ENGINE: Racy<Option<Engine>> = Racy::new(None);
+/// One engine per context (`ctx::Ctx`), created on first use.
+static ENGINES: Racy<[Option<Engine>; ctx::COUNT]> = Racy::new([None, None, None]);
+
+/// The adapter-free view of the weights every new context is built from,
+/// and the one tokenizer. Set once by `init`; read-only afterwards.
+static BASE: Racy<Option<(model::Model, &'static tokenizer::Tokenizer, vocab::Head)>> = Racy::new(None);
 
 pub fn engine_ready() -> bool {
-    unsafe { ENGINE.get().is_some() }
+    unsafe { BASE.get().is_some() }
+}
+
+/// The engine for a context, built on first use. `None` with no model.
+///
+/// Safe to call only while holding that context's holder, which is the same
+/// condition `with_engine` already establishes for the reference it hands
+/// out.
+unsafe fn engine_for(c: ctx::Ctx) -> Option<&'static mut Engine> {
+    let all = unsafe { ENGINES.get() };
+    let slot = &mut all[c as usize];
+    if slot.is_none() {
+        let (base, tok, head) = unsafe { BASE.get().as_ref()? };
+        // The boot head, which `sync_in` replaces with whatever `CANON` holds.
+        // Taken from `BASE` rather than the `Chat` engine, which another task
+        // may hold at this moment.
+        *slot = Some(ctx::spawn(base, tok, head.clone()));
+    }
+    slot.as_mut()
 }
 
 /// Which task owns the engine while the mind is running.
@@ -687,7 +719,11 @@ const NOBODY: usize = usize::MAX;
 /// runs on the initiative task, which set neither flag, so `with_engine`
 /// happily handed a second `&mut Engine` to anyone who asked during it. Adding
 /// a third pair would have made the next omission just as quiet.
-static HOLDER: AtomicUsize = AtomicUsize::new(NOBODY);
+static HOLDERS: [AtomicUsize; ctx::COUNT] = [const { AtomicUsize::new(NOBODY) }; ctx::COUNT];
+
+fn holder_of(c: ctx::Ctx) -> &'static AtomicUsize {
+    &HOLDERS[c as usize]
+}
 
 /// The engine, held across many `with_engine` calls.
 ///
@@ -703,12 +739,17 @@ static HOLDER: AtomicUsize = AtomicUsize::new(NOBODY);
 /// fault inside still can, but a fault in ring 0 with no guard page ends the
 /// machine anyway.
 pub struct EngineClaim {
-    _seal: (),
+    ctx: ctx::Ctx,
 }
 
 impl Drop for EngineClaim {
     fn drop(&mut self) {
-        HOLDER.store(NOBODY, Ordering::Release);
+        // Still ours, so the engine is ours to read: publish whatever the
+        // claim changed before anybody else can take it.
+        if let Some(e) = unsafe { engine_for(self.ctx) } {
+            ctx::publish(e);
+        }
+        holder_of(self.ctx).store(NOBODY, Ordering::Release);
     }
 }
 
@@ -719,8 +760,14 @@ impl Drop for EngineClaim {
 /// is exactly what happened before claims existed.
 pub fn claim_engine() -> Option<EngineClaim> {
     let me = crate::task::current();
-    match HOLDER.compare_exchange(NOBODY, me, Ordering::AcqRel, Ordering::Acquire) {
-        Ok(_) => Some(EngineClaim { _seal: () }),
+    let c = ctx::current();
+    match holder_of(c).compare_exchange(NOBODY, me, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => {
+            if let Some(e) = unsafe { engine_for(c) } {
+                ctx::sync_in(e);
+            }
+            Some(EngineClaim { ctx: c })
+        }
         Err(_) => None,
     }
 }
@@ -754,15 +801,32 @@ pub fn with_engine<R>(f: impl FnOnce(&mut Engine) -> R) -> Option<R> {
     // Taken for the length of this call when it is free, so a preemption in
     // the middle of the closure cannot let a second task in behind us. That is
     // the whole of the UB protection, and it needs nobody to remember a flag.
-    let took = match HOLDER.compare_exchange(NOBODY, me, Ordering::AcqRel, Ordering::Acquire) {
+    let c = ctx::current();
+    let holder = holder_of(c);
+    let took = match holder.compare_exchange(NOBODY, me, Ordering::AcqRel, Ordering::Acquire) {
         Ok(_) => true,
         // Ours already: a session claim, or a nested call.
         Err(h) if h == me => false,
         Err(_) => return None,
     };
-    let r = unsafe { ENGINE.get().as_mut().map(f) };
+    let r = match unsafe { engine_for(c) } {
+        Some(e) => {
+            // Only the outermost borrow syncs and publishes. A nested call or
+            // a call under a session claim leaves that to whoever took it, so
+            // a decode loop calling once per token pays nothing for this.
+            if took {
+                ctx::sync_in(e);
+            }
+            let r = f(e);
+            if took {
+                ctx::publish(e);
+            }
+            Some(r)
+        }
+        None => None,
+    };
     if took {
-        HOLDER.store(NOBODY, Ordering::Release);
+        holder.store(NOBODY, Ordering::Release);
     }
     r
 }
@@ -831,9 +895,10 @@ pub fn engine_selftest() -> bool {
     // state. An id that cannot be a real task, so nothing can be mid-call
     // under it.
     let other = me.wrapping_add(1_000_000);
-    HOLDER.store(other, Ordering::Release);
+    let h = holder_of(ctx::current());
+    h.store(other, Ordering::Release);
     let refused = with_engine(|_| ()).is_none();
-    HOLDER.store(NOBODY, Ordering::Release);
+    h.store(NOBODY, Ordering::Release);
     if !refused {
         return false;
     }
@@ -899,11 +964,22 @@ pub fn engine_refusal() -> alloc::string::String {
 }
 
 /// Which task holds the engine, for diagnostics. `None` when it is free.
+/// Who holds the running task's context, or `None`.
 pub fn engine_holder() -> Option<usize> {
-    match HOLDER.load(Ordering::Acquire) {
+    holder_in(ctx::current())
+}
+
+pub fn holder_in(c: ctx::Ctx) -> Option<usize> {
+    match holder_of(c).load(Ordering::Acquire) {
         NOBODY => None,
         h => Some(h),
     }
+}
+
+/// Whether any context is busy -- for work that should stand aside while the
+/// model is running anywhere, such as the miner's yield.
+pub fn any_holder() -> bool {
+    ctx::Ctx::ALL.iter().any(|c| holder_in(*c).is_some())
 }
 
 /// True when the engine is unavailable because the mind has it.
@@ -1090,8 +1166,10 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
         c.param_count()
     );
 
+    let tok: &'static tokenizer::Tokenizer = alloc::boxed::Box::leak(alloc::boxed::Box::new(tok));
     unsafe {
-        *ENGINE.get() = Some(Engine {
+        *BASE.get() = Some((m.share(), tok, head.clone()));
+        ENGINES.get()[ctx::Ctx::Chat as usize] = Some(Engine {
             model: m,
             tok,
             state,
@@ -1101,6 +1179,10 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
             council: None,
             pos: 0,
             last_token: tokenizer::BOS,
+            // One past what `seen` records, so the first borrow publishes the
+            // head into `CANON` and every later context starts from it.
+            router_epoch: 1,
+            seen: ctx::Seen::default(),
         })
     };
 
