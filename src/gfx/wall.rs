@@ -212,6 +212,67 @@ impl Sun {
     }
 }
 
+/// The sun's colours at the two ends of valence, and asleep. The middle is
+/// `Sun::rest`, so a calm mind is the approved wallpaper bit for bit.
+const WARM: ((u8, u8, u8), (u8, u8, u8)) = ((255, 240, 168), (255, 122, 48));
+const WAN: ((u8, u8, u8), (u8, u8, u8)) = ((214, 198, 190), (172, 58, 74));
+const DUSK: ((u8, u8, u8), (u8, u8, u8)) = ((255, 168, 104), (186, 48, 46));
+/// Full arousal lifts the sun this much of the screen height, and sleep sinks
+/// it this much: far enough that the hills take its lower half, which is the
+/// one pose in which "a new day" is deliberately not true.
+const LIFT: f32 = 0.06;
+const SINK: f32 = 0.24;
+
+impl Sun {
+    /// Where the brain's mood puts it. Valence and arousal are thousandths,
+    /// as `brain::Affect` carries them. Arousal is height and valence is
+    /// warmth -- toward gold, or toward a washed, bruised red -- and neither
+    /// moves it sideways or resizes it, so the windows on the right never
+    /// see it. A pure function, so the selftest can hold every pose.
+    pub fn for_mood(w: u32, h: u32, valence: i32, arousal: i32, asleep: bool) -> Sun {
+        let rest = Sun::rest(w, h);
+        let hf = h as f32;
+        if asleep {
+            return Sun { cy: rest.cy + SINK * hf, top: lin3(DUSK.0), bot: lin3(DUSK.1), ..rest };
+        }
+        let v = valence.clamp(-1000, 1000) as f32 / 1000.0;
+        let a = arousal.clamp(0, 1000) as f32 / 1000.0;
+        let toward = if v >= 0.0 { WARM } else { WAN };
+        let k = v.abs();
+        let mix = |r: [f32; 3], t: [f32; 3]| [r[0] + (t[0] - r[0]) * k, r[1] + (t[1] - r[1]) * k, r[2] + (t[2] - r[2]) * k];
+        Sun { cy: rest.cy - LIFT * hf * a, top: mix(rest.top, lin3(toward.0)), bot: mix(rest.bot, lin3(toward.1)), ..rest }
+    }
+
+    /// Part way from `self` to `to`, every field.
+    pub fn lerp(&self, to: &Sun, t: f32) -> Sun {
+        // `a + (b - a) * 1` is not always `b` in floats, and a glide whose
+        // last frame missed its pose by a bit would never stop differing.
+        if t >= 1.0 {
+            return *to;
+        }
+        let l = |a: f32, b: f32| a + (b - a) * t;
+        let l3 = |a: [f32; 3], b: [f32; 3]| [l(a[0], b[0]), l(a[1], b[1]), l(a[2], b[2])];
+        Sun { cx: l(self.cx, to.cx), cy: l(self.cy, to.cy), r: l(self.r, to.r), stripes: l(self.stripes, to.stripes), top: l3(self.top, to.top), bot: l3(self.bot, to.bot) }
+    }
+
+    /// Every pixel the overlay can touch, halo included, clipped to the
+    /// screen: what has to be put back to base before it moves.
+    pub fn reach(&self, w: u32, h: u32) -> (u32, u32, u32, u32) {
+        let reach = self.r * (1.0 + HALO_REACH);
+        let x0 = ((self.cx - reach).max(0.0)) as u32;
+        let x1 = ((self.cx + reach).max(0.0) as u32 + 1).min(w);
+        let y0 = ((self.cy - reach).max(0.0)) as u32;
+        let y1 = ((self.cy + reach).max(0.0) as u32 + 1).min(h);
+        (x0.min(w), y0.min(h), x1, y1)
+    }
+
+    /// Bits that change whenever anything drawn changes, for a scene stamp.
+    pub fn key(&self) -> [u32; 10] {
+        let b = |f: f32| f.to_bits();
+        [b(self.cx), b(self.cy), b(self.r), b(self.stripes), b(self.top[0]), b(self.top[1]), b(self.top[2]), b(self.bot[0]), b(self.bot[1]), b(self.bot[2])]
+    }
+}
+
 /// How far the halo reaches past the disc, as a multiple of its radius. It is
 /// windowed to exactly zero at that distance: a logistic tail is still a few
 /// tenths of a per cent of full light there, which on a night sky is a visible
@@ -521,6 +582,33 @@ pub fn selftest() -> bool {
         x += 4.0;
     }
     claim("the whole sun clears the nearest crest at every column", clear);
+
+    // The mood's poses. Calm is the approved picture exactly; any waking mood
+    // still clears the hills; warmth and height go the way they say.
+    let (w1, h1) = (1920u32, 1080u32);
+    let rest = Sun::rest(w1, h1);
+    let calm = Sun::for_mood(w1, h1, 0, 0, false);
+    claim("a calm mind's sun is the wallpaper's own, bit for bit", calm.key() == rest.key());
+    let mut awake_clear = true;
+    for (v, a) in [(-1000, 0), (1000, 0), (-1000, 1000), (1000, 1000), (0, 1000)] {
+        let s = Sun::for_mood(w1, h1, v, a, false);
+        awake_clear &= s.cy + s.r < HILLS.iter().map(|hl| hl.0(s.cx / wf) * hf).fold(f32::MAX, f32::min) && s.cy - s.r >= 0.0;
+    }
+    claim("every waking pose is whole, clear of the hills and on screen", awake_clear);
+    let (glad, sore) = (Sun::for_mood(w1, h1, 1000, 0, false), Sun::for_mood(w1, h1, -1000, 0, false));
+    // Gold is a larger green share at both ends of the disc; wan is a larger
+    // blue share and less red. (One ratio for both failed on a correct pair:
+    // the bruised red's green share is above the rest colour's in linear
+    // light, so "green over red" cannot say which way avoidance went.)
+    let share = |s: &Sun, k: usize| [s.top[k] / (s.top[0] + 1e-6), s.bot[k] / (s.bot[0] + 1e-6)];
+    let more = |a: [f32; 2], b: [f32; 2]| a[0] > b[0] && a[1] > b[1];
+    claim("approach turns the sun to gold", more(share(&glad, 1), share(&rest, 1)));
+    claim("avoidance washes it out: bluer, and less red", more(share(&sore, 2), share(&rest, 2)) && sore.top[0] < rest.top[0] && sore.bot[0] < rest.bot[0]);
+    claim("arousal lifts it and nothing moves it sideways", Sun::for_mood(w1, h1, 0, 1000, false).cy < rest.cy && glad.cx == rest.cx && sore.r == rest.r);
+    let night = Sun::for_mood(w1, h1, 0, 0, true);
+    let crest = HILLS.iter().map(|hl| hl.0(night.cx / wf) * hf).fold(f32::MAX, f32::min);
+    claim("asleep it sets: the hills cross its disc", night.cy + night.r > crest && night.cy - night.r < crest);
+    claim("a glide's ends are its ends", rest.lerp(&glad, 0.0).key() == rest.key() && rest.lerp(&glad, 1.0).key() == glad.key());
 
     // Deterministic, and every pixel written: two paints of a small screen.
     let (sw, sh) = (192u32, 108u32);

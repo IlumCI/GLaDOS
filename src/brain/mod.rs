@@ -588,6 +588,15 @@ pub fn report() -> Vec<String> {
         a.arousal,
         a.words()
     ));
+    if let Some((v, ar, sl, moving)) = crate::gfx::desk::mood_report() {
+        out.push(alloc::format!(
+            "  the wallpaper's sun: {} for valence {:+}, arousal {}{}",
+            if moving { "gliding to its pose" } else { "posed" },
+            v,
+            ar,
+            if sl { ", asleep" } else { "" }
+        ));
+    }
     out.push(alloc::format!(
         "  modulators: dopamine {}, octopamine {}, serotonin {} (of 1000)",
         DOPAMINE.load(Ordering::Acquire),
