@@ -360,13 +360,13 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     let l = Lstm { wih: wz.clone(), whh: wz.clone(), b: leak(vec![0.0, 0.0, 30.0, 0.0]), cin: 1, h: 1 };
     let got_l = lstm_bi(&l, &l, &[0.0, 0.0], 2);
     let h1 = 0.5 * tanh(0.5);
-    let h2 = 0.5 * tanh(0.5 + 0.5 * 1.0);          // c2 = 0.5 c1 + 0.5 = 0.75
+    let h2 = 0.5 * tanh(0.75);                     // c2 = 0.5 c1 + 0.5 = 0.75
     // forward: frame0 h1, frame1 h2; backward: frame1 h1, frame0 h2
     let want_l = [h1, h2, h2, h1];
     let mut ln = [1.0f32, 2.0, 3.0, 4.0];
     layer_norm(&mut ln, 2, None, 0.0);
     let mut inn = [1.0f32, 0.0, 3.0, 0.0];
-    instance_norm(&mut inn, 2, 2, 0.0);
+    instance_norm(&mut inn, 2, 2, 1e-5);           // a flat channel divides by eps, not by zero
     let mut sn = [0.0f32, 1.0];
     snake(&mut sn, 1, &[1.0]);
     vec![

@@ -71,7 +71,7 @@ pub fn number_words(n: u64, out: &mut Vec<Token>) {
 }
 
 /// Strip Markdown and URLs, leaving the words.
-fn strip(s: &str) -> String {
+pub fn strip(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let b: Vec<char> = s.chars().collect();
     let mut i = 0;

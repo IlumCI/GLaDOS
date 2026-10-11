@@ -10,6 +10,7 @@
 //! disagreement per stage -- exact up to the waveform, and on the spectral
 //! envelope after, because the source module's noise is each side's own.
 
+use super::ipa::Lexicon;
 use super::kokoro::{Model, Rng, Trace, FRAME};
 use super::vfile::VoiceFile;
 use crate::ai::tensor;
@@ -18,6 +19,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 static MODEL: Spin<Option<&'static Model>> = Spin::new(None);
+static LEXICON: Spin<Option<&'static Lexicon>> = Spin::new(None);
 static WHY: Spin<Option<String>> = Spin::new(None);
 
 pub fn init(staged: Option<&'static [u8]>) {
@@ -28,10 +30,19 @@ pub fn init(staged: Option<&'static [u8]>) {
     console::set_color(YELLOW);
     crate::kprintln!("\n[voice]");
     console::set_color(LTGRAY);
-    match VoiceFile::parse(b).map_err(String::from).and_then(|f| Model::load(&f)) {
-        Ok(m) => {
-            crate::kprintln!("  {} loaded: Kokoro-82M, {} MB in place", crate::VOICE_PATH, b.len() / 1_000_000);
+    match VoiceFile::parse(b).map_err(String::from).and_then(|f| Model::load(&f).map(|m| (m, f.bytes("lexicon.us").and_then(Lexicon::parse)))) {
+        Ok((m, lex)) => {
+            crate::kprintln!(
+                "  {} loaded: Kokoro-82M, {} MB in place, {}",
+                crate::VOICE_PATH,
+                b.len() / 1_000_000,
+                match &lex {
+                    Some(l) => alloc::format!("misaki lexicon of {} words", l.len()),
+                    None => String::from("no lexicon (CMUdict will do)"),
+                }
+            );
             *MODEL.lock_irq() = Some(alloc::boxed::Box::leak(alloc::boxed::Box::new(m)));
+            *LEXICON.lock_irq() = lex.map(|l| &*alloc::boxed::Box::leak(alloc::boxed::Box::new(l)));
         }
         Err(why) => {
             console::set_color(LTRED);
@@ -44,6 +55,16 @@ pub fn init(staged: Option<&'static [u8]>) {
 
 pub fn model() -> Option<&'static Model> {
     *MODEL.lock_irq()
+}
+
+pub fn lexicon() -> Option<&'static Lexicon> {
+    *LEXICON.lock_irq()
+}
+
+/// A sentence through the neural voice and the house style, 24 kHz mono.
+pub fn render(text: &str, d: super::style::Dial) -> Option<Vec<f32>> {
+    let m = model()?;
+    Some(super::style::render(m, lexicon(), text, d))
 }
 
 pub fn status() -> String {

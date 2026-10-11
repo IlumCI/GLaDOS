@@ -439,6 +439,11 @@ impl Model {
         Ok(out)
     }
 
+    /// One phoneme's id, or None for a character the model has no token for.
+    pub fn id_of(&self, ch: char) -> Option<u8> {
+        self.vocab.iter().find(|(c, _)| *c == ch as u32).map(|(_, id)| *id)
+    }
+
     /// The style for a sequence: row `ids.len() - 3` of the voice pack.
     fn style(&self, l: usize) -> (&[f32], &[f32]) {
         let row = (l.saturating_sub(3)).min(509);

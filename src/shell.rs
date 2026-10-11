@@ -4841,6 +4841,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             "stop" | "hush" => crate::voice::hush(),
             "" => kprintln!("  {}", crate::voice::status()),
             "model" => kprintln!("  {}", crate::voice::neural::status()),
+            r if r.starts_with("say ") => {
+                // The headless way to hear it: the queue, as a reply would
+                // take, whatever `voice on` says.
+                let n = crate::voice::say(r[4..].trim());
+                kprintln!("  {} sentence(s) queued", n);
+            }
             r if r.starts_with("verify ") => {
                 // The neural voice against the host's reference pass,
                 // stage by stage; the path is a GLADOSV1 dump from
@@ -4849,7 +4855,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     kprintln!("  {}", line);
                 }
             }
-            _ => kprintln!("  usage: voice [on|off|stop|model|verify <dump>]"),
+            _ => kprintln!("  usage: voice [on|off|stop|model|say <text>|verify <dump>]"),
         },
         "brain" => {
             // The connectome: what it is, what it reads, and a way to drive
