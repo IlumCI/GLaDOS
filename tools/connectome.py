@@ -268,13 +268,21 @@ def simulate(b: Brain, steps: int, drive: dict, seed: int = 1):
 
     One step, in exactly this order (the kernel's `lif::step` is the same):
       1. deliver the delay ring's slot for this step into g
-      2. Poisson input to driven sensors, in table order, one draw each
+      2. Poisson input to driven sensors, in table order, one draw each --
+         a kick to v, not to g (`PoissonInput(target_var='v')`)
       3. a refractory neuron is held at reset and its g does not decay --
          Shiu's model.py marks both equations `(unless refractory)`; any
          other neuron integrates v, then g decays
       4. a neuron strictly over threshold (`v > v_th`, as model.py has it)
-         spikes: reset, refractory, and its row's weights enter the ring
-         DELAY steps ahead
+         spikes: v to reset *and g to zero* (`eq_rst`), refractory unless it
+         is being driven (model.py sets `rfc = 0` for Poisson targets), and
+         its row's weights enter the ring DELAY steps ahead
+
+    Read off model.py line by line, after the first version got three of
+    these wrong and ran away: g kept across a spike meant every neuron that
+    fired once fired again the moment its refractory period ended, and 100
+    ms of sugar became 14,900 neurons at 200 Hz where Shiu's notebook reports
+    about 13,000 spikes in a whole second.
     Returns spike counts per neuron."""
     n = b.n
     v = [b.v0] * n
@@ -290,6 +298,7 @@ def simulate(b: Brain, steps: int, drive: dict, seed: int = 1):
         thr = (rate * b.dt_us * (1 << 32) // 1_000_000) << 32
         for i in b.sensors[name]:
             driven.append((i, thr))
+    nore = {i for i, _ in driven}
     for t in range(steps):
         slot = ring[t % slots]
         for i in range(n):
@@ -298,7 +307,7 @@ def simulate(b: Brain, steps: int, drive: dict, seed: int = 1):
                 slot[i] = 0
         for i, thr in driven:
             if rng.next() < thr:
-                g[i] += b.w_poi
+                v[i] += b.w_poi
         fired = []
         for i in range(n):
             if refr[i] > 0:
@@ -309,7 +318,8 @@ def simulate(b: Brain, steps: int, drive: dict, seed: int = 1):
                 g[i] -= tdiv(g[i], b.tau_syn)
                 if v[i] > b.vth:
                     v[i] = b.vreset
-                    refr[i] = b.refr
+                    g[i] = 0
+                    refr[i] = 0 if i in nore else b.refr
                     counts[i] += 1
                     fired.append(i)
         if fired:
@@ -342,6 +352,10 @@ def simulate_np(b: Brain, steps: int, drive: dict, seed: int = 1):
         for i in b.sensors[name]:
             driven.append((i, thr))
 
+    nore = np.zeros(n, dtype=bool)
+    for i, _ in driven:
+        nore[i] = True
+
     def tdiv_np(a, d):
         return np.sign(a) * (np.abs(a) // d)
 
@@ -351,7 +365,7 @@ def simulate_np(b: Brain, steps: int, drive: dict, seed: int = 1):
         ring[s] = 0
         for i, thr in driven:
             if rng.next() < thr:
-                g[i] += b.w_poi
+                v[i] += b.w_poi
         r = refr > 0
         refr[r] -= 1
         v[r] = b.vreset
@@ -361,7 +375,8 @@ def simulate_np(b: Brain, steps: int, drive: dict, seed: int = 1):
         fired = np.nonzero(live & (v > b.vth))[0]
         if fired.size:
             v[fired] = b.vreset
-            refr[fired] = b.refr
+            g[fired] = 0
+            refr[fired] = np.where(nore[fired], 0, b.refr)
             counts[fired] += 1
             out = ring[(t + b.delay) % slots]
             for i in fired:
@@ -614,10 +629,12 @@ def selftest() -> bool:
         claim("the same seed gives the same spikes", again == driven)
         claim("a different seed gives different ones", simulate(b, 2000, {"in": 150}, seed=2) != driven)
         claim("the vectorised oracle agrees with the loop exactly", simulate_np(b, 2000, {"in": 150}) == driven)
-        # One spike, by hand: at 150 Hz input weight W_POI pushes v from rest
-        # by (W_POI) / TAU_M in the step it lands -- 343,750 nV.
-        b2v = b.v0 + tdiv(b.v0 - b.v0 + b.w_poi, b.tau_m)
-        claim("one input spike moves v by W_POI / TAU_M in its own step", b2v - b.v0 == 343_750)
+        # One input spike, by hand: a 68.75 mV kick to v from rest, then one
+        # Euler step back toward rest, is still far over threshold -- Shiu's
+        # f_poi is chosen to be "sufficient to cause spiking".
+        kicked = b.v0 + b.w_poi
+        kicked += tdiv(b.v0 - kicked, b.tau_m)
+        claim("one input spike alone takes a resting neuron over threshold", kicked > b.vth)
     return ok
 
 

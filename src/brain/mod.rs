@@ -119,9 +119,12 @@ struct Snapshot {
     awake: usize,
     /// Simulated steps over wall ticks in the last window, in percent.
     pace: u64,
+    /// Microseconds per step in delivery, integration, scatter; synapses
+    /// scattered per step.
+    per_step: [u64; 4],
 }
 
-static SNAP: Spin<Snapshot> = Spin::new(Snapshot { t: 0, rate_mhz: Vec::new(), driving: Vec::new(), awake: 0, pace: 0 });
+static SNAP: Spin<Snapshot> = Spin::new(Snapshot { t: 0, rate_mhz: Vec::new(), driving: Vec::new(), awake: 0, pace: 0, per_step: [0; 4] });
 
 static ON: AtomicBool = AtomicBool::new(true);
 /// Affect, published as atomics so a reader never takes a lock.
@@ -285,6 +288,14 @@ fn brain_task() {
                 s.driving = drive.iter().map(|d| d.0).collect();
                 s.awake = sim.awake();
                 s.pace = pace;
+                let mhz = crate::time::tsc_mhz().max(1);
+                let steps = (sim.t - window_start).max(1);
+                for p in 0..3 {
+                    s.per_step[p] = sim.cost[p] * 1000 / mhz / steps; // ns
+                }
+                s.per_step[3] = sim.scattered / steps;
+                sim.cost = [0; 3];
+                sim.scattered = 0;
                 drop(s);
                 window_start = sim.t;
                 window_ticks = 0;
@@ -400,6 +411,13 @@ pub fn report() -> Vec<String> {
         s.awake,
         if ON.load(Ordering::Acquire) { "running" } else { "stopped ('brain on')" }
     ));
+    out.push(alloc::format!(
+        "  a step costs {} us deliver, {} us integrate, {} us scatter ({} synapses)",
+        s.per_step[0] / 1000,
+        s.per_step[1] / 1000,
+        s.per_step[2] / 1000,
+        s.per_step[3]
+    ));
     for (r, ro) in c.readouts.iter().enumerate() {
         let role = match ro.role {
             Role::Approach => "approach",
@@ -429,15 +447,15 @@ pub fn report() -> Vec<String> {
 
 // connectome.py sim assets/brain/worm.bin --poke noxious --rate 150 --ms 500 --seed 1 --emit
 const ORACLE_STEPS: u64 = 5000;
-const ORACLE_TOTAL: u64 = 2157;
-const ORACLE_DIGEST: u64 = 0x8930_01e0_06ec_52b6;
+const ORACLE_TOTAL: u64 = 435;
+const ORACLE_DIGEST: u64 = 0xb197_051d_ba8d_951c;
 
 // connectome.py sim out/fly.bin --poke food --rate 150 --ms 100 --seed 1 --emit
 // (fly.bin sha256 30ab9e27..., FlyWire v783 via Shiu's Connectivity_783.parquet)
 const FLY_DIGEST: [u8; 8] = [0xc6, 0xd0, 0x49, 0x90, 0xc3, 0x16, 0xcb, 0x1b];
 const FLY_STEPS: u64 = 1000;
-const FLY_TOTAL: u64 = 8272;
-const FLY_DIGEST_COUNTS: u64 = 0x4ee8_4cad_f16d_1ce5;
+const FLY_TOTAL: u64 = 1396;
+const FLY_DIGEST_COUNTS: u64 = 0xc96c_5844_e215_9d53;
 
 fn readout_hz(c: &Connectome, sim: &Sim, name: &str) -> u64 {
     let Some(r) = c.readouts.iter().find(|r| r.name == name) else { return 0 };
@@ -487,15 +505,18 @@ pub fn selftest() -> bool {
             // ASH, the polymodal nociceptor, drives the reversal command
             // interneurons (Kaplan & Horvitz 1993; Hilliard et al. 2005).
             //
-            // Over, not "twice over": that was this claim's first form, and it
-            // held only under looser dynamics than Shiu's. With g frozen while
-            // refractory, as model.py has it, the command layer saturates and
-            // reverse reads 173 Hz against forward's 130. The direction is the
-            // animal's; the margin is the model's, and the model is not the
-            // animal.
+            // Twice over, which held, then did not, then did again -- and
+            // the history is the useful part. Relaxed to "over" when the
+            // command layer saturated (reverse 173 Hz, forward 130); that
+            // saturation was this file's bug, not the model's: a spike kept
+            // its g, so a neuron that fired once fired again the moment its
+            // refractory period ended. With Shiu's reset it is 20 Hz against
+            // 3, the reflex is clear again, and the claim asks for the
+            // margin. A canary relaxed to fit a broken instrument is a canary
+            // that stops singing.
             let rev = readout_hz(&c, &ns, "reverse");
             let fwd = readout_hz(&c, &ns, "forward");
-            claim("canary: the nociceptor drives reversal over forward, as in the animal", rev > fwd && rev > 10);
+            claim("canary: the nociceptor drives reversal at least twice over forward, as in the animal", rev > fwd * 2 && rev > 10);
             let again = run_fixed(&c, &["noxious"], ORACLE_STEPS, 1);
             claim("the same seed gives the same spikes", again.counts == ns.counts);
         }

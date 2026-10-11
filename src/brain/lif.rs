@@ -10,11 +10,19 @@
 //!
 //! One step, in exactly this order (the oracle's docstring says the same):
 //!   1. deliver the delay ring's slot for this step into g
-//!   2. Poisson input to driven sensors, in drive order, one draw each
+//!   2. Poisson input to driven sensors, in drive order, one draw each: a
+//!      kick to v (`PoissonInput(target_var='v')`)
 //!   3. a refractory neuron is held at reset with g frozen; any other
 //!      integrates v and then decays g
-//!   4. a neuron strictly over threshold spikes, resets, goes refractory,
-//!      and its row's weights enter the ring `delay` steps ahead
+//!   4. a neuron strictly over threshold spikes: v to reset and g to zero
+//!      (`eq_rst`), refractory unless it is being driven (model.py gives
+//!      Poisson targets `rfc = 0`), and its row's weights enter the ring
+//!      `delay` steps ahead
+//!
+//! The first version had three of those wrong and the fly ran away: with g
+//! kept across a spike, every neuron that fired once fired again the moment
+//! its refractory period ended, and a second of sugar became three million
+//! spikes. Shiu's notebook reports about 13,000; this reads 15,298.
 
 use alloc::string::String;
 use alloc::vec;
@@ -242,8 +250,19 @@ pub struct Sim {
     /// Neurons that can change this step. Everything else is at a fixed
     /// point of the arithmetic -- see `inert` -- and skipping it is exact.
     active: Vec<u32>,
+    /// How many neurons are awake, whichever way they are being tracked.
+    awake: usize,
+    /// Walking the awake list or scanning everything in order. See `integrate`.
+    dense: bool,
     on: Vec<bool>,
+    /// Driven this step, and so never refractory -- set and cleared around
+    /// `integrate` from the drive list.
+    nore: Vec<bool>,
     pub t: u64,
+    /// TSC cycles spent in delivery, integration and scatter, for `brain`.
+    pub cost: [u64; 3],
+    /// Synapses scattered, for the same.
+    pub scattered: u64,
     pub rng: Rng,
     pub counts: Vec<u32>,
 }
@@ -259,8 +278,13 @@ impl Sim {
             touched: (0..slots).map(|_| Vec::new()).collect(),
             slots,
             active: Vec::new(),
+            awake: 0,
+            dense: false,
             on: vec![false; c.n],
+            nore: vec![false; c.n],
             t: 0,
+            cost: [0; 3],
+            scattered: 0,
             rng: Rng::new(seed),
             counts: vec![0; c.n],
         }
@@ -270,34 +294,11 @@ impl Sim {
     fn wake(&mut self, i: usize) {
         if !self.on[i] {
             self.on[i] = true;
-            self.active.push(i as u32);
+            self.awake += 1;
+            if !self.dense {
+                self.active.push(i as u32);
+            }
         }
-    }
-
-    /// A neuron the dense loop would leave exactly as it is, this step and
-    /// every step until something arrives: not refractory, a conductance the
-    /// integer decay no longer moves, and a voltage the integer update no
-    /// longer moves either. Nothing about it changes, so nothing about it
-    /// will until input lands, and it is below threshold so it cannot spike.
-    ///
-    /// The first version asked for g == 0 and was exact but nearly useless:
-    /// truncating decay leaves a residue under `tau_syn` nanovolts that never
-    /// reaches zero, so after one sugar drive 125,772 of the fly's neurons
-    /// stayed awake forever doing nothing, and the brain ran at 1% of real
-    /// time stepping them. "Would this step change anything" is the right
-    /// question, and it is still exact.
-    ///
-    /// This is the whole of the optimisation and it is exact rather than
-    /// approximate -- which `diag brain` checks by requiring the same digest
-    /// as the oracle's dense loop. With no basal firing, almost every neuron
-    /// of a fly is inert almost all of the time, so a step costs what the
-    /// activity costs and not what the animal costs.
-    #[inline]
-    fn inert(&self, c: &Connectome, i: usize) -> bool {
-        self.refr[i] == 0
-            && tdiv(self.g[i], c.tau_syn) == 0
-            && tdiv(c.v0 - self.v[i] + self.g[i], c.tau_m) == 0
-            && self.v[i] <= c.vth
     }
 
     /// One step. `driven` is (neuron, threshold) in drive order; `fired` is
@@ -307,6 +308,7 @@ impl Sim {
         let n = c.n;
         let slot = self.t as usize % self.slots;
         let base = slot * n;
+        let c0 = crate::time::rdtsc();
         let due = core::mem::take(&mut self.touched[slot]);
         for &i in due.iter() {
             let i = i as usize;
@@ -321,37 +323,29 @@ impl Sim {
         due.clear();
         self.touched[slot] = due;
         for &(i, thr) in driven {
+            self.nore[i as usize] = true;
             if self.rng.next() < thr {
-                self.g[i as usize] += c.w_poi;
+                self.v[i as usize] += c.w_poi;
                 self.wake(i as usize);
             }
         }
+        let c1 = crate::time::rdtsc();
         fired.clear();
-        let mut k = 0;
-        while k < self.active.len() {
-            let i = self.active[k] as usize;
-            if self.refr[i] > 0 {
-                // Shiu's model.py marks both equations `(unless refractory)`:
-                // v is held and g does not decay.
-                self.refr[i] -= 1;
-                self.v[i] = c.vreset;
-            } else {
-                self.v[i] += tdiv(c.v0 - self.v[i] + self.g[i], c.tau_m);
-                self.g[i] -= tdiv(self.g[i], c.tau_syn);
-                if self.v[i] > c.vth {
-                    self.v[i] = c.vreset;
-                    self.refr[i] = c.refr;
-                    self.counts[i] = self.counts[i].wrapping_add(1);
-                    fired.push(i as u32);
-                }
-            }
-            if self.inert(c, i) {
-                self.on[i] = false;
-                self.active.swap_remove(k);
-            } else {
-                k += 1;
-            }
+        // Shiu's constants get a step the compiler can divide in: `/ 200` by
+        // a constant is a multiply and a shift that truncates exactly as the
+        // instruction does, where `/ c.tau_m` is an `idiv` of forty-odd
+        // cycles -- five of them per neuron per step, which measured 6 ms of
+        // a 7.6 ms step on the fly. Any other constants take the general path,
+        // which computes the same thing slowly.
+        if c.tau_m == 200 && c.tau_syn == 50 {
+            self.integrate::<200, 50>(c, fired);
+        } else {
+            self.integrate::<0, 0>(c, fired);
         }
+        for &(i, _) in driven {
+            self.nore[i as usize] = false;
+        }
+        let c2 = crate::time::rdtsc();
         if !fired.is_empty() {
             let os = (self.t as usize + c.delay) % self.slots;
             let out = os * n;
@@ -364,14 +358,103 @@ impl Sim {
                     }
                     self.ring[out + j] += c.w[k] as i64 * c.w_syn;
                 }
+                self.scattered += (b - a) as u64;
             }
         }
+        let c3 = crate::time::rdtsc();
+        self.cost[0] += c1 - c0;
+        self.cost[1] += c2 - c1;
+        self.cost[2] += c3 - c2;
         self.t += 1;
+    }
+
+    /// Step 3 of the five: every awake neuron, and retirement of the ones
+    /// this step left at a fixed point. `TM`/`TS` are the time constants
+    /// when known at compile time and zero when they are not.
+    ///
+    /// Two ways to visit the awake set, and which is cheaper depends on how
+    /// much of the animal is awake. A few hundred neurons: walk the list. Most
+    /// of the brain -- which is what a fly under sustained sugar drive turned
+    /// out to be, 125,000 of 138,639 receiving input every few milliseconds
+    /// -- and a list in the order wakes arrived is a random walk through three
+    /// arrays, 35 ns a neuron measured. Then the step scans every neuron in
+    /// order and skips the sleeping ones, which is sequential and the
+    /// prefetcher's favourite thing. The same updates either way, so the
+    /// switch changes no spike, which `diag brain` checks by digest.
+    #[inline(always)]
+    fn integrate<const TM: i64, const TS: i64>(&mut self, c: &Connectome, fired: &mut Vec<u32>) {
+        let dm = |x: i64| if TM != 0 { x / TM } else { x / c.tau_m };
+        let ds = |x: i64| if TS != 0 { x / TS } else { x / c.tau_syn };
+        // One neuron's update; answers whether it is now at a fixed point.
+        let mut one = |i: usize, sim: &mut Sim| -> bool {
+            let mut v = sim.v[i];
+            let mut g = sim.g[i];
+            let mut r = sim.refr[i];
+            if r > 0 {
+                // Shiu's model.py marks both equations `(unless refractory)`:
+                // v is held and g does not decay.
+                r -= 1;
+                v = c.vreset;
+            } else {
+                v += dm(c.v0 - v + g);
+                g -= ds(g);
+                if v > c.vth {
+                    v = c.vreset;
+                    g = 0;
+                    r = if sim.nore[i] { 0 } else { c.refr };
+                    sim.counts[i] = sim.counts[i].wrapping_add(1);
+                    fired.push(i as u32);
+                }
+            }
+            sim.v[i] = v;
+            sim.g[i] = g;
+            sim.refr[i] = r;
+            // A fixed point: the dense loop would leave this neuron exactly as
+            // it is until input lands, so skipping it is exact. "Would this
+            // step change anything" and not "is g zero" -- truncating decay
+            // leaves a residue under tau_syn that never reaches zero, and the
+            // first version kept 125,772 fly neurons awake forever on it.
+            r == 0 && ds(g) == 0 && dm(c.v0 - v + g) == 0 && v <= c.vth
+        };
+        if self.dense {
+            for i in 0..c.n {
+                if self.on[i] && one(i, self) {
+                    self.on[i] = false;
+                    self.awake -= 1;
+                }
+            }
+            // Back to the list once the brain has quietened, rebuilt in order.
+            if self.awake * 16 < c.n {
+                self.dense = false;
+                self.active.clear();
+                for i in 0..c.n {
+                    if self.on[i] {
+                        self.active.push(i as u32);
+                    }
+                }
+            }
+        } else {
+            let mut k = 0;
+            while k < self.active.len() {
+                let i = self.active[k] as usize;
+                if one(i, self) {
+                    self.on[i] = false;
+                    self.awake -= 1;
+                    self.active.swap_remove(k);
+                } else {
+                    k += 1;
+                }
+            }
+            if self.awake * 8 > c.n {
+                self.dense = true;
+                self.active.clear();
+            }
+        }
     }
 
     /// Neurons awake right now, for `brain`.
     pub fn awake(&self) -> usize {
-        self.active.len()
+        self.awake
     }
 }
 
