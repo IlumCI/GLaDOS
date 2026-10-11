@@ -243,6 +243,10 @@ jobs:
             manifest: qwen3-0.6b
             seq: 0
             label: GLADOS
+            # The neural voice (payload/voice.txt, 180 MB) rides on this
+            # image only: the 2B images are 1.90 GB against GitHub's 2 GB
+            # asset limit, and it does not fit beside them.
+            voice: true
           # The 2B distill, Apache-2.0. Its payload is canonical at seq 512,
           # which is not a context worth shipping for a model this size, so
           # both variants stamp. The weights are uploaded once and these two
@@ -346,6 +350,24 @@ jobs:
           done
           python3 tools/wifi_fw.py --selftest
           python3 tools/payload.py verify payload-dir/FW payload/firmware.txt
+
+      # The neural voice, \GLADOS\voice.bin and its licence, from a pinned
+      # release like the firmware and for the same reason. Fetched into its
+      # own directory and verified there, because `payload.py verify` walks
+      # what it is given and would read the model as a stray; moved into
+      # place only afterwards, and after the model's own verify above.
+      - name: Fetch the neural voice
+        if: matrix.voice == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p payload-voice
+          for f in $(grep -v '^#' payload/voice.txt | awk 'NF >= 3 {print $3}'); do
+            gh release download payload-voice-v1 --dir payload-voice --clobber --pattern "$f"
+          done
+          python3 tools/kokoro.py --selftest
+          python3 tools/payload.py verify payload-voice payload/voice.txt
+          mv payload-voice/* payload-dir/
 
       - name: Build the ISO
         run: |
