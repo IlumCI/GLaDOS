@@ -43,7 +43,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 /// hand-kept list is the kind that goes quietly stale -- which is what
 /// `KNOWN_COMMANDS` did.
 pub const VERBS: &[&str] = &[
-    "about", "abstract", "acpi", "act", "adapter", "agent", "agentlog", "answer", "app", "ask",
+    "about", "abstract", "acpi", "act", "adapter", "agent", "agentlog", "answer", "app",
     "author", "autosnap", "batt", "battery", "bench", "brain", "bringup", "census", "checklist",
     "clear", "cont", "core", "cpu", "crypto", "ctx", "date", "deeptrain", "desk", "devices",
     "dhcp", "diag", "disk", "dmi", "dns", "ec", "echo", "edit", "enternet", "exec", "fat",
@@ -54,7 +54,7 @@ pub const VERBS: &[&str] = &[
     "mixbench", "model", "mouse", "net", "netman", "network", "nvme", "open",
     "oracle", "outcome", "pagemap", "paint", "pci", "perf", "ping", "pkg", "plan", "port",
     "power", "poweroff", "probe", "racy", "reboot", "recall", "recovery", "redqueen", "refresh",
-    "render", "repair", "repeat", "rng", "route", "sandbox", "say", "search", "serial",
+    "render", "repair", "repeat", "rng", "route", "sandbox", "search", "serial",
     "shutdown", "simd", "skill", "smp", "sound", "splash", "store", "study", "sysinfo",
     "tasks", "tcp", "teach", "tensor", "think", "todo", "train", "trust", "typewriter", "uname",
     "update", "uptime", "usb", "vars", "version", "vi", "video", "voice", "wifi", "win",
@@ -188,6 +188,83 @@ fn distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
+/// Verbs whose argument is prose by design: what follows them is the
+/// operator's words for the command to take as they are, so a sentence
+/// after one of these is not a reason to hand the line to the model.
+const PROSE_VERBS: &[&str] = &[
+    "agent", "think", "teach", "remember", "about", "echo", "author", "write", "open", "work", "route", "act",
+    "search", "web", "find", "learn", "if", "repeat",
+];
+
+/// Words that are almost never a command's argument and almost always part
+/// of a sentence.
+const FUNCTION_WORDS: &[&str] = &[
+    "the", "a", "an", "me", "my", "all", "some", "please", "for", "to", "of", "with", "is", "are", "what",
+    "how", "why", "can", "could", "would", "you", "i", "it", "this", "that", "these", "those", "your",
+];
+
+/// A line that starts with a command's name and then carries on in English.
+///
+/// "help me find the big files" begins with `help`; "show me what is
+/// running" might begin with a verb tomorrow. The shell would take either as
+/// a command with odd arguments. The rule: the first word is a command, its
+/// arguments are prose for no command (`PROSE_VERBS` take prose on purpose),
+/// and the rest reads as a sentence -- a function word, and nothing shaped
+/// like an argument: no path, no flag, no number.
+pub fn verb_first_language(cmd: &str, rest: &str) -> bool {
+    if rest.trim().is_empty() || PROSE_VERBS.contains(&cmd) {
+        return false;
+    }
+    let is_command = VERBS.contains(&cmd) || crate::sysbox::APPLETS.iter().any(|a| a.name == cmd);
+    if !is_command {
+        return false;
+    }
+    let words: alloc::vec::Vec<&str> = rest.split_whitespace().collect();
+    let argish = words.iter().any(|w| w.starts_with('/') || w.starts_with('-') || w.parse::<i64>().is_ok() || w.contains('.'));
+    let sentence = words.iter().any(|w| FUNCTION_WORDS.contains(&w.to_lowercase().as_str()));
+    sentence && !argish
+}
+
+/// "start over", "new conversation", "forget this conversation": `ask new`,
+/// said the way a person says it.
+fn starts_over(line: &str) -> bool {
+    let l = line.trim().trim_end_matches(|c: char| c.is_ascii_punctuation()).to_lowercase();
+    matches!(
+        l.as_str(),
+        "start over" | "new conversation" | "new chat" | "forget this conversation" | "forget our conversation" | "let's start over"
+    )
+}
+
+/// What a rescue goal starts with. `learn` refuses any goal carrying it: the
+/// command after a rescue is the operator carrying on, not correcting a
+/// routing decision, and the first live run recorded exactly that mistake --
+/// `ls` filed as the right answer to "cat readme".
+pub const RESCUE_MARK: &str = "rescue: ";
+
+static RESCUE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+pub fn rescue_on() -> bool {
+    RESCUE.load(Ordering::Acquire)
+}
+
+pub fn set_rescue(on: bool) {
+    RESCUE.store(on, Ordering::Release);
+}
+
+/// A command the operator typed, and how it failed: the agent gets both and
+/// tries to get the thing done another way. Read-only, three steps, and said
+/// -- an operator who meant exactly what they typed turns it off with
+/// `intent rescue off`.
+pub fn rescue(line: &str, error: &str) -> Decision {
+    if !super::engine_ready() {
+        return Decision::Say(String::new());
+    }
+    Decision::Run(
+        format!("agent -n 3 {}{} -- it said {}; find the right path or name first", RESCUE_MARK, line, error.trim()),
+        String::from("that failed -- the agent will try to get it done another way"),
+    )
+}
+
 /// Whether a line is addressed to the machine rather than asking it to do
 /// something.
 ///
@@ -221,6 +298,10 @@ pub fn conversational(line: &str) -> bool {
 pub enum Decision {
     /// A command line for `shell::execute`, and the one-line reason.
     Run(String, String),
+    /// A turn of the conversation: the operator's own words, and why.
+    Chat(String, String),
+    /// Forget the conversation and start a new one.
+    Forget,
     /// Nothing runs; say this.
     Say(String),
 }
@@ -251,7 +332,10 @@ pub fn decide(line: &str) -> Decision {
     if !super::engine_ready() {
         return Decision::Say(String::from("that is not a command, and no model is loaded to ask"));
     }
-    let chat = |why: String| Decision::Run(format!("ask {}", line), why);
+    let chat = |why: String| Decision::Chat(String::from(line), why);
+    if starts_over(line) {
+        return Decision::Forget;
+    }
     if conversational(line) {
         return chat(String::from("addressed to me, so it is a conversation"));
     }
@@ -300,7 +384,14 @@ pub fn selftest() -> bool {
     unsafe { *PENDING.get() = Some(String::from("remove /tmp/x")) };
     let no = matches!(answer("no"), Some(Decision::Say(_))) && answer("y").is_none();
     let unrelated = answer("ls").is_none();
-    let rows: [(&str, bool); 22] = [
+    let rows: [(&str, bool); 29] = [
+        ("'help me find the big files' is a sentence, not the help command", verb_first_language("help", "me find the big files")),
+        ("'ls /ai' is a command", !verb_first_language("ls", "/ai")),
+        ("'cat the readme please' is a sentence", verb_first_language("cat", "the readme please")),
+        ("a prose verb keeps its prose: 'remember my name is Ana'", !verb_first_language("remember", "my name is Ana")),
+        ("an unknown first word is not this rule's business", !verb_first_language("hello", "there you")),
+        ("'start over' forgets the conversation", starts_over("Start over.")),
+        ("an ordinary sentence does not", !starts_over("start over the download")),
         ("y runs the offered task, at full trust, verbatim", yes),
         ("and the offer is spent once taken", spent),
         ("n withdraws it, and a later y runs nothing", no),

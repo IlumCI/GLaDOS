@@ -28,7 +28,9 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 static QUEUE: Spin<VecDeque<String>> = Spin::new(VecDeque::new());
-static ON: AtomicBool = AtomicBool::new(false);
+/// On by default: the machine talks unless asked not to, and `voice off`
+/// is kept in `/etc/voice` so it stays asked.
+static ON: AtomicBool = AtomicBool::new(true);
 static ECAM: AtomicU64 = AtomicU64::new(0);
 static SPOKEN: AtomicUsize = AtomicUsize::new(0);
 static SPEAKING: AtomicBool = AtomicBool::new(false);
@@ -37,6 +39,9 @@ static SPEAKING: AtomicBool = AtomicBool::new(false);
 const QUEUE_MAX: usize = 24;
 
 pub fn init(ecam: Option<u64>) {
+    if let Some(b) = crate::sysbox::read_blob("/etc/voice") {
+        ON.store(b.as_slice() != b"off", Ordering::Release);
+    }
     if let Some(e) = ecam {
         ECAM.store(e, Ordering::Release);
     }
@@ -49,6 +54,7 @@ pub fn on() -> bool {
 
 pub fn set_on(v: bool) {
     ON.store(v, Ordering::Release);
+    crate::sysbox::write_blob("/etc/voice", if v { b"on".to_vec() } else { b"off".to_vec() });
     if !v {
         QUEUE.lock_irq().clear();
     }
@@ -84,7 +90,7 @@ pub fn hush() {
 pub fn status() -> String {
     alloc::format!(
         "voice {}, {} sentence(s) waiting, {} spoken this boot{}",
-        if on() { "on" } else { "off ('say' still speaks)" },
+        if on() { "on -- replies are spoken" } else { "off" },
         QUEUE.lock_irq().len(),
         SPOKEN.load(Ordering::Acquire),
         if SPEAKING.load(Ordering::Acquire) { ", speaking now" } else { "" }

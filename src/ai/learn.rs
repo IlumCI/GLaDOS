@@ -218,6 +218,11 @@ pub fn operator_ran(verb: &str) -> Verdict {
         return Verdict::NoGoal;
     }
     let (goal, chose) = pending();
+    // A rescue is the machine trying again after a command failed, not a
+    // routing decision a person can correct (`intent::RESCUE_MARK`).
+    if goal.as_deref().map_or(false, |g| g.starts_with(crate::ai::intent::RESCUE_MARK)) {
+        return Verdict::NoGoal;
+    }
     let is_applet = crate::sysbox::is_applet(verb);
     // Asked before the lock is taken again: `known` walks the corpus, which
     // reads the namespace, and holding this module's lock across that is a lock

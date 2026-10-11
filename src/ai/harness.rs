@@ -1854,7 +1854,7 @@ pub fn route_report(task: &str, trust: Trust) {
             kprintln!("    character  {}", e.head.name(v.character));
         });
         kprintln!("  {} of 3 agree (measured 50% right when split)", v.agreement);
-        kprintln!("  'ask <question>' to put it to the model instead");
+        kprintln!("  just say it to put it to the model instead");
     }
 
     let mhz = crate::time::tsc_mhz();

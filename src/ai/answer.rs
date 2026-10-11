@@ -193,9 +193,9 @@ pub const ASKS: &[Ask] = &[
         src: "Each trial debits from a declared series that sums to a fixed total, and only a new body of evidence refills it.",
     },
     Ask {
-        q: "What does 'ask new' do?",
-        a: "It forgets the conversation, so the next question starts a fresh one. Without it the cache is resumed and the next turn continues what came before.",
-        src: "ask is one continuing conversation rather than a question asked into the void, and the cache is what carries it.",
+        q: "What happens when you say start over?",
+        a: "It forgets the conversation, so the next thing said starts a fresh one. Without it the cache is resumed and the next turn continues what came before.",
+        src: "Talking to the machine is one continuing conversation rather than a question asked into the void, and the cache is what carries it.",
     },
     Ask {
         q: "Why does the fault reporter print twice?",

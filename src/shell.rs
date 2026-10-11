@@ -2448,7 +2448,21 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
     // sysbox first otherwise: it owns a whole vocabulary of short names, and
     // claiming them here keeps that list in one place instead of spreading
     // twenty more arms across this match.
+    // A sentence that happens to start with a command's name is still a
+    // sentence: "help me find the big files" is not the `help` command.
+    if crate::ai::intent::verb_first_language(cmd, rest) {
+        run_decision(crate::ai::intent::decide(line), boot, acpi, interp);
+        return;
+    }
+
+    let errors_before = crate::sysbox::errors();
     if !shell_owns && crate::sysbox::dispatch(cmd, rest) {
+        // It ran and said no. The operator meant something, and the machine
+        // can usually find another way to it.
+        if crate::sysbox::errors() != errors_before && crate::ai::intent::rescue_on() {
+            let why = crate::sysbox::last_error();
+            run_decision(crate::ai::intent::rescue(line, &why), boot, acpi, interp);
+        }
         return;
     }
 
@@ -3388,66 +3402,6 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                 }
                 _ => kprintln!("  usage: recall [on|off]"),
-            }
-        }
-        "ask" => {
-            let mut opts = crate::ai::GenOpts { steps: 64, temperature: 0.3, ..Default::default() };
-            let mut q = rest;
-            // Flags in any order, and -t before -n is the natural way to type
-            // it, so this loops rather than testing a fixed sequence.
-            loop {
-                if let Some(t) = q.strip_prefix("-t ") {
-                    opts.think = true;
-                    q = t.trim_start();
-                } else if let Some(t) = q.strip_prefix("-n ") {
-                    let mut it = t.splitn(2, ' ');
-                    match (it.next(), it.next()) {
-                        (Some(n), Some(tail)) => {
-                            opts.steps = n.parse().unwrap_or(opts.steps);
-                            q = tail.trim_start();
-                        }
-                        _ => break,
-                    }
-                } else {
-                    break;
-                }
-            }
-            if opts.think && opts.steps < 256 {
-                // Reasoning is not free and a truncated <think> block prints as
-                // a monologue with no answer, which looks like a broken model.
-                opts.steps = 256;
-                kprintln!("  (thinking: raised to {} tokens)", opts.steps);
-            }
-            if q.is_empty() {
-                kprintln!("  usage: ask [-t] [-n tokens] <question>");
-                kprintln!("     -t  let the model reason first, if it can");
-                kprintln!("     one conversation, continued -- 'ask new' to forget it");
-            } else if q == "new" {
-                crate::ai::companion::reset();
-                kprintln!("  forgotten. the next question starts a new conversation");
-            } else {
-                // A turn of one conversation, not a question asked into the
-                // void. The cache already holds what was said, so this costs
-                // the tokens of this turn and not of the whole exchange.
-                let n = crate::ai::companion::turns();
-                crate::ai::companion::turn(q, &opts);
-                // **Not** parked per turn, and the measurement is why.
-                //
-                // Parking writes the whole KV cache as a blob. The store is
-                // append-only -- `alloc_next` only rises and nothing reclaims
-                // -- so with autosnap running, two turns of a 512-slot cache
-                // wrote 16,375 then 19,625 blocks and took half a 27 MiB
-                // region. A 0.6B at 8k has a cache three orders of magnitude
-                // larger. There is no cadence that makes this affordable, so
-                // it is on request: `ctx save live`, which `revive` reads at
-                // boot.
-                //
-                // What survives on its own is what is small: `/ai/about` is a
-                // few hundred bytes and autosnap carries it, which is the part
-                // that actually has to be automatic.
-                if n == 0 {
-                    kprintln!("  ('ctx save live' to carry this conversation past the reboot)");
-                }
             }
         }
         "repeat" => {
@@ -4875,14 +4829,6 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 kprintln!("  a request is already pending");
             }
         }
-        "say" => {
-            if rest.trim().is_empty() {
-                kprintln!("  usage: say <text>");
-            } else {
-                let n = crate::voice::say(rest);
-                kprintln!("  {} sentence(s) queued", n);
-            }
-        }
         "voice" => match rest.trim() {
             "on" => {
                 crate::voice::set_on(true);
@@ -4951,7 +4897,9 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 ["trust", "readonly"] => intent::set_reach(Reach::ReadOnly),
                 ["trust", "ask"] => intent::set_reach(Reach::Ask),
                 ["trust", "full"] => intent::set_reach(Reach::Full),
-                _ => kprintln!("  usage: intent [trust readonly|ask|full]"),
+                ["rescue", "on"] => intent::set_rescue(true),
+                ["rescue", "off"] => intent::set_rescue(false),
+                _ => kprintln!("  usage: intent [trust readonly|ask|full] [rescue on|off]"),
             }
         }
         "agent" => {
@@ -5172,7 +5120,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  deeptrain [-n N -e E -r R]   train q/k/v as well as the head");
             kprintln!("  simd                         what the CPU has, and what is enabled");
             kprintln!("  smp [bench]                  the other cores, and what they are worth");
-            kprintln!("  ask [-t] <question>          one continuing conversation; 'ask new' forgets");
+            kprintln!("  (just type)                  one continuing conversation; 'start over' forgets");
             kprintln!("  about [text]                 what the model should know about you");
             kprintln!("  skill [trust <hash>]         which skills keep operator powers");
             kprintln!("  sandbox [keep] <path>        run a program, see what it touched, undo it");
@@ -8392,7 +8340,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         //
         // A file rather than a setting, because it is prose and because the
         // operator has to be able to correct it. It is read at the start of
-        // every conversation, so an edit takes effect on the next `ask new`.
+        // every conversation, so an edit takes effect when the operator next
+        // says "start over".
         "about" => {
             let path = crate::ai::companion::ABOUT;
             if rest.is_empty() {
@@ -8421,7 +8370,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 let n = buf.len();
                 if crate::sysbox::write_blob(path, buf) {
                     kprintln!("  {} B at {}", n, path);
-                    kprintln!("  takes effect on the next new conversation ('ask new')");
+                    kprintln!("  takes effect on the next new conversation ('start over')");
                 } else {
                     kprintln!("  could not write {}", path);
                 }
@@ -8715,11 +8664,41 @@ fn run_decision(d: crate::ai::intent::Decision, boot: &BootInfo, acpi: &Option<A
             console::set_color(WHITE);
             execute(&cmd, boot, acpi, interp);
         }
-        crate::ai::intent::Decision::Say(what) => {
-            console::set_color(YELLOW);
-            kprintln!("  {}", what);
+        crate::ai::intent::Decision::Chat(text, why) => {
+            console::set_color(LTGRAY);
+            kprintln!("  ({})", why);
             console::set_color(WHITE);
+            chat(&text);
         }
+        crate::ai::intent::Decision::Forget => {
+            crate::ai::companion::reset();
+            kprintln!("  forgotten -- the next thing you say starts a new conversation");
+        }
+        crate::ai::intent::Decision::Say(what) => {
+            if !what.is_empty() {
+                console::set_color(YELLOW);
+                kprintln!("  {}", what);
+                console::set_color(WHITE);
+            }
+        }
+    }
+}
+
+/// A turn of the one continuing conversation. This was the `ask` command,
+/// and now nothing is typed in front of it: whatever the operator says that
+/// is not a command or code reaches here through `ai::intent`.
+///
+/// The cache already holds what was said, so a turn costs the tokens of that
+/// turn and not of the whole exchange. It is **not** parked per turn:
+/// parking writes the whole KV cache, the store is append-only, and two
+/// turns of a 512-slot cache once took half a 27 MiB region -- so carrying a
+/// conversation past a reboot is `ctx save live`, on request.
+fn chat(q: &str) {
+    let opts = crate::ai::GenOpts { steps: 96, temperature: 0.3, ..Default::default() };
+    let n = crate::ai::companion::turns();
+    crate::ai::companion::turn(q, &opts);
+    if n == 0 {
+        kprintln!("  ('ctx save live' to carry this conversation past the reboot)");
     }
 }
 

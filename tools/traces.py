@@ -64,7 +64,7 @@ COMMANDS = [
     "video", "date", "reboot", "clear", "refresh", "typewriter", "words",
     "vars", "fault", "splash", "store", "recovery", "autosnap", "fat", "pkg",
     "edit", "if", "dhcp", "dns", "ping", "tcp", "http", "https", "wlan",
-    "trust", "wpa2", "crypto", "gen", "ask", "think", "act", "route", "teach",
+    "trust", "wpa2", "crypto", "gen", "think", "act", "route", "teach",
     "fit", "gate", "search", "probe", "window", "ctx", "cont", "logits",
     "zeroshot", "train", "feature", "repeat", "bench", "model", "tensor",
 ]

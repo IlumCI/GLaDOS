@@ -1265,7 +1265,7 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
         kprintln!("  the conversation from last boot is still here ({} tokens in)", pos);
         console::set_color(LTGRAY);
     }
-    kprintln!("  ready -- 'ask <question>' to talk, 'act <task>' to choose an applet");
+    kprintln!("  ready -- just type to talk; a task is handed to the agent");
     console::set_color(LTGRAY);
 
     kprintln!();

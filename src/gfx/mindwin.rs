@@ -767,7 +767,7 @@ impl DeskApp for Ask {
         match k {
             b'\n' | b'\r' => {
                 if !self.typed.is_empty() {
-                    super::desk::queue_command(&alloc::format!("ask {}", self.typed));
+                    super::desk::queue_command(&self.typed);
                     self.typed.clear();
                 }
                 true
@@ -793,7 +793,7 @@ impl DeskApp for Ask {
         if ax >= r.x as i32 && ax < (r.x + r.w) as i32 && ay >= r.y as i32 && ay < (r.y + r.h) as i32
         {
             if !self.typed.is_empty() {
-                super::desk::queue_command(&alloc::format!("ask {}", self.typed));
+                super::desk::queue_command(&self.typed);
                 self.typed.clear();
             }
             return true;
