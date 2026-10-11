@@ -55,7 +55,11 @@ static TURNS: crate::sync::Racy<usize> = crate::sync::Racy::new(0);
 /// model has already forgotten, which is worse than showing none.
 ///
 /// `true` is the operator's turn.
-static LOG: crate::sync::Racy<Vec<(bool, String)>> = crate::sync::Racy::new(Vec::new());
+///
+/// Locked: the turn is written on whichever task is generating while the
+/// compositor clones it for the Ask window, and preemption between the two is
+/// a clone of a vector mid-reallocation.
+static LOG: crate::sync::Spin<Vec<(bool, String)>> = crate::sync::Spin::new(Vec::new());
 
 /// How many turns are kept. Twenty-four is about six screens of the Ask
 /// window at its densest, and the cache holds fewer than that at 512 slots
@@ -65,7 +69,7 @@ const LOG_KEEP: usize = 24;
 /// The conversation as text, oldest first. A clone of a small static, so it is
 /// a free read for a paint pass -- see `glance`'s tiers.
 pub fn log_snapshot() -> Vec<(bool, String)> {
-    unsafe { (*LOG.get()).clone() }
+    LOG.lock_irq().clone()
 }
 
 fn log_push(mine: bool, text: &str) {
@@ -73,7 +77,7 @@ fn log_push(mine: bool, text: &str) {
     if text.is_empty() {
         return;
     }
-    let log = unsafe { &mut *LOG.get() };
+    let mut log = LOG.lock_irq();
     log.push((mine, String::from(text)));
     if log.len() > LOG_KEEP {
         log.remove(0);
@@ -87,7 +91,7 @@ pub fn turns() -> usize {
 /// Forget the conversation and start over.
 pub fn reset() {
     unsafe { *TURNS.get() = 0 };
-    unsafe { (*LOG.get()).clear() };
+    LOG.lock_irq().clear();
     unsafe { *SYS_LEN.get() = 0 };
     super::with_engine(|e| {
         e.pos = 0;

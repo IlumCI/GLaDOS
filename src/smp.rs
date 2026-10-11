@@ -205,6 +205,14 @@ extern "C" fn glados_ap_main() -> ! {
             this_cpu(), wp as u8, nx as u8);
     }
 
+    // And the PAT, which every core must hold identically: the bootstrap
+    // processor put a write-combining type in slot 1 and mapped the
+    // framebuffer through it, and a core still holding write-through there
+    // would read the same entry as a different memory type.
+    if crate::cpu::mtrr::programmed() && !crate::cpu::mtrr::program(false) {
+        crate::kprintln!("[smp] core {} could not load the PAT", this_cpu());
+    }
+
     ONLINE.fetch_add(1, Ordering::SeqCst);
 
     // Descriptor tables, then the interrupt table, then this core's own
@@ -675,7 +683,15 @@ pub fn init(acpi: &crate::acpi::Acpi) -> usize {
         let stack = alloc::boxed::Box::leak(stack.into_boxed_slice());
         // A heap pointer is its own physical address here, so the stack needs
         // no translation before a core in 64-bit mode can load it.
-        let top = (stack.as_ptr() as u64 + AP_STACK as u64) & !0xF;
+        // Eight below a sixteen-byte boundary, because the trampoline *jumps*
+        // into `glados_ap_main` and the ABI promises a function `rsp == 8 mod
+        // 16` on entry -- the state a `call` leaves, its return address having
+        // been pushed. Started at a boundary, every frame on every helper core
+        // was misaligned by eight, and nothing noticed until a chunk function
+        // used enough float registers to save xmm6-xmm15 with `movaps`: the
+        // wallpaper's sun overlay took #GP in its own prologue on all three
+        // helpers at once. The matvec kernels had simply never spilled one.
+        let top = ((stack.as_ptr() as u64 + AP_STACK as u64) & !0xF) - 8;
         unsafe { params.add(2).write_volatile(top) };
 
         // Mapped before the core is started rather than after: the core can

@@ -34,7 +34,51 @@ impl AgentLog {
     }
 }
 
+impl AgentLog {
+    /// What the window shows: the status line, whether the engine is held,
+    /// and the lines below it. One function for the painter and the stamp,
+    /// so the two cannot disagree about what is on screen.
+    ///
+    /// The episode log, or -- when there has never been an episode -- the
+    /// journal, which is the machine's account of its own ticks. An empty
+    /// window that says "no episode yet" while the mind has been narrating
+    /// to itself for ten minutes is a window with its back turned.
+    ///
+    /// Both readings are in `glance`'s free tier and both were being computed
+    /// every second and rendered nowhere -- `doing` reached only the
+    /// terminal's status strip, and `journal`, which is the resident mind's
+    /// own narration of why it woke up, reached nothing at all.
+    fn view(&self) -> ((String, bool), alloc::vec::Vec<String>) {
+        let (line, engine, journal) = crate::ai::glance::with_glance(|g| {
+            let what = crate::ai::glance::engine_line(g);
+            let mind = if g.mind_on { "mind on" } else { "mind off" };
+            (
+                alloc::format!("{}  |  {}  |  {} episode(s)", what, mind, g.episodes),
+                g.engine.is_some(),
+                g.journal.clone(),
+            )
+        });
+        let lines = match agent::log_snapshot() {
+            v if v.is_empty() => journal,
+            v => v,
+        };
+        ((line, engine), lines)
+    }
+}
+
 impl DeskApp for AgentLog {
+    fn stamp(&self) -> Option<u64> {
+        let (head, lines) = self.view();
+        Some(super::scene::Stamp::of((head, lines, self.scroll.get())))
+    }
+
+    /// The log grows from another task and nothing tells the desktop, so it
+    /// is looked at twice a second -- a frame that finds it unchanged
+    /// repaints nothing.
+    fn wake_ms(&self) -> Option<u32> {
+        Some(500)
+    }
+
     /// A transcript line plus its observation, which is what one step of an
     /// episode looks like.
     fn min_size(&self) -> (u32, u32) {
@@ -51,19 +95,8 @@ impl DeskApp for AgentLog {
         let area = client.shrink(6);
 
         // One line saying what the machine is doing, above the log of what it
-        // did. Both readings are in `glance`'s free tier and both were being
-        // computed every second and rendered nowhere -- `doing` reached only
-        // the terminal's status strip, and `journal`, which is the resident
-        // mind's own narration of why it woke up, reached nothing at all.
-        let head = crate::ai::glance::with_glance(|g| {
-            let what = crate::ai::glance::engine_line(g);
-            let mind = if g.mind_on { "mind on" } else { "mind off" };
-            (
-                alloc::format!("{}  |  {}  |  {} episode(s)", what, mind, g.episodes),
-                g.engine.is_some(),
-                g.journal.clone(),
-            )
-        });
+        // did (`view` says where each comes from).
+        let (head, lines) = self.view();
         theme::text_over_at(
             fb,
             area.x,
@@ -79,10 +112,6 @@ impl DeskApp for AgentLog {
         // journal, which is the machine's account of its own ticks. An empty
         // window that says "no episode yet" while the mind has been narrating
         // to itself for ten minutes is a window with its back turned.
-        let lines = match agent::log_snapshot() {
-            v if v.is_empty() => head.2,
-            v => v,
-        };
         // The draw pass owns the scroll clamp because only it knows how many
         // rows fit -- the same arrangement the ToDo window uses.
         let max_scroll = lines.len().saturating_sub(rows);
@@ -179,6 +208,16 @@ impl AuthorWin {
 }
 
 impl DeskApp for AuthorWin {
+    /// The run's published progress is everything this window shows.
+    fn stamp(&self) -> Option<u64> {
+        Some(super::scene::Stamp::of(crate::ai::author::progress()))
+    }
+
+    /// Published from the agent task between steps; looked at twice a second.
+    fn wake_ms(&self) -> Option<u32> {
+        Some(500)
+    }
+
     fn min_size(&self) -> (u32, u32) {
         (360, 200)
     }

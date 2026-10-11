@@ -91,7 +91,11 @@ const LOOP_LIMIT: usize = 3;
 // appended here as well -- a ring, because an episode that never ends must
 // not grow memory without bound.
 
-static LOG: Racy<Vec<String>> = Racy::new(Vec::new());
+/// A lock and not a `Racy`: the agent task appends while the desktop's
+/// compositor clones it for the transcript window, and a clone preempted
+/// halfway through a push that reallocated reads a freed buffer. One core is
+/// enough for that -- preemption is what makes it a race, not a second core.
+static LOG: crate::sync::Spin<Vec<String>> = crate::sync::Spin::new(Vec::new());
 const LOG_CAP: usize = 240;
 
 /// The last episode's successful actions, in order -- the ratchet's raw
@@ -102,18 +106,16 @@ static LAST_TRAJECTORY: Racy<Vec<String>> = Racy::new(Vec::new());
 static LAST_GOAL: Racy<Option<String>> = Racy::new(None);
 
 fn elog(line: String) {
-    unsafe {
-        let log = LOG.get();
-        log.push(line);
-        let excess = log.len().saturating_sub(LOG_CAP);
-        log.drain(..excess);
-    }
+    let mut log = LOG.lock_irq();
+    log.push(line);
+    let excess = log.len().saturating_sub(LOG_CAP);
+    log.drain(..excess);
 }
 
 /// Snapshot for a drawing window. A copy, because the agent task appends
 /// while the desktop draws; the line count is small enough not to care.
 pub fn log_snapshot() -> Vec<String> {
-    unsafe { LOG.get().clone() }
+    LOG.lock_irq().clone()
 }
 
 // --- abort ----------------------------------------------------------------

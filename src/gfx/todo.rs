@@ -376,6 +376,14 @@ impl Todo {
 }
 
 impl DeskApp for Todo {
+    /// The selection, the scroll and which steps are ticked -- `todo` in the
+    /// shell ticks them without going through this window, which is why the
+    /// list itself is hashed rather than counted on input to cover it.
+    fn stamp(&self) -> Option<u64> {
+        let done: [bool; 32] = unsafe { *DONE.get() };
+        Some(super::scene::Stamp::of((self.sel, self.scroll.get(), done)))
+    }
+
     /// Wide enough for a step's command line and tall enough for the
     /// expected/fail pair beneath it, which is the unit a reader needs whole.
     fn min_size(&self) -> (u32, u32) {

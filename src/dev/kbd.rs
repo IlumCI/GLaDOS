@@ -26,6 +26,8 @@ const COMMAND: u16 = 0x64;
 const STATUS_OUTPUT_FULL: u8 = 1 << 0;
 /// Status bit 1: input buffer full, i.e. the controller is not ready for a write.
 const STATUS_INPUT_FULL: u8 = 1 << 1;
+/// The byte waiting is from the second port, the mouse.
+const STATUS_AUX: u8 = 1 << 5;
 
 const CMD_READ_CONFIG: u8 = 0x20;
 const CMD_WRITE_CONFIG: u8 = 0x60;
@@ -201,6 +203,11 @@ static ALT: AtomicBool = AtomicBool::new(false);
 /// Alt has been pressed and nothing else has happened since.
 static ALT_ALONE: AtomicBool = AtomicBool::new(false);
 static CAPS: AtomicBool = AtomicBool::new(false);
+/// The Windows key, which this desktop calls Super.
+static SUPER: AtomicBool = AtomicBool::new(false);
+/// Super has been pressed and nothing else has happened since: releasing it
+/// then opens the Start menu, the way the key has always behaved.
+static SUPER_ALONE: AtomicBool = AtomicBool::new(false);
 static EXTENDED: AtomicBool = AtomicBool::new(false);
 
 // --- input ring ----------------------------------------------------------
@@ -227,6 +234,11 @@ fn push(byte: u8) {
 /// window, one to the shell -- so a ring that forgets which is which splits a
 /// typed line between them.
 fn push_from(byte: u8, serial: bool) {
+    // Three producers, not one: the keyboard interrupt, the compositor
+    // injecting USB scancodes, and the shell draining the UART. A keystroke
+    // landing between a drain's load of `HEAD` and its store overwrote a byte,
+    // so both ends of the ring are under one interrupt-safe lock.
+    let _ring = RING.lock_irq();
     let head = HEAD.load(Ordering::Relaxed);
     let next = (head + 1) % CAP;
     if next == TAIL.load(Ordering::Acquire) {
@@ -239,8 +251,88 @@ fn push_from(byte: u8, serial: bool) {
     HEAD.store(next, Ordering::Release);
 }
 
+/// Serialises every push and pop of the ring, and of `SHELL` below.
+static RING: crate::sync::Spin<()> = crate::sync::Spin::new(());
+
+/// Keys the compositor has already offered the desktop and the desktop gave
+/// back to the shell (`route`), oldest first. Read before the ring, because
+/// everything here arrived before anything still in it.
+static SHELL: crate::sync::Spin<alloc::collections::VecDeque<u8>> =
+    crate::sync::Spin::new(alloc::collections::VecDeque::new());
+/// A key is between the ring and `SHELL`, so nothing behind it may be read.
+static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+/// Whether the byte `pop` last returned had already been routed.
+static ROUTED: AtomicBool = AtomicBool::new(false);
+
+/// Routing stood down, for a selftest that feeds the ring keys nobody
+/// pressed and reads them back: routed, an injected Super-D would minimise
+/// every window on the screen in the middle of `diag`.
+static PAUSED: AtomicBool = AtomicBool::new(false);
+
+pub fn pause_routing(on: bool) {
+    PAUSED.store(on, Ordering::Release);
+}
+
+/// Whether the key last read was one the desktop has already declined, so the
+/// shell must not offer it to the desktop a second time.
+pub fn last_was_routed() -> bool {
+    ROUTED.load(Ordering::Relaxed)
+}
+
+/// Offer keystrokes to `offer`, oldest first, from the compositor.
+///
+/// **In order, or not at all.** The desktop decides where a key goes from the
+/// focus at the moment it looks, so a key routed ahead of one typed before it
+/// would be judged against the wrong window: Alt-Tab taken first, and the
+/// type-ahead behind it lands in whatever Alt-Tab raised. So this takes the
+/// head and only the head. `offer` answers `Some(k)` for a key that is the
+/// shell's after all; it joins `SHELL`, in the same order.
+///
+/// It stops at a byte off the serial line. Those are always the shell's and
+/// the shell takes them itself; everything before them has gone to `SHELL`
+/// already, so the shell's order is kept.
+///
+/// `offer` runs with no lock held -- it is the desktop, and it takes the
+/// desktop's own claim -- so `IN_FLIGHT` is what stops the shell reading a
+/// key behind the one being routed.
+pub fn route(mut offer: impl FnMut(u8) -> Option<u8>) {
+    if PAUSED.load(Ordering::Acquire) {
+        return;
+    }
+    loop {
+        let k = {
+            let _ring = RING.lock_irq();
+            let tail = TAIL.load(Ordering::Relaxed);
+            if tail == HEAD.load(Ordering::Acquire) || unsafe { MARK.get()[tail] } {
+                return;
+            }
+            let k = unsafe { BUF.get()[tail] };
+            TAIL.store((tail + 1) % CAP, Ordering::Release);
+            IN_FLIGHT.store(true, Ordering::Release);
+            k
+        };
+        ROUTES.fetch_add(1, Ordering::Relaxed);
+        let back = offer(k);
+        let _ring = RING.lock_irq();
+        if let Some(b) = back {
+            SHELL.lock_irq().push_back(b);
+        }
+        IN_FLIGHT.store(false, Ordering::Release);
+    }
+}
+
 /// Take one byte of decoded input, if any.
 pub fn pop() -> Option<u8> {
+    let _ring = RING.lock_irq();
+    if let Some(b) = SHELL.lock_irq().pop_front() {
+        ROUTED.store(true, Ordering::Relaxed);
+        set_from_serial(false);
+        return Some(b);
+    }
+    if IN_FLIGHT.load(Ordering::Acquire) {
+        return None;
+    }
+    ROUTED.store(false, Ordering::Relaxed);
     let tail = TAIL.load(Ordering::Relaxed);
     if tail == HEAD.load(Ordering::Acquire) {
         return None;
@@ -367,7 +459,7 @@ pub fn pending() -> usize {
 }
 
 pub fn has_input() -> bool {
-    TAIL.load(Ordering::Relaxed) != HEAD.load(Ordering::Acquire)
+    TAIL.load(Ordering::Relaxed) != HEAD.load(Ordering::Acquire) || !SHELL.lock_irq().is_empty()
 }
 
 /// Keys with no ASCII representation are delivered as bytes above 0x7F, so the
@@ -428,6 +520,60 @@ pub const KEY_TASKBAR: u8 = 0x8B;
 /// window unreachable from the keyboard.
 pub const KEY_STARTMENU: u8 = 0x8C;
 
+/// Super held with another key: one byte per chord, in `0xC0..=0xE3`.
+///
+/// **Decoded, where it used to be dropped.** The Windows key arrives as
+/// `E0 5B` (left) or `E0 5C` (right), and the extended-code table had no arm
+/// for either, so every press fell through `_ => return` -- the one modifier a
+/// tiling desktop is driven by did not exist. A byte per chord rather than a
+/// modifier the desktop reads, for the reason Alt-Tab is a byte: the desktop
+/// is handed bytes and has no view of what is held down.
+///
+/// The letters, Enter, Tab and the arrows, and Shift with the arrows. That is
+/// every chord the desktop binds or is planned to; anything else with Super
+/// held is swallowed rather than typed, since a key pressed with Super was not
+/// meant as text.
+pub const SUPER_FIRST: u8 = 0xC0;
+pub const SUPER_LAST: u8 = 0xE3;
+
+/// The chord byte for Super with `key` -- a lowercase letter, `\n`, `\t` or
+/// an arrow -- and Shift. One function for the decoder and for `win keys
+/// super-...`, so the typed path and the hardware path cannot disagree.
+pub fn super_chord(key: u8, shift: bool) -> Option<u8> {
+    Some(match (key, shift) {
+        (b'a'..=b'z', _) => SUPER_FIRST + (key - b'a'),
+        (b'\n', _) => 0xDA,
+        (b'\t', _) => 0xDB,
+        (KEY_LEFT, false) => 0xDC,
+        (KEY_RIGHT, false) => 0xDD,
+        (KEY_UP, false) => 0xDE,
+        (KEY_DOWN, false) => 0xDF,
+        (KEY_LEFT, true) => 0xE0,
+        (KEY_RIGHT, true) => 0xE1,
+        (KEY_UP, true) => 0xE2,
+        (KEY_DOWN, true) => 0xE3,
+        _ => return None,
+    })
+}
+
+/// The other way: which key and whether Shift, for a chord byte.
+pub fn chord_of(b: u8) -> Option<(u8, bool)> {
+    Some(match b {
+        0xC0..=0xD9 => (b'a' + (b - SUPER_FIRST), false),
+        0xDA => (b'\n', false),
+        0xDB => (b'\t', false),
+        0xDC => (KEY_LEFT, false),
+        0xDD => (KEY_RIGHT, false),
+        0xDE => (KEY_UP, false),
+        0xDF => (KEY_DOWN, false),
+        0xE0 => (KEY_LEFT, true),
+        0xE1 => (KEY_RIGHT, true),
+        0xE2 => (KEY_UP, true),
+        0xE3 => (KEY_DOWN, true),
+        _ => return None,
+    })
+}
+
 /// One scancode from something that is not the i8042.
 ///
 /// A USB keyboard reports HID usage codes, and `usbhid` turns those into the
@@ -461,6 +607,20 @@ fn decode(scancode: u8) {
         // away. A guest reading evdev needs the release most of all: a key
         // whose release nobody delivered is a key held forever.
         crate::linux::input::key(0xE000 | (scancode & !SC_RELEASE) as u16, !released);
+        // Super, both of them. Before the release early-return, because
+        // releasing it alone is the gesture that opens Start.
+        if matches!(scancode & !SC_RELEASE, 0x5B | 0x5C) {
+            if released {
+                SUPER.store(false, Ordering::Relaxed);
+                if SUPER_ALONE.swap(false, Ordering::Relaxed) {
+                    push(KEY_STARTMENU);
+                }
+            } else {
+                SUPER.store(true, Ordering::Relaxed);
+                SUPER_ALONE.store(true, Ordering::Relaxed);
+            }
+            return;
+        }
         if released {
             return;
         }
@@ -480,6 +640,13 @@ fn decode(scancode: u8) {
             }
             _ => return,
         };
+        if SUPER.load(Ordering::Relaxed) {
+            SUPER_ALONE.store(false, Ordering::Relaxed);
+            if let Some(c) = super_chord(key, SHIFT.load(Ordering::Relaxed)) {
+                push(c);
+            }
+            return;
+        }
         push(key);
         return;
     }
@@ -538,6 +705,16 @@ fn decode(scancode: u8) {
     // Any other key means Alt was a modifier, not a menu request.
     ALT_ALONE.store(false, Ordering::Relaxed);
 
+    // Super chords before anything else reads the key: Super-Tab is not
+    // Alt-Tab and Super-Q is not a 'q'.
+    if SUPER.load(Ordering::Relaxed) {
+        SUPER_ALONE.store(false, Ordering::Relaxed);
+        if let Some(c) = super_chord(UNSHIFTED[code as usize].to_ascii_lowercase(), shift) {
+            push(c);
+        }
+        return;
+    }
+
     // Tab and Space are the keys whose modified forms are *different keys*
     // rather than different characters, and the map cannot express that: both
     // tables hold the same byte at those indices. Alt is checked first, so
@@ -590,7 +767,46 @@ fn decode(scancode: u8) {
     push(ch);
 }
 
+/// The controller's configuration byte, read now with interrupts off so the
+/// keyboard handler cannot take the reply. For `kbd`: a byte that does not
+/// have IRQ1 and the port-1 clock on is a keyboard that will never interrupt.
+pub fn controller_config() -> Option<u8> {
+    let flags: u64;
+    unsafe { core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags) };
+    flush();
+    command(CMD_READ_CONFIG);
+    let c = read_data();
+    if flags & (1 << 9) != 0 {
+        crate::cpu::enable_interrupts();
+    }
+    c
+}
+
+/// Keyboard interrupts taken, and keys the compositor has routed: `kbd`.
+static IRQS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static ROUTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// `(interrupts, keys in the ring, keys queued for the shell, keys routed)`.
+pub fn stats() -> (u64, usize, usize, u64) {
+    (
+        IRQS.load(Ordering::Relaxed),
+        pending(),
+        SHELL.lock_irq().len(),
+        ROUTES.load(Ordering::Relaxed),
+    )
+}
+
 extern "x86-interrupt" fn keyboard_isr(_frame: idt::InterruptStackFrame) {
+    IRQS.fetch_add(1, Ordering::Relaxed);
+    // Nothing to read, or a byte from the mouse's port: not a keystroke. An
+    // edge that arrived while interrupts were off (the mouse's set-up) can be
+    // delivered after its byte was taken, and decoding whatever the data port
+    // last held would type a key nobody pressed.
+    let status = unsafe { inb(STATUS) };
+    if status & STATUS_OUTPUT_FULL == 0 || status & STATUS_AUX != 0 {
+        lapic::eoi();
+        return;
+    }
     // Always drain the byte. Leaving it in the output buffer means the
     // controller never asserts IRQ1 again and the keyboard silently dies.
     let scancode = unsafe { inb(DATA) };
@@ -600,6 +816,18 @@ extern "x86-interrupt" fn keyboard_isr(_frame: idt::InterruptStackFrame) {
     crate::ai::godbits::ins(crate::time::rdtsc());
     decode(scancode);
     lapic::eoi();
+    // The compositor routes keystrokes now (`route`), and it may be asleep.
+    if routable() {
+        crate::gfx::render::key_arrived();
+        crate::gfx::render::preempt_for_input();
+    }
+}
+
+/// Whether the oldest unread key is a keystroke the compositor should route
+/// rather than a byte off the serial line, which is the shell's alone.
+pub fn routable() -> bool {
+    let tail = TAIL.load(Ordering::Relaxed);
+    tail != HEAD.load(Ordering::Acquire) && !unsafe { MARK.get()[tail] }
 }
 
 pub struct InitReport {

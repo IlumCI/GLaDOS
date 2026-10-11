@@ -26,10 +26,16 @@ const W: usize = 9;
 const H: usize = 9;
 const MINES: usize = 10;
 /// Pixel size of one cell. Chosen so a fingerless pointer can still hit one.
-const CELL: u32 = 30;
+fn cell() -> u32 {
+    theme::px(30)
+}
 /// The header strip: counter, face, timer.
-const HEAD: u32 = 44;
-const PAD: u32 = 6;
+fn head() -> u32 {
+    theme::px(44)
+}
+fn pad() -> u32 {
+    theme::px(6)
+}
 
 #[derive(Clone, Copy, Default)]
 struct Cell {
@@ -60,12 +66,10 @@ pub struct Mines {
     seed: u64,
 }
 
+/// `gfx::now_ms`: the frame's time while a frame is drawn, so the timer's
+/// stamp and its paint read one clock.
 fn now_ms() -> u64 {
-    let mhz = crate::time::tsc_mhz();
-    if mhz == 0 {
-        return 0;
-    }
-    crate::time::rdtsc() / (mhz * 1000)
+    super::now_ms()
 }
 
 impl Mines {
@@ -84,8 +88,8 @@ impl Mines {
     /// The window size that fits the board exactly.
     pub fn preferred() -> (u32, u32) {
         (
-            W as u32 * CELL + PAD * 2 + theme::FRAME * 2 + 8,
-            H as u32 * CELL + HEAD + PAD * 3 + theme::TITLE_H + theme::FRAME * 2 + 10,
+            W as u32 * cell() + pad() * 2 + theme::frame_w() * 2 + 8,
+            H as u32 * cell() + head() + pad() * 3 + theme::title_h() + theme::frame_w() * 2 + 10,
         )
     }
 
@@ -205,12 +209,12 @@ impl Mines {
 
     /// Board origin inside a client rectangle.
     fn board_at(client: Rect) -> (u32, u32) {
-        (client.x + PAD + 2, client.y + HEAD + PAD * 2)
+        (client.x + pad() + 2, client.y + head() + pad() * 2)
     }
 
     fn face_rect(client: Rect) -> Rect {
-        let s = HEAD - 10;
-        Rect::new(client.x + (client.w.saturating_sub(s)) / 2, client.y + PAD + 2, s, s)
+        let s = head() - 10;
+        Rect::new(client.x + (client.w.saturating_sub(s)) / 2, client.y + pad() + 2, s, s)
     }
 
     fn cell_at(client: Rect, px: i32, py: i32) -> Option<(usize, usize)> {
@@ -219,7 +223,7 @@ impl Mines {
         if dx < 0 || dy < 0 {
             return None;
         }
-        let (x, y) = ((dx as u32 / CELL) as usize, (dy as u32 / CELL) as usize);
+        let (x, y) = ((dx as u32 / cell()) as usize, (dy as u32 / cell()) as usize);
         (x < W && y < H).then_some((x, y))
     }
 }
@@ -254,11 +258,44 @@ fn count_color(n: u8) -> Color {
     }
 }
 
+impl Mines {
+    /// What the timer shows. One function for the painter and the stamp.
+    fn secs(&self) -> i64 {
+        match self.state {
+            _ if !self.laid => 0,
+            State::Playing => (now_ms().saturating_sub(self.t0) / 1000) as i64,
+            _ => (self.t_end.saturating_sub(self.t0) / 1000) as i64,
+        }
+    }
+}
+
 impl DeskApp for Mines {
+    /// Everything `draw_in` reads: every cell's visible state, the face, the
+    /// selection and the timer's whole seconds. A mine that is not open is
+    /// still hashed, because a lost game reveals them all.
+    fn stamp(&self) -> Option<u64> {
+        let mut h = super::scene::Stamp::new();
+        use core::hash::{Hash, Hasher};
+        for c in &self.cells {
+            h.write_u8(c.mine as u8 | (c.open as u8) << 1 | (c.flag as u8) << 2 | c.n << 3);
+        }
+        (self.state as u8, self.sel, self.laid, self.secs()).hash(&mut h);
+        Some(h.finish())
+    }
+
+    /// The timer moves once a second while a game is running, and nothing
+    /// else moves without input. Looked at four times a second rather than
+    /// once, because the second boundary is the game's and not the clock's:
+    /// a one-second poll out of phase with it shows each digit up to a
+    /// second late. A look that finds the same second repaints nothing.
+    fn wake_ms(&self) -> Option<u32> {
+        (self.laid && self.state == State::Playing).then_some(250)
+    }
+
     /// The board does not reflow: nine cells of thirty pixels plus the
     /// header is the whole program, and anything narrower crops it.
     fn min_size(&self) -> (u32, u32) {
-        (W as u32 * CELL + PAD * 2, H as u32 * CELL + HEAD + PAD * 3)
+        (W as u32 * cell() + pad() * 2, H as u32 * cell() + head() + pad() * 3)
     }
 
     fn draw_in(&self, fb: &Framebuffer, client: Rect, focused: bool) {
@@ -288,18 +325,14 @@ impl DeskApp for Mines {
 
         let left = MINES as i64 - self.flags() as i64;
         let lw = theme::text_w(3) + 8;
-        let well_h = HEAD - 16;
-        let ly = client.y + PAD + 5;
-        let lr = Rect::new(client.x + PAD + 2, ly, lw, well_h);
+        let well_h = head() - 16;
+        let ly = client.y + pad() + 5;
+        let lr = Rect::new(client.x + pad() + 2, ly, lw, well_h);
         theme::well(fb, lr, theme::SCREEN);
         theme::text(fb, lr.x + 4, lr.y + (well_h - theme::text_h()) / 2, &digits(left), theme::APERTURE, theme::SCREEN);
 
-        let secs = match self.state {
-            _ if !self.laid => 0,
-            State::Playing => (now_ms().saturating_sub(self.t0) / 1000) as i64,
-            _ => (self.t_end.saturating_sub(self.t0) / 1000) as i64,
-        };
-        let tr = Rect::new(client.x + client.w - PAD - 2 - lw, ly, lw, well_h);
+        let secs = self.secs();
+        let tr = Rect::new(client.x + client.w - pad() - 2 - lw, ly, lw, well_h);
         theme::well(fb, tr, theme::SCREEN);
         theme::text(fb, tr.x + 4, tr.y + (well_h - theme::text_h()) / 2, &digits(secs), theme::APERTURE, theme::SCREEN);
 
@@ -326,15 +359,15 @@ impl DeskApp for Mines {
         for y in 0..H {
             for x in 0..W {
                 let c = self.cells[y * W + x];
-                let r = Rect::new(bx + x as u32 * CELL, by + y as u32 * CELL, CELL, CELL);
+                let r = Rect::new(bx + x as u32 * cell(), by + y as u32 * cell(), cell(), cell());
                 if c.open {
                     // Sunken and flat, with a 1px grid line.
                     fb.rect(r.x, r.y, r.w, r.h, theme::FACE);
                     fb.rect(r.x, r.y, r.w, 1, theme::SHADOW);
                     fb.rect(r.x, r.y, 1, r.h, theme::SHADOW);
                     if c.mine {
-                        let cx = r.x + CELL / 2;
-                        let cy = r.y + CELL / 2;
+                        let cx = r.x + cell() / 2;
+                        let cy = r.y + cell() / 2;
                         // A mine the board lost on gets a red bed.
                         if self.state == State::Lost {
                             fb.rect(r.x + 1, r.y + 1, r.w - 1, r.h - 1, Color::new(0xD8, 0x50, 0x40));
@@ -347,8 +380,8 @@ impl DeskApp for Mines {
                         let d = [(b'0' + c.n) as char];
                         let mut s = String::new();
                         s.push(d[0]);
-                        let tx = r.x + (CELL - theme::text_w(1)) / 2 + 1;
-                        let ty = r.y + (CELL - theme::text_h()) / 2 + 1;
+                        let tx = r.x + (cell() - theme::text_w(1)) / 2 + 1;
+                        let ty = r.y + (cell() - theme::text_h()) / 2 + 1;
                         theme::text_over(fb, tx, ty, &s, count_color(c.n));
                     }
                 } else {
@@ -356,8 +389,8 @@ impl DeskApp for Mines {
                     fb.rect(r.x, r.y, r.w, r.h, theme::FACE);
                     theme::bevel(fb, r, true);
                     if c.flag {
-                        let cx = r.x + CELL / 2;
-                        let cy = r.y + CELL / 2;
+                        let cx = r.x + cell() / 2;
+                        let cy = r.y + cell() / 2;
                         fb.rect(cx - 1, cy - 7, 2, 14, theme::TEXT);
                         fb.rect(cx - 8, cy - 7, 8, 6, theme::APERTURE);
                         fb.rect(cx - 5, cy + 5, 10, 2, theme::TEXT);
@@ -370,10 +403,10 @@ impl DeskApp for Mines {
         // exactly the rule every widget follows.
         if focused && self.state == State::Playing {
             let r = Rect::new(
-                bx + self.sel.0 as u32 * CELL,
-                by + self.sel.1 as u32 * CELL,
-                CELL,
-                CELL,
+                bx + self.sel.0 as u32 * cell(),
+                by + self.sel.1 as u32 * cell(),
+                cell(),
+                cell(),
             );
             fb.frame(r.x + 1, r.y + 1, r.w - 2, r.h - 2, theme::APERTURE);
         }
@@ -383,7 +416,7 @@ impl DeskApp for Mines {
             State::Won => "clear. n deals again",
             State::Lost => "that was a mine. n deals again",
         };
-        let my = by + H as u32 * CELL + 4;
+        let my = by + H as u32 * cell() + 4;
         if my + theme::text_h() < client.y + client.h {
             theme::text(fb, bx, my, msg, theme::TEXT, theme::FACE);
         }

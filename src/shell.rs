@@ -144,7 +144,7 @@ fn find_core(want: &str) -> Option<[u8; 32]> {
 }
 
 const KNOWN_COMMANDS: &[&str] = &[
-    "term", "todo", "paint", "write", "mines", "oracle", "enternet", "net", "dhcp", "mem",
+    "term", "perf", "desk", "todo", "paint", "write", "mines", "oracle", "enternet", "net", "dhcp", "mem",
     "mine", "uptime", "tasks", "status", "help", "app", "author", "video", "serial", "log", "snap",
     "update", "repair", "gpu", "abstract", "study", "work", "redqueen", "grammar",
     "forest",
@@ -158,6 +158,10 @@ const KNOWN_COMMANDS: &[&str] = &[
 /// steps is one whose contract no skeleton serves, and saying so quickly is
 /// more use than grinding.
 const AUTHOR_STEPS: usize = 8;
+
+/// The `splash hold` demo's grip on the screen, kept across commands until
+/// `splash release`.
+static SPLASH_LEASE: crate::sync::Spin<Option<crate::gfx::lease::Lease>> = crate::sync::Spin::new(None);
 
 pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
     console::set_color(LTCYAN);
@@ -253,7 +257,10 @@ pub fn run(boot: &BootInfo, acpi: &Option<Acpi>) -> ! {
         // that ends up in a menu can never leave one: the bytes that would
         // dismiss it are eaten by it. `win keys` remains the way to drive the
         // desktop headlessly, and it comes through here as a command.
-        let key = if crate::dev::kbd::last_was_serial() {
+        // And a key the compositor already offered the desktop (`kbd::route`)
+        // is the shell's by that desktop's own answer; offering it again
+        // would ask the question twice against a focus that may have moved.
+        let key = if crate::dev::kbd::last_was_serial() || crate::dev::kbd::last_was_routed() {
             raw
         } else {
             match crate::gfx::desk::key(raw) {
@@ -2898,6 +2905,53 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 );
                 return;
             }
+            // Where frames spent their time, by painter, since `render reset`.
+            if rest.trim() == "top" {
+                let st = render::stats();
+                kprintln!("  over {} frame(s), time spent painting, per frame:", st.draws);
+                for (name, us, n) in render::costs() {
+                    if n == 0 {
+                        continue;
+                    }
+                    kprintln!("    {:<14} {:>6} us   ({} pass(es))", name, us / st.draws.max(1), n);
+                }
+                return;
+            }
+            // Compare every damage-limited frame against a full repaint.
+            if let Some(v) = rest.trim().strip_prefix("verify") {
+                match v.trim() {
+                    "on" => crate::gfx::desk::set_verify(true),
+                    "off" => crate::gfx::desk::set_verify(false),
+                    _ => {}
+                }
+                let (runs, bad, console_only, first) = crate::gfx::desk::verify_report();
+                kprintln!("  verified {} frame(s) against a full repaint, {} differed", runs, bad);
+                if console_only > 0 {
+                    kprintln!("  and {} differed only inside a terminal's grid, which the console paints itself", console_only);
+                }
+                if let Some(r) = first {
+                    console::set_color(LTRED);
+                    kprintln!("  the first difference was inside {}x{} at ({}, {})", r.w, r.h, r.x, r.y);
+                    if let Some((x, y, got, want)) = crate::gfx::desk::verify_pixel() {
+                        kprintln!("  first pixel ({}, {}): frame {:08x}, reference {:08x}", x, y, got, want);
+                    }
+                    console::set_color(LTGRAY);
+                }
+                return;
+            }
+            // Outline what each frame repaints, for as long as it is on.
+            if let Some(v) = rest.trim().strip_prefix("flash") {
+                match v.trim() {
+                    "on" => crate::gfx::desk::set_flash(true),
+                    "off" => crate::gfx::desk::set_flash(false),
+                    _ => {}
+                }
+                kprintln!(
+                    "  damage outlines {}",
+                    if crate::gfx::desk::flashing() { "on -- each repainted rectangle is framed in magenta" } else { "off" }
+                );
+                return;
+            }
             if rest.trim() == "reset" {
                 render::reset();
                 kprintln!("  counting from here");
@@ -2998,6 +3052,80 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             console::set_color(if st.max_gap_ms > 1000 { LTRED } else { WHITE });
             kprintln!("    worst gap    {:>6} ms   the longest the screen stood still", st.max_gap_ms);
             console::set_color(LTGRAY);
+            // The distribution, not a rate: what a person notices is the slow
+            // frame and the late response, so those are what is printed.
+            let t = render::timing();
+            if t.frame.3 > 0 {
+                kprintln!(
+                    "    frame time   p50 {} us  p95 {} us  max {} us   ({} frames, present p50 {} us)",
+                    t.frame.0, t.frame.1, t.frame.2, t.frame.3, t.present.0
+                );
+                console::set_color(if t.over_budget > 0 { LTRED } else { LTGRAY });
+                kprintln!(
+                    "    over budget  {:>6}   frame(s) slower than {} us (60 fps)",
+                    t.over_budget, render::BUDGET_US
+                );
+                console::set_color(LTGRAY);
+            }
+            let (drects, dpix) = render::damage_totals();
+            if st.draws > 0 {
+                // Tenths, because the average is usually between one and two
+                // rectangles and integer division printed "0 rect(s)" beside a
+                // nonzero pixel count, which read as a broken counter.
+                let tenths = drects * 10 / st.draws;
+                kprintln!(
+                    "    repainted    {}.{} rect(s), {} px per frame on average (a whole screen is {})",
+                    tenths / 10,
+                    tenths % 10,
+                    dpix / st.draws,
+                    boot.fb.width() as u64 * boot.fb.height() as u64
+                );
+            }
+            let ask = render::askers();
+            if !ask.is_empty() {
+                kprint!("    asked by    ");
+                for (f, l, n) in ask.iter().take(4) {
+                    kprint!(" {}:{} x{}", f.rsplit('/').next().unwrap_or(f), l, n);
+                }
+                kprintln!();
+            }
+            let (qf, qc) = crate::gfx::quality::range();
+            kprintln!(
+                "    quality       {} (level {} of 4, may range {}..{})",
+                crate::gfx::quality::name(crate::gfx::quality::level()),
+                crate::gfx::quality::level(),
+                qf,
+                qc
+            );
+            let (whole, part, held) = crate::gfx::desk::image_stats();
+            kprintln!("    window images {} whole, {} in part since boot, {} KiB held", whole, part, held / 1024);
+            let reads = render::mmio_reads();
+            console::set_color(if reads > 0 { YELLOW } else { LTGRAY });
+            kprintln!("    aperture reads {:>5}   pixel(s) read back from write-combining memory since boot", reads);
+            let intr = render::intruders();
+            if !intr.is_empty() {
+                console::set_color(LTRED);
+                kprint!("    wrote a leased screen");
+                for (f, l, n) in intr.iter().take(4) {
+                    kprint!(" {}:{} x{}", f.rsplit('/').next().unwrap_or(f), l, n);
+                }
+                kprintln!();
+                console::set_color(LTGRAY);
+            }
+            if reads > 0 {
+                kprint!("      read by  ");
+                for (f, l, n) in render::mmio_readers().iter().take(4) {
+                    kprint!(" {}:{} x{}", f.rsplit('/').next().unwrap_or(f), l, n);
+                }
+                kprintln!();
+            }
+            console::set_color(LTGRAY);
+            if t.latency.3 > 0 {
+                kprintln!(
+                    "    input->screen p50 {} us  p95 {} us  max {} us   ({} events)",
+                    t.latency.0, t.latency.1, t.latency.2, t.latency.3
+                );
+            }
             // The compositor's own pulse, which is a different question from
             // whether frames landed. An idle desktop composes nothing and is
             // perfectly healthy; a compositor that stopped turning is the
@@ -3021,6 +3149,15 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // task that leaks it never notices.
                 if let Some(h) = crate::gfx::desk::claim_holder() {
                     kprintln!("    the paint claim is held by task {}", h);
+                }
+            }
+            // The screen itself, when a full-screen program has it: a desktop
+            // that composes nothing because the editor owns the screen and one
+            // that composes nothing because it is broken look the same.
+            if let Some(o) = crate::gfx::lease::holder() {
+                match crate::gfx::lease::holder_task() {
+                    Some(t) => kprintln!("    the screen is leased to {}, taken by task {}", o.name(), t),
+                    None => kprintln!("    the screen is leased to {}", o.name()),
                 }
             }
             // **The worst quiet prints whether or not it crossed the bar.**
@@ -5152,6 +5289,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             console::set_color(WHITE);
         }
         "usb" => match acpi.as_ref().and_then(|a| a.mcfg) {
+            Some(_) if rest.trim() == "hid reset" => {
+                // Typed, so it needs no pointer: the way back when one dies.
+                match crate::dev::usbhid::reset() {
+                    Ok(n) => kprintln!("  {} input device(s) found again", n),
+                    Err(e) => kprintln!("  {}", e),
+                }
+                crate::dev::usbhid::report();
+            }
             Some(ecam) if rest.trim() == "hid" => {
                 // Says nothing when it found nothing new, because the usual
                 // reason for that is that boot already took them, and "0
@@ -5906,7 +6051,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
                 None => kprintln!("  no MCFG, so nothing has swept PCI"),
             }
-            crate::dev::registry::report();
+            if rest.trim() == "table" {
+                crate::dev::registry::report();
+            } else {
+                crate::dev::manager::report();
+            }
         }
         "pci" => match acpi.as_ref().and_then(|a| a.mcfg) {
             Some(ecam) => {
@@ -6149,6 +6298,29 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             }
         }
         "plan" => crate::ai::aixi::report(),
+        // The OFL asks that the licence travel with every copy of the fonts,
+        // and the kernel image is a copy. Printed whole, as written.
+        "licences" | "licenses" => {
+            kprintln!("{}", crate::gfx::text::OFL_NOTO);
+            kprintln!("{}", crate::gfx::text::OFL_CASCADIA);
+            kprintln!("  crates and their licences: NOTICE.md in the source tree");
+        }
+        "kbd" => {
+            let (irqs, ring, shell, routed) = crate::dev::kbd::stats();
+            kprintln!("  {} keyboard interrupt(s), {} routed by the compositor", irqs, routed);
+            kprintln!("  {} byte(s) waiting in the ring, {} handed to the shell", ring, shell);
+            match crate::dev::kbd::controller_config() {
+                Some(c) => kprintln!(
+                    "  controller config {:#04x}: irq1 {}  port-1 clock {}  irq12 {}  translate {}",
+                    c,
+                    if c & 0x01 != 0 { "on" } else { "OFF" },
+                    if c & 0x10 == 0 { "on" } else { "OFF" },
+                    if c & 0x02 != 0 { "on" } else { "off" },
+                    if c & 0x40 != 0 { "on" } else { "off" },
+                ),
+                None => kprintln!("  the controller did not answer a config read"),
+            }
+        }
         // `rng` -- bytes from the kernel generator, and what it thinks of
         // itself. The status line is the interesting half: an estimate below
         // the threshold means `fill_secret` is refusing, which is what a TLS
@@ -6200,6 +6372,27 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         console::set_color(LTGRAY);
                     }
                 }
+            }
+        }
+        // Why the desktop is fast or slow on this machine, in one screen.
+        "perf" => crate::gfx::perf_report(),
+        // The desktop's settings, the verb behind the Settings window's
+        // Desktop page: bare lists them, `desk <key> <value>` sets one and
+        // writes them all to /etc/desk.
+        "desk" => {
+            let rest = rest.trim();
+            match rest.split_once(' ') {
+                None if rest.is_empty() => {
+                    for (k, takes, what) in crate::gfx::settings::KEYS {
+                        let v = crate::gfx::settings::get(k).unwrap_or_default();
+                        kprintln!("  {:<7} {:<10} {:<18} {}", k, v, takes, what);
+                    }
+                }
+                None => kprintln!("  usage: desk [<key> <value>] -- bare lists them"),
+                Some((k, v)) => match crate::gfx::settings::set(k, v.trim()) {
+                    Ok(()) => kprintln!("  {} {}", k, crate::gfx::settings::get(k).unwrap_or_default()),
+                    Err(e) => kprintln!("  {}: {}", k, e),
+                },
             }
         }
         "mind" if rest.trim() == "open" => {
@@ -6403,6 +6596,44 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // Alt and Shift, and a control with no typed form never gets
                 // tested.
                 "prev" => desk::cycle(true),
+                // What tints the focused caption's glass, until the Settings
+                // window owns it.
+                "glass" => {
+                    let want = it.next().unwrap_or("");
+                    if want.is_empty() {
+                        kprintln!("  caption glass: {} (of {})", crate::gfx::theme::caption_tint(), crate::gfx::theme::TINTS.join(", "));
+                    } else if crate::gfx::settings::set("glass", want).is_ok() {
+                        kprintln!("  caption glass: {}", want);
+                    } else {
+                        kprintln!("  no tint '{}' -- {}", want, crate::gfx::theme::TINTS.join(", "));
+                    }
+                }
+                // The interface's scale, in per cent: 125 by default, which is
+                // Windows' choice for this panel's density.
+                "scale" => {
+                    match it.next().and_then(|t| t.parse::<u32>().ok()) {
+                        Some(p) => match crate::gfx::settings::set("scale", &alloc::format!("{}", p)) {
+                            Ok(()) => kprintln!("  interface at {}%", crate::gfx::theme::scale() / 10),
+                            Err(e) => kprintln!("  {} -- 75 to 250", e),
+                        },
+                        None => kprintln!("  interface at {}% -- win scale <percent>, 75 to 250", crate::gfx::theme::scale() / 10),
+                    }
+                }
+                // How long motion takes, in per cent of Hyprland's durations:
+                // 100 as configured, 2000 twenty times slower -- which is how
+                // an arrival lasting 410 ms gets photographed by a harness
+                // whose screenshot takes seconds -- and 0 for none at all.
+                "anim" => {
+                    match it.next().and_then(|t| t.parse::<u32>().ok()) {
+                        // Not through `settings`: a test slowing motion down to
+                        // photograph it must not write that into /etc/desk.
+                        Some(p) => {
+                            crate::gfx::anim::set_speed(p);
+                            kprintln!("  motion at {}% of its configured duration", crate::gfx::anim::speed());
+                        }
+                        None => kprintln!("  motion at {}% of its configured duration -- win anim <percent>, 0 for none", crate::gfx::anim::speed()),
+                    }
+                }
                 // The typed equivalent of the wheel over the terminal. Serial
                 // cannot inject PS/2 packets, so a scrollback reachable only
                 // by a wheel is a scrollback nothing ever checks -- the same
@@ -6438,7 +6669,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // its Enter presses whatever the panel had focused. That is
                 // how the first test of an application deleted the item it had
                 // just added.
-                "term" => desk::focus_terminal(),
+                // Opens it as the desktop icon does -- creating it on a clean
+                // desktop, restoring it if minimised -- because typing this is
+                // asking for the terminal, and a verb that only raised one
+                // that already showed left a headless driver no way to put a
+                // terminal on screen at all.
+                "term" => desk::open_terminal(),
                 // Clearing the screen, and clearing the screen around one
                 // thing. Neither is the other with an argument, so they are
                 // two verbs. Minimised and not closed -- the terminal and the
@@ -6980,6 +7216,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         if s.left { " left" } else { "" },
                         if s.right { " right" } else { "" }
                     );
+                    let (irqs, packets, resyncs, stale, rescued) = crate::dev::mouse::stats();
+                    kprintln!(
+                        "  ps/2    {} interrupt(s), {} packet(s), {} byte(s) dropped to resync, {} half-packet(s) abandoned, {} byte(s) rescued",
+                        irqs, packets, resyncs, stale, rescued
+                    );
+                    crate::dev::usbhid::report();
                 }
                 Some("move") => {
                     let dx = it.next().and_then(|t| t.parse::<i32>().ok());
@@ -6988,7 +7230,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         None => kprintln!("  usage: mouse move <dx> [dy]"),
                         Some(dx) => {
                             let s = crate::dev::mouse::peek();
-                            crate::dev::mouse::apply(dx, dy, s.left, s.right, 0);
+                            crate::dev::mouse::apply_exact(dx, dy, s.left, s.right, 0);
                             let now = crate::dev::mouse::peek();
                             kprintln!("  moved {},{} -- pointer now at {},{}", dx, dy, now.x, now.y);
                         }
@@ -7029,7 +7271,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     kprintln!(
                         "  clock {}, screen {}",
                         if crate::port::clock::ready() { "calibrated" } else { "UNCALIBRATED" },
-                        if crate::gfx::exclusive() { "held" } else { "free" }
+                        crate::gfx::lease::holder().map_or("free", |o| o.name())
                     );
                     kprintln!("  'port bars' draws a test frame through the surface");
                 }
@@ -7140,17 +7382,127 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 crate::gfx::bench();
                 return;
             }
-            if rest.trim() == "bars" {
+            if rest.trim() == "cache" {
+                crate::gfx::cache_report();
+                return;
+            }
+            // Switch the aperture's memory type for an A/B within one boot.
+            // Shell-only, and it says what it changed rather than trusting it:
+            // the report below re-reads the page tables and the MTRRs.
+            if let Some(k) = rest.trim().strip_prefix("cache ") {
+                use crate::cpu::mtrr::Kind;
+                let kind = match k.trim() {
+                    "wb" => Kind::Wb,
+                    "wc" => Kind::Wc,
+                    "uc" => Kind::Uc,
+                    _ => {
+                        kprintln!("  usage: video cache [wb|wc|uc]");
+                        return;
+                    }
+                };
+                // A live guest may hold a private copy of the aperture's page
+                // directory, which this would leave on the old type -- the
+                // alias `paging::set_cache` describes. Refused rather than
+                // walked, since the only caller is this test verb.
+                if crate::linux::syscall::live_guests() > 0 {
+                    kprintln!("  a Linux guest is alive; its page tables may hold the old type -- end it first");
+                    return;
+                }
+                let len = boot.fb_end - boot.fb_start;
+                if !crate::mem::paging::set_cache(boot.fb_start, len, kind) {
+                    kprintln!("  could not set {} -- is the PAT programmed? ('video cache' says)", kind.short());
+                }
+                crate::gfx::cache_report();
+                return;
+            }
+            if let Some(k) = rest.trim().strip_prefix("stream") {
+                use core::sync::atomic::Ordering;
+                match k.trim() {
+                    "on" => crate::gfx::STREAM.store(true, Ordering::Relaxed),
+                    "off" => crate::gfx::STREAM.store(false, Ordering::Relaxed),
+                    _ => {}
+                }
+                kprintln!("  non-temporal stores to the aperture: {}",
+                    if crate::gfx::STREAM.load(Ordering::Relaxed) { "on" } else { "off" });
+                return;
+            }
+            // The anti-aliased geometry, for the eye: drawn into memory and
+            // shown under a lease for `ms` milliseconds, like `video bars`.
+            let sheet = if let Some(ms) = rest.trim().strip_prefix("shapes") {
+                Some((ms, crate::gfx::shape::proof as fn(&crate::gfx::Framebuffer), "shapes"))
+            } else if let Some(ms) = rest.trim().strip_prefix("gradients") {
+                Some((ms, crate::gfx::grad::proof as fn(&crate::gfx::Framebuffer), "gradients"))
+            } else if let Some(ms) = rest.trim().strip_prefix("shadows") {
+                Some((ms, crate::gfx::shadow::proof as fn(&crate::gfx::Framebuffer), "shadows"))
+            } else if let Some(ms) = rest.trim().strip_prefix("glass") {
+                Some((ms, crate::gfx::glass::proof as fn(&crate::gfx::Framebuffer), "glass"))
+            } else if let Some(ms) = rest.trim().strip_prefix("scale") {
+                Some((ms, crate::gfx::scale::proof as fn(&crate::gfx::Framebuffer), "scale"))
+            } else if let Some(ms) = rest.trim().strip_prefix("wall") {
+                Some((ms, crate::gfx::wall::proof as fn(&crate::gfx::Framebuffer), "wall"))
+            } else if let Some(ms) = rest.trim().strip_prefix("icons") {
+                Some((ms, crate::gfx::icons::proof as fn(&crate::gfx::Framebuffer), "icons"))
+            } else if let Some(ms) = rest.trim().strip_prefix("text") {
+                Some((ms, crate::gfx::text::proof as fn(&crate::gfx::Framebuffer), "text"))
+            } else {
+                None
+            };
+            if let Some((ms, draw, what)) = sheet {
+                let ms: u64 = ms.trim().parse().unwrap_or(3000);
+                let (w, h) = (boot.fb.width(), boot.fb.height());
+                let mut px = alloc::vec![0u32; (w * h) as usize];
+                let ram = unsafe {
+                    crate::gfx::Framebuffer::over_ram(px.as_mut_ptr() as u64, w, h, w, boot.fb.format())
+                };
+                draw(&ram);
+                let _screen = crate::gfx::lease::take(crate::gfx::lease::Owner::VideoTest);
+                // Where the sheet is in memory, so the host can read the exact
+                // pixels (QEMU `pmemsave`) rather than a photograph of a screen.
+                kprintln!("  {} drawn, for {} ms; image at {:#x}, {}x{}, 4 bytes a pixel",
+                    what, ms, px.as_ptr() as u64, w, h);
+                // Re-laid every tenth of a second rather than once. Not for the
+                // machine: QEMU's picture of its own video memory goes stale a
+                // few seconds after the guest stops writing it -- measured, the
+                // monitor's `xp` read the bars in memory while `screendump`
+                // showed the desktop -- so a sheet drawn once cannot be
+                // photographed. Real hardware scans the memory out.
+                let mhz = crate::time::tsc_mhz().max(1) as u64;
+                let until = crate::time::rdtsc() + ms * mhz * 1000;
+                while crate::time::rdtsc() < until {
+                    for y in 0..h {
+                        boot.fb.blit_span(0, y, &px[(y * w) as usize..((y + 1) * w) as usize]);
+                    }
+                    let next = crate::time::rdtsc() + 100 * mhz * 1000;
+                    while crate::time::rdtsc() < next.min(until) {
+                        crate::task::yield_now();
+                    }
+                }
+                return;
+            }
+            if let Some(ms) = rest.trim().strip_prefix("bars") {
                 // Deferred from boot because the splash owned the screen.
                 // Swapped red and blue mean the firmware's reported pixel
                 // format is wrong, which is worth being able to re-check.
+                //
+                // Held for a bounded time, and under a lease: the bars used to
+                // be drawn on the aperture with nothing told, so they lasted
+                // until some unrelated row changed and then left fragments.
+                // Now they stay `ms` milliseconds (3000 by default) and the
+                // desktop comes back whole when the lease drops.
+                let ms: u64 = ms.trim().parse().unwrap_or(3000);
+                let _screen = crate::gfx::lease::take(crate::gfx::lease::Owner::VideoTest);
                 let y = boot.fb.height().saturating_sub(80);
                 let w = boot.fb.width() / 6;
                 use crate::gfx::palette;
                 boot.fb.rect(w, y, w, 40, palette::LTRED);
                 boot.fb.rect(w * 2, y, w, 40, palette::LTGREEN);
                 boot.fb.rect(w * 3, y, w, 40, palette::LTBLUE);
-                kprintln!("  bars drawn: red green blue, left to right");
+                kprintln!("  bars drawn: red green blue, left to right, for {} ms", ms);
+                let mhz = crate::time::tsc_mhz().max(1) as u64;
+                let until = crate::time::rdtsc() + ms * mhz * 1000;
+                while crate::time::rdtsc() < until {
+                    crate::task::yield_now();
+                }
             } else {
                 kprintln!("  'video bars' to check the pixel format");
             }
@@ -7192,10 +7544,26 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             let a1 = t.split_whitespace().nth(1);
             if a0 == Some("release") {
                 // Give the screen back, for the frame-by-frame capture below.
-                crate::gfx::set_exclusive(false);
-                crate::gfx::compose::invalidate();
-                crate::gfx::render::invalidate();
+                // Dropping the lease forgets the shadow and asks for a frame.
+                let held = SPLASH_LEASE.lock_irq().take();
+                drop(held);
                 kprintln!("  released");
+            } else if a0 == Some("glide") {
+                // One frame of the hand-off to the wallpaper, held like
+                // `hold`, and where its pixels are -- QEMU's picture of a held
+                // screen goes stale, so the frame is judged from `pmemsave`.
+                let f: u32 = a1.and_then(|s| s.parse().ok()).unwrap_or(0);
+                {
+                    let mut l = SPLASH_LEASE.lock_irq();
+                    if l.is_none() {
+                        *l = crate::gfx::lease::take(crate::gfx::lease::Owner::Splash);
+                    }
+                }
+                crate::gfx::compose::invalidate();
+                match crate::gfx::splash::demo_glide(f) {
+                    Some(fb) => kprintln!("  glide frame {} of 48; image at {:#x}, {}x{}", f, fb.addr(), fb.width(), fb.height()),
+                    None => kprintln!("  no canvas to glide on"),
+                }
             } else if a0 == Some("hold") {
                 // Draw one frame and keep the framebuffer held, returning to
                 // the prompt at once -- so a driver can shoot the sequence
@@ -7203,7 +7571,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // and `splash release` at the end. Exclusive is set so the
                 // clock and cursor do not paint over the held frame.
                 let step: u32 = a1.and_then(|s| s.parse().ok()).unwrap_or(0);
-                crate::gfx::set_exclusive(true);
+                {
+                    let mut l = SPLASH_LEASE.lock_irq();
+                    if l.is_none() {
+                        *l = crate::gfx::lease::take(crate::gfx::lease::Owner::Splash);
+                    }
+                }
                 crate::gfx::compose::invalidate();
                 let label = labels.get(step as usize).copied().unwrap_or("ready");
                 crate::gfx::splash::demo_frame(step, label);
@@ -7221,12 +7594,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
-                crate::port::with_screen(|| {
-                    // The splash composes into the back buffer now, and
-                    // `with_screen` blanked the screen straight to the aperture,
-                    // so the shadow is stale -- forget it, or the first frame's
-                    // diff would leave the blanked pixels where splash happens
-                    // to match the old desktop.
+                {
+                    // A `Splash` lease rather than `port::with_screen`: the
+                    // splash composes through the compositor, and the lease a
+                    // ported program takes keeps the compositor off the screen
+                    // entirely, which would hide every frame. The shadow is
+                    // forgotten so the first frame writes every row.
+                    let _screen = crate::gfx::lease::take(crate::gfx::lease::Owner::Splash);
                     crate::gfx::compose::invalidate();
                     let stages = crate::gfx::splash::stages();
                     if let Some(step) = freeze {
@@ -7253,7 +7627,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         }
                         unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
                     }
-                });
+                }
                 kprintln!("  done");
             }
         }

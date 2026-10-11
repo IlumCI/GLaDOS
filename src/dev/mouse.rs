@@ -98,6 +98,13 @@ pub fn take() -> State {
     out
 }
 
+/// Whether anything has happened since the last `take`, without consuming it.
+/// The compositor's sleep asks this so a packet that lands just before it
+/// goes to sleep is not left waiting a whole tick.
+pub fn pending() -> bool {
+    unsafe { (*STATE.get()).moved }
+}
+
 /// The state as it stands, consuming nothing.
 ///
 /// `take` clears the wheel and the moved flag because those describe what
@@ -133,11 +140,23 @@ pub fn position() -> Option<(u32, u32)> {
 /// signs in a flags byte, HID sends plain signed bytes, and neither of those
 /// belongs in here.
 pub fn apply(dx: i32, dy: i32, left: bool, right: bool, wheel: i32) {
+    apply_with(dx, dy, left, right, wheel, true)
+}
+
+/// `apply` one count to one pixel, for `mouse move`: a script aiming at a
+/// caption button by its coordinates is not a hand, and accelerating it
+/// would land it somewhere else.
+pub fn apply_exact(dx: i32, dy: i32, left: bool, right: bool, wheel: i32) {
+    apply_with(dx, dy, left, right, wheel, false)
+}
+
+fn apply_with(dx: i32, dy: i32, left: bool, right: bool, wheel: i32, hand: bool) {
     let s = unsafe { &mut *STATE.get() };
     let (w, h) = unsafe { *BOUNDS.get() };
     if dx != 0 || dy != 0 {
-        s.x = (s.x + dx).clamp(0, w - 1);
-        s.y = (s.y - dy).clamp(0, h - 1);
+        let (mx, my) = if hand { ballistics(dx, dy) } else { (dx, dy) };
+        s.x = (s.x + mx).clamp(0, w - 1);
+        s.y = (s.y - my).clamp(0, h - 1);
         s.moved = true;
         // The same motion, kept unclamped for a reader that wants how far the
         // hand moved rather than where the pointer ended up. Accumulated here
@@ -155,6 +174,9 @@ pub fn apply(dx: i32, dy: i32, left: bool, right: bool, wheel: i32) {
     if left != s.left || right != s.right {
         s.moved = true;
     }
+    if s.moved {
+        crate::gfx::render::input_arrived();
+    }
     // Both states, because evdev reports transitions and this is handed
     // state: a packet arrives for every movement, so emitting a press per
     // packet would give a guest a hundred clicks a second. Placed here for
@@ -163,6 +185,48 @@ pub fn apply(dx: i32, dy: i32, left: bool, right: bool, wheel: i32) {
     crate::linux::input::pointer(dx, dy, wheel, left, right, s.left, s.right);
     s.left = left;
     s.right = right;
+}
+
+/// Pointer speed, in per cent of a count per pixel. Settings: `desk pointer`.
+static SPEED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(100);
+/// What the last move left over below a whole pixel, in 1/256ths, so slow
+/// motion at a speed under 100% still arrives rather than rounding to none.
+static CARRY: Racy<(i32, i32)> = Racy::new((0, 0));
+
+pub fn speed() -> u32 {
+    SPEED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_speed(pct: u32) {
+    SPEED.store(pct.clamp(25, 400), core::sync::atomic::Ordering::Relaxed);
+}
+
+/// The gain on one report, in 1/256ths: the speed setting times an
+/// acceleration that leaves slow motion one-to-one and lets a flick cross
+/// the screen. A desk mouse at 1080p one-to-one needs most of the desk to
+/// cross the screen, which is the "slow" the trip reported; a flat gain
+/// large enough to fix that makes pointing at a caption button shaky.
+///
+/// Pure, so `diag mouse`-style claims need no hardware.
+pub fn gain(counts: i32, speed_pct: u32) -> i32 {
+    let c = counts.unsigned_abs().min(64) as i32;
+    // 1x at rest, rising one eighth per count past two, capped at 3x.
+    let accel = (256 + (c - 2).max(0) * 32).min(768);
+    accel * speed_pct as i32 / 100
+}
+
+fn ballistics(dx: i32, dy: i32) -> (i32, i32) {
+    let speed = speed();
+    let mag = dx.abs().max(dy.abs());
+    let g = gain(mag, speed);
+    let carry = unsafe { &mut *CARRY.get() };
+    let fx = dx * g + carry.0;
+    let fy = dy * g + carry.1;
+    // Toward zero, keeping the remainder with its sign, so motion back and
+    // forth does not drift.
+    let (mx, my) = (fx / 256, fy / 256);
+    *carry = (fx - mx * 256, fy - my * 256);
+    (mx, my)
 }
 
 /// Take the motion accumulated since the last call, and forget it.
@@ -212,12 +276,41 @@ pub struct InitReport {
 }
 
 pub fn init(acpi: &Acpi, apic_id: u8) -> InitReport {
+    // **The whole conversation with the controller happens with interrupts
+    // off**, because the keyboard's interrupt is already live by now and it
+    // shares the data port. Every reply below -- the config byte, each ACK,
+    // the device id -- raises IRQ1 as it lands, and the keyboard handler read
+    // it first. The config read then timed out, `unwrap_or(0)` turned the
+    // timeout into a configuration of zero, and writing that back switched
+    // the keyboard's interrupt off for the life of the boot: the controller
+    // read back `0x02`, irq1 off, translation off, after exactly one keyboard
+    // interrupt, which was the stolen config byte. Found under QEMU, where no
+    // PS/2 key had ever reached this kernel -- every test drove the desktop
+    // through `win keys` -- and it is no property of QEMU's: it depends only
+    // on IRQ1 being routed before the mouse is set up, which it always is.
+    let flags: u64;
+    unsafe { core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags) };
+    let report = init_quiet(acpi, apic_id);
+    // Anything the mouse sent while the line was masked is stale, and the
+    // edges that would announce it were taken with interrupts off.
+    flush();
+    if flags & (1 << 9) != 0 {
+        crate::cpu::enable_interrupts();
+    }
+    report
+}
+
+fn init_quiet(acpi: &Acpi, apic_id: u8) -> InitReport {
     let mut report = InitReport { present: false, wheel: false, id: None, routed_gsi: None };
 
     command(CMD_ENABLE_PORT2);
 
     command(CMD_READ_CONFIG);
-    let current = read_data().unwrap_or(0);
+    // A configuration that could not be read is not written back: a guess
+    // here is a byte that turns the keyboard off.
+    let Some(current) = read_data() else {
+        return report;
+    };
     let config = (current | CFG_PORT2_IRQ) & !CFG_PORT2_CLOCK_OFF;
     command(CMD_WRITE_CONFIG);
     write_data(config);
@@ -262,10 +355,88 @@ pub fn init(acpi: &Acpi, apic_id: u8) -> InitReport {
 }
 
 extern "x86-interrupt" fn mouse_isr(_frame: idt::InterruptStackFrame) {
-    let byte = unsafe { inb(0x60) };
-    // The hand on the mouse feeds the Oracle's entropy ring exactly as the
-    // hand on the keyboard does -- TempleOS folded both into KbdMsEvtTime.
-    crate::ai::godbits::ins(crate::time::rdtsc());
+    IRQS.fetch_add(1, Relaxed);
+    // Only a byte that is there and is the mouse's. An edge can arrive for a
+    // byte the rescue below already took, and reading the port then hands the
+    // decoder whatever it last held -- a phantom byte that knocks every
+    // packet after it out of line.
+    let status = unsafe { inb(0x64) };
+    if status & 0x01 != 0 && status & 0x20 != 0 {
+        let byte = unsafe { inb(0x60) };
+        // The hand on the mouse feeds the Oracle's entropy ring exactly as
+        // the hand on the keyboard does -- TempleOS folded both into
+        // KbdMsEvtTime.
+        crate::ai::godbits::ins(crate::time::rdtsc());
+        take_byte(byte);
+    }
+    lapic::eoi();
+    // After the EOI, as the timer does: the switch may not come back for a
+    // while and the controller must not be left waiting on this vector.
+    crate::gfx::render::preempt_for_input();
+}
+
+use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+/// For `mouse`: interrupts taken, whole packets, bytes dropped to find the
+/// start of one, half-packets abandoned, and bytes the rescue took.
+static IRQS: AtomicU64 = AtomicU64::new(0);
+static PACKETS: AtomicU64 = AtomicU64::new(0);
+static RESYNCS: AtomicU64 = AtomicU64::new(0);
+static STALE: AtomicU64 = AtomicU64::new(0);
+static RESCUED: AtomicU64 = AtomicU64::new(0);
+/// TSC of the last byte, so a half-packet left lying can be recognised.
+static LAST_BYTE: AtomicU64 = AtomicU64::new(0);
+
+/// `(interrupts, packets, resyncs, stale half-packets, rescued bytes)`.
+pub fn stats() -> (u64, u64, u64, u64, u64) {
+    (
+        IRQS.load(Relaxed),
+        PACKETS.load(Relaxed),
+        RESYNCS.load(Relaxed),
+        STALE.load(Relaxed),
+        RESCUED.load(Relaxed),
+    )
+}
+
+/// **The pointer's keep-alive**, from the compositor's loop.
+///
+/// IRQ 12 is an edge. If one is lost -- taken while the line was masked, or
+/// swallowed by a controller that raised it for a byte somebody else read --
+/// the mouse's byte stays in the output buffer, and a full buffer is a
+/// controller that sends nothing more, ever: the touchpad is dead until
+/// reboot and nothing reports why. So the buffer is looked at here, and a
+/// mouse byte nobody collected is collected.
+///
+/// And a half-packet that has sat for a tenth of a second is abandoned: the
+/// three bytes of a packet arrive together, so a partial one that old is a
+/// lost byte, and keeping it reads every later packet one byte out.
+pub fn rescue() {
+    if !present() {
+        return;
+    }
+    let flags: u64;
+    unsafe { core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags) };
+    let status = unsafe { inb(0x64) };
+    if status & 0x01 != 0 && status & 0x20 != 0 {
+        let byte = unsafe { inb(0x60) };
+        RESCUED.fetch_add(1, Relaxed);
+        take_byte(byte);
+    }
+    let phase = unsafe { &mut *PHASE.get() };
+    if *phase != 0 {
+        let age = crate::time::rdtsc().saturating_sub(LAST_BYTE.load(Relaxed));
+        if age > crate::time::tsc_mhz().max(1) as u64 * 100_000 {
+            *phase = 0;
+            STALE.fetch_add(1, Relaxed);
+        }
+    }
+    if flags & (1 << 9) != 0 {
+        crate::cpu::enable_interrupts();
+    }
+}
+
+/// One byte of the stream, from the interrupt or the rescue.
+fn take_byte(byte: u8) {
+    LAST_BYTE.store(crate::time::rdtsc(), Relaxed);
     let phase = unsafe { &mut *PHASE.get() };
     let buf = unsafe { &mut *BUF.get() };
 
@@ -273,7 +444,7 @@ extern "x86-interrupt" fn mouse_isr(_frame: idt::InterruptStackFrame) {
     // start of a packet and the stream is out of sync; dropping the byte is
     // the only way back, because there is no framing to resynchronise against.
     if *phase == 0 && byte & 0x08 == 0 {
-        lapic::eoi();
+        RESYNCS.fetch_add(1, Relaxed);
         return;
     }
 
@@ -282,10 +453,10 @@ extern "x86-interrupt" fn mouse_isr(_frame: idt::InterruptStackFrame) {
 
     let want = if unsafe { *WHEEL.get() } { 4 } else { 3 };
     if *phase < want {
-        lapic::eoi();
         return;
     }
     *phase = 0;
+    PACKETS.fetch_add(1, Relaxed);
 
     let flags = buf[0];
     // Overflow means the counter saturated between packets. The delta is
@@ -322,5 +493,5 @@ extern "x86-interrupt" fn mouse_isr(_frame: idt::InterruptStackFrame) {
     }
 
     apply(dx, dy, flags & 0x01 != 0, flags & 0x02 != 0, wheel);
-    lapic::eoi();
 }
+

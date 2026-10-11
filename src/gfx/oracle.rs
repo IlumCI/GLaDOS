@@ -247,9 +247,8 @@ impl Oracle {
         // numbers arrive rather than being there already. It is presentation
         // and nothing else: what it uncovers was measured once, at boot, and
         // does not change while it is being drawn.
-        let now = crate::dev::lapic::ticks() as u64 * 1000 / crate::TIMER_HZ as u64;
-        let since = now.saturating_sub(self.shown_ms);
-        let grow = (since as f32 / 900.0).clamp(0.0, 1.0);
+        let since = now_ms().saturating_sub(self.shown_ms);
+        let grow = (since as f32 / REVEAL_MS as f32).clamp(0.0, 1.0);
 
         let chance = 100 / f.classes.max(1);
         let held = if f.held_n > 0 { f.held_ok * 100 / f.held_n } else { 0 };
@@ -549,8 +548,10 @@ impl Oracle {
     }
 }
 
+/// `gfx::now_ms`: the frame's time while a frame is drawn, so a moving tab's
+/// stamp, its paint and the verifier's reference all see one moment.
 fn now_ms() -> u64 {
-    crate::dev::lapic::ticks() as u64 * 1000 / crate::TIMER_HZ as u64
+    super::now_ms()
 }
 
 fn clip(s: &str, n: usize) -> String {
@@ -572,31 +573,60 @@ fn fits(w: u32) -> usize {
     (w / theme::text_w(1).max(1)) as usize
 }
 
+/// How long a tab's numbers take to arrive, in milliseconds (`draw_learn`).
+const REVEAL_MS: u64 = 900;
+/// The rate the moving tabs are redrawn at. Thirty, not sixty: what moves is a
+/// slow pulse and a bar growing, and half the frames is half the cost.
+const ANIM_MS: u64 = 33;
+
 impl DeskApp for Oracle {
-    fn draw_in(&self, fb: &Framebuffer, client: Rect, focused: bool) {
+    /// The tab, the footer, and per tab what it reads. Those that move are
+    /// stamped with the animation's own clock quantised to `ANIM_MS`; those
+    /// that do not are stamped with what their data comes from, so they are
+    /// redrawn when it changes and never otherwise.
+    ///
+    /// **This replaced a `render::invalidate` from inside `draw_in`**, which
+    /// made an open Oracle a sixty-frames-a-second, whole-frame cost forever,
+    /// on every tab, including the ledger tab that re-reads the whole ledger
+    /// each time it is drawn.
+    fn stamp(&self) -> Option<u64> {
+        use core::hash::{Hash, Hasher};
+        let mut h = super::scene::Stamp::new();
+        (self.tab, self.status.as_str(), self.matrix.is_some()).hash(&mut h);
+        let since = now_ms().saturating_sub(self.shown_ms);
+        match self.tab {
+            // Past the reveal is its own bucket, so the last frame is drawn at
+            // full length rather than at whichever step came last before it.
+            0 => (trace::generation(), if since >= REVEAL_MS { u64::MAX } else { since / ANIM_MS }).hash(&mut h),
+            1 => (trace::generation(), now_ms() / ANIM_MS).hash(&mut h),
+            2 | 3 => trace::generation().hash(&mut h),
+            4 => (
+                crate::sysbox::blob_len(crate::ai::godel::LEDGER),
+                crate::sysbox::hash_of(crate::ai::godel::ARCHIVE),
+            )
+                .hash(&mut h),
+            _ => {}
+        }
+        Some(h.finish())
+    }
+
+    fn wake_ms(&self) -> Option<u32> {
+        let since = now_ms().saturating_sub(self.shown_ms);
+        match self.tab {
+            0 if since <= REVEAL_MS => Some(ANIM_MS as u32),
+            1 => Some(ANIM_MS as u32),
+            // Written by other tasks -- a routing decision, a trial.
+            0 | 2 | 3 | 4 => Some(1000),
+            _ => None,
+        }
+    }
+
+    fn draw_in(&self, fb: &Framebuffer, client: Rect, _focused: bool) {
         theme::panel(fb, client);
         let (tabs, body, foot) = Self::layout(client);
 
         for (i, rect) in Self::tab_rects(tabs).iter().enumerate() {
             theme::button(fb, *rect, TABS[i], i == self.tab, i == self.tab);
-        }
-
-        // **The animation asks for the next frame, and that is a real cost.**
-        //
-        // The compositor composes only when something says the screen is out
-        // of date, which is what keeps an idle desktop free. A moving picture
-        // has to keep saying so, and a frame is 2,143 us measured, about 7% of
-        // a core at sixty a second.
-        //
-        // Gated on the tab rather than on focus, and that is a correction. The
-        // shell calls `focus_terminal` after *every* command, so a window
-        // raised by `win keys alttab` loses focus again before the next line
-        // is read -- which made the panel freeze the moment anything was typed,
-        // including the command that was meant to be driving it. The tab is
-        // the real opt-in: nothing draws this unless somebody chose it, and a
-        // minimised window is never drawn at all.
-        if self.tab <= 1 {
-            super::render::invalidate();
         }
 
         theme::well(fb, body, theme::SCREEN);

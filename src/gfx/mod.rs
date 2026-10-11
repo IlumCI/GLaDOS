@@ -6,7 +6,56 @@
 //! are the only output device that exists.
 
 pub mod browse;
+pub mod lease;
+pub mod region;
 pub mod render;
+pub mod blend;
+pub mod scene;
+pub mod shape;
+pub mod grad;
+pub mod shadow;
+pub mod glass;
+pub mod scale;
+pub mod wall;
+pub mod anim;
+pub mod quality;
+pub mod settings;
+pub mod flip;
+pub mod tile;
+pub mod icons;
+pub mod text;
+
+/// The time a frame is about, in milliseconds since boot (TSC), taken once
+/// when the frame's scene is built; outside a frame, the time now.
+///
+/// For programs that draw from the clock -- the Mines timer, Oracle's
+/// animation. Their stamp, their paint and `render verify`'s reference paint
+/// happen at three different moments, and a program reading the live clock in
+/// each could see a second turn over between them: the stamp said one digit,
+/// the paint drew another, and the verifier reported a difference that was the
+/// clock's. One reading per frame makes all three agree.
+pub fn now_ms() -> u64 {
+    match FRAME_MS.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => live_ms(),
+        t => t,
+    }
+}
+
+fn live_ms() -> u64 {
+    let mhz = crate::time::tsc_mhz() as u64;
+    if mhz == 0 {
+        return 0;
+    }
+    crate::time::rdtsc() / (mhz * 1000)
+}
+
+static FRAME_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Called by the desktop as it builds a frame's scene, and with `false` when
+/// the frame is done.
+pub(crate) fn frame_clock(on: bool) {
+    FRAME_MS.store(if on { live_ms().max(1) } else { 0 }, core::sync::atomic::Ordering::Relaxed);
+}
 pub mod compose;
 pub mod console;
 pub mod mines;
@@ -81,6 +130,33 @@ pub trait DeskApp {
     fn tag(&self) -> u64 {
         0
     }
+
+    /// A fingerprint of everything this program draws from *other than input*
+    /// -- its log's length, its data's generation, a running clock's second.
+    ///
+    /// The desktop keeps each program's pixels between frames and redraws them
+    /// only when this, the focus, the size or an input event changes. `None`,
+    /// the default, means "redraw on every composed frame", which is what
+    /// every program got before there were stamps, so a program that does not
+    /// answer loses nothing; a program that answers wrongly shows stale pixels
+    /// until its next input, which `render verify` reports.
+    ///
+    /// Programs draw and are handed input in their own coordinates: `client`
+    /// is `(0, 0, w, h)` in `draw_in`, `press`, `drag` and `right_press`, and
+    /// the pointer is relative to it. Layout cached while drawing therefore
+    /// means the same thing when a press reads it back.
+    fn stamp(&self) -> Option<u64> {
+        None
+    }
+
+    /// How often a program with a stamp wants its stamp looked at when
+    /// nothing else is happening -- a timer, a clock, an animation. `None`,
+    /// the default, means only on input or when something else composes.
+    /// The desktop wakes the compositor at the shortest period any open
+    /// program asks for; a frame whose stamps did not move repaints nothing.
+    fn wake_ms(&self) -> Option<u32> {
+        None
+    }
 }
 
 use crate::sync::Racy;
@@ -93,30 +169,11 @@ pub fn set_primary(fb: Framebuffer) {
     unsafe { *PRIMARY.get() = Some(fb) };
 }
 
-/// Whether something owns the whole screen right now.
-///
-/// A full-screen program does not get the machine to itself just by drawing
-/// over it: `desk::paint_clock` runs on the clock task at 10 Hz and
-/// `desk::move_cursor` runs on whichever task is generating, and both write
-/// the framebuffer. So a game frame is stamped over ten times a second, and
-/// the pointer leaves an arrow in the middle of it.
-///
-/// Both of those take a paint claim, which is private to `desk.rs`, so an
-/// exclusive painter cannot serialise against them the way they serialise
-/// against each other. This is the other half of that arrangement: instead of
-/// contending for the claim, the periodic painters stand down entirely.
-///
-/// `edit::run` has owned the screen this way since it was written and has the
-/// defect today -- the clock paints over the editor. It is fixed by the same
-/// flag.
-static EXCLUSIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-
-pub fn set_exclusive(on: bool) {
-    EXCLUSIVE.store(on, core::sync::atomic::Ordering::Release);
-}
-
+/// Whether something other than the desktop owns the screen. The question
+/// `gfx::lease` answers now, with an owner attached; this name stays for the
+/// many places that only need yes or no.
 pub fn exclusive() -> bool {
-    EXCLUSIVE.load(core::sync::atomic::Ordering::Acquire)
+    lease::held()
 }
 
 pub fn primary() -> Option<Framebuffer> {
@@ -303,12 +360,23 @@ impl Shape {
 /// The pointer is borrowed for the duration of that paint and never outlives
 /// it; `with_shape` is the only way to set it and restores the previous value,
 /// so a nested paint cannot leave someone else's outline installed.
-static CLIP: Racy<Option<(*const Shape, i32, i32)>> = Racy::new(None);
+///
+/// **It applies to one surface, the one it was installed for**, keyed by that
+/// surface's base address. It was global, and two things showed why it cannot
+/// be: `diag paint`, running on the shell task, drew its 16x16 test surface
+/// through whatever window outline the compositor had installed when it was
+/// preempted, and failed a dozen claims at random; and an application drawing
+/// into its own surface inside a window's paint was clipped by that window's
+/// outline in *screen* coordinates against its own *local* ones. A clipped
+/// surface keeps its base, so a damage-limited repaint of the back buffer is
+/// still shaped; a view or another buffer is not.
+static CLIP: Racy<Option<(*const Shape, i32, i32, usize)>> = Racy::new(None);
 
-/// Draw `f` confined to `shape`, positioned with its top-left at `(x, y)`.
-pub fn with_shape<R>(shape: &Shape, x: i32, y: i32, f: impl FnOnce() -> R) -> R {
+/// Draw `f` with writes to `on` confined to `shape`, positioned with its
+/// top-left at `(x, y)` in `on`'s coordinates.
+pub fn with_shape<R>(on: &Framebuffer, shape: &Shape, x: i32, y: i32, f: impl FnOnce() -> R) -> R {
     let prev = unsafe { *CLIP.get() };
-    unsafe { *CLIP.get() = Some((shape as *const Shape, x, y)) };
+    unsafe { *CLIP.get() = Some((shape as *const Shape, x, y, on.base as usize)) };
     let r = f();
     unsafe { *CLIP.get() = prev };
     r
@@ -321,10 +389,13 @@ pub fn with_shape<R>(shape: &Shape, x: i32, y: i32, f: impl FnOnce() -> R) -> R 
 /// is a load and a branch, which is what keeps it off the cost of the span
 /// fills everything else depends on.
 #[inline]
-fn clip_run(y: u32, x: u32, w: u32) -> Option<(u32, u32)> {
-    let Some((sp, ox, oy)) = (unsafe { *CLIP.get() }) else {
+fn clip_run(base: usize, y: u32, x: u32, w: u32) -> Option<(u32, u32)> {
+    let Some((sp, ox, oy, on)) = (unsafe { *CLIP.get() }) else {
         return Some((x, w));
     };
+    if on != base {
+        return Some((x, w));
+    }
     let ly = (y as i64) - (oy as i64);
     if ly < 0 {
         return None;
@@ -385,6 +456,18 @@ pub struct Framebuffer {
     /// volatile price there made every rectangle in the interface cost one
     /// un-mergeable store per pixel.
     mmio: bool,
+    /// The part of the surface writes may land in: `[sx0, sx1) x [sy0, sy1)`.
+    ///
+    /// The whole surface unless a caller narrowed it with `clipped`. This is
+    /// what lets a damage-limited compositor repaint one rectangle by calling
+    /// the *same* painters that draw a whole frame -- every write path goes
+    /// through `clip`, so a painter that draws a window, a gradient or a line
+    /// of text simply loses whatever falls outside, with no painter knowing
+    /// there was a rectangle at all.
+    sx0: u32,
+    sy0: u32,
+    sx1: u32,
+    sy1: u32,
 }
 
 // Single core, ring 0, one owner. There is no other CPU to race with yet.
@@ -402,7 +485,8 @@ impl Framebuffer {
         stride: u32,
         format: Format,
     ) -> Self {
-        Self { base: base as *mut u32, width, height, stride, format, mmio: true }
+        Self { base: base as *mut u32, width, height, stride, format, mmio: true,
+               sx0: 0, sy0: 0, sx1: width, sy1: height }
     }
 
     /// A framebuffer over memory this program owns.
@@ -420,7 +504,121 @@ impl Framebuffer {
         stride: u32,
         format: Format,
     ) -> Self {
-        Self { base: base as *mut u32, width, height, stride, format, mmio: false }
+        Self { base: base as *mut u32, width, height, stride, format, mmio: false,
+               sx0: 0, sy0: 0, sx1: width, sy1: height }
+    }
+
+    /// A buffer of `w` x `h` that answers to the screen rectangle at
+    /// `(x, y)`: a painter writes in screen coordinates and the pixel lands
+    /// in `buf`, at its offset into the rectangle. The scissor is exactly that
+    /// rectangle, so nothing outside it is ever addressed.
+    ///
+    /// For a window's image (`desk`): every painter in this tree works in
+    /// screen coordinates, and glass in particular samples the wallpaper by
+    /// screen position, so drawing a window off screen means lying about
+    /// where the buffer is rather than teaching forty painters an origin.
+    /// `base` points `y * w + x` pixels *before* `buf`, which is never read
+    /// or written through -- every access is clipped to the scissor first,
+    /// `get` and `blend` included.
+    ///
+    /// # Safety
+    /// `buf` must hold `w * h` pixels and outlive the returned value.
+    pub unsafe fn displaced(buf: *mut u32, x: u32, y: u32, w: u32, h: u32, format: Format) -> Self {
+        let back = y as usize * w as usize + x as usize;
+        Self {
+            base: buf.wrapping_sub(back),
+            width: x + w,
+            height: y + h,
+            stride: w,
+            format,
+            mmio: false,
+            sx0: x,
+            sy0: y,
+            sx1: x + w,
+            sy1: y + h,
+        }
+    }
+
+    /// The same surface with writes confined to a rectangle, in the same
+    /// coordinates. Narrowing an already narrowed one intersects the two, so a
+    /// scissor can only ever shrink -- a painter handed a clipped surface
+    /// cannot widen its way back out.
+    pub fn clipped(&self, x: u32, y: u32, w: u32, h: u32) -> Framebuffer {
+        let mut f = *self;
+        f.sx0 = self.sx0.max(x);
+        f.sy0 = self.sy0.max(y);
+        f.sx1 = self.sx1.min(x.saturating_add(w));
+        f.sy1 = self.sy1.min(y.saturating_add(h));
+        if f.sx1 < f.sx0 {
+            f.sx1 = f.sx0;
+        }
+        if f.sy1 < f.sy0 {
+            f.sy1 = f.sy0;
+        }
+        f
+    }
+
+    /// A rectangle of this surface as a surface of its own, with `(0, 0)` at
+    /// the rectangle's corner -- for something that draws in its own
+    /// coordinates, an application's client area most of all. The base
+    /// pointer moves and the stride stays, so every primitive works unchanged
+    /// and clips to the rectangle by clipping to its own size. The parent's
+    /// scissor carries over, translated. `None` when the rectangle is off the
+    /// surface.
+    ///
+    /// A shape installed with `with_shape` is in absolute coordinates of
+    /// whatever surface it is used on; inside a view, pass it local ones.
+    pub fn view(&self, x: u32, y: u32, w: u32, h: u32) -> Option<Framebuffer> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let w = w.min(self.width - x);
+        let h = h.min(self.height - y);
+        let off = (y as usize) * (self.stride as usize) + x as usize;
+        Some(Framebuffer {
+            base: unsafe { self.base.add(off) },
+            width: w,
+            height: h,
+            stride: self.stride,
+            format: self.format,
+            mmio: self.mmio,
+            sx0: self.sx0.saturating_sub(x).min(w),
+            sy0: self.sy0.saturating_sub(y).min(h),
+            sx1: self.sx1.saturating_sub(x).min(w),
+            sy1: self.sy1.saturating_sub(y).min(h),
+        })
+    }
+
+    /// Whether anything drawn in this rectangle could land: it meets the
+    /// scissor. For skipping whole layers outside the area being repainted.
+    pub fn touches(&self, x: u32, y: u32, w: u32, h: u32) -> bool {
+        x < self.sx1 && y < self.sy1
+            && x.saturating_add(w) > self.sx0 && y.saturating_add(h) > self.sy0
+    }
+
+    /// The writable rectangle as `(x0, y0, x1, y1)`, exclusive at the far edge.
+    pub fn scissor(&self) -> (u32, u32, u32, u32) {
+        (self.sx0, self.sy0, self.sx1, self.sy1)
+    }
+
+    /// Whether writes reach every pixel, i.e. nothing has narrowed the scissor.
+    fn unclipped(&self) -> bool {
+        self.sx0 == 0 && self.sy0 == 0 && self.sx1 == self.width && self.sy1 == self.height
+    }
+
+    /// The part of a run on row `y` that may be written: the scissor, then any
+    /// shape installed with `with_shape`. Every write path asks this.
+    #[inline]
+    fn clip(&self, y: u32, x: u32, w: u32) -> Option<(u32, u32)> {
+        if y < self.sy0 || y >= self.sy1 {
+            return None;
+        }
+        let lo = x.max(self.sx0);
+        let hi = (x as u64 + w as u64).min(self.sx1 as u64) as u32;
+        if hi <= lo {
+            return None;
+        }
+        clip_run(self.base as usize, y, lo, hi - lo)
     }
 
     /// One row as a slice, clipped to the surface.
@@ -461,7 +659,7 @@ impl Framebuffer {
     pub fn shade_span(&self, x: u32, y: u32, w: u32, num: u32) {
         // Clipped first, for symmetry with `fill_span` and `blit_span`: a
         // shadow drawn under a shaped window has the same right to be cut.
-        let Some((x, w)) = clip_run(y, x, w) else { return };
+        let Some((x, w)) = self.clip(y, x, w) else { return };
         let Some(dst) = self.row_mut(y, x, w) else { return };
         let num = num.min(256);
         for px in dst.iter_mut() {
@@ -508,7 +706,7 @@ impl Framebuffer {
     ///
     /// RAM surfaces only, exactly as `shade_span`.
     pub fn tint_span(&self, x: u32, y: u32, w: u32, c: Color, num: u32) {
-        let Some((x, w)) = clip_run(y, x, w) else { return };
+        let Some((x, w)) = self.clip(y, x, w) else { return };
         let num = num.min(256);
         let keep = 256 - num;
         let src = self.encode(c);
@@ -565,10 +763,85 @@ impl Framebuffer {
     /// The fast path under `present`, which used to write the changed span of
     /// every row a pixel at a time through `put` -- two bounds checks and a
     /// volatile store each, for something that is a memcpy.
+    /// Note a write to the screen itself made while a program holds it and
+    /// by a task other than that program's: `render`'s "wrote a leased
+    /// screen". A lease promises the program the aperture to itself, and the
+    /// only way to find out who breaks that is to catch them at the write.
+    #[track_caller]
+    #[inline]
+    fn intrusion(&self) {
+        if !self.mmio || lease::compositor_may_write() {
+            return;
+        }
+        if lease::holder_task() == Some(crate::task::current()) {
+            return;
+        }
+        render::intruded(core::panic::Location::caller());
+    }
+
+    /// The writable part of row `y` from `x` for `w` pixels, through the
+    /// scissor and any installed shape, and how far into the request it starts
+    /// -- so a caller can take the matching part of its own mask or source.
+    /// RAM surfaces only (see `row_mut`).
+    fn blend_target(&self, x: u32, y: u32, w: u32) -> Option<(&mut [u32], usize)> {
+        let (cx, cw) = self.clip(y, x, w)?;
+        let row = self.row_mut(y, cx, cw)?;
+        Some((row, (cx - x) as usize))
+    }
+
+    /// Lay premultiplied `src` over row `y` from `x` (`gfx::blend::over`).
+    pub fn over_row(&self, x: u32, y: u32, src: &[u32]) {
+        if let Some((row, skip)) = self.blend_target(x, y, src.len() as u32) {
+            let n = row.len();
+            blend::over(row, &src[skip..skip + n]);
+        } else if self.mmio {
+            // The screen itself is never read; an opaque source still lands.
+            for (i, &p) in src.iter().enumerate() {
+                if p >> 24 == 0xFF {
+                    self.put(x + i as u32, y, p & 0x00FF_FFFF);
+                }
+            }
+        }
+    }
+
+    /// Lay a premultiplied `color` over row `y` through a coverage `mask`.
+    pub fn over_mask_row(&self, x: u32, y: u32, mask: &[u8], color: u32) {
+        if let Some((row, skip)) = self.blend_target(x, y, mask.len() as u32) {
+            let n = row.len();
+            blend::over_mask(row, &mask[skip..skip + n], color);
+        } else if self.mmio {
+            // No back buffer -- early boot, a fault report -- so no reading:
+            // a mask is thresholded rather than blended.
+            for (i, &m) in mask.iter().enumerate() {
+                if m >= 128 {
+                    self.put(x + i as u32, y, color & 0x00FF_FFFF);
+                }
+            }
+        }
+    }
+
+    /// A translucent fill of `w` pixels of row `y` (`gfx::blend::over_solid`).
+    pub fn over_span(&self, x: u32, y: u32, w: u32, color: u32) {
+        if let Some((row, _)) = self.blend_target(x, y, w) {
+            blend::over_solid(row, color);
+        } else if self.mmio && color >> 24 >= 128 {
+            self.fill_span(x, y, w, color & 0x00FF_FFFF);
+        }
+    }
+
+    /// Every channel of `w` pixels of row `y` times `factor`, over 255: a dim.
+    /// Nothing happens on the screen itself, which cannot be read.
+    pub fn multiply_span(&self, x: u32, y: u32, w: u32, factor: u32) {
+        if let Some((row, _)) = self.blend_target(x, y, w) {
+            blend::multiply(row, factor);
+        }
+    }
+
+    #[track_caller]
     pub fn blit_span(&self, x: u32, y: u32, src: &[u32]) {
         // A shaped blit has to drop the same pixels from the source as from
         // the destination, so the offset into `src` moves with the clip.
-        let (x, src) = match clip_run(y, x, src.len() as u32) {
+        let (x, src) = match self.clip(y, x, src.len() as u32) {
             None => return,
             Some((cx, cw)) => {
                 let skip = (cx - x) as usize;
@@ -583,18 +856,29 @@ impl Framebuffer {
         if y >= self.height || x >= self.width {
             return;
         }
+        self.intrusion();
         let n = (src.len() as u32).min(self.width - x) as usize;
         let off = (y as usize) * (self.stride as usize) + (x as usize);
-        // One memcpy rather than `n` serialised volatile stores. This is the
-        // write half of `present`, so at 1920x1080 the old form was up to two
-        // million un-mergeable stores for a frame.
+        // One bulk copy rather than `n` serialised volatile stores. This is
+        // the write half of `present`, so at 1920x1080 the old form was up to
+        // two million un-mergeable stores for a frame.
         //
-        // Safe on this aperture specifically: it is mapped write-back (see
-        // `mem::paging`), and `copy_nonoverlapping` lowers to a memcpy call
-        // rather than to stores the optimiser can prove nobody reads. The
-        // check that it is not elided is empirical and immediate -- `video
-        // bars` paints nothing at all if this stops reaching the screen.
-        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), self.base.add(off), n) };
+        // The aperture is write-combining now (`mem::paging::set_cache`), and
+        // the copy uses non-temporal stores when `STREAM` is on: they go
+        // straight to the combining buffers in whole 64-byte lines and never
+        // allocate a cache line for memory nobody will read. The `sfence`
+        // after is what makes the row visible to the display engine before
+        // anything that follows -- combining buffers drain in no promised
+        // order otherwise. `video stream off` falls back to a plain copy, so
+        // the two can be compared within one boot on the GF63.
+        unsafe {
+            let dst = self.base.add(off);
+            if STREAM.load(core::sync::atomic::Ordering::Relaxed) {
+                stream_copy(dst, src.as_ptr(), n);
+            } else {
+                core::ptr::copy_nonoverlapping(src.as_ptr(), dst, n);
+            }
+        }
     }
 
     #[inline]
@@ -645,11 +929,12 @@ impl Framebuffer {
     }
 
     #[inline]
+    #[track_caller]
     pub fn put(&self, x: u32, y: u32, raw: u32) {
         if x >= self.width || y >= self.height {
             return;
         }
-        if clip_run(y, x, 1).is_none() {
+        if self.clip(y, x, 1).is_none() {
             return;
         }
         let off = (y as usize) * (self.stride as usize) + (x as usize);
@@ -666,6 +951,7 @@ impl Framebuffer {
         // full terminal redraw is around 1.2 million of them. Every one was an
         // un-mergeable volatile store into RAM.
         if self.mmio {
+            self.intrusion();
             unsafe { write_volatile(self.base.add(off), raw) }
         } else {
             unsafe { *self.base.add(off) = raw }
@@ -678,11 +964,17 @@ impl Framebuffer {
     /// caller: the mouse pointer saves what it covers so it can be lifted
     /// without repainting the desktop underneath it.
     #[inline]
+    #[track_caller]
     pub fn get(&self, x: u32, y: u32) -> u32 {
-        if x >= self.width || y >= self.height {
+        // Outside the scissor answers nothing: a displaced surface has no
+        // memory there at all.
+        if x >= self.width || y >= self.height || x < self.sx0 || y < self.sy0 || x >= self.sx1 || y >= self.sy1 {
             return 0;
         }
         let off = (y as usize) * (self.stride as usize) + (x as usize);
+        if self.mmio {
+            render::mmio_read(1);
+        }
         unsafe { core::ptr::read_volatile(self.base.add(off)) }
     }
 
@@ -696,7 +988,7 @@ impl Framebuffer {
     /// drawing stays on `put`/`rect`, which never read.
     #[inline]
     pub fn blend(&self, x: u32, y: u32, c: Color, a: u16) {
-        if a == 0 || x >= self.width || y >= self.height {
+        if a == 0 || x < self.sx0 || y < self.sy0 || x >= self.sx1 || y >= self.sy1 {
             return;
         }
         if a >= 256 {
@@ -728,9 +1020,13 @@ impl Framebuffer {
         self.encode(c)
     }
 
+    #[track_caller]
     pub fn fill(&self, c: Color) {
+        self.intrusion();
         let raw = self.encode(c);
-        if raw == 0 {
+        // The memset covers `height * stride`, which on a view or a clipped
+        // surface is pixels that are not this surface's to write.
+        if raw == 0 && self.unclipped() && self.width == self.stride {
             // The overwhelmingly common case, since the console background is
             // black. `write_bytes` lowers to memset, which is an opaque call
             // the optimiser cannot discard -- so it needs none of the volatile
@@ -743,6 +1039,7 @@ impl Framebuffer {
     }
 
     /// Paint `count` scan lines, starting at `y`, in an already-encoded colour.
+    #[track_caller]
     fn fill_rows(&self, y: u32, count: u32, raw: u32) {
         let end = y.saturating_add(count).min(self.height);
         for row in y..end {
@@ -762,14 +1059,18 @@ impl Framebuffer {
     ///
     /// This *reads* video memory, which was once the reason the console
     /// re-rendered from its character grid instead of scrolling -- reads across
-    /// an uncached MMIO aperture are ruinous. That is no longer the situation:
-    /// `build_identity_map` gives the framebuffer aperture a write-back
+    /// an uncached MMIO aperture are ruinous. They are again: the aperture is
+    /// write-combining since 1.4.1 and `render` counts every read. What
+    /// follows describes the write-back mapping that preceded that, when
+    /// `build_identity_map` gave the framebuffer aperture a write-back
     /// mapping, so these are ordinary cached reads of stolen DRAM.
     ///
     /// `region_h` exists because the panel height is rarely a whole number of
     /// text rows -- 1080 is not divisible by 16 -- and scrolling the leftover
     /// strip at the bottom would drag it up into the last row.
+    #[track_caller]
     pub fn scroll_up(&self, region_h: u32, pixels: u32, bg: Color) {
+        self.intrusion();
         let region_h = region_h.min(self.height);
         if pixels == 0 || region_h == 0 {
             return;
@@ -783,6 +1084,9 @@ impl Framebuffer {
         let stride = self.stride as usize;
         let shift = (pixels as usize) * stride;
         let span = (region_h as usize) * stride;
+        if self.mmio {
+            render::mmio_read((span - shift) as u64);
+        }
         unsafe {
             let buf = core::slice::from_raw_parts_mut(self.base, span);
             buf.copy_within(shift..span, 0);
@@ -796,7 +1100,9 @@ impl Framebuffer {
     /// is inset into a window: it would drag the frame and anything beside it
     /// upwards too. This copies row by row within the rectangle, which is more
     /// work per line and the only thing that is correct.
+    #[track_caller]
     pub fn scroll_rect(&self, x: u32, y: u32, w: u32, h: u32, pixels: u32, bg: Color) {
+        self.intrusion();
         if pixels == 0 || w == 0 || h == 0 || x >= self.width || y >= self.height {
             return;
         }
@@ -811,6 +1117,9 @@ impl Framebuffer {
         }
 
         let stride = self.stride as usize;
+        if self.mmio {
+            render::mmio_read((h - pixels) as u64 * w as u64);
+        }
         for dy in 0..(h - pixels) {
             let src = ((y + dy + pixels) as usize) * stride + x as usize;
             let dst = ((y + dy) as usize) * stride + x as usize;
@@ -824,8 +1133,9 @@ impl Framebuffer {
         }
     }
 
+    #[track_caller]
     fn fill_span(&self, x: u32, y: u32, w: u32, raw: u32) {
-        let Some((x, w)) = clip_run(y, x, w) else { return };
+        let Some((x, w)) = self.clip(y, x, w) else { return };
         // Clip once for the whole run rather than once per pixel, which is
         // what going through `put` used to cost.
         if let Some(dst) = self.row_mut(y, x, w) {
@@ -835,6 +1145,7 @@ impl Framebuffer {
         if y >= self.height || x >= self.width {
             return;
         }
+        self.intrusion();
         let n = w.min(self.width - x) as usize;
         let off = (y as usize) * (self.stride as usize) + (x as usize);
         for i in 0..n {
@@ -842,6 +1153,7 @@ impl Framebuffer {
         }
     }
 
+    #[track_caller]
     pub fn rect(&self, x: u32, y: u32, w: u32, h: u32, c: Color) {
         let raw = self.encode(c);
         let end = y.saturating_add(h).min(self.height);
@@ -1227,6 +1539,40 @@ impl Framebuffer {
 /// numbers and a person needs the table -- and two measurements of the same
 /// thing is how two answers to "did this regress" come to disagree. One
 /// `measure`, two consumers.
+/// Whether writes to the aperture use non-temporal stores. On by default;
+/// `video stream on|off` switches it for an A/B within one boot.
+pub static STREAM: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+/// Copy `n` pixels to write-combining memory with non-temporal stores.
+///
+/// The head is copied plainly up to a 16-byte boundary, because `movntdq`
+/// faults on an unaligned destination; the body goes four pixels a store; the
+/// tail plainly again. SSE2 is part of the x86-64 baseline and the kernel is
+/// built with it on, so this needs no feature gate.
+///
+/// # Safety
+/// `dst` and `src` must be valid for `n` pixels and must not overlap.
+unsafe fn stream_copy(dst: *mut u32, src: *const u32, n: usize) {
+    use core::arch::x86_64::{__m128i, _mm_loadu_si128, _mm_sfence, _mm_stream_si128};
+    let mut i = 0;
+    unsafe {
+        while i < n && (dst.add(i) as usize) & 15 != 0 {
+            dst.add(i).write(*src.add(i));
+            i += 1;
+        }
+        while i + 4 <= n {
+            let v = _mm_loadu_si128(src.add(i) as *const __m128i);
+            _mm_stream_si128(dst.add(i) as *mut __m128i, v);
+            i += 4;
+        }
+        while i < n {
+            dst.add(i).write(*src.add(i));
+            i += 1;
+        }
+        _mm_sfence();
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Frame {
     pub width: u32,
@@ -1243,6 +1589,15 @@ pub struct Frame {
     pub fill_present_us: (u64, u64),
     /// The terminal's own cost, which is most of what a full `draw` is.
     pub console_us: (u64, u64),
+    /// One pointer move, through the path a real packet takes.
+    pub cursor_us: (u64, u64),
+    /// A frame where nothing changed: building and diffing the scene, and the
+    /// parts that repaint whenever a frame is composed at all.
+    pub idle_us: (u64, u64),
+    /// A 64x64 change -- a hover, a caret -- composed and presented.
+    pub small_us: (u64, u64),
+    /// An 800x600 window moved ten pixels: where it was and where it is.
+    pub move_us: (u64, u64),
 }
 
 /// Time the graphics path. `None` when there is no framebuffer to time.
@@ -1270,21 +1625,60 @@ pub fn measure() -> Option<Frame> {
         (lo, hi)
     };
 
+    // The compositor stands down for the length of the measurement. It runs
+    // on its own task, and every `damage` below wakes it: left running it
+    // composed the forced whole frame itself, and the `draw` being timed
+    // either found nothing left to do or lost the paint claim and returned at
+    // once -- `video.draw` read 0 us. Turning it off and waiting for the claim
+    // to be free means the frame timed is the frame asked for.
+    let was = render::enabled();
+    render::set_enabled(false);
+    while desk::claim_holder().is_some() {
+        crate::task::yield_now();
+    }
     let target = compose::target().unwrap_or_else(|| fb.clone());
     let (w, h) = (target.width(), target.height());
     let out = Frame {
         width: w,
         height: h,
         rect_us: best_of(&mut || target.rect(0, 0, w, h, theme::DESKTOP)),
-        draw_us: best_of(&mut || desk::draw()),
+        // A whole frame, forced. Since frames became damage-limited a bare
+        // `draw` composes only what changed -- nothing, here -- and this rail
+        // kept its name while measuring that instead, which made every
+        // comparison across that change a comparison of two different things.
+        draw_us: best_of(&mut || {
+            render::damage_all();
+            desk::draw()
+        }),
         present_us: best_of(&mut || compose::present()),
         fill_present_us: best_of(&mut || {
             target.rect(0, 0, w, h, theme::APERTURE);
             compose::present();
         }),
         console_us: best_of(&mut || console::redraw()),
+        idle_us: best_of(&mut || desk::draw()),
+        small_us: best_of(&mut || {
+            render::damage(theme::Rect::new(w / 2, h / 2, 64, 64));
+            desk::draw()
+        }),
+        move_us: best_of(&mut || {
+            let (mw, mh) = (800.min(w), 600.min(h));
+            render::damage(theme::Rect::new(w / 4, h / 4, mw, mh));
+            render::damage(theme::Rect::new(w / 4 + 10, h / 4, mw, mh));
+            desk::draw()
+        }),
+        cursor_us: {
+            let mut step = 0u32;
+            best_of(&mut || {
+                step += 1;
+                desk::bench_cursor(step);
+            })
+        },
     };
+    desk::cursor_home();
+    render::damage_all();
     desk::draw();
+    render::set_enabled(was);
     Some(out)
 }
 
@@ -1306,6 +1700,10 @@ pub fn bench() {
         ("present, no change   ", m.present_us),
         ("fill + present, all  ", m.fill_present_us),
         ("console redraw_all   ", m.console_us),
+        ("pointer move         ", m.cursor_us),
+        ("frame, nothing moved ", m.idle_us),
+        ("frame, 64x64 changed ", m.small_us),
+        ("frame, window moved  ", m.move_us),
     ] {
         kprintln!("  {} {:>7} us  (max {})", what, lo, hi);
     }
@@ -1331,6 +1729,177 @@ pub fn text_selftest() -> bool {
 /// than by looking: a gradient that is one shade wrong is invisible in a
 /// screenshot and a shadow that bleeds one channel into the next is a colour
 /// nobody would think to check.
+/// The memory-type decoding behind `video cache`, against synthetic registers.
+pub fn pat_selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    let mut claim = |what: &str, good: bool| {
+        if !good {
+            ok = false;
+        }
+        kprintln!("  {}  {}", if good { "ok " } else { "FAIL" }, what);
+    };
+    crate::cpu::mtrr::checks(&mut claim);
+    // And the live machine: every core that came up holds the same PAT, and it
+    // is the one the framebuffer's mapping was chosen against.
+    if crate::cpu::mtrr::programmed() {
+        let seen = crate::cpu::mtrr::per_core();
+        claim(
+            "every online core holds the PAT the bootstrap processor programmed",
+            seen.iter().all(|v| *v == crate::cpu::mtrr::GLADOS_PAT),
+        );
+        if let Some(fb) = primary() {
+            let slot = crate::mem::paging::pat_slot(fb.addr());
+            claim("the framebuffer's leaf selects the write-combining slot", slot == Some(1));
+        }
+    } else {
+        kprintln!("  ....  the PAT was not programmed on this machine, so 2 claim(s) about it did not run");
+    }
+    ok
+}
+
+/// `perf`: the two things that decide how fast this desktop can be on a real
+/// machine and that no emulator can show -- the processor's clock, and what
+/// a store to the screen costs -- measured, and then read out as a verdict.
+///
+/// Everything above the screen is drawn on the CPU into ordinary memory, so
+/// a frame is CPU time plus one copy to the aperture. Under KVM on this very
+/// laptop a typical frame is a third of a millisecond. If the machine feels
+/// slow on its own feet, one of these two is why, and this says which.
+pub fn perf_report() {
+    use crate::kprintln;
+    use crate::dev::power;
+    kprintln!("[perf]");
+    // The clock.
+    let base = power::base_mhz();
+    let now = power::measure_mhz(20_000);
+    match (now, base) {
+        (Some(n), Some(b)) => kprintln!("  cpu       running at {} MHz, base {} MHz ({}% of base)", n, b, n * 100 / b.max(1)),
+        _ => kprintln!("  cpu       clock not readable here ({})", power::why()),
+    }
+    kprintln!(
+        "  governor  {}{}{}",
+        if power::hwp_enabled() { "hardware-managed, " } else { "hardware-managed states OFF, " },
+        power::governor().name(),
+        match power::turbo() {
+            Some(true) => ", turbo on",
+            Some(false) => ", turbo OFF",
+            None => "",
+        }
+    );
+    // The screen's memory type, at its first byte.
+    if let (Some(fb), Some(snap)) = (primary(), crate::cpu::mtrr::read()) {
+        let slot = crate::mem::paging::pat_slot(fb.addr()).unwrap_or(0xFF);
+        let p = if slot == 0xFF { crate::cpu::mtrr::Kind::Reserved(0xFF) } else { crate::cpu::mtrr::pat_kind(snap.pat, slot) };
+        let m = crate::cpu::mtrr::mtrr_kind(snap.def_type, &snap.ranges, fb.addr()).unwrap_or(crate::cpu::mtrr::Kind::Reserved(0xFE));
+        kprintln!("  screen    {}x{} at {:#x}, memory type {}", fb.width(), fb.height(), fb.addr(), crate::cpu::mtrr::effective(p, m).name());
+    }
+    // What a store to it costs, against ordinary memory.
+    let rows = primary().map_or(0, |f| f.height().min(256));
+    let screen = desk::screen_write_bench(rows);
+    let ram = {
+        let n = 8 * 1024 * 1024 / 4;
+        let a: alloc::vec::Vec<u32> = alloc::vec![0x1234_5678; n];
+        let mut b: alloc::vec::Vec<u32> = alloc::vec![0; n];
+        let t0 = crate::time::rdtsc();
+        b.copy_from_slice(&a);
+        core::hint::black_box(&b);
+        let us = crate::time::rdtsc().saturating_sub(t0) / crate::time::tsc_mhz().max(1) as u64;
+        (n as u64 * 4, us.max(1))
+    };
+    let mbs = |(bytes, us): (u64, u64)| bytes / us; // bytes per microsecond is MB/s
+    kprintln!("  memory    {} MB/s copying ordinary RAM", mbs(ram));
+    match screen {
+        Some(s) => kprintln!("  to screen {} MB/s writing the framebuffer ({} rows)", mbs(s), rows),
+        None => kprintln!("  to screen not measured (a program holds the screen, or a frame was being drawn)"),
+    }
+    // The verdict.
+    kprintln!("  verdict:");
+    let mut fine = true;
+    if let Some(s) = screen {
+        if mbs(s) < 1000 {
+            fine = false;
+            kprintln!("    writes to the screen are slow -- {} MB/s, where write-combined memory", mbs(s));
+            kprintln!("    takes several thousand. Every frame pays this. Try 'video cache wc' then");
+            kprintln!("    'perf' again; 'video cache' prints what each 2 MiB of the aperture is.");
+        }
+    }
+    if let (Some(n), Some(b)) = (now, base) {
+        if n * 10 < b * 8 {
+            fine = false;
+            kprintln!("    the processor is running at {}% of its base clock. 'power governor", n * 100 / b.max(1));
+            kprintln!("    performance' asks it for full speed; 'perf' again shows whether it took.");
+        }
+    }
+    if fine {
+        kprintln!("    neither the clock nor the screen is the bottleneck; 'render top' splits a frame.");
+    }
+    if let Some(name) = crate::cpu::hypervisor_name() {
+        kprintln!("  (under {}: the screen is host memory and the clock is the host's)", name);
+    }
+}
+
+/// What the processor really does with a store to the framebuffer.
+///
+/// Walks the aperture a 2 MiB step at a time, because the page tables map it
+/// in 2 MiB entries and the MTRRs may split it anywhere, and prints each run
+/// of identical answers once. Under a hypervisor the registers are virtual and
+/// the emulator does not model caches, so the answer is about the guest's
+/// configuration and says nothing about speed -- which is printed rather than
+/// left to be remembered.
+pub fn cache_report() {
+    use crate::cpu::mtrr;
+    use crate::kprintln;
+    let Some(fb) = primary() else {
+        kprintln!("  no framebuffer");
+        return;
+    };
+    let Some(snap) = mtrr::read() else {
+        kprintln!("  this processor does not report a PAT and MTRRs; nothing to decode");
+        return;
+    };
+    let base = fb.addr();
+    let len = fb.stride() as u64 * fb.height() as u64 * 4;
+    kprintln!("  aperture  {:#x} .. {:#x}  ({} KiB)", base, base + len, len / 1024);
+    kprintln!("  PAT       {:#018x}{}", snap.pat,
+              if snap.pat == mtrr::PAT_POWER_ON { "  (power-on layout: no WC slot)" } else { "" });
+    kprintln!("  MTRRs     {}, default {}, {} variable range(s), WC {}",
+              if snap.def_type & (1 << 11) != 0 { "enabled" } else { "DISABLED" },
+              mtrr::Kind::from_mtrr((snap.def_type & 0xFF) as u8).short(),
+              snap.ranges.iter().filter(|r| r.valid()).count(),
+              if snap.wc_supported { "supported" } else { "not supported" });
+
+    let step = 2 * 1024 * 1024u64;
+    let mut at = base & !(step - 1);
+    let mut run: Option<(u64, u8, mtrr::Kind, mtrr::Kind)> = None;
+    let flush = |r: (u64, u8, mtrr::Kind, mtrr::Kind), end: u64| {
+        let (from, slot, p, m) = r;
+        kprintln!("    {:#x}..{:#x}  page slot {} = {:<3}  mtrr {:<3}  -> {}",
+                  from, end, slot, p.short(), m.short(), mtrr::effective(p, m).name());
+    };
+    while at < base + len {
+        let probe = at.max(base);
+        let slot = crate::mem::paging::pat_slot(probe).unwrap_or(0xFF);
+        let p = if slot == 0xFF { mtrr::Kind::Reserved(0xFF) } else { mtrr::pat_kind(snap.pat, slot) };
+        let m = mtrr::mtrr_kind(snap.def_type, &snap.ranges, probe).unwrap_or(mtrr::Kind::Reserved(0xFE));
+        match run {
+            Some(r) if r.1 == slot && r.2 == p && r.3 == m => {}
+            Some(r) => {
+                flush(r, probe);
+                run = Some((probe, slot, p, m));
+            }
+            None => run = Some((probe, slot, p, m)),
+        }
+        at += step;
+    }
+    if let Some(r) = run {
+        flush(r, base + len);
+    }
+    if let Some(name) = crate::cpu::hypervisor_name() {
+        kprintln!("  running under {}: these are its registers, and it does not model caches", name);
+    }
+}
+
 pub fn paint_selftest() -> bool {
     use crate::kprintln;
     let mut ok = true;
@@ -1357,6 +1926,46 @@ pub fn paint_selftest() -> bool {
     fb.rect(0, 0, W, H, Color::new(0xFF, 0xFF, 0xFF));
     fb.shade_span(0, 0, W, 0);
     claim("and by 0 takes it to black", buf[0] == 0);
+
+    // --- clipping and views -------------------------------------------------
+    // The property damage-limited repaint rests on: a painter handed a
+    // clipped surface draws whatever it likes and only the rectangle changes.
+    let black = fb.encode(Color::new(0, 0, 0));
+    let red = Color::new(0xFF, 0, 0);
+    let red_raw = fb.encode(red);
+    fb.rect(0, 0, W, H, Color::new(0, 0, 0));
+    let c = fb.clipped(4, 4, 6, 5);
+    c.rect(0, 0, W, H, red);
+    let inside = (4..10).all(|x| (4..9).all(|y| buf[(y * W + x) as usize] == red_raw));
+    let outside = (0..W).all(|x| (0..H).all(|y| {
+        (4..10).contains(&x) && (4..9).contains(&y) || buf[(y * W + x) as usize] == black
+    }));
+    claim("a clipped surface fills exactly its rectangle", inside);
+    claim("and leaves every pixel outside it alone", outside);
+    claim("clipping twice intersects rather than widening",
+          !c.clipped(0, 0, W, H).touches(0, 0, 4, 4) && c.clipped(0, 0, W, H).touches(5, 5, 1, 1));
+    fb.rect(0, 0, W, H, Color::new(0, 0, 0));
+    if let Some(v) = fb.view(3, 2, 5, 4) {
+        v.put(0, 0, red_raw);
+        v.rect(0, 0, 100, 100, red);
+        claim("a view's (0,0) is its corner on the parent", buf[(2 * W + 3) as usize] == red_raw);
+        let only = (0..W).all(|x| (0..H).all(|y| {
+            (3..8).contains(&x) && (2..6).contains(&y) || buf[(y * W + x) as usize] == black
+        }));
+        claim("and a view cannot draw past its own edge, whatever it asks for", only);
+        claim("a view knows its own size", v.width() == 5 && v.height() == 4);
+        // A red neighbour first, so a fill that ran past the view would show.
+        fb.put(2, 2, red_raw);
+        fb.put(8, 2, red_raw);
+        v.fill(Color::new(0, 0, 0));
+        claim("filling a view black clears the view and nothing beside it",
+              buf[(2 * W + 3) as usize] == black
+                  && buf[(2 * W + 2) as usize] == red_raw
+                  && buf[(2 * W + 8) as usize] == red_raw);
+    } else {
+        claim("a view of an on-surface rectangle exists", false);
+    }
+    claim("a view off the surface is refused", fb.view(W, 0, 1, 1).is_none());
 
     fb.rect(0, 0, W, H, Color::new(0xFF, 0xFF, 0xFF));
     fb.shade_span(0, 0, W, 128);

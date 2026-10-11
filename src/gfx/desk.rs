@@ -150,6 +150,178 @@ pub struct Window {
     pub content: Content,
     pub menus: Vec<Menu>,
     pub closable: bool,
+    /// Who this window is, for as long as it is open. The scene pairs a
+    /// window across frames by this rather than by its index, which shifts
+    /// whenever a window below it closes or one is raised.
+    pub serial: u64,
+    /// An application's own pixels, kept between frames.
+    ///
+    /// An application used to redraw itself into the desktop on every frame
+    /// that touched its window -- including frames where nothing about it had
+    /// changed, because another window moved across it or the clock ticked.
+    /// Kept, it is redrawn only when its key moves (`app_key`), and a frame
+    /// that merely exposes or moves it is a row copy. Interior mutability
+    /// because the painter holds the desktop shared.
+    pub app_surface: core::cell::RefCell<Option<AppSurface>>,
+    /// The whole window as it was last painted, chrome and client, so a frame
+    /// that only exposes it copies rows. See `WinImage`.
+    pub image: core::cell::RefCell<Option<WinImage>>,
+    /// A window on its way in: the pop-in's scale and the fade, each on its
+    /// own curve and duration, as Hyprland's `windowsIn` and `fadeIn` are.
+    pub arrive: Option<(super::anim::Tween, super::anim::Tween)>,
+    /// Where this window is drawn this frame and at what opacity, while it
+    /// is arriving or sliding -- fixed once per frame by `layers`, so the
+    /// frame and `render verify`'s reference of it draw the same instant
+    /// rather than two readings of the clock.
+    pub shown: core::cell::Cell<Option<(Rect, f32)>>,
+    /// In the tiling layout (`gfx::tile`), or floating over it. Every window
+    /// tiles unless it is put afloat -- Super-V, or by taking hold of it.
+    pub tiled: bool,
+    /// On its way from one place to another: where it set out from and the
+    /// tween (Hyprland's `windows`). The window is already at its new place
+    /// as far as input and its image go; it is drawn on the way there.
+    pub slide: Option<(Rect, super::anim::Tween)>,
+}
+
+/// A window, painted off screen and kept (1.4.1, phase 11).
+///
+/// Keyed by exactly what the scene stamps the window's layer with
+/// (`window_key`): the layer's stamp moving re-draws all of it, a part's
+/// stamp moving re-draws that part, and anything else -- a window dragged
+/// across it, a menu closing over it, the pointer's plane -- is a copy out of
+/// here. The terminal's grid is not in it: the console paints its own
+/// surface and goes over the image, since text arrives at a rate chrome
+/// never does.
+///
+/// Pixels outside the window's outline are kept and never shown: the copy
+/// goes through the same shape the direct paint is clipped by, so the two
+/// agree pixel for pixel, which is what `render verify` holds them to -- its
+/// reference frame paints straight onto the frame (`REFERENCE`), so a stale
+/// image is a mismatch rather than two frames agreeing about the same stale
+/// copy.
+pub struct WinImage {
+    px: Vec<u32>,
+    frame: Rect,
+    key: u64,
+    parts: Vec<(Rect, u64)>,
+    /// The same pixels with the outline as alpha, made the first time the
+    /// window is drawn scaled or faded and kept until the image changes:
+    /// it was rebuilt every frame of every arrival and slide, a million
+    /// pixels a window a frame at 1920 x 1080.
+    prem: core::cell::RefCell<Option<alloc::sync::Arc<super::scale::Image>>>,
+}
+
+/// What `Window::app_surface` holds: the pixels, their size, and the key they
+/// were drawn under.
+pub struct AppSurface {
+    px: Vec<u32>,
+    w: u32,
+    h: u32,
+    key: u64,
+}
+
+/// How many events each application has been handed -- a key, a press, a
+/// drag, a release, a wheel notch -- keyed by the address of the program
+/// (its `Box` does not move while the window lives). Part of that program's
+/// key, so input always redraws the program that received it, without it
+/// having to say what the input changed, and redraws nothing else.
+///
+/// By address rather than by window because every caller holds the program
+/// borrowed out of `d.windows[i].content`, and the window beside it cannot be
+/// reached through the same index while that borrow lives. A closed window's
+/// slot is taken by whichever program lands at its address next, which costs
+/// that program nothing: its surface is new either way.
+static APP_INPUT: crate::sync::Spin<[(usize, u64); 16]> = crate::sync::Spin::new([(0, 0); 16]);
+
+fn app_addr(a: &dyn DeskApp) -> usize {
+    a as *const dyn DeskApp as *const u8 as usize
+}
+
+fn app_input(a: &dyn DeskApp) {
+    let at = app_addr(a);
+    let mut t = APP_INPUT.lock_irq();
+    match t.iter().position(|e| e.0 == at) {
+        Some(k) => t[k].1 = t[k].1.wrapping_add(1),
+        None => {
+            // Evict the least-touched row; a program that loses its row gets
+            // a count of zero, which differs from what it had, so it redraws.
+            let k = (0..t.len()).min_by_key(|&k| t[k].1).unwrap_or(0);
+            t[k] = (at, 1);
+        }
+    }
+}
+
+fn inputs_to(a: &dyn DeskApp) -> u64 {
+    let at = app_addr(a);
+    APP_INPUT.lock_irq().iter().find(|e| e.0 == at).map_or(0, |e| e.1)
+}
+
+/// The key an application's surface is drawn under: the program's own stamp
+/// if it offers one, plus focus, size and input. A program with no stamp is
+/// redrawn once per composed frame, which is what every program got before
+/// there were stamps.
+fn app_key(a: &dyn DeskApp, active: bool, client: Rect, seq: u64) -> u64 {
+    match a.stamp() {
+        Some(st) => super::scene::Stamp::of((
+            st,
+            active,
+            client.w,
+            client.h,
+            inputs_to(a),
+        )),
+        None => super::scene::Stamp::of((seq, 0xA99u32)),
+    }
+}
+
+/// Bring a window's application surface up to date and lay it into `fb`.
+fn paint_app(win: &Window, a: &dyn DeskApp, fb: &Framebuffer, client: Rect, active: bool) {
+    let seq = FRAME_SEQ.load(core::sync::atomic::Ordering::Relaxed);
+    let key = app_key(a, active, client, seq);
+    let mut slot = win.app_surface.borrow_mut();
+    let stale = match slot.as_ref() {
+        Some(sf) => sf.w != client.w || sf.h != client.h || sf.key != key,
+        None => true,
+    };
+    if stale {
+        let n = client.w as usize * client.h as usize;
+        let mut px = match slot.take() {
+            Some(sf) if sf.px.len() == n => sf.px,
+            _ => {
+                let mut v = Vec::new();
+                if v.try_reserve_exact(n).is_err() {
+                    // No room for a surface: draw straight into the frame, as
+                    // every application did before there were surfaces.
+                    drop(slot);
+                    if let Some(v) = fb.view(client.x, client.y, client.w, client.h) {
+                        a.draw_in(&v, Rect::new(0, 0, client.w, client.h), active);
+                    }
+                    return;
+                }
+                v.resize(n, 0);
+                v
+            }
+        };
+        let view = unsafe { Framebuffer::over_ram(px.as_mut_ptr() as u64, client.w, client.h, client.w, fb.format()) };
+        // The window's face first: programs paint over the ground
+        // `theme::window` laid, and do not all fill their whole client area.
+        view.rect(0, 0, client.w, client.h, theme::FACE);
+        let t0 = crate::time::rdtsc();
+        a.draw_in(&view, Rect::new(0, 0, client.w, client.h), active);
+        super::render::cost(super::render::Cost::AppRender, crate::time::rdtsc().saturating_sub(t0));
+        *slot = Some(AppSurface { px, w: client.w, h: client.h, key });
+    }
+    let Some(sf) = slot.as_ref() else { return };
+    let (_, y0, _, y1) = fb.scissor();
+    for y in y0.max(client.y)..y1.min(client.y + client.h) {
+        let r = (y - client.y) as usize * sf.w as usize;
+        fb.blit_span(client.x, y, &sf.px[r..r + sf.w as usize]);
+    }
+}
+
+static NEXT_SERIAL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+fn next_serial() -> u64 {
+    NEXT_SERIAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
 }
 
 impl Window {
@@ -167,7 +339,7 @@ impl Window {
 /// A mode rather than a pile of booleans: the states are mutually exclusive by
 /// nature -- a window cannot be both being moved and being resized -- and an
 /// enum makes that unrepresentable instead of merely unlikely.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mode {
     Normal,
     /// A menu-bar menu is open.
@@ -190,6 +362,8 @@ pub enum Mode {
     DragSize { from: Rect, edges: u8 },
     /// The Start menu is open above the taskbar.
     Start { item: usize },
+    /// Flip 3D (Super-Tab): the windows in a stack, and the keyboard turns it.
+    Flip,
 }
 
 /// What the pointer is over, for the paint pass.
@@ -197,7 +371,7 @@ pub enum Mode {
 /// Only things that draw differently when pointed at. Kept on the desktop and
 /// compared per packet: a repaint happens when the *target* changes, not when
 /// the pointer moves, so sliding across one button costs one redraw.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Hover {
     None,
     /// A taskbar slot, apps and windows in one flat index.
@@ -229,10 +403,15 @@ pub struct Desktop {
     /// be cloned to be read. It lives as long as the menu is open and is
     /// cleared when it closes, which is the same lifetime either way.
     pub query: String,
+    /// The tiling layout: which windows tile, and how their slots split.
+    pub tiles: super::tile::Tree,
 }
 
 static DESK: Racy<Option<Desktop>> = Racy::new(None);
-static PENDING: Racy<Vec<String>> = Racy::new(Vec::new());
+/// Locked: the shell drains it while the compositor (a key, a click) and
+/// other tasks push. It was a `Racy`, which was a promise that only one task
+/// ever touched it, and the compositor routing keys made that untrue.
+static PENDING: crate::sync::Spin<Vec<String>> = crate::sync::Spin::new(Vec::new());
 
 /// How many queued commands are kept.
 ///
@@ -256,12 +435,18 @@ const PENDING_CAP: usize = 8;
 /// Full drops the *newest* and says so. The alternative -- pushing the oldest
 /// out -- is the bug this replaces, arriving one command later.
 pub fn queue_command(cmd: &str) {
-    let q = unsafe { &mut *PENDING.get() };
-    if q.len() >= PENDING_CAP {
+    let full = {
+        let mut q = PENDING.lock_irq();
+        let full = q.len() >= PENDING_CAP;
+        if !full {
+            q.push(String::from(cmd));
+        }
+        full
+    };
+    // Said outside the lock: printing takes the console's.
+    if full {
         crate::kprintln!("  (queue full -- '{}' dropped)", cmd);
-        return;
     }
-    q.push(String::from(cmd));
 }
 
 /// Desktop changes asked for by a task that does not own the desktop.
@@ -292,9 +477,25 @@ pub enum Op {
     /// `AuthorWin::new` is the agent's business and this queue's job is to
     /// carry it, not to know about it.
     OpenApp { title: &'static str, icon: usize, app: alloc::boxed::Box<dyn super::DeskApp>, w: u32, h: u32 },
+    /// A program's window by tag, the shape Skywalker's clients need: a
+    /// title the client chose, and no "already open" check, since two
+    /// windows of one client are two windows.
+    OpenTagged { title: String, icon: usize, app: alloc::boxed::Box<dyn super::DeskApp>, w: u32, h: u32 },
+    Retitle { tag: u64, title: String },
+    Close { tag: u64 },
 }
 
-static OPS: Racy<Vec<Op>> = Racy::new(Vec::new());
+/// Locked, because posting from any task is the point of it: a `Racy` here
+/// made "safe from any task" true only of the task that drains it.
+static OPS: crate::sync::Spin<Vec<Posted>> = crate::sync::Spin::new(Vec::new());
+
+/// An op in transit. `Send` by assertion: a `Box<dyn DeskApp>` is not, because
+/// programs keep `Cell`s, but posting *moves* the box -- the poster keeps no
+/// reference to it, so it is only ever touched by one task at a time, which
+/// is all `Send` asks. A program that kept an `Rc` shared with its poster
+/// would break this, and none does; Skywalker's window shares an `Arc<Spin>`.
+struct Posted(Op);
+unsafe impl Send for Posted {}
 
 /// Small for the same reason `PENDING_CAP` is: this covers a burst, not a
 /// backlog. Nothing posts more than one of these per episode.
@@ -305,12 +506,18 @@ const OPS_CAP: usize = 8;
 /// Safe from any task. Full drops the newest and says so, exactly as
 /// `queue_command` does -- pushing the oldest out is the bug that replaces.
 pub fn post(op: Op) {
-    let q = unsafe { &mut *OPS.get() };
-    if q.len() >= OPS_CAP {
+    let full = {
+        let mut q = OPS.lock_irq();
+        let full = q.len() >= OPS_CAP;
+        if !full {
+            q.push(Posted(op));
+        }
+        full
+    };
+    if full {
         crate::kprintln!("  (desktop queue full -- an op was dropped)");
         return;
     }
-    q.push(op);
     super::render::invalidate();
 }
 
@@ -322,11 +529,11 @@ pub fn post(op: Op) {
 pub fn drain_ops() {
     loop {
         let op = {
-            let q = unsafe { &mut *OPS.get() };
+            let mut q = OPS.lock_irq();
             if q.is_empty() {
                 return;
             }
-            q.remove(0)
+            q.remove(0).0
         };
         match op {
             Op::OpenApp { title, icon, app, w, h } => {
@@ -337,16 +544,23 @@ pub fn drain_ops() {
                 clear_of_terminal();
                 focus_terminal();
             }
+            Op::OpenTagged { title, icon, app, w, h } => open_app(&title, icon, app, w, h),
+            Op::Retitle { tag, title } => retitle_tagged(tag, &title),
+            Op::Close { tag } => {
+                close_tagged(tag);
+            }
         }
     }
 }
 
 /// How many ops are waiting. For the selftest.
 pub fn ops_len() -> usize {
-    unsafe { (*OPS.get()).len() }
+    OPS.lock_irq().len()
 }
 
-const MARGIN: u32 = 8;
+fn margin() -> u32 {
+    theme::px(8)
+}
 const NUDGE: u32 = 16;
 /// A menu bar's height, which is the theme's and no longer the caption's.
 ///
@@ -354,14 +568,20 @@ const NUDGE: u32 = 16;
 /// became a trap the moment the caption grew: every menu row and every
 /// dropdown row would have gone to thirty pixels around sixteen of text,
 /// silently, because nothing here says a menu row is as tall as a title.
-const MENU_H: u32 = theme::MENU_H;
+fn menu_h() -> u32 {
+    theme::menu_h()
+}
 /// The bar along the bottom.
 ///
 /// A number rather than `TITLE_H + 10` for the same reason. A taskbar is its
 /// own surface and XP's is not a caption plus a constant.
-const TASK_H: u32 = 38;
+fn task_h() -> u32 {
+    theme::px(38)
+}
 /// Gap between task buttons.
-const TASK_GAP: u32 = 4;
+fn task_gap() -> u32 {
+    theme::px(4)
+}
 
 /// The icons on the wall, top to bottom, and what opening one runs.
 ///
@@ -378,7 +598,7 @@ const ICONS: [(&str, &str); 10] = [
     ("Write", "write"),
     ("Mines", "mines"),
     ("Oracle", "oracle"),
-    ("Settings", "win open settings"),
+    ("Settings", "win open set:desk"),
 ];
 
 /// The Start menu, bottom of the bar upward -- the 98 half of the ancestry.
@@ -406,7 +626,7 @@ const START_ITEMS: [(&str, &str); 13] = [
     ("Write", "write"),
     ("Mines", "mines"),
     ("Oracle", "oracle"),
-    ("Settings", "win open settings"),
+    ("Settings", "win open set:desk"),
     ("Reboot", "reboot"),
     ("Shut down", "shutdown"),
 ];
@@ -467,6 +687,7 @@ pub fn with_ref<R>(f: impl FnOnce(&Desktop) -> R) -> Option<R> {
     unsafe { (*DESK.get()).as_ref().map(f) }
 }
 
+#[track_caller]
 pub fn with<R>(f: impl FnOnce(&mut Desktop) -> R) -> Option<R> {
     let claim = Claim::wait();
     // **Reaching the desktop from outside a frame marks the screen dirty**,
@@ -497,17 +718,45 @@ const SYS_ITEMS: [&str; 4] = ["Move", "Size", "Maximise / Restore", "Close"];
 /// Windows are laid out and maximised against this rather than the panel, so
 /// the taskbar is never covered. A bar that a maximised window hides is a bar
 /// that is not there when it is most wanted.
+/// The shadow a window casts: a blurred rounded box under it (`gfx::shadow`),
+/// deeper for the focused window, which reads as the one nearest the eye --
+/// the cue that took over from a title bar's colour in every desktop since
+/// Vista. None when it fills the work area, where there is nothing to fall on.
+fn win_shadow(win: &Window, active: bool) -> Option<(super::shadow::Spec, i32, i32, u8)> {
+    if win.state == WinState::Maximised {
+        return None;
+    }
+    let radius = win.round;
+    Some(if active {
+        (super::shadow::Spec { radius, sigma: 12.0 }, 0, 5, 102)
+    } else {
+        (super::shadow::Spec { radius, sigma: 7.0 }, 0, 3, 61)
+    })
+}
+
+/// A window's frame grown by everything its shadow reaches, clipped to the
+/// screen: the layer's bounds, and so its damage when it moves.
+fn shadowed(win: &Window, frame: Rect, active: bool, fb: &Framebuffer) -> Rect {
+    let Some((spec, dx, dy, _)) = win_shadow(win, active) else { return frame };
+    let (l, t, r, b) = super::shadow::reach(spec, dx, dy);
+    let x0 = frame.x.saturating_sub(l);
+    let y0 = frame.y.saturating_sub(t);
+    let x1 = (frame.x + frame.w + r).min(fb.width());
+    let y1 = (frame.y + frame.h + b).min(fb.height());
+    Rect::new(x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
+}
+
 fn screen_rect(fb: &Framebuffer) -> Rect {
     Rect::new(
-        MARGIN,
-        MARGIN,
-        fb.width().saturating_sub(MARGIN * 2),
-        fb.height().saturating_sub(MARGIN * 2 + TASK_H),
+        margin(),
+        margin(),
+        fb.width().saturating_sub(margin() * 2),
+        fb.height().saturating_sub(margin() * 2 + task_h()),
     )
 }
 
 fn taskbar_rect(fb: &Framebuffer) -> Rect {
-    Rect::new(0, fb.height().saturating_sub(TASK_H), fb.width(), TASK_H)
+    Rect::new(0, fb.height().saturating_sub(task_h()), fb.width(), task_h())
 }
 
 /// The Start button, left end of the bar.
@@ -517,7 +766,9 @@ fn start_rect(fb: &Framebuffer) -> Rect {
     // does. A button inset from the corner gives away the pixels Fitts' law
     // makes the most valuable on the screen: the corner is infinitely large to
     // a pointer and a three-pixel margin throws that away.
-    Rect::new(bar.x, bar.y + 1, theme::text_w(6) + 34, bar.h.saturating_sub(2))
+    // The orb's own diameter plus a margin, still from the very corner.
+    let n = bar.h.saturating_sub(2);
+    Rect::new(bar.x, bar.y + 1, n + 12, n)
 }
 
 /// Where the Start menu pops, directly above its button. The width formula is
@@ -534,15 +785,22 @@ fn start_menu_rect(fb: &Framebuffer) -> theme::Popup {
         .unwrap_or(4)
         .max(QUERY_COLS);
     let bar = taskbar_rect(fb);
-    let probe = theme::Popup::sized(bar.x + 2, 0, cols, n, fb.width());
-    theme::Popup::sized(
+    let probe = theme::Popup::padded(bar.x + 2, 0, cols, n, fb.width(), START_PAD);
+    theme::Popup::padded(
         bar.x + 2,
-        bar.y.saturating_sub(probe.panel.h),
+        bar.y.saturating_sub(probe.panel.h + 4),
         cols,
         n,
         fb.width(),
+        START_PAD,
     )
 }
+
+/// The Start menu's glass frame, round its rows.
+const START_PAD: u32 = 9;
+
+/// The Start menu's shadow, which its overlay layer's bounds reach to.
+const START_SHADOW: (super::shadow::Spec, i32, i32, u8) = (super::shadow::Spec { radius: 8, sigma: 9.0 }, 0, 4, 90);
 
 /// How many characters wide the query row is sized for.
 const QUERY_COLS: usize = 22;
@@ -567,6 +825,10 @@ fn is_query_row(item: usize) -> bool {
 // --- desktop icons ---------------------------------------------------------
 
 const ICON_W: u32 = 132;
+/// The wall's icons, in pixels: 38 logical at the 1.25 scale.
+fn icon_px() -> u32 {
+    theme::px(48)
+}
 const ICON_H: u32 = 84;
 
 /// The icon column, top-left of the wall, downwards -- the 98 half of the
@@ -576,7 +838,7 @@ fn icon_rects(fb: &Framebuffer) -> Vec<(Rect, usize)> {
     let mut x = 10u32;
     let mut y = 14u32;
     for (k, _) in ICONS.iter().enumerate() {
-        if y + ICON_H > fb.height().saturating_sub(TASK_H) {
+        if y + ICON_H > fb.height().saturating_sub(task_h()) {
             // Wrap to a second column, as the 98 desktop did. The terminal
             // reserves only the first column, so overflow icons sit behind
             // windows -- reachable, and always also in the Start menu.
@@ -601,21 +863,12 @@ fn icon_at(fb: &Framebuffer, x: i32, y: i32) -> Option<usize> {
 /// bitmap format is more machinery than six drawings justify.
 fn draw_icons(fb: &Framebuffer, hover: Hover) {
     for (r, k) in icon_rects(fb) {
-        let px = r.x + (r.w - 40) / 2;
-        // The wall is one `vgrad` of `WALL` over the whole framebuffer
-        // (`wallpaper`), so that is exactly what shows through the mark.
-        pictogram(
-            fb,
-            k,
-            px,
-            r.y,
-            40,
-            super::splash::Cut::Sky { stops: &theme::WALL, top: 0, height: fb.height() },
-        );
+        let px = r.x + (r.w - icon_px()) / 2;
+        pictogram(fb, k, px, r.y, icon_px());
         let (label, _) = ICONS[k];
         let tw = theme::text_w_of(label);
         let tx = r.x + (r.w.saturating_sub(tw)) / 2;
-        let ty = r.y + 46;
+        let ty = r.y + icon_px() + 6;
         if hover == Hover::Icon(k) {
             fb.rect(
                 tx.saturating_sub(3),
@@ -634,256 +887,17 @@ fn draw_icons(fb: &Framebuffer, hover: Hover) {
     }
 }
 
-/// How much of a drawing survives at the size it is drawn.
+/// One pictogram at `(x, y)`, `s` pixels square, by icon index: `gfx::icons`,
+/// the lit objects the operator chose for 1.4.1, anti-aliased at any size and
+/// transparent around the object -- which is why there is no longer a `cut`
+/// to say what shows through the mark: whatever is behind it simply does.
 ///
-/// The same decision `mindwin::dense()` makes about text, for the same reason
-/// and stated the same way: the detail is chosen from the size rather than
-/// from the call site, so no caller has to know and two callers cannot
-/// disagree.
-///
-/// The floor is not a taste judgement. `m()` clamps a thickness to one pixel,
-/// so at 24 across every hairline is *already* at its minimum and a gloss band
-/// two units tall and a shadow offset two units right land on the same pixel
-/// as the thing they are meant to be offset from. Below 32 those flourishes
-/// are not subtle, they are noise, and the honest drawing is the silhouette.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Detail {
-    /// Silhouette and one accent. The taskbar.
-    Bar,
-    /// Lit body, gloss and a base shadow. The wall.
-    Wall,
-}
-
-/// One pictogram at `(x, y)`, `s` pixels square, by icon index.
-///
-/// Drawn in a 40-unit design space and scaled, so the wall (40) and the
-/// taskbar (24) share one set of drawings instead of two sets that drift.
-/// Thicknesses clamp to a pixel -- a hairline that rounds to zero is a detail
-/// that vanishes, and at 24 pixels every line is load-bearing.
-///
-/// `cut` is what shows through the mark's blades, and it is a `Cut` rather
-/// than a `Color` because a single colour is a lie everywhere it is used here.
-/// The wall is a six-stop gradient and the taskbar button is a ramp; the old
-/// parameter took `DESKTOP` and `FACE`, neither of which is any row of the
-/// thing actually behind the icon, so the Aperture mark stamped a flat patch
-/// of the wrong shade across both. `splash::Cut::Sky` samples the real ramp at
-/// the real row, and the wallpaper's own mark has always used it.
-fn pictogram(fb: &Framebuffer, k: usize, x: u32, y: u32, s: u32, cut: super::splash::Cut<'_>) {
-    let dark = theme::ICON_EDGE;
-    let hi = theme::HILIGHT;
-    // Rounded scale from the 40-unit space, and the same for thicknesses but
-    // never less than a pixel.
-    let c = |v: u32| (v * s + 20) / 40;
-    let m = |v: u32| ((v * s + 20) / 40).max(1);
-    let d = if s >= 32 { Detail::Wall } else { Detail::Bar };
-    let lit = d == Detail::Wall;
-
-    // A body: the ramp, its edge, and the gloss that makes it an object rather
-    // than a sticker. Taken as design-space units so every icon is written in
-    // the same coordinates as before.
-    let body = |bx: u32, by: u32, bw: u32, bh: u32, ramp: &[(u8, Color)]| {
-        let (px, py, pw, ph) = (x + c(bx), y + c(by), c(bw), c(bh));
-        if pw == 0 || ph == 0 {
-            return;
-        }
-        if lit {
-            // Under and right, and drawn first so the body covers the half of
-            // it that would otherwise sit on the object itself.
-            fb.shade_rect(px + m(2), py + m(2), pw, ph, theme::ICON_SHADE_NUM);
-        }
-        fb.vgrad(px, py, pw, ph, ramp);
-        if lit && ph > 4 {
-            let gh = (ph * theme::ICON_GLOSS_SPAN / 256).max(1);
-            fb.tint_rect(px + 1, py + 1, pw.saturating_sub(2), gh, hi, theme::ICON_GLOSS_NUM);
-        }
-        fb.frame(px, py, pw, ph, dark);
-    };
-
-    // The one highlight that says "lit from above and to the left". Skipped
-    // entirely on the bar, where its radius rounds to a pixel and it reads as
-    // a stray dot rather than as a shine.
-    let spec = |cx: u32, cy: u32, r: u32| {
-        if lit {
-            fb.fill_circle((x + c(cx)) as i32, (y + c(cy)) as i32, c(r).max(1) as i32, hi);
-        }
-    };
-
-    match k {
-        // Terminal: a lit screen with a prompt on it.
-        ICO_TERM => {
-            body(3, 5, 34, 24, &theme::ICON_DARK);
-            fb.rect(x + c(8), y + c(11), c(7), m(3), theme::APERTURE);
-            if lit {
-                fb.rect(x + c(8), y + c(17), c(13), m(2), theme::SCREEN_TEXT);
-                fb.rect(x + c(8), y + c(22), c(9), m(2), theme::SCREEN_TEXT);
-            }
-            body(16, 30, 8, 4, &theme::ICON_GLASS);
-            body(10, 34, 20, 4, &theme::ICON_GLASS);
-        }
-        // Programs: the mark itself, lit, with the real background showing
-        // through its blades. This is the Aperture program manager.
-        ICO_PROGRAMS => {
-            super::splash::aperture_with(
-                fb,
-                (x + c(20)) as i32,
-                (y + c(20)) as i32,
-                c(18) as i32,
-                if lit {
-                    super::splash::Face::Ramp(&theme::SUN)
-                } else {
-                    super::splash::Face::Flat(theme::APERTURE)
-                },
-                cut,
-            );
-        }
-        // Files: a folder, with the tab behind the face so the fold reads.
-        ICO_FILES => {
-            body(4, 8, 15, 6, &theme::ICON_WARM);
-            body(4, 12, 32, 23, &theme::ICON_WARM);
-            if lit {
-                // The lip: one lighter line where the front panel meets the
-                // back, which is the whole difference between a folder and an
-                // orange rectangle.
-                fb.rect(x + c(5), y + c(13), c(30), m(2), theme::APERTURE);
-            }
-        }
-        // ToDo: a card with ticked lines.
-        ICO_TODO => {
-            body(6, 2, 28, 36, &theme::ICON_PAPER);
-            for (i, done) in [true, true, false].iter().enumerate() {
-                let ly = y + c(9 + i as u32 * 10);
-                fb.frame(x + c(10), ly, m(7), m(7), dark);
-                if *done {
-                    fb.rect(x + c(11), ly + m(1), m(5), m(5), theme::APERTURE);
-                }
-                fb.rect(x + c(21), ly + m(2), c(9), m(2), theme::TEXT_DIM);
-            }
-        }
-        // Enternet: a globe, lit as a sphere.
-        ICO_NET => {
-            let (cx, cy, r) = ((x + c(20)) as i32, (y + c(20)) as i32, c(17) as i32);
-            // No drop shadow. `shade_rect` is a rectangle, and a rectangle
-            // behind a disc is a grey box with a ball in it -- which is what
-            // the first attempt looked like. There is no shaded-circle
-            // primitive and a round body does not need one: the ramp already
-            // turns it away from the light at the bottom.
-            fb.fill_circle_ramp(cx, cy, r, &theme::ICON_GLASS);
-            fb.circle(cx, cy, r, dark);
-            // Latitudes as chords of the same circle, so they narrow toward
-            // the poles the way a wireframe globe does.
-            for dy in [-9i32, 0, 9] {
-                let yy = cy + c(dy.unsigned_abs()) as i32 * dy.signum();
-                let half = crate::gfx::isqrt((r * r - (yy - cy) * (yy - cy)).max(0) as u32) as i32;
-                if half > 1 {
-                    fb.rect((cx - half) as u32, yy as u32, (half * 2) as u32, m(1), theme::WALL_RIM);
-                }
-            }
-            fb.rect((cx - m(1) as i32 / 2).max(0) as u32, (cy - r) as u32, m(1), (r * 2) as u32, theme::WALL_RIM);
-            spec(14, 13, 4);
-        }
-        // Paint: a palette with wells, and a brush laid across it.
-        ICO_PAINT => {
-            let (cx, cy, r) = ((x + c(19)) as i32, (y + c(22)) as i32, c(16) as i32);
-            fb.fill_circle_ramp(cx, cy, r, &theme::ICON_WOOD);
-            fb.circle(cx, cy, r, dark);
-            // The thumb hole, in the board's own shadow tone rather than in
-            // the background -- a palette is a solid object with a hole in it,
-            // and what shows through a hole in a held object is more board.
-            fb.fill_circle(cx + c(7) as i32, cy + c(5) as i32, c(4).max(1) as i32, Color::new(0x5E, 0x42, 0x24));
-            for (i, col) in [theme::APERTURE, theme::INK_BLUE, theme::INK_GREEN, theme::INK_RED]
-                .iter()
-                .enumerate()
-            {
-                let wx = cx + c(if i % 2 == 0 { 0 } else { 9 }) as i32 - c(6) as i32;
-                let wy = cy + c(if i / 2 == 0 { 0 } else { 9 }) as i32 - c(9) as i32;
-                fb.fill_circle(wx, wy, c(3).max(1) as i32, *col);
-                if lit {
-                    fb.put((wx - 1) as u32, (wy - 1) as u32, fb.raw(hi));
-                }
-            }
-            fb.rect(x + c(26), y + c(2), m(3), c(15), theme::TEXT_DIM);
-            body(24, 1, 6, 5, &theme::ICON_WARM);
-        }
-        // Write: a page with lines of text and a nib.
-        ICO_WRITE => {
-            body(8, 2, 24, 36, &theme::ICON_PAPER);
-            for i in 0..5u32 {
-                let w = if i == 4 { 10 } else { 16 };
-                fb.rect(x + c(12), y + c(8 + i * 6), c(w), m(2), theme::TEXT_DIM);
-            }
-            fb.rect(x + c(12), y + c(32), c(8), m(2), theme::APERTURE);
-        }
-        // Mines: a grid with one uncovered mine.
-        ICO_MINES => {
-            body(2, 2, 36, 36, &theme::ICON_PAPER);
-            for i in 1..4u32 {
-                fb.rect(x + c(2 + i * 12), y + c(2), m(1), c(36), theme::EDGE);
-                fb.rect(x + c(2), y + c(2 + i * 12), c(36), m(1), theme::EDGE);
-            }
-            let (cx, cy, r) = ((x + c(20)) as i32, (y + c(20)) as i32, c(9) as i32);
-            // Short, and only on the wall. At 24 across a spike is two pixels
-            // of grey crossing a grid line and reads as a smudge.
-            if lit {
-                let reach = r + c(2) as i32;
-                for (dx, dy) in [(0i32, 1i32), (1, 0), (1, 1), (1, -1)] {
-                    fb.line_thick(
-                        cx - dx * reach,
-                        cy - dy * reach,
-                        cx + dx * reach,
-                        cy + dy * reach,
-                        m(2) as i32,
-                        theme::ICON_EDGE,
-                    );
-                }
-            }
-            fb.fill_circle_ramp(cx, cy, r, &theme::ICON_DARK);
-            spec(17, 17, 2);
-        }
-        // Oracle: an eye. The lids are stacked rows, the iris the mark's
-        // colour, and it reads at both sizes because an eye is mostly its
-        // contrast.
-        ICO_ORACLE => {
-            for (i, w) in [8u32, 20, 30, 36, 30, 20, 8].iter().enumerate() {
-                let ly = y + c(8 + i as u32 * 4);
-                fb.rect(x + c(20) - c(*w) / 2, ly, c(*w), m(4), hi);
-            }
-            let (cx, cy) = ((x + c(20)) as i32, (y + c(20)) as i32);
-            fb.fill_circle_ramp(cx, cy, c(7).max(1) as i32, &theme::ICON_WARM);
-            fb.fill_circle(cx, cy, c(3).max(1) as i32, theme::DARKEDGE);
-            spec(17, 17, 2);
-        }
-        // Settings: three sliders, each a well with a lit knob in it.
-        ICO_SET => {
-            for i in 0..3u32 {
-                let ly = y + c(9 + i * 11);
-                fb.rect(x + c(4), ly, c(32), m(4), theme::WELL_EDGE);
-                fb.rect(x + c(4), ly + m(1), c(32), m(2), theme::TRAY);
-                let kx = 6 + (i * 11) % 24;
-                body(kx, 9 + i * 11 - 3, 7, 10, &theme::ICON_GLASS);
-            }
-        }
-        // Not an icon. Drawn rather than defaulted, because the arm this
-        // replaces *was* Settings -- an out-of-range index silently drew the
-        // sliders, which is the mistake the named constants exist to make
-        // unwriteable, wearing the costume of a working icon.
-        _ => {
-            body(4, 4, 32, 32, &theme::ICON_PAPER);
-            fb.line(
-                (x + c(8)) as i32,
-                (y + c(8)) as i32,
-                (x + c(32)) as i32,
-                (y + c(32)) as i32,
-                theme::BAD_TEXT,
-            );
-            fb.line(
-                (x + c(32)) as i32,
-                (y + c(8)) as i32,
-                (x + c(8)) as i32,
-                (y + c(32)) as i32,
-                theme::BAD_TEXT,
-            );
-        }
-    }
+/// They replaced drawings built from rectangles, frames and one-pixel
+/// glosses in a 40-unit space, with a `Detail` level to drop the flourishes
+/// that turned to noise below 32 pixels; a signed-distance drawing has no such
+/// floor, and the same one serves the wall, the taskbar and a title bar.
+fn pictogram(fb: &Framebuffer, k: usize, x: u32, y: u32, s: u32) {
+    super::icons::lay(fb, k, x, y, s);
 }
 
 impl Desktop {
@@ -909,6 +923,27 @@ pub fn init() {
         return;
     }
 
+    // Paint the wallpaper and blur its glass copy now, during boot, rather
+    // than in the first frame the compositor composes: together they are about
+    // half a second, which as a frame is the desktop appearing and then
+    // standing still. Through a surface clipped to nothing, so this builds the
+    // caches and writes no pixel.
+    //
+    // **Before the desktop exists, and that order is the fix rather than
+    // tidiness.** The compositor task is already running and composes the
+    // moment `DESK` is set; warmed any later, its first frame arrived
+    // mid-build, found the cache still empty and built a second copy at the
+    // same time -- two `&mut` into one `Racy` from two tasks, and half a
+    // second of frame anyway. Measured: two rebuilds, a 771 ms first frame.
+    // The operator's settings, before anything is sized from them.
+    let kept = super::settings::load();
+    if kept > 0 {
+        crate::serial_println!("[desk] {} setting(s) from /etc/desk", kept);
+    }
+    if let Some(fb) = super::primary() {
+        wallpaper_cached(&fb.clipped(0, 0, 0, 0));
+    }
+
     // A clean desktop: nothing open. The wallpaper, the icon column and the
     // taskbar are the whole of it, and the operator opens what they want from
     // the sidebar -- the machine covers its own wall with nothing. This is the
@@ -926,15 +961,18 @@ pub fn init() {
             mode: Mode::Normal,
             hover: Hover::None,
             query: String::new(),
+            tiles: super::tile::Tree::new(),
         })
     };
-    // The compositor needs the heap, which exists by now; the console then
-    // paints into the back buffer and pushes its own cells through, so shell
-    // output stays immediate between desktop draws.
+    // The compositor needs the heap, which exists by now; each console then
+    // paints into a surface of its own, reports what changed as damage, and
+    // is laid into the frame under whatever covers it. Typing stays immediate
+    // because the compositor composes the first frame after a quiet spell at
+    // once (`render::pace`).
     super::compose::init();
-    if let Some(back) = super::compose::target() {
+    if super::compose::active() {
         for ch in [super::console::USER, super::console::EXEC] {
-            super::console::with_ch(ch, |c| c.retarget(back.clone(), true));
+            super::console::with_ch(ch, |c| c.compose_mode());
         }
     }
     super::render::invalidate();
@@ -955,15 +993,22 @@ fn item(label: &str, cmd: &str) -> MenuItem {
 fn make_terminal(screen: Rect) -> Window {
     let icons_w = 10 + ICON_W + 10;
     let term_x = screen.x.max(icons_w);
-    let term_w = (screen.x + screen.w).saturating_sub(term_x + MARGIN);
+    let term_w = (screen.x + screen.w).saturating_sub(term_x + margin());
     Window {
+        serial: next_serial(),
+        app_surface: Default::default(),
+        image: Default::default(),
+        arrive: None,
+        shown: Default::default(),
+        tiled: tile_new(),
+        slide: None,
         title: String::from("GLaDOS Terminal"),
         icon: ICO_TERM,
         rect: Rect::new(term_x, screen.y, term_w, screen.h),
         state: WinState::Normal,
         snap_back: None,
         route: None,
-        round: theme::WIN_ROUND,
+        round: theme::win_round(),
         content: Content::Terminal(super::console::USER),
         menus: alloc::vec![
             Menu {
@@ -1159,7 +1204,7 @@ pub fn open(title: &str, panel: Panel) {
             .windows
             .iter()
             .find(|win| matches!(win.content, Content::Terminal(c) if c == super::console::USER))
-            .map(|win| win.rect.x + win.rect.w + MARGIN)
+            .map(|win| win.rect.x + win.rect.w + margin())
             .unwrap_or(screen.x);
         // Narrow it rather than slide it under the terminal.
         //
@@ -1186,6 +1231,13 @@ pub fn open(title: &str, panel: Panel) {
         let y = (screen.y + screen.h / 3 + off)
             .min(screen.y + screen.h.saturating_sub(h));
         d.windows.push(Window {
+            serial: next_serial(),
+            app_surface: Default::default(),
+        image: Default::default(),
+        arrive: None,
+        shown: Default::default(),
+        tiled: tile_new(),
+        slide: None,
             title: String::from(title),
             // `open` is reached through `win open <name>` with the panel's
             // name as the title, so the name is what there is to go by.
@@ -1194,7 +1246,7 @@ pub fn open(title: &str, panel: Panel) {
             state: WinState::Normal,
         snap_back: None,
         route: None,
-        round: theme::WIN_ROUND,
+        round: theme::win_round(),
             content: Content::Panel(panel),
             menus: Vec::new(),
             closable: true,
@@ -1235,8 +1287,8 @@ pub fn open_app(title: &str, icon: usize, app: Box<dyn DeskApp>, w: u32, h: u32)
     // is born usable, and the edge dragging added alongside means it stays
     // that way.
     let inner = app.min_size();
-    let need_w = inner.0 + theme::FRAME * 2;
-    let need_h = inner.1 + theme::TITLE_H + theme::FRAME * 2;
+    let need_w = inner.0 + theme::frame_w() * 2;
+    let need_h = inner.1 + theme::title_h() + theme::frame_w() * 2;
     let (w, h) = (
         w.max(need_w).min(screen.w),
         h.max(need_h).min(screen.h),
@@ -1249,13 +1301,20 @@ pub fn open_app(title: &str, icon: usize, app: Box<dyn DeskApp>, w: u32, h: u32)
         let y = (screen.y + (screen.h.saturating_sub(h)) / 3 + off)
             .min(screen.y + screen.h.saturating_sub(h));
         d.windows.push(Window {
+            serial: next_serial(),
+            app_surface: Default::default(),
+        image: Default::default(),
+        arrive: None,
+        shown: Default::default(),
+        tiled: tile_new(),
+        slide: None,
             title: String::from(title),
             icon,
             rect: Rect::new(x, y, w, h),
             state: WinState::Normal,
         snap_back: None,
         route: None,
-        round: theme::WIN_ROUND,
+        round: theme::win_round(),
             content: Content::App(app),
             menus: Vec::new(),
             closable: true,
@@ -1334,7 +1393,7 @@ fn clear_of_terminal() {
             .windows
             .iter()
             .find(|w| matches!(w.content, Content::Terminal(c) if c == super::console::USER))
-            .map(|w| w.rect.x + w.rect.w + MARGIN)
+            .map(|w| w.rect.x + w.rect.w + margin())
         else {
             return;
         };
@@ -1457,13 +1516,20 @@ pub fn open_browser(url: &str) {
         let x = screen.x + (screen.w.saturating_sub(w)) / 2;
         let y = screen.y + (screen.h.saturating_sub(h)) / 3;
         d.windows.push(Window {
+            serial: next_serial(),
+            app_surface: Default::default(),
+        image: Default::default(),
+        arrive: None,
+        shown: Default::default(),
+        tiled: tile_new(),
+        slide: None,
             title,
             icon: ICO_NET,
             rect: Rect::new(x, y, w, h),
             state: WinState::Normal,
         snap_back: None,
         route: None,
-        round: theme::WIN_ROUND,
+        round: theme::win_round(),
             content: Content::Browser(b),
             menus: Vec::new(),
             closable: true,
@@ -1501,8 +1567,8 @@ const CURSOR: [&str; 17] = [
     "     X..X  ",
     "      XX   ",
 ];
-const CUR_W: u32 = 11;
-const CUR_H: u32 = 17;
+const CUR_W: u32 = super::compose::CUR_W;
+const CUR_H: u32 = super::compose::CUR_H;
 
 /// What the pointer is currently saying it will do.
 ///
@@ -1825,7 +1891,16 @@ pub fn selftest() -> bool {
     // `take_as` exists so it can be asked without arranging a second task.
     let me = crate::task::current();
     let other = me.wrapping_add(1);
-    let first = Claim::take();
+    // The compositor holds the claim for the whole of each frame, so "free"
+    // has to be waited for: with `render verify on` a frame is slow enough
+    // that taking it cold lost the race often enough to fail the suite. A
+    // second's patience, then the claim is taken as before.
+    let deadline = crate::time::rdtsc() + crate::time::tsc_mhz().max(1) as u64 * 1_000_000;
+    let mut first = Claim::take();
+    while first.is_none() && crate::time::rdtsc() < deadline {
+        crate::task::yield_now();
+        first = Claim::take();
+    }
     claim("a free claim can be taken", first.is_some());
     claim("and another task is refused", Claim::take_as(other).is_none());
     // Reentrancy, asserted rather than assumed: `draw` holds this across a
@@ -1834,15 +1909,23 @@ pub fn selftest() -> bool {
     // frame.
     claim("while this task may re-enter", Claim::take().is_some());
     drop(first);
-    let again = Claim::take();
+    // The compositor may take it in between, which is the claim working;
+    // what is asked is that it can be had again at all.
+    let deadline = crate::time::rdtsc() + crate::time::tsc_mhz().max(1) as u64 * 1_000_000;
+    let mut again = Claim::take();
+    while again.is_none() && crate::time::rdtsc() < deadline {
+        crate::task::yield_now();
+        again = Claim::take();
+    }
     claim("dropping it lets the next one in", again.is_some());
     drop(again);
     // Leaving it held would deadlock every later repaint, so the release path
     // is worth one more claim of its own -- and a re-entry must *not* release
-    // it, which is what `Claim::took` is for.
+    // it, which is what `Claim::took` is for. Asked of this task: the
+    // compositor holding it a moment later is not this task leaking it.
     claim(
-        "and it is free afterwards",
-        PAINTER.load(core::sync::atomic::Ordering::Relaxed) == NOBODY,
+        "and this task no longer holds it",
+        PAINTER.load(core::sync::atomic::Ordering::Relaxed) != me,
     );
 
     // --- tiling -----------------------------------------------------------
@@ -1939,41 +2022,129 @@ pub fn selftest() -> bool {
         claim("and no two icons share an index", distinct);
     }
 
-    // --- the opening curve -------------------------------------------------
-    //
-    // Pure arithmetic, and the last frame is the claim that matters: a final
-    // rectangle off by a pixel leaves a seam of chrome the real window does
-    // not cover, and nothing repaints it until something else happens to.
-    {
-        let to = Rect::new(100, 60, 300, 200);
-        claim("a window arrives exactly where it was going", open_rect(to, OPEN_STEPS - 1, OPEN_STEPS) == to);
-        claim("and one step is one step", open_rect(to, 0, 1) == to);
-        let first = open_rect(to, 0, OPEN_STEPS);
-        claim("it starts smaller than it ends", first.w < to.w && first.h < to.h);
-        // Concentric, because growing from a corner reads as a slide from
-        // somewhere -- and a window opened by a command came from nowhere.
-        claim(
-            "and grows from its own centre",
-            first.x + first.w / 2 == to.x + to.w / 2 && first.y + first.h / 2 == to.y + to.h / 2,
-        );
-        let mut prev = 0;
-        let mut grows = true;
-        for step in 0..OPEN_STEPS {
-            let r = open_rect(to, step, OPEN_STEPS);
-            grows &= r.w >= prev;
-            prev = r.w;
-        }
-        claim("monotonically", grows);
-        // A window too small to have chrome must not produce a rectangle with
-        // a negative or wrapped size -- every dimension here is unsigned.
-        let tiny = Rect::new(0, 0, 8, 8);
-        let t = open_rect(tiny, 0, OPEN_STEPS);
-        claim("and a tiny window does not wrap", t.w > 0 && t.h > 0 && t.w <= 24 && t.h <= 16);
-    }
     ok
 }
 
+/// The pointer's pixels for a shape, encoded, `None` where it is clear. The
+/// arrow carries its outline in the bitmap; the resize glyphs are solid
+/// figures given a dark halo here, so each reads on both a dark title bar and
+/// the light wall.
+/// The pointer plane's image for `shape`, premultiplied ARGB with the
+/// pointer's position at `(HOT_X, HOT_Y)`.
+///
+/// The arrow is drawn, not looked up: an anti-aliased outline with a dark rim
+/// and a soft shadow below and to the right, at the 1.25 scale this release
+/// lays everything out for -- the old one was an eleven-by-seventeen bitmap in
+/// two colours. It is built once and kept, because `cursor_show` runs on every
+/// pointer packet and the drawing is a few thousand distance evaluations. The
+/// resize glyphs are still bitmaps, converted, with their top-left where the
+/// pointer is, as it always was.
+fn cursor_image(fb: &Framebuffer, shape: u8) -> super::compose::Plane {
+    use super::compose::{HOT_X, HOT_Y, PLANE};
+    if shape == SHAPE_ARROW {
+        static ARROW: Racy<Option<super::compose::Plane>> = Racy::new(None);
+        let cache = unsafe { &mut *ARROW.get() };
+        if cache.is_none() {
+            *cache = Some(arrow_plane(fb));
+        }
+        return cache.unwrap();
+    }
+    let bits = bitmap(shape);
+    let set = |r: i32, c: i32| -> bool {
+        if r < 0 || c < 0 || r >= CUR_H as i32 || c >= CUR_W as i32 {
+            return false;
+        }
+        matches!(bits[r as usize].as_bytes().get(c as usize), Some(b'X') | Some(b'.'))
+    };
+    let mut out = [0u32; (PLANE * PLANE) as usize];
+    for row in 0..CUR_H {
+        let line = bits[row as usize].as_bytes();
+        for col in 0..CUR_W {
+            let v = match line.get(col as usize) {
+                Some(b'.') | Some(b'X') => Some(fb.raw(theme::HILIGHT)),
+                _ => {
+                    let (r, c) = (row as i32, col as i32);
+                    let near = (-1..=1).any(|dr| (-1..=1).any(|dc| (dr, dc) != (0, 0) && set(r + dr, c + dc)));
+                    near.then(|| fb.raw(theme::TEXT))
+                }
+            };
+            if let Some(v) = v {
+                out[((row + HOT_Y) * PLANE + col + HOT_X) as usize] = super::blend::opaque(v);
+            }
+        }
+    }
+    out
+}
+
+/// The arrow's outline, in logical pixels from its tip: down the left edge,
+/// in to the notch, out along the tail, back to the notch, and across to the
+/// wing. The proportions are the familiar ones; only the drawing is new.
+const ARROW_PTS: [(f32, f32); 7] = [(0.0, 0.0), (0.0, 17.0), (4.0, 13.0), (7.0, 20.0), (10.0, 19.0), (7.0, 12.0), (12.0, 12.0)];
+
+/// Signed distance from `(x, y)` to the arrow at `scale`: negative inside.
+fn arrow_sd(x: f32, y: f32, scale: f32) -> f32 {
+    let n = ARROW_PTS.len();
+    let mut d = f32::MAX;
+    let mut inside = false;
+    for i in 0..n {
+        let (ax, ay) = (ARROW_PTS[i].0 * scale, ARROW_PTS[i].1 * scale);
+        let (bx, by) = (ARROW_PTS[(i + 1) % n].0 * scale, ARROW_PTS[(i + 1) % n].1 * scale);
+        let (ex, ey) = (bx - ax, by - ay);
+        let (px, py) = (x - ax, y - ay);
+        let t = ((px * ex + py * ey) / (ex * ex + ey * ey)).clamp(0.0, 1.0);
+        let (qx, qy) = (px - ex * t, py - ey * t);
+        d = d.min(qx * qx + qy * qy);
+        // Crossing number, for the sign.
+        if (ay > y) != (by > y) && x < ax + (y - ay) * ex / ey {
+            inside = !inside;
+        }
+    }
+    let d = super::shape::libm_sqrt(d);
+    if inside { -d } else { d }
+}
+
+fn arrow_plane(fb: &Framebuffer) -> super::compose::Plane {
+    use super::compose::{HOT_X, HOT_Y, PLANE};
+    let scale = 1.25f32;
+    let rim = 1.25f32;
+    let (sx, sy, sigma) = (1.0f32, 2.0f32, 1.6f32);
+    let fill = super::blend::opaque(fb.raw(Color::new(255, 255, 255)));
+    let ink = super::blend::opaque(fb.raw(Color::new(20, 24, 32)));
+    let mut out = [0u32; (PLANE * PLANE) as usize];
+    for py in 0..PLANE {
+        for px in 0..PLANE {
+            // Pixel centre, relative to the tip.
+            let (x, y) = (px as f32 + 0.5 - HOT_X as f32, py as f32 + 0.5 - HOT_Y as f32);
+            let d = arrow_sd(x, y, scale);
+            // The shadow: the outline, offset and softened by its own distance
+            // field rather than blurred -- a smoothstep across a sigma either
+            // side of the edge, at about half black.
+            let ds = arrow_sd(x - sx, y - sy, scale);
+            let t = ((ds + sigma) / (3.0 * sigma)).clamp(0.0, 1.0);
+            let shade = (1.0 - t * t * (3.0 - 2.0 * t)) * 0.55;
+            let mut p = super::blend::premul(0, (shade * 255.0 + 0.5) as u8);
+            // The rim, then the white body inside it.
+            let rim_cov = (0.5 - d).clamp(0.0, 1.0);
+            if rim_cov > 0.0 {
+                p = super::blend::over_px(super::blend::scale_px(ink, (rim_cov * 255.0 + 0.5) as u32), p);
+            }
+            let body = (0.5 - (d + rim)).clamp(0.0, 1.0);
+            if body > 0.0 {
+                p = super::blend::over_px(super::blend::scale_px(fill, (body * 255.0 + 0.5) as u32), p);
+            }
+            out[(py * PLANE + px) as usize] = p;
+        }
+    }
+    out
+}
+
 pub fn cursor_hide(fb: &Framebuffer) {
+    // With a compositor the pointer is a plane over the back buffer and is
+    // never painted into anything, so there is nothing to lift: a frame
+    // repaints under it and the present lays it back over whatever changed.
+    if super::compose::cursor_plane() {
+        return;
+    }
     let Some((x, y)) = (unsafe { *SHOWN.get() }) else { return };
     // Ask the compositor for those pixels back, rather than trusting a copy
     // taken earlier.
@@ -1999,8 +2170,12 @@ pub fn cursor_hide(fb: &Framebuffer) {
 }
 
 pub fn cursor_show(fb: &Framebuffer, x: u32, y: u32) {
-    cursor_hide(fb);
     let shape = unsafe { *SHAPE.get() };
+    if super::compose::cursor_plane() {
+        super::compose::set_cursor(Some((x, y)), &cursor_image(fb, shape));
+        return;
+    }
+    cursor_hide(fb);
     let bits = bitmap(shape);
     // Only needed when there is no compositor to ask. With one, this loop is
     // 187 uncached reads off the aperture per mouse move -- on the path that
@@ -2081,19 +2256,13 @@ static TRAY_AT: Racy<Option<u64>> = Racy::new(None);
 /// stopped screen looks stopped. What still reports liveness is the watchdog,
 /// which says so in words on a channel the screen cannot take away.
 ///
-/// **Straight to the aperture and deliberately not folded into the frame.**
-/// Composing them would mean a whole frame every tenth of a second -- 2,143 us
-/// measured, so about 2% of a core with nothing happening at all -- to move
-/// four digits. The objection that made the old version wrong was never that
-/// it wrote a small rectangle; it was that a second *task* did. Writing
-/// through `compose::target` keeps the shadow honest, which is the half that
-/// actually mattered.
-///
-/// `after_frame` forces a repaint because `draw` paints the well these sit in
-/// and not the text inside it, so a composed frame erases them. They were
-/// blank for up to a tenth of a second after every frame before this, which is
-/// the flicker nobody had a name for.
-pub fn paint_tray(after_frame: bool) {
+/// **A part of the taskbar layer, stamped by the text it shows.** This only
+/// notices that a tenth of a second has passed and asks for a frame; the
+/// scene diff then finds the clock part's stamp moved and repaints that well
+/// alone. It is asked once per tenth and never "after a frame": the tray is
+/// in the frame, so a frame cannot erase it, and asking unconditionally after
+/// every frame made each frame request the next.
+pub fn paint_tray() {
     // The boot screen owns the framebuffer while it is up, and an uptime in
     // the corner of a splash is the tell that something is drawing behind the
     // curtain.
@@ -2108,7 +2277,7 @@ pub fn paint_tray(after_frame: bool) {
     // DOOM and swamp the counter that exists to say a full-screen program was
     // running. One per tenth is the same fact at the tray's own rate.
     let tenths = crate::dev::lapic::ticks() * 10 / crate::TIMER_HZ as u64;
-    if !after_frame && unsafe { *TRAY_AT.get() } == Some(tenths) {
+    if unsafe { *TRAY_AT.get() } == Some(tenths) {
         return;
     }
     // A full-screen program owns the screen outright, and the tray is not on
@@ -2121,19 +2290,35 @@ pub fn paint_tray(after_frame: bool) {
     }
     unsafe { *TRAY_AT.get() = Some(tenths) };
     super::render::tray_painted();
+    // A new tenth: the taskbar layer's clock part has a new stamp, so the
+    // next frame repaints that well and nothing else.
+    let _ = fb;
+    super::render::invalidate();
+}
 
-    let cs = theme::CHROME_SCALE;
+/// The two readouts' text, right now. One function for the scene's stamp and
+/// the painter, so they cannot disagree about what is shown.
+fn tray_strings() -> (alloc::string::String, Option<alloc::string::String>) {
+    let tenths = crate::dev::lapic::ticks() * 10 / crate::TIMER_HZ as u64;
     // Short, because the taskbar reserves a fixed well for it and every
     // character of that well is a character the task buttons do not get.
-    let text = alloc::format!(" up {}.{}s ", tenths / 10, tenths % 10);
-    let c = clock_rect(&fb);
-    tray_text(&fb, c, &text, cs);
-
+    let clock = alloc::format!(" up {}.{}s ", tenths / 10, tenths % 10);
     // The charge, in its own well beside the clock. The reading behind it is
     // cached, so asking ten times a second costs a comparison rather than a
     // run of the firmware's bytecode.
-    if let (Some(b), Some(t)) = (battery_rect(&fb), battery_text()) {
-        tray_text(&fb, b, &t, cs);
+    (clock, battery_text())
+}
+
+/// Paint both readouts into the frame.
+fn paint_tray_text(fb: &Framebuffer) {
+    if super::splash::active() {
+        return;
+    }
+    let cs = theme::CHROME_SCALE;
+    let (clock, battery) = tray_strings();
+    tray_text(fb, clock_rect(fb), &clock, cs);
+    if let (Some(b), Some(t)) = (battery_rect(fb), battery) {
+        tray_text(fb, b, &t, cs);
     }
 }
 
@@ -2144,23 +2329,21 @@ pub fn paint_tray(after_frame: bool) {
 /// count -- this tree has paid for that distinction in three separate places,
 /// and the charge string is the one here most likely to grow a symbol.
 fn tray_text(fb: &Framebuffer, well: Rect, text: &str, scale: u32) {
-    let width = text.chars().count() as u32 * super::font::GLYPH_W * scale;
+    // Measured in the interface face; a readout that does not fit is not
+    // drawn rather than cut, since half a clock is a wrong clock.
+    let width = theme::text_w_of_at(text, scale);
     if well.w <= width {
         return;
     }
     let x = well.x + (well.w - width) / 2;
-    let y = well.y + (well.h.saturating_sub(super::font::GLYPH_H * scale)) / 2;
-    // Through the compositor's back buffer, so the shadow agrees with the
-    // screen. Writing the aperture directly left the shadow describing pixels
-    // that were no longer there, and a later `present` comparing the two found
-    // them equal and wrote nothing -- so the compositor could never erase the
-    // clock, and digits stayed on screen the desktop had decided to cover.
-    let target = super::compose::target().unwrap_or(*fb);
-    // Light ink on the tray's own ground, and the background stays opaque: it
-    // is what erases the digit that was there a tenth of a second ago, and
-    // nothing else presents this rectangle on the tray's behalf.
-    target.draw_text(x, y, text, theme::TITLE_TEXT, theme::TRAY, scale);
-    super::compose::flush_rect(x, y, width, super::font::GLYPH_H * scale);
+    let y = well.y + (well.h.saturating_sub(theme::text_h_at(scale))) / 2;
+    // Into the compositor's back buffer like everything else, on the tray's
+    // own ground: the inner well is laid down first, so a reading shorter
+    // than the last one leaves none of the last one's digits behind.
+    // Straight onto the glass: the frame repaints the clock's well from the
+    // bar up whenever its stamp moves, so nothing of the last reading is left
+    // to cover, and a box behind the digits was XP's tray.
+    theme::text_over_at(fb, x, y, text, theme::TITLE_TEXT, scale);
 }
 
 /// Put the arrow somewhere, without letting anything else paint while it does.
@@ -2188,6 +2371,27 @@ fn move_cursor(x: u32, y: u32) -> bool {
         super::render::cursor_painted();
         true
     })
+}
+
+/// One pointer move, for `video bench` and the `video.cursor_move` rail.
+///
+/// Alternates between two spots a few pixels apart so every call really moves
+/// the arrow, and puts it back where the hand left it afterwards. Measured
+/// through `move_cursor`, the same path a real packet takes, so the number is
+/// what a person dragging the mouse pays per update -- today a hide and a show
+/// straight on the aperture, and after phase 6 a re-present of two small
+/// rectangles.
+pub fn bench_cursor(step: u32) {
+    let Some(fb) = super::primary() else { return };
+    let (x, y) = (fb.width() / 2 + (step & 1) * 7, fb.height() / 2 + (step & 1) * 5);
+    move_cursor(x, y);
+}
+
+/// Put the arrow back where the pointer says it is, after `bench_cursor`.
+pub fn cursor_home() {
+    if let Some((x, y)) = unsafe { *POS.get() } {
+        move_cursor(x, y);
+    }
 }
 
 pub fn poll_mouse() {
@@ -2423,20 +2627,27 @@ pub fn show_executive() {
 fn make_executive(screen: Rect) -> Window {
     let icons_w = 10 + ICON_W + 10;
     let term_x = screen.x.max(icons_w);
-    let term_w = (screen.x + screen.w).saturating_sub(term_x + MARGIN);
+    let term_w = (screen.x + screen.w).saturating_sub(term_x + margin());
     Window {
+        serial: next_serial(),
+        app_surface: Default::default(),
+        image: Default::default(),
+        arrive: None,
+        shown: Default::default(),
+        tiled: tile_new(),
+        slide: None,
         title: String::from("Executive"),
         icon: ICO_TERM,
         rect: Rect::new(
-            term_x + MARGIN,
-            screen.y + MARGIN,
-            term_w.saturating_sub(MARGIN * 2).max(320),
-            screen.h.saturating_sub(MARGIN * 4).max(200),
+            term_x + margin(),
+            screen.y + margin(),
+            term_w.saturating_sub(margin() * 2).max(320),
+            screen.h.saturating_sub(margin() * 4).max(200),
         ),
         state: WinState::Normal,
         snap_back: None,
         route: None,
-        round: theme::WIN_ROUND,
+        round: theme::win_round(),
         content: Content::Terminal(super::console::EXEC),
         menus: alloc::vec![Menu {
             label: String::from("View"),
@@ -2476,7 +2687,7 @@ static OUTLINE: Racy<Option<super::Shape>> = Racy::new(None);
 
 /// Paint `f` clipped to this window's outline, or straight through when the
 /// window is an ordinary rectangle.
-fn with_window_shape<R>(w: &Window, frame: Rect, f: impl FnOnce() -> R) -> R {
+fn with_window_shape<R>(fb: &Framebuffer, w: &Window, frame: Rect, f: impl FnOnce() -> R) -> R {
     // A maximised window has square corners and nothing behind it to show
     // through them. XP squares them too.
     if w.round == 0 || w.state == WinState::Maximised {
@@ -2498,7 +2709,7 @@ fn with_window_shape<R>(w: &Window, frame: Rect, f: impl FnOnce() -> R) -> R {
     let Some(shape) = (unsafe { (*OUTLINE.get()).as_ref() }) else {
         return f();
     };
-    super::with_shape(shape, frame.x as i32, frame.y as i32, f)
+    super::with_shape(fb, shape, frame.x as i32, frame.y as i32, f)
 }
 
 /// Which borders the pointer is over, if any.
@@ -2578,8 +2789,8 @@ fn min_size_of(w: &Window) -> (u32, u32) {
         _ => (240, 120),
     };
     (
-        inner.0 + theme::FRAME * 2,
-        inner.1 + theme::TITLE_H + theme::FRAME * 2,
+        inner.0 + theme::frame_w() * 2,
+        inner.1 + theme::title_h() + theme::frame_w() * 2,
     )
 }
 
@@ -2616,6 +2827,11 @@ fn window_at(x: i32, y: i32) -> Option<usize> {
 /// chrome, and finally the content under the point. This is the pointer's
 /// whole vocabulary.
 fn press_at(x: i32, y: i32) {
+    // A click anywhere while the stack is up takes the window at its front.
+    if unsafe { (*FLIP.get()).is_some() } {
+        flip_leave(true);
+        return;
+    }
     let Some(fb) = super::primary() else { return };
     let screen = screen_rect(&fb);
     let double = is_double(x, y);
@@ -2689,7 +2905,11 @@ fn press_at(x: i32, y: i32) {
         } else if state != WinState::Maximised {
             // Remember where inside the frame the pointer took hold, so the
             // window follows the grab instead of snapping a corner to it.
+            // Taking hold of a tiled window lifts it out of the layout, as
+            // Hyprland's drag does: a window under the pointer has to be
+            // free to follow it, and its slot closes up behind it.
             with(|d| {
+                d.windows[f].tiled = false;
                 d.mode = Mode::Drag {
                     dx: (x - frame.x as i32).max(0) as u32,
                     dy: (y - frame.y as i32).max(0) as u32,
@@ -2704,7 +2924,10 @@ fn press_at(x: i32, y: i32) {
     if state != WinState::Maximised {
         let e = edges_at(frame, x, y);
         if e != edge::NONE {
-            with(|d| d.mode = Mode::DragSize { from: frame, edges: e });
+            with(|d| {
+                d.windows[f].tiled = false;
+                d.mode = Mode::DragSize { from: frame, edges: e }
+            });
             super::render::invalidate();
             return;
         }
@@ -2730,7 +2953,8 @@ fn press_at(x: i32, y: i32) {
             }
         }
         Content::App(a) => {
-            if a.press(client, x, y) {
+            app_input(a.as_ref());
+            if a.press(Rect::new(0, 0, client.w, client.h), x - client.x as i32, y - client.y as i32) {
                 // The press begins a gesture: until the button lifts, motion
                 // belongs to this program. That is what a brush stroke is.
                 unsafe { *APP_PRESS.get() = true };
@@ -2761,7 +2985,10 @@ fn app_drag_to(x: i32, y: i32) {
         let has_menus = !d.windows[f].menus.is_empty();
         let (_, _, client) = chrome(frame, has_menus);
         match &mut d.windows[f].content {
-            Content::App(a) => a.drag(client, x, y),
+            Content::App(a) => {
+                app_input(a.as_ref());
+                a.drag(Rect::new(0, 0, client.w, client.h), x - client.x as i32, y - client.y as i32)
+            }
             _ => false,
         }
     })
@@ -2775,7 +3002,10 @@ fn app_release() {
     let changed = with(|d| {
         let Some(f) = d.focus() else { return false };
         match &mut d.windows[f].content {
-            Content::App(a) => a.release(),
+            Content::App(a) => {
+                app_input(a.as_ref());
+                a.release()
+            }
             _ => false,
         }
     })
@@ -2803,7 +3033,7 @@ fn caption_action(f: usize, which: usize) {
             }
             _ => {
                 if d.windows[f].closable {
-                    d.windows.remove(f);
+                    close_at(d, f);
                 } else {
                     // The terminal is the shell: it keeps running with no
                     // window, so its X means "put it away", which is the
@@ -2882,11 +3112,84 @@ pub fn retitle_tagged(tag: u64, title: &str) {
     super::render::invalidate();
 }
 
+/// What a Super chord does.
+///
+/// Hyprland's binds where they do not collide with this desktop's: Enter a
+/// terminal, Q close, V float, J turn the split, F full screen, the arrows
+/// focus the window that way and with Shift swap places with it, D the
+/// desktop, and Tab the Flip 3D stack. A chord with no binding is still the desktop's and is
+/// dropped, so a reader of the plan does not find Super-V typing a 'v'.
+fn super_key(k: u8) {
+    let Some((key, shift)) = kbd::chord_of(k) else { return };
+    match (key, shift) {
+        (b'\n', _) => open_terminal(),
+        (b'q', _) => close_focused(),
+        (b'd', _) => show_desktop(),
+        // Flip 3D, and again to turn it.
+        (b'\t', _) => {
+            if unsafe { (*FLIP.get()).is_some() } {
+                flip_turn(1.0);
+            } else {
+                with(|d| d.mode = Mode::Normal);
+                flip_open();
+            }
+        }
+        (b'v', _) => toggle_float(),
+        (b'j', _) => toggle_split(),
+        (b'f', _) => {
+            with(|d| {
+                if let Some(f) = d.focus() {
+                    let w = &mut d.windows[f];
+                    w.state = if w.state == WinState::Maximised { WinState::Normal } else { WinState::Maximised };
+                }
+            });
+        }
+        (k, shift) if k == kbd::KEY_LEFT => tile_move(0, shift),
+        (k, shift) if k == kbd::KEY_RIGHT => tile_move(1, shift),
+        (k, shift) if k == kbd::KEY_UP => tile_move(2, shift),
+        (k, shift) if k == kbd::KEY_DOWN => tile_move(3, shift),
+        _ => {}
+    }
+    super::render::invalidate();
+}
+
+/// Super-D: put every window away, and the second press brings back exactly
+/// those that were showing -- not every window, which would also restore the
+/// ones somebody had minimised on purpose.
+fn show_desktop() {
+    let away = unsafe { &mut *SHOWN_AWAY.get() };
+    with(|d| {
+        let showing: Vec<(u64, WinState)> = d
+            .windows
+            .iter()
+            .filter(|w| w.state != WinState::Minimised)
+            .map(|w| (w.serial, w.state))
+            .collect();
+        if showing.is_empty() && !away.is_empty() {
+            for w in d.windows.iter_mut() {
+                if let Some((_, was)) = away.iter().find(|(s, _)| *s == w.serial) {
+                    w.state = *was;
+                }
+            }
+            away.clear();
+        } else {
+            for w in d.windows.iter_mut() {
+                w.state = WinState::Minimised;
+            }
+            *away = showing;
+        }
+    });
+}
+
+/// Which windows Super-D put away, and how each was showing -- a maximised
+/// window comes back maximised. Only touched under the desktop's claim.
+static SHOWN_AWAY: Racy<Vec<(u64, WinState)>> = Racy::new(Vec::new());
+
 pub fn close_focused() {
     with(|d| {
         if let Some(f) = d.focus() {
             if d.windows[f].closable {
-                d.windows.remove(f);
+                close_at(d, f);
             } else {
                 d.windows[f].state = WinState::Minimised;
             }
@@ -2944,21 +3247,21 @@ fn dropdown_rows(fb: &Framebuffer, d: &Desktop, screen: Rect) -> Option<theme::P
     }
     let f = d.focus()?;
     let frame = d.windows[f].frame(screen);
-    let inner = frame.shrink(theme::FRAME);
+    let inner = frame.shrink(theme::frame_w());
     match d.mode {
         Mode::Menu { menu, .. } => {
             let m = d.windows[f].menus.get(menu)?;
-            let bar = Rect::new(inner.x, inner.y + theme::TITLE_H + 2, inner.w, MENU_H);
+            let bar = Rect::new(inner.x, inner.y + theme::title_h() + 2, inner.w, menu_h());
             let x = theme::menu_labels(bar, d.windows[f].menus.iter().map(|p| p.label.as_str()))
                 .nth(menu)?
                 .x;
             let cols = m.items.iter().map(|i| i.label.chars().count()).max().unwrap_or(4);
-            let y = inner.y + theme::TITLE_H + 2 + MENU_H;
+            let y = inner.y + theme::title_h() + 2 + menu_h();
             Some(theme::Popup::sized(x, y, cols, m.items.len(), fb.width().saturating_sub(x)))
         }
         Mode::Sys { .. } => {
             let cols = SYS_ITEMS.iter().map(|s| s.chars().count()).max().unwrap_or(4);
-            let y = inner.y + theme::TITLE_H;
+            let y = inner.y + theme::title_h();
             Some(theme::Popup::sized(
                 inner.x,
                 y,
@@ -3087,6 +3390,11 @@ pub fn tile_focused(t: Tile) -> bool {
         w.snap_back = w.snap_back.or(Some(w.rect));
         w.state = WinState::Normal;
         w.rect = tile_rect(t, screen);
+        // Placed by hand is floating, as a drag is: left in the dwindle
+        // tree, the next frame's `tile_sync` put it straight back where the
+        // tree said, and `win tile right` answered "tiled right" about a
+        // window that had not moved.
+        w.tiled = false;
         true
     })
     .unwrap_or(false);
@@ -3118,6 +3426,7 @@ pub fn tile_all() -> usize {
             w.snap_back = w.snap_back.or(Some(w.rect));
             w.state = WinState::Normal;
             w.rect = tile_rect(ORDER[slot], screen);
+            w.tiled = false;
         }
         idx.len()
     })
@@ -3211,41 +3520,11 @@ pub fn refresh_status() {
     if super::exclusive() {
         return;
     }
-    let Some(fb) = super::primary() else { return };
-    let screen = screen_rect(&fb);
-    let mut well = None;
-    with(|d| {
-        let Some(w) = d
-            .windows
-            .iter()
-            .find(|w| matches!(w.content, Content::Terminal(c) if c == super::console::USER))
-        else {
-            return;
-        };
-        if w.state == WinState::Minimised {
-            return;
-        }
-        let (_, _, client) = chrome(w.frame(screen), !w.menus.is_empty());
-        if !client.is_empty() {
-            well = Some(client.shrink(2).shrink(2));
-        }
-    });
-    let Some(w) = well else { return };
-    // The gutter too, and for the same reason the strip is here: `clear` is a
-    // console-only repaint, so without this the marks it cannot reach survive
-    // the screen they described.
-    if let Some(strip) = terminal_strip(w) {
-        let grid = Rect::new(
-            w.x + 3,
-            w.y + 3,
-            w.w.saturating_sub(6),
-            w.h.saturating_sub(6 + strip.h),
-        );
-        prompt_gutter(&fb, w, grid);
-        super::compose::flush_rect(w.x, grid.y, 4, grid.h);
-        terminal_status(&fb, strip);
-        super::compose::flush_rect(strip.x, strip.y, strip.w, strip.h);
-    }
+    // The gutter and the status strip are parts of the terminal's layer,
+    // repainted by any composed frame. Asking for one is all this needs to do;
+    // it used to paint them itself, into the aperture and then the back
+    // buffer, with geometry of its own.
+    super::render::invalidate();
 }
 
 /// A tick in the margin beside every row that starts a command.
@@ -3258,7 +3537,9 @@ pub fn refresh_status() {
 ///
 /// In the three pixels between the well and the grid, which were margin. So
 /// this adds no chrome and takes no space from the console.
-fn prompt_gutter(fb: &super::Framebuffer, well: Rect, grid: Rect) {
+/// Which rows of the main terminal begin with a prompt, the row height and
+/// the grid's top: everything the gutter reads, for its painter and its stamp.
+fn gutter_marks() -> ([bool; 96], u32, u32) {
     let mut starts = [false; 96];
     let mut row_h = 0u32;
     let mut oy = 0u32;
@@ -3266,6 +3547,28 @@ fn prompt_gutter(fb: &super::Framebuffer, well: Rect, grid: Rect) {
         row_h = c.rows_starting(crate::shell::PROMPT, &mut starts);
         oy = c.origin().1;
     });
+    (starts, row_h, oy)
+}
+
+/// The gutter's and the strip's inputs as this frame's scene saw them.
+///
+/// Taken once, in `layers`, and read by the painters, so the stamp, the
+/// incremental paint and `render verify`'s reference paint all draw the same
+/// readings. Read live, a prompt the shell printed between the paint and the
+/// reference made the two disagree about one gutter tick, and the verifier
+/// reported a difference that was its own race.
+static FRAME_INPUTS: Racy<Option<(([bool; 96], u32, u32), (String, String, bool))>> = Racy::new(None);
+
+fn frame_marks() -> ([bool; 96], u32, u32) {
+    unsafe { (*FRAME_INPUTS.get()).as_ref().map(|f| f.0) }.unwrap_or_else(gutter_marks)
+}
+
+fn frame_status() -> (String, String, bool) {
+    unsafe { (*FRAME_INPUTS.get()).as_ref().map(|f| f.1.clone()) }.unwrap_or_else(status_text)
+}
+
+fn prompt_gutter(fb: &super::Framebuffer, well: Rect, grid: Rect) {
+    let (starts, row_h, oy) = frame_marks();
     if row_h == 0 {
         return;
     }
@@ -3311,13 +3614,24 @@ fn terminal_status(fb: &super::Framebuffer, r: Rect) {
     fb.rect(r.x, r.y, r.w, 1, theme::TRAY_EDGE);
     let ty = r.y + (r.h.saturating_sub(theme::text_h_at(1))) / 2;
 
+    let (left, right, engine) = frame_status();
+    theme::text_over_at(fb, r.x + 6, ty, &left, theme::TITLE_TEXT, 1);
+    // Right-aligned, and laid out from the right edge inwards so a long
+    // model line runs out of room before it can overwrite the state --
+    // which is the half that changes and therefore the half worth seeing.
+    let w = theme::text_w_of_at(&right, 1);
+    if r.w > w + 24 {
+        let x = r.x + r.w - w - 6;
+        let tone = if engine { theme::APERTURE } else { theme::TITLE_TEXT };
+        theme::text_over_at(fb, x, ty, &right, tone, 1);
+    }
+}
+
+/// The strip's two lines and whether the engine is held: everything its
+/// painter reads, so the scene can stamp the strip with it.
+fn status_text() -> (String, String, bool) {
     crate::ai::glance::with_glance(|g| {
         let left = crate::ai::glance::model_line(g);
-        theme::text_over_at(fb, r.x + 6, ty, &left, theme::TITLE_TEXT, 1);
-
-        // Right-aligned, and laid out from the right edge inwards so a long
-        // model line runs out of room before it can overwrite the state --
-        // which is the half that changes and therefore the half worth seeing.
         let engine = crate::ai::glance::engine_line(g);
         let mind = if g.mind_on { "mind on" } else { "mind off" };
         // A terminal showing something other than its last line has to say so.
@@ -3329,163 +3643,608 @@ fn terminal_status(fb: &super::Framebuffer, r: Rect) {
         } else {
             alloc::format!("{}  |  {}", engine, mind)
         };
-        let w = theme::text_w_at(right.chars().count(), 1);
-        if r.w > w + 24 {
-            let x = r.x + r.w - w - 6;
-            let tone = if g.engine.is_some() { theme::APERTURE } else { theme::TITLE_TEXT };
-            theme::text_over_at(fb, x, ty, &right, tone, 1);
-        }
-    });
+        (left, right, g.engine.is_some())
+    })
 }
 
-/// A window on its way in, and how far along it is.
-///
-/// **One static and not two.** This was an `ARRIVING` index beside a blocking
-/// animation loop, and the index was a flag somebody had to remember to clear
-/// -- its own comment said so: "a missed flourish is a window that appears
-/// instantly; a leaked flag is a window that never appears at all". There are
-/// three exits from that loop and each had to put it back. Holding the whole
-/// flight instead makes `arriving()` *derived*: there is no window arriving
-/// when there is no flight, which is the same bargain `draw` makes about
-/// console visibility one screen down.
-struct Flight {
-    win: usize,
-    to: Rect,
-    title: alloc::string::String,
-    step: u32,
-}
+/// The shortest period, in milliseconds, at which an open program asked for
+/// its stamp to be looked at (`DeskApp::wake_ms`), as of the last frame; 0 for
+/// none. Read by the compositor's pacing.
+static APP_WAKE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
-static FLIGHT: crate::sync::Racy<Option<Flight>> = crate::sync::Racy::new(None);
-
-/// Which window is still on its way, if any.
-fn arriving() -> Option<usize> {
-    unsafe { (*FLIGHT.get()).as_ref().map(|f| f.win) }
-}
-
-/// How many frames a window takes to arrive.
-///
-/// Six, which at one frame each is about a tenth of a second -- long enough to
-/// be seen and short enough that it is never something to wait through. It is
-/// bounded and one-shot rather than a running cost: six frames at ~2.2 ms is
-/// ~13 ms of painting for the whole gesture.
-const OPEN_STEPS: u32 = 6;
-
-/// Where a window sits partway through arriving.
-///
-/// Pure, so the curve is checkable at boot with no framebuffer and no desktop.
-/// It grows from a small rectangle at the window's own centre, so the motion
-/// reads as the window coming forward rather than sliding in from an edge --
-/// which would be a claim about where it came from, and windows here come from
-/// a command.
-///
-/// The last step is `to` exactly and not `to` approximately: a final frame off
-/// by a pixel leaves a seam of chrome the real window does not cover, and it
-/// would be there until something else repainted.
-fn open_rect(to: Rect, step: u32, steps: u32) -> Rect {
-    if step + 1 >= steps || steps == 0 {
-        return to;
+pub fn app_wake_ms() -> Option<u32> {
+    match APP_WAKE.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        ms => Some(ms),
     }
-    // Eased rather than linear: `f = 1 - (1-t)^2` starts fast and settles, so
-    // the frames cluster near the end where the shape is recognisable. Integer
-    // arithmetic throughout -- there is no float anywhere else in this file.
-    let t = (step + 1) * 256 / steps;
-    let inv = 256 - t;
-    let f = 256 - (inv * inv) / 256;
-    let f = f.clamp(40, 256);
-    let w = (to.w * f / 256).max(24);
-    let h = (to.h * f / 256).max(16);
-    let cx = to.x + to.w / 2;
-    let cy = to.y + to.h / 2;
-    Rect::new(cx.saturating_sub(w / 2), cy.saturating_sub(h / 2), w, h)
 }
 
-/// Start a window's arrival. Records it; the compositor flies it.
+/// Whether the compositor has work due within the next few milliseconds that
+/// no `invalidate` will announce: something part-way through an animation,
+/// or a pointer paint the 4 ms pacing deferred. While either is true it must
+/// not sleep a whole timer tick, or the motion stutters and the arrow lags.
+pub fn busy() -> bool {
+    ANIMATING.load(core::sync::atomic::Ordering::Relaxed) || unsafe { *CURSOR_PENDING.get() }
+}
+
+/// Whether anything is moving: a window arriving or one leaving. Kept by
+/// `anim_step`, read by the compositor's pacing without the desktop.
+static ANIMATING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// A window that has closed and is still fading out: its last image, where
+/// it was, and its two tweens. It outlives the window by the length of the
+/// fade, which is the whole of Hyprland's `windowsOut` -- a window that
+/// vanished in the frame after the click would have nothing to fade.
+struct Ghost {
+    serial: u64,
+    frame: Rect,
+    img: super::scale::Image,
+    out: (super::anim::Tween, super::anim::Tween),
+    shown: core::cell::Cell<(f32, f32)>,
+}
+
+static GHOSTS: Racy<Vec<Ghost>> = Racy::new(Vec::new());
+
+/// A window's image with its outline as alpha: opaque inside the shape the
+/// direct paint is clipped to, clear outside it -- what a scaled or faded
+/// window has to be, since its corners now fall over something else.
+fn premultiplied(win: &Window, im: &WinImage) -> alloc::sync::Arc<super::scale::Image> {
+    if let Some(p) = im.prem.borrow().as_ref() {
+        return p.clone();
+    }
+    let p = alloc::sync::Arc::new(premultiply(win, im));
+    *im.prem.borrow_mut() = Some(p.clone());
+    p
+}
+
+fn premultiply(win: &Window, im: &WinImage) -> super::scale::Image {
+    let (w, h) = (im.frame.w, im.frame.h);
+    let shape = (win.round != 0 && win.state != WinState::Maximised)
+        .then(|| super::Shape::round_top(w, h, win.round));
+    let mut px = Vec::with_capacity(w as usize * h as usize);
+    for y in 0..h {
+        let (a, b) = match &shape {
+            Some(sh) => sh.span(y).unwrap_or((0, 0)),
+            None => (0, w),
+        };
+        let row = &im.px[(y * w) as usize..((y + 1) * w) as usize];
+        for (x, &p) in row.iter().enumerate() {
+            let x = x as u32;
+            px.push(if x >= a && x < b { p | 0xFF00_0000 } else { 0 });
+        }
+    }
+    super::scale::Image { w, h, px }
+}
+
+/// A window has closed: keep its image fading where it stood.
+fn depart(w: Window) {
+    if !super::render::enabled() || super::exclusive() {
+        return;
+    }
+    let img = {
+        let slot = w.image.borrow();
+        match slot.as_ref() {
+            Some(im) => Some(((*premultiplied(&w, im)).clone(), im.frame)),
+            None => None,
+        }
+    };
+    let Some((img, frame)) = img else { return };
+    use super::anim::{preset, Tween};
+    let out = (Tween::new(preset::WINDOWS_OUT.0, preset::WINDOWS_OUT.1), Tween::new(preset::FADE_OUT.0, preset::FADE_OUT.1));
+    unsafe { (*GHOSTS.get()).push(Ghost { serial: w.serial, frame, img, out, shown: core::cell::Cell::new((1.0, 1.0)) }) };
+    ANIMATING.store(true, core::sync::atomic::Ordering::Relaxed);
+    super::render::invalidate();
+}
+
+/// Close window `i`, letting it fade.
+fn close_at(d: &mut Desktop, i: usize) {
+    if i < d.windows.len() {
+        let w = d.windows.remove(i);
+        depart(w);
+    }
+}
+
+/// Start the newest window's arrival: it pops in from `POPIN` of its size
+/// and fades up, on the clock (`anim`).
 ///
-/// **It used to run the animation here, and that made every task that opens a
-/// window a compositor.** The loop called `draw` six times on whichever task
-/// had asked -- the shell, the agent, `drain_ops` -- with a `delay_us(16_000)`
-/// between them, so opening a window both composed frames off the compositor
-/// and blocked its caller for a tenth of a second. Measured: `composers` went
-/// 1 -> 5 for one `paint` and 5 -> 9 for one `mines`, four handovers of the
-/// frame per window, on a machine whose whole design rests on there being one
-/// writer. Nothing caught it for a while because the two things that measure
-/// `composers` -- `render probe` and `diag all` -- open no windows.
-///
-/// The delay goes with it. A frame per compositor turn is ~16 ms at 60 Hz by
-/// construction, which is what the sleep was approximating.
+/// It was six frames of chrome only, a rectangle growing from the window's
+/// centre with the window itself withheld until the last -- because a
+/// window could not be drawn scaled until it had an image (phase 11). The
+/// window is in the scene throughout now, takes input throughout, and is
+/// drawn out of its image at this frame's scale and opacity.
 pub fn open_flourish() {
-    // With the compositor stood down there is nobody to fly it, and a flight
-    // nothing advances is a window that never appears. Arriving instantly is
-    // the right answer, and it is what `render off` means: back to what the
-    // machine did before any of this.
+    // With the compositor stood down there is nobody to animate it, and a
+    // tween nothing composes is a window that sits invisible until something
+    // else happens to repaint it. Arriving at once is what `render off` means.
     if !super::render::enabled() {
         return;
     }
-    let Some(fb) = super::primary() else { return };
-    let screen = screen_rect(&fb);
-    let mut what = None;
+    use super::anim::{preset, Tween};
     with(|d| {
-        let i = d.windows.len().checked_sub(1)?;
-        let w = &d.windows[i];
+        // The newest by serial, not the last in the stack: the stack's end is
+        // whatever has focus, and opening a window hands focus back to the
+        // terminal, so the last window is the shell and not the new one.
+        let w = d.windows.iter_mut().max_by_key(|w| w.serial)?;
         if w.state == WinState::Minimised {
             return None;
         }
-        what = Some((i, w.frame(screen), w.title.clone()));
+        w.arrive = Some((Tween::new(preset::WINDOWS_IN.0, preset::WINDOWS_IN.1), Tween::new(preset::FADE_IN.0, preset::FADE_IN.1)));
         Some(())
     });
-    let Some((i, to, title)) = what else { return };
-    if to.w < 64 || to.h < 48 {
-        return;
-    }
-    // A second window opened while the first is still arriving replaces it
-    // rather than queueing. The one it replaces appears instantly, which is
-    // the same outcome the old loop gave by blocking its caller until it had
-    // finished -- and it cannot strand an index, because the index and the
-    // flight are one object now.
-    unsafe { *FLIGHT.get() = Some(Flight { win: i, to, title, step: 0 }) };
+    ANIMATING.store(true, core::sync::atomic::Ordering::Relaxed);
     super::render::invalidate();
 }
 
-/// Fly a window in by one frame. The compositor's, and nobody else's.
+/// The area the tiling layout fills: the screen above the taskbar. Its own
+/// rectangle rather than `screen_rect`, whose margin is a floating window's
+/// and not the layout's -- the layout's edge is `tile::gaps`' outer gap.
+fn tile_area(fb: &Framebuffer) -> Rect {
+    Rect::new(0, 0, fb.width(), fb.height().saturating_sub(task_h()))
+}
+
+/// Bring the tiling tree in line with the windows, and every tiled window to
+/// its slot.
 ///
-/// Answers whether one is still in flight, which the caller uses for nothing
-/// but a count -- the repaint is asked for here, because the desktop under the
-/// next rectangle has to be composed again or the previous step's chrome stays
-/// on the screen under it.
-pub fn flourish_step() -> bool {
-    let done = {
-        let held = unsafe { &mut *FLIGHT.get() };
-        let Some(f) = held.as_mut() else { return false };
-        match super::primary() {
-            // A full-screen program owns the screen, so the arrival is not on
-            // it. Abandoned rather than paused: it is a tenth of a second of
-            // decoration, and holding a flight across a DOOM session would
-            // keep its window out of every frame until the program exited.
-            _ if super::exclusive() => true,
-            None => true,
-            Some(_) if f.step >= OPEN_STEPS.saturating_sub(1) => true,
-            Some(fb) => {
-                let r = open_rect(f.to, f.step, OPEN_STEPS);
-                f.step += 1;
-                let back = super::compose::target().unwrap_or(fb);
-                theme::window(&back, r, &f.title, true, false, false, None);
-                super::compose::flush_rect(
-                    r.x.saturating_sub(theme::SHADOW_W),
-                    r.y.saturating_sub(theme::SHADOW_W),
-                    r.w + theme::SHADOW_W * 2,
-                    r.h + theme::SHADOW_W * 2,
-                );
-                false
+/// **Reconciled, not hooked.** Windows are opened, closed, minimised and
+/// restored from a dozen places in this file and from other tasks through
+/// `post`; teaching each of them to tell the layout would be a dozen places
+/// to forget one. So before each frame the tree is made to hold exactly the
+/// tiled windows that are showing -- new ones split the window nearest the
+/// top that already tiles, which is the one they were opened from -- and the
+/// layout is applied. A window whose slot moved slides there.
+fn tile_sync(d: &mut Desktop, area: Rect) {
+    let want = |w: &Window| w.tiled && w.state != WinState::Minimised;
+    for s in d.tiles.leaves() {
+        if !d.windows.iter().any(|w| w.serial == s && want(w)) {
+            d.tiles.remove(s);
+        }
+    }
+    let mut missing: Vec<u64> = d.windows.iter().filter(|w| want(w) && !d.tiles.contains(w.serial)).map(|w| w.serial).collect();
+    missing.sort_unstable();
+    for s in missing {
+        let beside = d.windows.iter().rev().map(|w| w.serial).find(|x| d.tiles.contains(*x));
+        d.tiles.insert(s, beside);
+    }
+    let now = super::anim::now_us();
+    let mut moved = false;
+    for (s, r) in d.tiles.layout(area) {
+        let Some(w) = d.windows.iter_mut().find(|w| w.serial == s) else { continue };
+        if w.rect == r {
+            continue;
+        }
+        // Slide from wherever it is drawn now, which mid-slide is part of the
+        // way along the last one. A window that has never been drawn -- one
+        // just opened, which arrives instead -- simply takes its place.
+        if w.image.borrow().is_some() && w.arrive.is_none() && super::render::enabled() {
+            let from = match w.slide {
+                Some((f, t)) => lerp_rect(f, w.rect, t.at(now)),
+                None => w.rect,
+            };
+            w.slide = Some((from, super::anim::Tween::new(super::anim::preset::WINDOWS_MOVE.0, super::anim::preset::WINDOWS_MOVE.1)));
+            moved = true;
+        }
+        w.rect = r;
+    }
+    if moved {
+        ANIMATING.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A progress fixed to a 4096th, which is what every stamp of a moving
+/// layer records.
+///
+/// **The stamp and the painter must read the same number.** They read the
+/// unrounded one at first and `render verify` found the gap: a ring fading
+/// up by less than a 4096th left the stamp where it was, so nothing was
+/// repainted -- and still moved one glow pixel's rounding by one, which the
+/// reference frame, painting at the new value, drew differently. Rounded
+/// once, here, a change too small to damage anything is too small to draw.
+fn q4096(x: f32) -> f32 {
+    ((x.clamp(0.0, 1.0) * 4096.0 + 0.5) as u32) as f32 / 4096.0
+}
+
+/// `a` toward `b` by `t`, exactly `b` at 1.
+fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
+    if t >= 1.0 {
+        return b;
+    }
+    let l = |x: u32, y: u32| (x as f32 + (y as f32 - x as f32) * t + 0.5) as u32;
+    Rect::new(l(a.x, b.x), l(a.y, b.y), l(a.w, b.w).max(1), l(a.h, b.h).max(1))
+}
+
+/// `r` scaled by `k` about its centre.
+fn scaled(r: Rect, k: f32) -> Rect {
+    let w = ((r.w as f32 * k) + 0.5) as u32;
+    let h = ((r.h as f32 * k) + 0.5) as u32;
+    Rect::new(r.x + (r.w - w.min(r.w)) / 2, r.y + (r.h - h.min(r.h)) / 2, w.max(1), h.max(1))
+}
+
+/// Time writing `rows` rows of the screen, under the painter's claim so no
+/// frame lands in the middle: `(bytes, microseconds)`.
+pub fn screen_write_bench(rows: u32) -> Option<(u64, u64)> {
+    let _claim = Claim::take()?;
+    let t0 = crate::time::rdtsc();
+    let n = super::compose::rewrite_rows(0, rows);
+    let us = crate::time::rdtsc().saturating_sub(t0) / crate::time::tsc_mhz().max(1) as u64;
+    (n > 0).then_some((n, us.max(1)))
+}
+
+/// Change the interface's scale (`theme::set_scale`) and everything sized
+/// from it: the terminals take their face at the new size and reflow, every
+/// window's image is re-keyed through its stamp, and the next frame is whole.
+pub fn set_scale(permille: u32) {
+    theme::set_scale(permille);
+    for ch in [super::console::USER, super::console::EXEC] {
+        super::console::with_ch(ch, |c| c.rescale());
+    }
+    super::render::damage_all();
+}
+
+/// Super-V: float a tiled window, or tile a floating one. Afloat it keeps a
+/// size of its own -- at most two thirds of the area, centred -- and slides
+/// there from its slot, as it slides back into one.
+fn toggle_float() {
+    let Some(fb) = super::primary() else { return };
+    let area = tile_area(&fb);
+    with(|d| {
+        let Some(f) = d.focus() else { return };
+        let w = &mut d.windows[f];
+        if w.state == WinState::Maximised {
+            w.state = WinState::Normal;
+        }
+        w.tiled = !w.tiled;
+        if !w.tiled {
+            let nw = w.rect.w.min(area.w * 2 / 3);
+            let nh = w.rect.h.min(area.h * 2 / 3);
+            let to = Rect::new(area.x + (area.w - nw) / 2, area.y + (area.h - nh) / 2, nw, nh);
+            if w.image.borrow().is_some() {
+                w.slide = Some((w.rect, super::anim::Tween::new(super::anim::preset::WINDOWS_MOVE.0, super::anim::preset::WINDOWS_MOVE.1)));
+                ANIMATING.store(true, core::sync::atomic::Ordering::Relaxed);
+            }
+            w.rect = to;
+        }
+    });
+}
+
+/// Super and an arrow: focus the window that way. With Shift: swap places
+/// with it, when both tile.
+fn tile_move(dir: u8, swap: bool) {
+    let Some(fb) = super::primary() else { return };
+    let screen = screen_rect(&fb);
+    with(|d| {
+        let Some(f) = d.focus() else { return };
+        let me = d.windows[f].serial;
+        let rects: Vec<(u64, Rect)> = d
+            .windows
+            .iter()
+            .filter(|w| w.state != WinState::Minimised)
+            .map(|w| (w.serial, w.frame(screen)))
+            .collect();
+        let Some(to) = super::tile::neighbour(&rects, me, dir) else { return };
+        if swap {
+            d.tiles.swap(me, to);
+        } else if let Some(i) = d.windows.iter().position(|w| w.serial == to) {
+            d.raise(i);
+        }
+    });
+}
+
+/// Super-J: turn the split the focused window sits in the other way.
+fn toggle_split() {
+    let Some(fb) = super::primary() else { return };
+    let area = tile_area(&fb);
+    with(|d| {
+        let Some(f) = d.focus() else { return };
+        let s = d.windows[f].serial;
+        let (_, out) = super::tile::gaps();
+        let inner = Rect::new(area.x + out, area.y + out, area.w.saturating_sub(2 * out), area.h.saturating_sub(2 * out));
+        d.tiles.toggle(s, inner);
+    });
+}
+
+/// Flip 3D's state, while it is up.
+struct FlipState {
+    /// The windows, by serial, front first as the stack began: the
+    /// focused window, then down the z-order.
+    order: Vec<u64>,
+    /// Each window's image, outline as alpha, with its mip chain: taken
+    /// once when the stack opens, since a stack of windows is a picture of
+    /// them and four hundred milliseconds is no time to re-take it.
+    images: Vec<super::scale::Mips>,
+    /// Where the stack rests, and the turn on its way there.
+    offset: f32,
+    turn: Option<(f32, super::anim::Tween)>,
+    /// The stack rising out of the desktop, and going back into it -- with
+    /// the window to come to the front, if one was picked.
+    enter: super::anim::Tween,
+    leave: Option<(super::anim::Tween, Option<u64>)>,
+    /// The darkened blur the stack stands on.
+    bg: Vec<u32>,
+    /// The desktop as it was when the stack opened, which it rises out of
+    /// and sinks back into: a still, because repainting the live desktop
+    /// under the stack every frame of the rise was what put those frames
+    /// over budget. Empty until a frame's `layers` takes it.
+    under: Vec<u32>,
+    /// This frame's offset and how far up the stack is, fixed by `layers`.
+    shown: (f32, f32),
+    /// Whether a frame's `layers` has seen the stack yet. Super-Tab can
+    /// arrive from the shell's task between a frame's scene and its paint,
+    /// and a stack painted by a frame whose scene does not have it is a
+    /// frame the reference -- and the next frame -- disagree with.
+    live: bool,
+}
+
+static FLIP: Racy<Option<FlipState>> = Racy::new(None);
+
+/// The glass the stack stands on: the wallpaper's blur, nearly black.
+const FLIP_GLASS: super::glass::Glass = super::glass::Glass {
+    tint: Color::new(8, 12, 20),
+    glow: Color::new(40, 60, 90),
+    blur: 40,
+    afterglow: 12,
+    color: 48,
+    gloss: 0,
+    gloss_end: 0.5,
+};
+
+/// Super-Tab: stand the windows up in a stack.
+fn flip_open() {
+    let Some(fb) = super::primary() else { return };
+    if !super::render::enabled() || super::exclusive() {
+        cycle(false);
+        return;
+    }
+    let (w, h) = (fb.width(), fb.height());
+    let mut picked: Vec<(u64, super::scale::Image)> = Vec::new();
+    with(|d| {
+        for win in d.windows.iter().rev() {
+            if win.state == WinState::Minimised {
+                continue;
+            }
+            if let Some(im) = win.image.borrow().as_ref() {
+                picked.push((win.serial, (*premultiplied(win, im)).clone()));
             }
         }
-    };
-    // Dropped before the write, because `arriving()` reads this and the frame
-    // asked for below is the one that has to see the window arrive.
-    if done {
-        unsafe { *FLIGHT.get() = None };
+    });
+    if picked.is_empty() {
+        return;
     }
+    let mut bg = Vec::new();
+    if bg.try_reserve_exact(w as usize * h as usize).is_err() {
+        return;
+    }
+    bg.resize(w as usize * h as usize, 0u32);
+    let surf = unsafe { Framebuffer::over_ram(bg.as_mut_ptr() as u64, w, h, w, fb.format()) };
+    super::glass::fill(&surf, 0, 0, w, h, 0, FLIP_GLASS);
+    use super::anim::{Curve, Tween};
+    // Every halving the stack will reach for, built now rather than in the
+    // first frames of the rise: the deepest window is the smallest, so asking
+    // for its size builds the whole chain, and a frame that had to halve a
+    // million-pixel image three times was a frame over budget.
+    let n = picked.len();
+    let mut images: Vec<super::scale::Mips> = picked.iter().map(|p| super::scale::Mips::new(p.1.clone())).collect();
+    for m in images.iter_mut() {
+        let (iw, ih) = (m.base().w as f32, m.base().h as f32);
+        let q = super::flip::at_depth(iw, ih, (n.max(1) - 1) as f32, w as f32, h as f32);
+        let _ = m.level_for(((q.x1 - q.x0).max(1.0)) as u32, q.h1.max(1.0) as u32);
+    }
+    let state = FlipState {
+        order: picked.iter().map(|p| p.0).collect(),
+        images,
+        offset: 0.0,
+        turn: None,
+        enter: Tween::new(420, Curve::EaseOutQuint),
+        leave: None,
+        bg,
+        under: Vec::new(),
+        shown: (0.0, 0.0),
+        live: false,
+    };
+    unsafe { *FLIP.get() = Some(state) };
+    with(|d| d.mode = Mode::Flip);
+    ANIMATING.store(true, core::sync::atomic::Ordering::Relaxed);
     super::render::invalidate();
-    !done
+}
+
+/// Turn the stack by one: the front window to the back, or back again.
+fn flip_turn(by: f32) {
+    let Some(f) = (unsafe { (*FLIP.get()).as_mut() }) else { return };
+    if f.leave.is_some() {
+        return;
+    }
+    let now = super::anim::now_us();
+    let from = match f.turn {
+        Some((a, t)) => a + (f.offset - a) * t.at(now),
+        None => f.offset,
+    };
+    f.offset += by;
+    f.turn = Some((from, super::anim::Tween::new(300, super::anim::Curve::EaseOutQuint)));
+    ANIMATING.store(true, core::sync::atomic::Ordering::Relaxed);
+    super::render::invalidate();
+}
+
+/// The window at the front of the stack at rest.
+fn flip_front(f: &FlipState) -> Option<u64> {
+    let n = f.order.len();
+    let k = (crate::ai::tensor::floorf(f.offset + 0.5) as i64).rem_euclid(n.max(1) as i64) as usize;
+    f.order.get(k).copied()
+}
+
+/// Lay the stack back down: on the window at the front when `pick`, or on
+/// the desktop as it was.
+fn flip_leave(pick: bool) {
+    let Some(f) = (unsafe { (*FLIP.get()).as_mut() }) else { return };
+    if f.leave.is_some() {
+        return;
+    }
+    let choice = if pick { flip_front(f) } else { None };
+    f.leave = Some((super::anim::Tween::new(300, super::anim::Curve::EaseOutQuint), choice));
+    ANIMATING.store(true, core::sync::atomic::Ordering::Relaxed);
+    super::render::invalidate();
+}
+
+/// The stack's offset and rise at `now`.
+fn flip_at(f: &FlipState, now: u64) -> (f32, f32) {
+    let offset = match f.turn {
+        Some((a, t)) => a + (f.offset - a) * t.at(now),
+        None => f.offset,
+    };
+    let up = f.enter.at(now) * f.leave.map_or(1.0, |(t, _)| 1.0 - t.at(now));
+    (offset, up)
+}
+
+/// Retire Flip's motion; true while any of it is still moving.
+fn flip_step(now: u64) -> bool {
+    let slot = unsafe { &mut *FLIP.get() };
+    let Some(f) = slot.as_mut() else { return false };
+    if let Some((_, t)) = f.turn {
+        if t.done(now) {
+            f.turn = None;
+        }
+    }
+    if let Some((t, pick)) = f.leave {
+        if t.done(now) {
+            *slot = None;
+            with(|d| {
+                d.mode = Mode::Normal;
+                if let Some(s) = pick {
+                    if let Some(i) = d.windows.iter().position(|w| w.serial == s) {
+                        d.raise(i);
+                    }
+                }
+            });
+            return false;
+        }
+        return true;
+    }
+    f.turn.is_some() || !f.enter.done(now)
+}
+
+/// Paint the stack. Over the desktop as it rises, with the darkened glass
+/// fading up beneath it; alone once it is up, since it covers everything.
+fn paint_flip(fb: &Framebuffer, d: &Desktop, screen: Rect) {
+    let Some(f) = (unsafe { (*FLIP.get()).as_mut() }) else { return };
+    let (offset, up) = f.shown;
+    let (w, h) = (fb.width(), fb.height());
+    let (x0, y0, x1, y1) = fb.scissor();
+    let a = (up.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+    let n = f.order.len();
+    // Two passes: build whatever halvings this frame needs, then borrow them
+    // all at once. It cloned the chosen level of every window every frame --
+    // megabytes copied per window per frame, which is what kept the stack
+    // over budget after everything else about it was fast.
+    let mut plan: Vec<(usize, super::flip::Quad, u32, u32)> = Vec::with_capacity(n);
+    for (k, depth) in super::flip::order(n, offset) {
+        let serial = f.order[k];
+        let Some(win) = d.windows.iter().find(|w| w.serial == serial) else { continue };
+        let frame = win.frame(screen);
+        let mips = &mut f.images[k];
+        let (iw, ih) = (mips.base().w as f32, mips.base().h as f32);
+        let stood = super::flip::at_depth(iw, ih, depth, w as f32, h as f32);
+        let flat = super::flip::Quad::flat(frame.x as f32, frame.y as f32, frame.w as f32, frame.h as f32);
+        let q = super::flip::Quad::lerp(flat, stood, up);
+        let (qx0, qy0, qx1, qy1) = q.bounds();
+        if qx1 < x0 as f32 || qx0 > x1 as f32 || qy1 < y0 as f32 || qy0 > y1 as f32 {
+            continue;
+        }
+        let (lw, lh) = (((q.x1 - q.x0).max(1.0)) as u32, q.h0.max(q.h1).max(1.0) as u32);
+        let _ = mips.level_for(lw, lh);
+        plan.push((k, q, lw, lh));
+    }
+    let items: Vec<(&super::scale::Image, super::flip::Quad)> =
+        plan.iter().map(|&(k, q, lw, lh)| (f.images[k].built_for(lw, lh), q)).collect();
+    let base = (a < 255 && !f.under.is_empty()).then_some(&f.under[..]);
+    super::flip::paint(fb, base, Some((&f.bg, w, a)), &items);
+}
+
+/// Retire what has finished moving and keep frames coming while anything
+/// has not. The compositor's, after each frame.
+pub fn anim_step() {
+    if !ANIMATING.load(core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let now = super::anim::now_us();
+    // A full-screen program owns the screen: everything lands at once rather
+    // than holding windows half-drawn across a program that may run for an
+    // hour.
+    let all = super::exclusive();
+    let mut moving = false;
+    with(|d| {
+        for w in d.windows.iter_mut() {
+            if let Some((a, b)) = w.arrive {
+                if all || (a.done(now) && b.done(now)) {
+                    w.arrive = None;
+                } else {
+                    moving = true;
+                }
+            }
+            if let Some((_, t)) = w.slide {
+                if all || t.done(now) {
+                    w.slide = None;
+                } else {
+                    moving = true;
+                }
+            }
+        }
+    });
+    let g = unsafe { &mut *GHOSTS.get() };
+    g.retain(|gh| !all && !(gh.out.0.done(now) && gh.out.1.done(now)));
+    moving |= !g.is_empty();
+    let ring = unsafe { &mut *FOCUS_RING.get() };
+    if let Some(t) = ring.1 {
+        if all || t.done(now) {
+            ring.1 = None;
+        } else {
+            moving = true;
+        }
+    }
+    if all {
+        unsafe { *FLIP.get() = None };
+        with(|d| {
+            if d.mode == Mode::Flip {
+                d.mode = Mode::Normal;
+            }
+        });
+    }
+    moving |= flip_step(now);
+    ANIMATING.store(moving, core::sync::atomic::Ordering::Relaxed);
+    // One more frame after the last tween ends, which is the one that draws
+    // the window plainly or clears the last of a ghost.
+    super::render::invalidate();
+}
+
+/// An arriving window's scale and opacity at `now`.
+fn arrival_at(t: (super::anim::Tween, super::anim::Tween), now: u64) -> (f32, f32) {
+    let p = super::anim::preset::POPIN;
+    (p + (1.0 - p) * t.0.at(now), t.1.at(now))
+}
+
+/// A departing one's.
+fn departure_at(t: (super::anim::Tween, super::anim::Tween), now: u64) -> (f32, f32) {
+    let p = super::anim::preset::POPIN;
+    (1.0 - (1.0 - p) * t.0.at(now), 1.0 - t.1.at(now))
+}
+
+/// A window, or a ghost, at scale `k` about its centre and at `opacity`,
+/// with its shadow faded along with it.
+fn paint_transformed(fb: &Framebuffer, img: &super::scale::Image, to: Rect, opacity: f32, shadow: Option<(super::shadow::Spec, i32, i32, u8)>) {
+    let (x, y, w, h) = (to.x as i32, to.y as i32, to.w, to.h);
+    let o = (opacity.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+    if let Some((spec, dx, dy, alpha)) = shadow {
+        super::shadow::cast(fb, x, y, w, h, spec, dx, dy, (alpha as u32 * o / 255) as u8);
+    }
+    super::scale::draw(fb, img, x, y, w, h, o as u8);
+}
+
+fn paint_ghosts(fb: &Framebuffer) {
+    for gh in unsafe { (*GHOSTS.get()).iter() } {
+        let r = gh.frame;
+        if !fb.touches(r.x, r.y, r.w, r.h) {
+            continue;
+        }
+        let (k, o) = gh.shown.get();
+        paint_transformed(fb, &gh.img, scaled(r, k), o, None);
+    }
 }
 
 /// How close to a screen edge a move has to end to count as a snap.
@@ -3787,7 +4546,8 @@ fn right_click_at(x: i32, y: i32) {
                 let (_, _, client) = chrome(frame, has_menus);
                 match &mut d.windows[f].content {
                     Content::App(a) if contains(client, x, y) => {
-                        a.right_press(client, x, y)
+                        app_input(a.as_ref());
+                        a.right_press(Rect::new(0, 0, client.w, client.h), x - client.x as i32, y - client.y as i32)
                     }
                     _ => false,
                 }
@@ -3814,7 +4574,10 @@ fn wheel_at(x: i32, y: i32, notches: i32) {
         // Over a panel the wheel walks the first list, which is what a wheel
         // over a launcher or a checklist means.
         Content::Panel(p) => p.wheel(notches),
-        Content::App(a) => a.wheel(notches),
+        Content::App(a) => {
+            app_input(a.as_ref());
+            a.wheel(notches)
+        }
         // Up is back, which is the direction every terminal has agreed on.
         // Three rows a notch, matching the log windows.
         Content::Terminal(ch) => super::console::scroll_view(*ch, (notches * 3) as isize),
@@ -3826,175 +4589,17 @@ fn wheel_at(x: i32, y: i32, notches: i32) {
     }
 }
 
-/// The wall: a flat field, a sparse grid, and the mark in the middle.
+/// The wallpaper: `gfx::wall`, an Aperture sun over rim-lit hills.
 ///
-/// The same `splash::aperture` the boot screen draws, not a second copy of the
-/// geometry -- five earlier attempts at that logo were wrong in five different
-/// ways, and the way to stop a sixth is for there to be exactly one of it.
-///
-/// Drawn dim. A wallpaper competing with the windows on it is a wallpaper
-/// nobody can work in front of, and the cut wedges have to be painted in the
-/// wall's own colour anyway, so the mark is a two-colour figure by
-/// construction.
+/// It replaced a gradient horizon ruled with a graticule, a dial, three
+/// Bresenham ellipses and seven bubbles around the mark -- the busy wall the
+/// 1.4.1 plan names among the reasons the desktop looked 1998.
+pub(crate) fn paint_wallpaper(fb: &Framebuffer) {
+    wallpaper(fb);
+}
+
 fn wallpaper(fb: &Framebuffer) {
-    let (w, h) = (fb.width(), fb.height());
-    // A horizon rather than a fill. One `vgrad` is the same memset per row the
-    // flat colour was, so the sky costs nothing over what it replaced -- and
-    // it is what gives a drop shadow somewhere to land, which a near-black
-    // wall never did.
-    fb.vgrad(0, 0, w, h, &theme::WALL);
-
-    // Ruled, fine and heavy. The dot grid that used to be here was a fixed
-    // colour, which is subtle over one part of a gradient and dirt over the
-    // rest; these are a percentage of white, so they are equally faint over
-    // near-black water and over gold. Span fills, not lines: a graticule of
-    // rectangles is memsets where a lattice of diagonals would be Bresenham.
-    let mut x = 0;
-    while x < w {
-        let n = if x % theme::WALL_MAJOR == 0 { theme::WALL_MAJOR_NUM } else { theme::WALL_MINOR_NUM };
-        fb.tint_rect(x, 0, 1, h, theme::WALL_INK, n);
-        x += theme::WALL_MINOR;
-    }
-    let mut y = 0;
-    while y < h {
-        let n = if y % theme::WALL_MAJOR == 0 { theme::WALL_MAJOR_NUM } else { theme::WALL_MINOR_NUM };
-        fb.tint_rect(0, y, w, 1, theme::WALL_INK, n);
-        y += theme::WALL_MINOR;
-    }
-
-    let (cx, cy) = ((w / 2) as i32, (h / 2) as i32);
-    let r = (h / 5).min(w / 5) as i32;
-
-    // The dial, and graduations pointing outward from it. Drawn before the
-    // atom and before the bubbles, so it sits behind both.
-    let dial = r * theme::WALL_DIAL as i32 / 100;
-    fb.circle(cx, cy, dial, theme::WALL_ORBIT);
-    for i in 0..theme::WALL_TICKS {
-        let (sx, sy) = unit(i, theme::WALL_TICKS);
-        let long = i % 6 == 0;
-        let out = dial + if long { r / 9 } else { r / 22 };
-        fb.line(
-            cx + sx * dial / 1024,
-            cy + sy * dial / 1024,
-            cx + sx * out / 1024,
-            cy + sy * out / 1024,
-            theme::WALL_ORBIT,
-        );
-    }
-
-    // The atom: three ellipses through the same nucleus at even tilts, and an
-    // electron on each. The mark itself is the nucleus and is drawn last,
-    // unchanged -- it is already a ring with a filled centre, which is what
-    // the middle of one of these diagrams has always been.
-    let (a, b) = (
-        r * theme::WALL_ORBIT_A as i32 / 100,
-        r * theme::WALL_ORBIT_B as i32 / 100,
-    );
-    let tilts = theme::WALL_ORBIT_TILTS;
-    for t in 0..tilts {
-        ellipse(fb, cx, cy, a, b, t, tilts * 2, theme::WALL_ORBIT);
-        let (px, py) = on_ellipse(cx, cy, a, b, t, tilts * 2, theme::WALL_ELECTRONS[t as usize]);
-        fb.fill_circle(px, py, (r / 20).max(3), theme::WALL_RIM);
-        fb.fill_circle(px - r / 60, py - r / 60, (r / 60).max(1), theme::WALL_SPEC);
-    }
-
-    // Light on it. A bubble is a wash rather than a fill, so the sky and the
-    // ruling both carry on through it -- which is the whole difference
-    // between glass and a dot.
-    for (bx, by, br) in theme::WALL_BUBBLES {
-        bubble(
-            fb,
-            (w * bx / 100) as i32,
-            (h * by / 100) as i32,
-            (h * br / 100).max(4) as i32,
-        );
-    }
-
-    // Filled blades, and the gaps between them filled with the sky that would
-    // have been there. Which is to say the gaps are the sky: a cut here takes
-    // its colour from the same ramp the wall was drawn from, row by row, so
-    // there is nothing standing in for the background because it is the
-    // background.
-    super::splash::aperture_with(
-        fb,
-        cx,
-        cy,
-        r,
-        super::splash::Face::Ramp(&theme::SUN),
-        super::splash::Cut::Sky { stops: &theme::WALL, top: 0, height: h },
-    );
-}
-
-/// A point on the unit circle, scaled by 1024, for step `i` of `n`.
-///
-/// Integer, and derived from one eighth of a turn by symmetry rather than
-/// from a table of `n` entries, so changing the graduation count needs no
-/// second table to keep in step with it.
-fn unit(i: u32, n: u32) -> (i32, i32) {
-    // 1024 * sin(k * pi / 32) for k in 0..=16: a quarter turn, and every other
-    // angle is one of these with a sign or the pair swapped.
-    const Q: [i32; 17] = [
-        0, 100, 200, 297, 391, 483, 569, 650, 724, 792, 851, 903, 946, 979, 1004, 1019, 1024,
-    ];
-    let step = (i * 64 / n.max(1)) % 64;
-    let (quad, k) = (step / 16, (step % 16) as usize);
-    let (s, c) = (Q[k], Q[16 - k]);
-    match quad {
-        0 => (c, s),
-        1 => (-s, c),
-        2 => (-c, -s),
-        _ => (s, -c),
-    }
-}
-
-/// One point of a tilted ellipse, scaled and rotated in integers.
-fn on_ellipse(cx: i32, cy: i32, a: i32, b: i32, ti: u32, tn: u32, i: u32) -> (i32, i32) {
-    let (tc, ts) = unit(ti, tn);
-    let (c, s) = unit(i, 64);
-    let (ex, ey) = (a * c / 1024, b * s / 1024);
-    (
-        cx + (ex * tc - ey * ts) / 1024,
-        cy + (ex * ts + ey * tc) / 1024,
-    )
-}
-
-/// A tilted ellipse, as sixty-four chords.
-///
-/// Sixty-four because that is the resolution of `unit`'s table, and it is
-/// already more than enough: on the largest orbit here the chord is about
-/// thirty pixels and its sagitta is under half of one, so the curve is smooth
-/// before it is drawn rather than by being subdivided until it looks it.
-fn ellipse(fb: &Framebuffer, cx: i32, cy: i32, a: i32, b: i32, ti: u32, tn: u32, col: Color) {
-    let mut prev = on_ellipse(cx, cy, a, b, ti, tn, 0);
-    for i in 1..=64 {
-        let p = on_ellipse(cx, cy, a, b, ti, tn, i % 64);
-        fb.line(prev.0, prev.1, p.0, p.1, col);
-        prev = p;
-    }
-}
-
-/// One glass bubble: a wash, a rim, and a specular.
-fn bubble(fb: &Framebuffer, cx: i32, cy: i32, r: i32) {
-    for dy in -r..=r {
-        let half = super::isqrt((r * r - dy * dy).max(0) as u32) as i32;
-        let y = cy + dy;
-        let x0 = (cx - half).max(0);
-        let x1 = cx + half;
-        if y < 0 || x1 <= x0 {
-            continue;
-        }
-        fb.tint_span(
-            x0 as u32,
-            y as u32,
-            (x1 - x0) as u32,
-            theme::WALL_INK,
-            theme::WALL_BUBBLE_NUM,
-        );
-    }
-    fb.circle(cx, cy, r, theme::WALL_RIM);
-    // Up and to the left, which is where every light source in this interface
-    // already is -- the bevel says so and so does the gloss on every ramp.
-    fb.fill_circle(cx - r / 3, cy - r / 3, (r / 6).max(1), theme::WALL_SPEC);
+    super::wall::paint(fb);
 }
 
 /// Buttons on the bar, one per window, in stacking order: the window's
@@ -4038,7 +4643,7 @@ fn task_layout(fb: &Framebuffer, d: &Desktop) -> Vec<(Rect, usize, bool)> {
             break;
         }
         out.push((Rect::new(x, y, w, btn_h), icon, pressed));
-        x += w + TASK_GAP;
+        x += w + task_gap();
     }
     out
 }
@@ -4055,28 +4660,33 @@ fn taskbar(fb: &Framebuffer, d: &Desktop, sel: Option<usize>) {
     // and the back-to-front repaint means what is underneath is already
     // composed -- which is the whole reason a translucent bar costs one blended
     // span per row and no second pass over anything.
-    fb.glass(bar.x, bar.y, bar.w, bar.h, theme::GLASS, &theme::GLASS_STOPS);
-    // The specular sheen over the top, and then one hard line where the pane
-    // meets the sky. The opacity table is proportional and cannot say "one
-    // pixel" at any height, which is the division of labour between a ramp and
-    // the line drawn on top of it.
-    fb.glass(bar.x, bar.y, bar.w, bar.h / 2, theme::GLOSS, &theme::GLOSS_STOPS);
-    fb.rect(bar.x, bar.y, bar.w, 1, theme::TASK_EDGE);
+    //
+    // Vista's glass now (1.4.1): the blurred sky behind it, darkened and
+    // glossed, where it was a ramp of tints blended over the wall. One light
+    // line where the pane meets the sky, and a dark one under it, which is
+    // the edge of the glass catching the light.
+    super::glass::fill(fb, bar.x as i32, bar.y as i32, bar.w, bar.h, 0, theme::TASKBAR_GLASS);
+    let lit = fb.encode(Color::new(255, 255, 255));
+    let shade = fb.encode(Color::new(0, 0, 0));
+    fb.over_span(bar.x, bar.y, bar.w, super::blend::premul(lit, 70));
+    fb.over_span(bar.x, bar.y + 1, bar.w, super::blend::premul(shade, 60));
 
-    // The Start button: the mark and the name. Held down while its menu is
-    // open, which is the one place the bar states a mode rather than a focus.
+    // The Start orb: Vista's, with the Aperture mark lit in it where Vista
+    // had its flag. It replaced a green Luna pill with the name on it and a
+    // ring round a dot for a mark, which is what the mark had to be when
+    // nothing here could draw a curve. Lit while its menu is open, which is
+    // the one place the bar states a mode rather than a focus.
     let s = start_rect(fb);
     let start_open = matches!(d.mode, Mode::Start { .. });
     let lit = start_open || d.hover == Hover::Start;
-    theme::control(
+    let n = s.h;
+    super::icons::lay(
         fb,
-        s,
-        if lit { &theme::START_HOT } else { &theme::START },
-        theme::START_EDGE,
+        if lit { super::icons::ORB_HOT } else { super::icons::ORB },
+        s.x + (s.w - n) / 2,
+        s.y,
+        n,
     );
-    theme::aperture_dot(fb, s.x + 15, s.y + s.h / 2, (s.h / 2) as i32 - 5);
-    let ty = s.y + (s.h.saturating_sub(theme::text_h())) / 2;
-    theme::text_over(fb, s.x + 30, ty, "GLaDOS", theme::START_TEXT);
 
     for (i, (r, icon, pressed)) in task_layout(fb, d).into_iter().enumerate() {
         // Keyboard selection and pointer hover draw the same way: both are "the
@@ -4086,28 +4696,30 @@ fn taskbar(fb: &Framebuffer, d: &Desktop, sel: Option<usize>) {
         // `control` rather than `button`: a task button wants the hover wash,
         // and `button` reads its one boolean as keyboard focus. The two mean
         // different things and only here do they need telling apart.
-        let stops: &[(u8, Color)] = if pressed {
-            &theme::BTN_DOWN
-        } else if hot {
-            &theme::BTN_HOT
-        } else {
-            &theme::BTN
+        //
+        // Vista's and 7's: an icon standing on the glass, with a pane of
+        // light behind it only where it means something -- the window that
+        // has focus, and the one under the pointer. A tile behind every icon
+        // was XP's, and it made a bar of windows a row of buttons.
+        let wash = match (pressed, hot) {
+            (true, true) => 92,
+            (true, false) => 58,
+            (false, true) => 40,
+            (false, false) => 0,
         };
-        theme::control(fb, r, stops, if hot { theme::BTN_EDGE_HOT } else { theme::BTN_EDGE });
+        if wash > 0 {
+            let b = super::shape::Box::new(r.x as i32, r.y as i32, r.w, r.h);
+            let white = fb.encode(Color::new(255, 255, 255));
+            super::shape::rrect(fb, b, 4, super::blend::premul(white, wash));
+            super::shape::ring(fb, b, 4, 1, super::blend::premul(white, (wash + 50).min(255)));
+        }
         let s = r.h.saturating_sub(6);
         // Nudged a pixel when pressed, the same lie about depth the label
         // used to tell.
         let off = u32::from(pressed);
         // The button face is the ramp chosen just above, not `FACE` -- which
         // is no row of any of them.
-        pictogram(
-            fb,
-            icon,
-            r.x + (r.w.saturating_sub(s)) / 2 + off,
-            r.y + 3 + off,
-            s,
-            super::splash::Cut::Sky { stops, top: r.y, height: r.h },
-        );
+        pictogram(fb, icon, r.x + (r.w.saturating_sub(s)) / 2 + off, r.y + 3 + off, s);
     }
 
     // What the button is for, which the bar itself cannot say.
@@ -4130,28 +4742,82 @@ fn taskbar(fb: &Framebuffer, d: &Desktop, sel: Option<usize>) {
 
 /// The hovered task button's window title, standing above the bar.
 
+/// Where the taskbar's hover tip goes, if one is showing. One formula for the
+/// painter and the scene.
+/// The largest a taskbar thumbnail is drawn.
+const THUMB_W: u32 = 200;
+const THUMB_H: u32 = 140;
+
+/// A hovered window's thumbnail size, from its image: the window's own
+/// proportions inside `THUMB_W` x `THUMB_H`. None when it has never been
+/// drawn -- a window minimised before it was ever shown -- and the tip is
+/// its title alone.
+fn thumb_size(w: &Window) -> Option<(u32, u32)> {
+    let im = w.image.borrow();
+    let im = im.as_ref()?;
+    let (iw, ih) = (im.frame.w.max(1), im.frame.h.max(1));
+    let k = (THUMB_W as f32 / iw as f32).min(THUMB_H as f32 / ih as f32).min(1.0);
+    Some((((iw as f32 * k) as u32).max(1), ((ih as f32 * k) as u32).max(1)))
+}
+
+/// Where a hovered task button's preview stands: a pane of glass over the
+/// button, the window's title along its top and the window itself below --
+/// Windows 7's, because a bar of icons says what kind of window each is and
+/// not which, and the preview is how the two of a kind are told apart.
+fn tip_rect(fb: &Framebuffer, d: &Desktop) -> Option<Rect> {
+    let Hover::Task(i) = d.hover else { return None };
+    let (r, _, _) = task_layout(fb, d).into_iter().nth(i)?;
+    let win = d.windows.get(i)?;
+    let tw = theme::text_w_of(&win.title);
+    let (pw, ph) = thumb_size(win).unwrap_or((0, 0));
+    let box_w = (tw + 20).max(pw + 20).min(fb.width().saturating_sub(4));
+    let box_h = theme::text_h() + 14 + if ph > 0 { ph + 8 } else { 0 };
+    // Clamped to the screen rather than centred blindly: the last button on a
+    // full bar sits against the clock, and a tip centred on it would hang off
+    // the edge.
+    let want = r.x + r.w / 2 - (box_w / 2).min(r.x + r.w / 2);
+    let x = want.min(fb.width().saturating_sub(box_w + 2)).max(2);
+    let y = r.y.saturating_sub(box_h + 8);
+    Some(Rect::new(x, y, box_w, box_h))
+}
+
 fn taskbar_tip(fb: &Framebuffer, d: &Desktop) {
     let Hover::Task(i) = d.hover else { return };
-    let Some((r, _, _)) = task_layout(fb, d).into_iter().nth(i) else { return };
-    {
-        if let Some(title) = d.windows.get(i).map(|w| w.title.as_str()) {
-            let tw = theme::text_w_of(title);
-            let box_w = tw + 12;
-            let box_h = theme::text_h() + 8;
-            // Clamped to the screen rather than centred blindly: the last
-            // button on a full bar sits against the clock, and a tip centred
-            // on it would hang off the edge.
-            let want = r.x + r.w / 2 - (box_w / 2).min(r.x + r.w / 2);
-            let x = want.min(fb.width().saturating_sub(box_w + 2)).max(2);
-            let y = r.y.saturating_sub(box_h + 4);
-            let tr = Rect::new(x, y, box_w, box_h);
-            fb.shade_rect(tr.x + 2, tr.y + 2, tr.w, tr.h, 96);
-            fb.vgrad(tr.x, tr.y, tr.w, tr.h, &theme::TITLE_OFF);
-            theme::outline(fb, tr, theme::EDGE);
-            theme::text_over(fb, tr.x + 6, tr.y + 4, title, theme::TEXT);
+    let Some(tr) = tip_rect(fb, d) else { return };
+    let Some(win) = d.windows.get(i) else { return };
+    fb.shade_rect(tr.x + 2, tr.y + 2, tr.w, tr.h, 96);
+    super::glass::fill(fb, tr.x as i32, tr.y as i32, tr.w, tr.h, 6, theme::caption_glass(true));
+    let shown = theme::fit(&win.title, tr.w.saturating_sub(20));
+    theme::text_over(fb, tr.x + 10, tr.y + 6, &shown, theme::TITLE_TEXT);
+    let Some((pw, ph)) = thumb_size(win) else { return };
+    let img = {
+        let slot = win.image.borrow();
+        match slot.as_ref() {
+            Some(im) => (*premultiplied(win, im)).clone(),
+            None => return,
         }
-    }
+    };
+    let mut mips = super::scale::Mips::new(img);
+    let level = mips.level_for(pw, ph).clone();
+    let x = tr.x + (tr.w - pw) / 2;
+    let y = tr.y + theme::text_h() + 12;
+    super::scale::draw(fb, &level, x as i32, y as i32, pw, ph, 255);
 }
+
+/// The Move/Size hint, when the keyboard is moving or sizing a window.
+fn hint_rect(fb: &Framebuffer, d: &Desktop) -> Option<Rect> {
+    d.focus()?;
+    let msg = match d.mode {
+        Mode::Move { .. } => MOVE_HINT,
+        Mode::Size { .. } => SIZE_HINT,
+        _ => return None,
+    };
+    let w = theme::text_w_of(msg);
+    Some(Rect::new((fb.width().saturating_sub(w)) / 2, margin(), w, menu_h()))
+}
+
+const MOVE_HINT: &str = " Move: arrows, Enter to place, Esc to cancel ";
+const SIZE_HINT: &str = " Size: arrows, Enter to keep, Esc to cancel ";
 
 /// The rest of the bar: the recesses, and what did not fit.
 fn taskbar_tail(fb: &Framebuffer, d: &Desktop) {
@@ -4168,23 +4834,17 @@ fn taskbar_tail(fb: &Framebuffer, d: &Desktop) {
         let bar = taskbar_rect(fb);
         if right > w + 6 {
             let r = Rect::new(right - w - 6, bar.y + 4, w, bar.h - 8);
-            theme::control(fb, r, &theme::BTN, theme::BTN_EDGE);
+            let b = super::shape::Box::new(r.x as i32, r.y as i32, r.w, r.h);
+            let white = fb.encode(Color::new(255, 255, 255));
+            super::shape::rrect(fb, b, 4, super::blend::premul(white, 40));
             let ty = r.y + (r.h.saturating_sub(theme::text_h())) / 2;
-            theme::text_over(fb, r.x + 4, ty, &label, theme::TEXT_DIM);
+            theme::text_over(fb, r.x + 4, ty, &label, theme::TITLE_TEXT);
         }
     }
 
-    // The tray recesses. Not `theme::well`: a well outlines a hole in a face,
-    // and on a coloured bar the thing that reads as a recess is being darker
-    // than what surrounds it.
-    let recess = |r: Rect| {
-        fb.rect(r.x, r.y, r.w, r.h, theme::TRAY);
-        theme::outline(fb, r, theme::TRAY_EDGE);
-    };
-    recess(clock_rect(fb));
-    if let Some(b) = battery_rect(fb) {
-        recess(b);
-    }
+    // The tray's readouts stand on the glass as the icons do (`tray_text`).
+    // They sat in dark recesses, which is XP's tray and its notification
+    // area's box.
 }
 
 /// Where the charge readout goes, when there is one.
@@ -4282,66 +4942,1097 @@ pub fn draw() {
     let Some(_claim) = Claim::take() else {
         return;
     };
+    let started = crate::time::rdtsc();
     let screen = screen_rect(&real);
-    // Lift the pointer before presenting, or the pixels saved under it are
-    // stale the moment anything below moves, and putting them back paints a
-    // rectangle of the previous frame onto the new one.
+    // A no-op with a compositor, where the pointer is a plane and never in
+    // the back buffer; without one it lifts the arrow drawn on the aperture.
     cursor_hide(&real);
     // Compose into the back buffer when there is one; the screen then gets
     // only the rows that changed. Without one (no heap yet, or its
     // allocation failed) this is the direct draw it always was.
     let fb = super::compose::target().unwrap_or(real);
+    let (reported, full) = super::render::take_damage();
+    let whole = Rect::new(0, 0, real.width(), real.height());
+    let mut damage = super::region::Region::new();
+    super::frame_clock(true);
+    with(|d| {
+        tile_sync(d, tile_area(&real));
+        track_focus(d);
+    });
     with_ref(|d| {
-        // The terminal is an application, not the screen itself. While its
-        // window is minimised the shell keeps running -- it still reads serial,
-        // still answers, and its output still lands in the console's shadow
-        // grid -- but nothing may reach the framebuffer, or the prompt paints
-        // straight over the desktop it is supposed to be behind. That leak is
-        // what drew a prompt and a black bar across the wallpaper.
+        let next = layers(d, &real, screen);
+        let prev = unsafe { &mut *PREV.get() };
+        // Everything when asked for, when there is no previous frame to
+        // compare with, and when there is no back buffer -- drawing straight
+        // to the aperture has no shadow to make a partial repaint safe.
+        match prev.as_ref() {
+            Some(p) if !full && super::compose::active() => {
+                damage = reported;
+                super::scene::diff(p, &next, &mut damage);
+            }
+            _ => damage.add(whole),
+        }
+        damage.clip_to(whole);
+        // `render flash`: what this frame repaints because something changed,
+        // before the last frame's outlines are added to it -- those are
+        // repainted to erase them and are not themselves outlined, or every
+        // frame would outline the frame before it forever.
+        let shown = damage;
+        let flashing = FLASH.load(core::sync::atomic::Ordering::Relaxed);
+        let lit = unsafe { &mut *FLASHED.get() };
+        for r in lit.iter() {
+            damage.add(r);
+        }
+        damage.clip_to(whole);
+        *lit = super::region::Region::new();
+        place_consoles(d, screen);
+        for r in damage.iter() {
+            paint_scene(&fb.clipped(r.x, r.y, r.w, r.h), d, screen);
+        }
+        if verifying() {
+            verify_frame(&fb, d, screen);
+        }
+        if flashing {
+            for r in shown.iter() {
+                outline(&fb, r, FLASH_COLOUR);
+                lit.add(r);
+            }
+        }
+        *prev = Some(next);
+    });
+    super::frame_clock(false);
+    super::render::drew();
+    let presenting = crate::time::rdtsc();
+    super::render::damaged(damage.len() as u64, damage.area());
+    super::compose::present_region(&damage);
+    // Put the pointer back where it was. Without this every keystroke that
+    // repaints would blink the arrow out until the mouse next moved.
+    if let Some((px, py)) = unsafe { *POS.get() } {
+        cursor_show(&real, px, py);
+    }
+    let ended = crate::time::rdtsc();
+    super::render::frame_timed(started, presenting, ended);
+    // A frame of something moving is a frame the budget is about; the
+    // governor hears of those and nothing else (`quality`).
+    //
+    // Not while `render verify` runs: its reference repaints the whole frame
+    // again inside the frame, and a governor fed that measured the
+    // instrument -- it shed every rung down to no motion on a machine with
+    // headroom to spare.
+    if ANIMATING.load(core::sync::atomic::Ordering::Relaxed) && !verifying() {
+        let us = ended.saturating_sub(started) / crate::time::tsc_mhz().max(1) as u64;
+        // No line on the serial port: one from the compositor lands after
+        // the shell's prompt and hides it from `drive.py`. `render` says.
+        if super::quality::observe(us.min(u32::MAX as u64) as u32) {
+            super::render::damage_all();
+        }
+    }
+}
+
+/// `render flash`: outline every rectangle a frame repaints, so damage can
+/// be watched rather than inferred. The outlines are drawn into the back
+/// buffer after the verifier has looked, and erased by the next frame, which
+/// the tray guarantees within a tenth of a second -- long enough to see.
+static FLASH: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// What the last frame outlined, to repaint away. Under the paint claim.
+static FLASHED: Racy<super::region::Region> = Racy::new(super::region::Region::new());
+const FLASH_COLOUR: Color = Color::new(0xFF, 0x20, 0xC0);
+
+pub fn set_flash(on: bool) {
+    FLASH.store(on, core::sync::atomic::Ordering::Relaxed);
+    super::render::invalidate();
+}
+
+pub fn flashing() -> bool {
+    FLASH.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// A one-pixel frame just inside `r`.
+fn outline(fb: &Framebuffer, r: Rect, c: Color) {
+    if r.w == 0 || r.h == 0 {
+        return;
+    }
+    fb.rect(r.x, r.y, r.w, 1, c);
+    fb.rect(r.x, r.y + r.h - 1, r.w, 1, c);
+    fb.rect(r.x, r.y, 1, r.h, c);
+    fb.rect(r.x + r.w - 1, r.y, 1, r.h, c);
+}
+
+/// The last frame's layers, for `scene::diff`. Only the compositor's frame
+/// reads or writes it, under the paint claim.
+static PREV: Racy<Option<Vec<super::scene::Layer>>> = Racy::new(None);
+
+/// Counts composed frames, for the parts of the scene whose content changes
+/// without anything the scene can fingerprint -- an application drawing from
+/// its own state, a status strip reading the machine. Stamping them with this
+/// repaints them whenever a frame is composed at all, which is what happened to
+/// the whole screen before damage existed; phase 8 gives applications stamps
+/// of their own.
+static FRAME_SEQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Where a terminal's well, grid and strip are inside its client area. One
+/// formula for the painter, the scene and `place_consoles`, which must agree
+/// about where the text goes or it is painted in one place and hit-tested,
+/// reflowed or damaged in another.
+fn terminal_geometry(client: Rect, ch: usize) -> (Rect, Rect, Option<Rect>) {
+    let well = client.shrink(2);
+    let inner = well.shrink(3);
+    let strip = if ch == super::console::USER { terminal_strip(well) } else { None };
+    let grid = match strip {
+        Some(s) => Rect::new(inner.x, inner.y, inner.w, inner.h - s.h),
+        None => inner,
+    };
+    (well, grid, strip)
+}
+
+/// Put each console where its window is, and hide the ones nobody can see,
+/// before any painting.
+///
+/// This was part of the paint pass: every console was hidden at the top of a
+/// frame and made visible again when its window was drawn. Once a frame only
+/// repaints what changed, a frame that does not touch the terminal would leave
+/// it hidden -- and a hidden console's output reaches nothing -- so where each
+/// console is and whether it shows is decided here, from the window list,
+/// whatever the frame repaints.
+///
+/// A minimised window's console was never reflowed *and* never told it was
+/// hidden: it kept its old origin and visibility, and the next line written to
+/// it went straight to the framebuffer at that stale position -- over the
+/// desktop, outside any window. The Executive does this on its own schedule,
+/// so minimising it and waiting produced `[mind t16] disabled` painted on the
+/// wallpaper. Hiding every console first and showing only placed ones is what
+/// prevents that, and nothing is lost: an invisible console still updates its
+/// shadow grid, and its window repaints the whole log when it comes back.
+fn place_consoles(d: &Desktop, screen: Rect) {
+    // Decided first and applied once per console. It hid every console and
+    // then showed the placed ones, every frame -- and a composed console only
+    // reports damage while visible, so a line printed by another task in the
+    // gap between the two reported nothing, and its cell stayed stale until
+    // something else repainted that part of the terminal.
+    let mut placed: [Option<Rect>; super::console::NCONSOLE] = [None; super::console::NCONSOLE];
+    for win in d.windows.iter() {
+        if win.state == WinState::Minimised {
+            continue;
+        }
+        let Content::Terminal(ch) = win.content else { continue };
+        let client = theme::chrome(win.frame(screen), !win.menus.is_empty()).client;
+        if client.is_empty() || ch >= placed.len() {
+            continue;
+        }
+        placed[ch] = Some(terminal_geometry(client, ch).1);
+    }
+    for (ch, grid) in placed.iter().enumerate() {
+        super::console::with_ch(ch, |c| match grid {
+            Some(g) => {
+                c.set_visible(true);
+                c.reflow(g.x, g.y, g.w, g.h);
+            }
+            None => c.set_visible(false),
+        });
+    }
+}
+
+/// What this frame contains, as the scene sees it. Pure over the desktop: it
+/// paints nothing, and two calls over an unchanged desktop answer the same
+/// list -- apart from the parts stamped with `FRAME_SEQ`, on purpose.
+///
+/// **Each stamp has to cover everything its painter reads.** That is the whole
+/// contract, and the way it fails is a pixel that does not update when it
+/// should. `render verify on` composes a whole reference frame every frame and
+/// compares, which is how a missing input is found rather than guessed at.
+/// What a window's painter reads, as the scene stamps it: the whole layer's
+/// stamp, and the parts that repaint on their own. One function for `layers`,
+/// which turns it into damage, and for the window's image, which is re-drawn
+/// exactly where that damage says -- two copies of this would be two answers
+/// to "has this window changed", and a stale image is what the second would
+/// cost.
+fn window_key(
+    d: &Desktop,
+    i: usize,
+    win: &Window,
+    active: bool,
+    frame: Rect,
+    inputs: &(([bool; 96], u32, u32), (String, String, bool)),
+    seq: u64,
+    wake: &mut u32,
+) -> (u64, Vec<(Rect, u64)>) {
+    use super::scene::Stamp;
+    use core::hash::Hash;
+    let hot = match d.hover {
+        Hover::Caption { win, which } if win == i => Some(which),
+        _ => None,
+    };
+    let menu_hover = match d.hover {
+        Hover::MenuLabel { win, menu } if win == i => Some(menu),
+        _ => None,
+    };
+    let open_menu = match d.mode {
+        Mode::Menu { menu, .. } if active => Some(menu),
+        _ => None,
+    };
+    let mut st = Stamp::new();
+    (frame, win.title.as_str(), active, win.state == WinState::Maximised).hash(&mut st);
+    (hot, menu_hover, open_menu, win.round).hash(&mut st);
+    // The caption glass's tint is chrome the painter reads.
+    theme::caption_tint().hash(&mut st);
+    // And the scale, which every metric in it is drawn at, and every other
+    // setting (`settings::generation`).
+    theme::scale().hash(&mut st);
+    super::settings::generation().hash(&mut st);
+    super::quality::level().hash(&mut st);
+    for m in &win.menus {
+        m.label.hash(&mut st);
+    }
+    let chrome = theme::chrome(frame, !win.menus.is_empty());
+    let client = chrome.client;
+    let mut parts = Vec::new();
+    if !client.is_empty() {
+        match &win.content {
+            Content::Terminal(ch) => {
+                let (well, grid, strip) = terminal_geometry(client, *ch);
+                // The well's border and the grid's own background are
+                // fixed by the geometry; the console repaints its text
+                // itself as it prints.
+                core::hash::Hasher::write_u64(&mut st, Stamp::of((well, grid)));
+                // The gutter marks where prompts start and the strip reads
+                // the machine's state, each stamped with exactly what its
+                // painter reads. The gutter belongs to the main terminal
+                // alone, as its painter does.
+                if *ch == super::console::USER {
+                    parts.push((Rect::new(well.x + 1, grid.y, 2, grid.h), Stamp::of(inputs.0)));
+                }
+                if let Some(strip) = strip {
+                    parts.push((strip, Stamp::of(&inputs.1)));
+                }
+            }
+            Content::Panel(p) => {
+                let hov = match d.hover {
+                    Hover::Widget { win, idx } if win == i => Some(idx),
+                    _ => None,
+                };
+                parts.push((client, Stamp::of((p.stamp(), active, hov))));
+            }
+            Content::Browser(b) => parts.push((client, Stamp::of((b.stamp(), active)))),
+            Content::App(a) => {
+                if let Some(ms) = a.wake_ms() {
+                    *wake = (*wake).min(ms.max(1));
+                }
+                parts.push((client, app_key(a.as_ref(), active, client, seq)))
+            }
+        }
+    }
+    (core::hash::Hasher::finish(&st), parts)
+}
+
+fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Layer> {
+    use super::scene::{Layer, LayerId, Stamp};
+    use core::hash::Hash;
+    let seq = FRAME_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let now = super::anim::now_us();
+    let (w, h) = (fb.width(), fb.height());
+    let mut out = Vec::new();
+    let mut wake = u32::MAX;
+    let inputs = (gutter_marks(), status_text());
+    out.push(Layer { id: LayerId::Wallpaper, bounds: Rect::new(0, 0, w, h), stamp: Stamp::of((w, h)), parts: Vec::new() });
+
+    let icons = icon_rects(fb);
+    if let Some(b) = icons.iter().map(|(r, _)| *r).reduce(|a, b| {
+        let x0 = a.x.min(b.x);
+        let y0 = a.y.min(b.y);
+        Rect::new(x0, y0, (a.x + a.w).max(b.x + b.w) - x0, (a.y + a.h).max(b.y + b.h) - y0)
+    }) {
+        // Hover moves the highlight between icons, and only the icons read it
+        // among the things under the windows.
         //
-        // Cleared here and set again only if the terminal is actually drawn
-        // below, so visibility is *derived* from whether it was painted rather
-        // than tracked alongside the window state and able to disagree with it.
-        super::console::with(|c| c.set_visible(false));
-        wallpaper(&fb);
+        // Padded, because the painter draws outside the cells: a hovered
+        // label's highlight is six pixels wider than the label and a long
+        // label is as wide as its cell, so the highlight spilled a pixel past
+        // each side and a repaint clipped to the cells left those columns
+        // stale. `render verify` found it on the first hover over Terminal.
+        let pad = 8;
+        let b = Rect::new(b.x.saturating_sub(pad), b.y.saturating_sub(pad), b.w + 2 * pad, b.h + 2 * pad);
+        out.push(Layer { id: LayerId::Icons, bounds: b, stamp: Stamp::of((d.hover, theme::scale())), parts: Vec::new() });
+    }
+
+    let focus = d.focus();
+    {
+        let mut st = Stamp::new();
+        for win in &d.windows {
+            win.title.hash(&mut st);
+            win.icon.hash(&mut st);
+            (win.state == WinState::Minimised).hash(&mut st);
+            (win.state == WinState::Maximised).hash(&mut st);
+        }
+        focus.hash(&mut st);
+        d.mode.hash(&mut st);
+        d.hover.hash(&mut st);
+        theme::scale().hash(&mut st);
+        super::settings::generation().hash(&mut st);
+        super::quality::level().hash(&mut st);
+        // The readouts are parts of the bar: a new tenth of a second repaints
+        // the clock's well and nothing else.
+        let (clock, battery) = tray_strings();
+        let mut parts = alloc::vec![(clock_rect(fb), Stamp::of(clock.as_str()))];
+        if let Some(b) = battery_rect(fb) {
+            parts.push((b, Stamp::of(battery.as_deref())));
+        }
+        out.push(Layer {
+            id: LayerId::Taskbar,
+            bounds: taskbar_rect(fb),
+            stamp: core::hash::Hasher::finish(&st),
+            parts,
+        });
+    }
+
+    for (i, win) in d.windows.iter().enumerate() {
+        if win.state == WinState::Minimised {
+            continue;
+        }
+        let active = Some(i) == focus;
+        let frame = win.frame(screen);
+        let bounds = shadowed(win, frame, active, fb);
+        let (mut stamp, parts) = window_key(d, i, win, active, frame, &inputs, seq, &mut wake);
+        // An arriving or sliding window is a different picture every frame.
+        // Its whole layer moves with the clock, fixed here for the frame, and
+        // a slide's layer reaches back to where it set out from.
+        let mut bounds = bounds;
+        win.shown.set(
+            win.arrive
+                .map(|t| {
+                    let (k, o) = arrival_at(t, now);
+                    (scaled(frame, k), q4096(o))
+                })
+                .or_else(|| win.slide.map(|(from, t)| (lerp_rect(from, frame, t.at(now)), 1.0))),
+        );
+        if let Some((r, o)) = win.shown.get() {
+            stamp = Stamp::of((stamp, r, (o * 4096.0) as u32));
+        }
+        if active {
+            let ring = unsafe { &mut *FOCUS_RING.get() };
+            ring.2 = q4096(ring.1.map_or(1.0, |t| t.at(now)));
+            stamp = Stamp::of((stamp, (ring.2 * 4096.0) as u32));
+        }
+        if let Some((from, _)) = win.slide {
+            let b = shadowed(win, from, active, fb);
+            let x0 = bounds.x.min(b.x);
+            let y0 = bounds.y.min(b.y);
+            bounds = Rect::new(x0, y0, (bounds.x + bounds.w).max(b.x + b.w) - x0, (bounds.y + bounds.h).max(b.y + b.h) - y0);
+        }
+        out.push(Layer {
+            id: LayerId::Window(win.serial),
+            bounds,
+            stamp,
+            parts,
+        });
+    }
+
+    // Everything drawn over the windows: the taskbar tip, menus, the move and
+    // size hint, the Start menu. One layer, because they come and go together
+    // with the mode and the hover, and its bounds are their union.
+    // Windows on their way out, over the windows and under the popups.
+    for gh in unsafe { (*GHOSTS.get()).iter() } {
+        let (k, o) = departure_at(gh.out, now);
+        let (k, o) = (q4096(k), q4096(o));
+        gh.shown.set((k, o));
+        out.push(Layer {
+            id: LayerId::Ghost(gh.serial),
+            bounds: gh.frame,
+            stamp: Stamp::of(((k * 4096.0) as u32, (o * 4096.0) as u32)),
+            parts: Vec::new(),
+        });
+    }
+
+    let mut over: Option<Rect> = None;
+    let mut grow = |r: Rect| {
+        over = Some(match over {
+            None => r,
+            Some(a) => {
+                let x0 = a.x.min(r.x);
+                let y0 = a.y.min(r.y);
+                Rect::new(x0, y0, (a.x + a.w).max(r.x + r.w) - x0, (a.y + a.h).max(r.y + r.h) - y0)
+            }
+        });
+    };
+    if let Some(t) = tip_rect(fb, d) {
+        // The tip's shadow is offset two pixels.
+        grow(Rect::new(t.x, t.y, t.w + 2, t.h + 2));
+    }
+    if let Some(p) = dropdown_rows(fb, d, screen) {
+        if let Mode::Start { .. } = d.mode {
+            let (spec, dx, dy, _) = START_SHADOW;
+            let (l, t, r, b) = super::shadow::reach(spec, dx, dy);
+            let x0 = p.panel.x.saturating_sub(l);
+            let y0 = p.panel.y.saturating_sub(t);
+            grow(Rect::new(x0, y0, p.panel.x + p.panel.w + r - x0, (p.panel.y + p.panel.h + b).min(fb.height()) - y0));
+        }
+        grow(p.panel);
+    }
+    if let Some(r) = hint_rect(fb, d) {
+        grow(r);
+    }
+    if let Some(b) = over {
+        let mut st = Stamp::new();
+        (d.mode, d.hover, d.query.as_str(), focus).hash(&mut st);
+        if let Hover::Task(t) = d.hover {
+            d.windows.get(t).map(|w| w.title.as_str()).hash(&mut st);
+            // The preview is live: it follows the window's image.
+            d.windows.get(t).and_then(|w| w.image.borrow().as_ref().map(|im| (im.key, im.frame, im.parts.clone()))).hash(&mut st);
+        }
+        out.push(Layer { id: LayerId::Overlay, bounds: b, stamp: core::hash::Hasher::finish(&st), parts: Vec::new() });
+    }
+    if let Some(f) = unsafe { (*FLIP.get()).as_mut() } {
+        let (o, u) = flip_at(f, now);
+        // Fixed to a 4096th, as every moving layer's values are (`q4096`).
+        let o = ((o * 4096.0) as i64) as f32 / 4096.0;
+        f.shown = (o, q4096(u));
+        if !f.live {
+            // The back buffer still holds the last frame -- the desktop as it
+            // stood when the stack was asked for.
+            if let Some(back) = super::compose::target() {
+                let n = (back.width() * back.height()) as usize;
+                if back.width() == w && back.height() == h && f.under.try_reserve_exact(n).is_ok() {
+                    let src = unsafe { core::slice::from_raw_parts(back.addr() as *const u32, n) };
+                    f.under.extend_from_slice(src);
+                }
+            }
+        }
+        f.live = true;
+        out.push(Layer {
+            id: LayerId::Flip,
+            bounds: Rect::new(0, 0, w, h),
+            stamp: Stamp::of(((f.shown.0 * 4096.0) as i64, (f.shown.1 * 4096.0) as u32, f.order.len())),
+            parts: Vec::new(),
+        });
+    }
+    unsafe { *FRAME_INPUTS.get() = Some(inputs) };
+    APP_WAKE.store(if wake == u32::MAX { 0 } else { wake }, core::sync::atomic::Ordering::Relaxed);
+    out
+}
+
+/// The wallpaper, painted once per screen size into memory of its own.
+///
+/// `wallpaper` draws a gradient sky, a lattice, a dial, three ellipses of
+/// Bresenham chords and seven bubbles -- several thousand primitives -- and it
+/// was doing so sixty times a second whenever anything moved. With damage it
+/// would do so once per damaged rectangle, mostly to throw the result away.
+/// Painted once and kept, a repaint of any part of it is a row copy.
+///
+/// 8 MB at 1920x1080. When that allocation fails the procedural painter runs
+/// as it always did, which is slower and identical.
+static WALL: Racy<Option<(Vec<u32>, u32, u32)>> = Racy::new(None);
+
+/// How hard the glass blurs the wallpaper, in pixels at the screen's own
+/// resolution. Vista blurred a downsampled copy at a sigma of three, which is
+/// about twelve here; a little more reads as frosted rather than smeared.
+const GLASS_SIGMA: f32 = 14.0;
+
+/// Keep a wallpaper somebody else already painted -- the boot screen's glide
+/// ends on it -- rather than painting it again, and take the glass blur from
+/// it as `wallpaper_cached` would. Before the desktop exists, so nothing is
+/// composing from the cache while it is set.
+pub(crate) fn adopt_wallpaper(px: Vec<u32>, w: u32, h: u32) {
+    super::glass::set_backdrop(&px, w, h, GLASS_SIGMA);
+    unsafe { *WALL.get() = Some((px, w, h)) };
+}
+
+fn wallpaper_cached(fb: &Framebuffer) {
+    let (w, h) = (fb.width(), fb.height());
+    let cache = unsafe { &mut *WALL.get() };
+    if cache.as_ref().map(|c| (c.1, c.2)) != Some((w, h)) {
+        *cache = None;
+        let n = w as usize * h as usize;
+        let mut px = Vec::new();
+        if px.try_reserve_exact(n).is_ok() {
+            px.resize(n, 0u32);
+            let surf = unsafe { Framebuffer::over_ram(px.as_mut_ptr() as u64, w, h, w, fb.format()) };
+            wallpaper(&surf);
+            // The blurred copy every pane of glass samples, made here because
+            // this is the one moment the wallpaper changes.
+            super::glass::set_backdrop(&px, w, h, GLASS_SIGMA);
+            *cache = Some((px, w, h));
+        }
+    }
+    match cache.as_ref() {
+        Some((px, w, _)) => {
+            let (x0, y0, x1, y1) = fb.scissor();
+            for y in y0..y1 {
+                let row = &px[(y * w) as usize..((y + 1) * w) as usize];
+                fb.blit_span(x0, y, &row[x0 as usize..x1 as usize]);
+            }
+        }
+        None => wallpaper(fb),
+    }
+}
+
+/// Compose a whole reference frame every frame and compare it with what the
+/// damage-limited one produced. A debugging aid, off by default and costly
+/// when on; `render verify on|off`.
+static VERIFY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static VERIFY_BAD: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Frames that differed only inside a terminal's grid. Counted apart because
+/// until phase 7 the console paints its own cells, caret included, straight
+/// into the back buffer between frames, and a full repaint reproduces the text
+/// but not every trace of the caret -- a known difference with a known owner,
+/// which must not drown a scene bug in the same count.
+static VERIFY_CONSOLE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static VERIFY_RUNS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static VERIFY_FIRST: Racy<Option<Rect>> = Racy::new(None);
+/// The first differing pixel of the first bad frame: where, what the frame
+/// had and what the reference had. A bounding box says where to look; two
+/// values say what is wrong -- a missing blend, a stale frame, a dim applied
+/// twice -- which a box never can.
+static VERIFY_PIXEL: Racy<Option<(u32, u32, u32, u32)>> = Racy::new(None);
+
+pub fn verify_pixel() -> Option<(u32, u32, u32, u32)> {
+    unsafe { *VERIFY_PIXEL.get() }
+}
+
+/// The verifier's reference frame. Written only under the paint claim.
+static VERIFY_BUF: Racy<Vec<u32>> = Racy::new(Vec::new());
+
+pub fn set_verify(on: bool) {
+    if on {
+        // Sized here, on the shell's task and under the paint claim, so no
+        // frame ever allocates it and none can be reading it while it moves.
+        if let Some(fb) = super::primary() {
+            let n = fb.width() as usize * fb.height() as usize;
+            let deadline = crate::time::rdtsc() + crate::time::tsc_mhz().max(1) as u64 * 1_000_000;
+            let mut held = Claim::take();
+            while held.is_none() && crate::time::rdtsc() < deadline {
+                crate::task::yield_now();
+                held = Claim::take();
+            }
+            if held.is_some() {
+                let buf = unsafe { &mut *VERIFY_BUF.get() };
+                if buf.len() != n {
+                    buf.clear();
+                    if buf.try_reserve_exact(n).is_ok() {
+                        buf.resize(n, 0);
+                    }
+                }
+            }
+        }
+    }
+    VERIFY.store(on, core::sync::atomic::Ordering::Relaxed);
+    if on {
+        VERIFY_BAD.store(0, core::sync::atomic::Ordering::Relaxed);
+        VERIFY_CONSOLE.store(0, core::sync::atomic::Ordering::Relaxed);
+        VERIFY_RUNS.store(0, core::sync::atomic::Ordering::Relaxed);
+        unsafe { *VERIFY_FIRST.get() = None };
+        unsafe { *VERIFY_PIXEL.get() = None };
+    }
+}
+
+fn verifying() -> bool {
+    VERIFY.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Frames checked, frames that differed outside any terminal grid, frames
+/// that differed only inside one, and the first scene difference seen.
+pub fn verify_report() -> (u64, u64, u64, Option<Rect>) {
+    (
+        VERIFY_RUNS.load(core::sync::atomic::Ordering::Relaxed),
+        VERIFY_BAD.load(core::sync::atomic::Ordering::Relaxed),
+        VERIFY_CONSOLE.load(core::sync::atomic::Ordering::Relaxed),
+        unsafe { *VERIFY_FIRST.get() },
+    )
+}
+
+/// Paint the whole frame into scratch memory and compare it with `back`.
+///
+/// The tray readouts are left out of the comparison: their text is read at
+/// paint time, so a tenth of a second turning over between the frame and the
+/// reference is a difference in the clock rather than in the renderer.
+///
+/// The reference lives in `VERIFY_BUF`, allocated once when verification is
+/// switched on. It was a fresh eight megabytes per frame, and `diag mt` --
+/// which checks the heap has not grown across a run -- caught a frame that
+/// happened to be in flight at its closing sample and reported it as a leak
+/// of exactly one 1920x1080 frame.
+fn verify_frame(back: &Framebuffer, d: &Desktop, screen: Rect) {
+    let (w, h) = (back.width(), back.height());
+    let n = w as usize * h as usize;
+    let px = unsafe { &mut *VERIFY_BUF.get() };
+    if px.len() != n {
+        return;
+    }
+    let scratch = unsafe { Framebuffer::over_ram(px.as_mut_ptr() as u64, w, h, w, back.format()) };
+    REFERENCE.store(true, core::sync::atomic::Ordering::Relaxed);
+    paint_scene(&scratch, d, screen);
+    REFERENCE.store(false, core::sync::atomic::Ordering::Relaxed);
+    VERIFY_RUNS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let skip = [clock_rect(back), battery_rect(back).unwrap_or(Rect::new(0, 0, 0, 0))];
+    let grids: Vec<Rect> = d.windows.iter().enumerate()
+        .filter(|(_, w)| w.state != WinState::Minimised && w.arrive.is_none() && w.slide.is_none())
+        .filter_map(|(_, w)| match w.content {
+            Content::Terminal(ch) => {
+                let client = theme::chrome(w.frame(screen), !w.menus.is_empty()).client;
+                Some(terminal_geometry(client, ch).1)
+            }
+            _ => None,
+        })
+        .collect();
+    let inside = |rs: &[Rect], x: u32, y: u32| rs.iter().any(|r| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h);
+    let base = back.addr() as *const u32;
+    let mut bad: Option<Rect> = None;
+    let mut console_only = false;
+    for y in 0..h {
+        for x in 0..w {
+            if inside(&skip, x, y) {
+                continue;
+            }
+            let a = unsafe { *base.add((y * back.stride() + x) as usize) };
+            if a != px[(y * w + x) as usize] && inside(&grids, x, y) {
+                console_only = true;
+                continue;
+            }
+            if a != px[(y * w + x) as usize] {
+                let pix = unsafe { &mut *VERIFY_PIXEL.get() };
+                if pix.is_none() {
+                    *pix = Some((x, y, a, px[(y * w + x) as usize]));
+                }
+                bad = Some(match bad {
+                    None => Rect::new(x, y, 1, 1),
+                    Some(r) => {
+                        let x0 = r.x.min(x);
+                        let y0 = r.y.min(y);
+                        Rect::new(x0, y0, (r.x + r.w).max(x + 1) - x0, (r.y + r.h).max(y + 1) - y0)
+                    }
+                });
+            }
+        }
+    }
+    if bad.is_none() && console_only {
+        VERIFY_CONSOLE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(r) = bad {
+        VERIFY_BAD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let first = unsafe { &mut *VERIFY_FIRST.get() };
+        // Recorded, not printed: a line from the compositor lands in the
+        // middle of whatever the shell is printing, and the first one landed
+        // on the prompt, which hid it from `drive.py` and looked exactly like
+        // a hung shell. `render verify` reports it.
+        if first.is_none() {
+            *first = Some(r);
+        }
+    }
+}
+
+/// Paint the desktop onto `target`: everything, in order, back to front.
+///
+/// This is what `draw` used to do inline, unchanged except that it is now run
+/// once per damaged rectangle with `target` clipped to it -- so every painter
+/// below draws exactly what it always drew and loses whatever falls outside
+/// the rectangle. Windows wholly outside it are skipped. The order is the
+/// order, so a translucent shadow or glass band always blends over pixels
+/// repainted underneath it in the same pass.
+/// Set while `render verify` composes its reference frame, which paints
+/// every window straight onto the frame rather than out of its image.
+static REFERENCE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Window images drawn whole and in part since boot, for `render`.
+static IMAGE_WHOLE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static IMAGE_PART: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// `(whole, part, bytes held)`: how often window images were drawn, and what
+/// they hold now.
+pub fn image_stats() -> (u64, u64, usize) {
+    let held = with_ref(|d| {
+        d.windows.iter().map(|w| w.image.borrow().as_ref().map_or(0, |im| im.px.len() * 4)).sum()
+    })
+    .unwrap_or(0);
+    (
+        IMAGE_WHOLE.load(core::sync::atomic::Ordering::Relaxed),
+        IMAGE_PART.load(core::sync::atomic::Ordering::Relaxed),
+        held,
+    )
+}
+
+/// How much an unfocused window is dimmed, of 256: Hyprland's
+/// `dim_inactive`, kept light -- the cue is which window is nearest the eye,
+/// and the others still have to be read.
+static DIM: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(228);
+/// The per cent it was set as, kept so it reads back as what was asked for
+/// rather than as a 256th rounded back.
+static DIM_PCT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(11);
+
+/// How dark an unfocused window goes, in per cent (Settings): 0 is off.
+pub fn set_dim(percent: u32) {
+    let p = percent.min(60);
+    DIM_PCT.store(p, core::sync::atomic::Ordering::Relaxed);
+    DIM.store(256 - (p * 256 + 50) / 100, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn dim_percent() -> u32 {
+    DIM_PCT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether a new window tiles (Settings); off, it floats where it opens.
+static TILE_NEW: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+pub fn set_tile_new(on: bool) {
+    TILE_NEW.store(on, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn tile_new() -> bool {
+    TILE_NEW.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// The focus ring's two colours (Settings), by name.
+pub const RINGS: [(&str, Color, Color); 3] = [
+    ("aperture", theme::APERTURE, Color::new(0xFF, 0xC8, 0x5A)),
+    ("sky", Color::new(0x33, 0xCC, 0xFF), Color::new(0x00, 0xFF, 0x99)),
+    ("ice", Color::new(0xB8, 0xD8, 0xFF), Color::new(0xFF, 0xFF, 0xFF)),
+];
+static RING: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+pub fn set_ring(name: &str) -> bool {
+    match RINGS.iter().position(|r| r.0 == name) {
+        Some(i) => {
+            RING.store(i as u8, core::sync::atomic::Ordering::Relaxed);
+            true
+        }
+        None => false,
+    }
+}
+
+pub fn ring_name() -> &'static str {
+    RINGS[RING.load(core::sync::atomic::Ordering::Relaxed) as usize % RINGS.len()].0
+}
+
+/// The focused window's ring: how wide it is, and how far its glow reaches.
+const RING_W: f32 = 2.0;
+const GLOW: f32 = 10.0;
+
+/// Which window the ring is on and how far it has faded up (Hyprland's
+/// `border`, 539 ms easeOutQuint), and this frame's opacity of it, fixed by
+/// `layers` as a window's position is.
+static FOCUS_RING: Racy<(u64, Option<super::anim::Tween>, f32)> = Racy::new((0, None, 1.0));
+
+/// Notice focus moving to a different window and fade the ring up on it.
+fn track_focus(d: &Desktop) {
+    let now = d.focus().map_or(0, |f| d.windows[f].serial);
+    let ring = unsafe { &mut *FOCUS_RING.get() };
+    if ring.0 != now {
+        ring.0 = now;
+        if super::render::enabled() {
+            use super::anim::{Curve, Tween};
+            ring.1 = Some(Tween::new(539, Curve::EaseOutQuint));
+            ANIMATING.store(true, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// Signed distance from a point to a window's outline -- square at the
+/// foot, corners of radius `r` at the head, as `Shape::round_top` cuts it.
+fn sd_frame(px: f32, py: f32, f: Rect, r: f32) -> f32 {
+    let (x0, y0, x1, y1) = (f.x as f32, f.y as f32, (f.x + f.w) as f32, (f.y + f.h) as f32);
+    if r > 0.0 && py < y0 + r {
+        let corner = |cx: f32| {
+            let (dx, dy) = (px - cx, py - (y0 + r));
+            super::shape::libm_sqrt(dx * dx + dy * dy) - r
+        };
+        if px < x0 + r {
+            return corner(x0 + r);
+        }
+        if px > x1 - r {
+            return corner(x1 - r);
+        }
+    }
+    (x0 - px).max(px - x1).max(y0 - py).max(py - y1)
+}
+
+/// The focused window's border: a thin ring just inside its outline, in a
+/// 45-degree ramp from Aperture orange to gold -- Hyprland's gradient
+/// border, in the accent the Look keeps for focus -- with a soft warm glow
+/// outside it. `glow` is false where there is nothing outside to glow on.
+fn focus_ring(fb: &Framebuffer, frame: Rect, round: u32, alpha: f32, glow: bool) {
+    if alpha <= 0.0 || frame.w < 8 || frame.h < 8 {
+        return;
+    }
+    let r = round as f32;
+    let reach = if glow { GLOW as u32 } else { 0 };
+    let x0 = frame.x.saturating_sub(reach);
+    let x1 = frame.x + frame.w + reach;
+    let (sx0, sy0, sx1, sy1) = fb.scissor();
+    let y0 = frame.y.saturating_sub(reach).max(sy0);
+    let y1 = (frame.y + frame.h + reach).min(sy1);
+    let band = round + RING_W as u32 + 2;
+    let (_, a, b) = RINGS[RING.load(core::sync::atomic::Ordering::Relaxed) as usize % RINGS.len()];
+    let span = (frame.w + frame.h).max(1) as f32;
+    let mut row: Vec<u32> = Vec::new();
+    let cov = |t: f32| (0.5 - t).clamp(0.0, 1.0);
+    let mut paint = |y: u32, xa: u32, xb: u32, row: &mut Vec<u32>| {
+        let (xa, xb) = (xa.max(sx0), xb.min(sx1));
+        if xa >= xb {
+            return;
+        }
+        row.clear();
+        let py = y as f32 + 0.5;
+        for x in xa..xb {
+            let d = sd_frame(x as f32 + 0.5, py, frame, r);
+            let ring = cov(d) - cov(d + RING_W);
+            let g = if glow && d > 0.0 { let k = (1.0 - d / GLOW).max(0.0); 0.30 * k * k } else { 0.0 };
+            let k = ring.max(g) * alpha;
+            if k <= 0.0 {
+                row.push(0);
+                continue;
+            }
+            let t = (((x as f32 - frame.x as f32) + (py - frame.y as f32)) / span).clamp(0.0, 1.0);
+            let mix = |p: u8, q: u8| (p as f32 + (q as f32 - p as f32) * t + 0.5) as u8;
+            let raw = fb.encode(Color::new(mix(a.r, b.r), mix(a.g, b.g), mix(a.b, b.b)));
+            row.push(super::blend::premul(raw, (k * 255.0 + 0.5) as u8));
+        }
+        fb.over_row(xa, y, row);
+    };
+    for y in y0..y1 {
+        let near_edge = y < frame.y + band || y + RING_W as u32 + 2 >= frame.y + frame.h;
+        if near_edge {
+            paint(y, x0, x1, &mut row);
+        } else {
+            // Between the head and the foot only the two sides carry a ring.
+            paint(y, x0, frame.x + RING_W as u32 + 2, &mut row);
+            paint(y, (frame.x + frame.w).saturating_sub(RING_W as u32 + 2), x1, &mut row);
+        }
+    }
+}
+
+/// An unfocused window, dimmed where it shows.
+fn dim_window(fb: &Framebuffer, win: &Window, frame: Rect) {
+    with_window_shape(fb, win, frame, || {
+        let (x0, y0, x1, y1) = fb.scissor();
+        let xa = x0.max(frame.x);
+        let xb = x1.min(frame.x + frame.w);
+        if xa >= xb {
+            return;
+        }
+        for y in y0.max(frame.y)..y1.min(frame.y + frame.h) {
+            fb.shade_span(xa, y, xb - xa, DIM.load(core::sync::atomic::Ordering::Relaxed));
+        }
+    });
+}
+
+/// A terminal's grid, over whatever the window under it was painted from.
+fn console_over(fb: &Framebuffer, win: &Window) {
+    if let Content::Terminal(ch) = &win.content {
+        super::console::blit_ch(*ch, fb);
+    }
+}
+
+/// Bring a window's image up to date and copy the part of it the frame is
+/// repainting. False when there is no image to be had, and the caller paints
+/// directly.
+fn from_image(fb: &Framebuffer, d: &Desktop, i: usize, win: &Window, frame: Rect, active: bool, hot: Option<usize>) -> bool {
+    if !ensure_image(fb.format(), d, i, win, frame, active, hot) {
+        return false;
+    }
+    let slot = win.image.borrow();
+    let Some(im) = slot.as_ref() else { return false };
+    with_window_shape(fb, win, frame, || {
+        let (x0, y0, x1, y1) = fb.scissor();
+        let xa = x0.max(frame.x);
+        let xb = x1.min(frame.x + frame.w);
+        if xa >= xb {
+            return;
+        }
+        for y in y0.max(frame.y)..y1.min(frame.y + frame.h) {
+            let r = (y - frame.y) as usize * frame.w as usize;
+            fb.blit_span(xa, y, &im.px[r + (xa - frame.x) as usize..r + (xb - frame.x) as usize]);
+        }
+    });
+    true
+}
+
+/// Bring a window's image up to date. False when there is none to be had.
+fn ensure_image(format: super::Format, d: &Desktop, i: usize, win: &Window, frame: Rect, active: bool, hot: Option<usize>) -> bool {
+    use core::sync::atomic::Ordering::Relaxed;
+    if frame.is_empty() {
+        return false;
+    }
+    let inputs = unsafe { (*FRAME_INPUTS.get()).clone() }.unwrap_or_else(|| (gutter_marks(), status_text()));
+    let mut wake = u32::MAX;
+    let (key, parts) = window_key(d, i, win, active, frame, &inputs, FRAME_SEQ.load(Relaxed), &mut wake);
+    let mut slot = win.image.borrow_mut();
+    let n = frame.w as usize * frame.h as usize;
+    let whole = match slot.as_ref() {
+        Some(im) => im.frame != frame || im.key != key || im.parts.len() != parts.len(),
+        None => true,
+    };
+    let t0 = crate::time::rdtsc();
+    if whole {
+        let mut px = match slot.take() {
+            Some(im) if im.px.len() == n => im.px,
+            _ => {
+                let mut v = Vec::new();
+                if v.try_reserve_exact(n).is_err() {
+                    return false;
+                }
+                v.resize(n, 0);
+                v
+            }
+        };
+        let img = unsafe { Framebuffer::displaced(px.as_mut_ptr(), frame.x, frame.y, frame.w, frame.h, format) };
+        paint_window_body(&img, d, i, win, frame, active, hot);
+        IMAGE_WHOLE.fetch_add(1, Relaxed);
+        *slot = Some(WinImage { px, frame, key, parts, prem: Default::default() });
+    } else if let Some(im) = slot.as_mut() {
+        // Only the parts whose stamps moved, which is exactly the damage the
+        // scene gave this window: the rest of the image is still what it
+        // would draw.
+        for (k, part) in parts.iter().enumerate() {
+            if im.parts[k] == *part {
+                continue;
+            }
+            let (r, _) = *part;
+            let img = unsafe { Framebuffer::displaced(im.px.as_mut_ptr(), frame.x, frame.y, frame.w, frame.h, format) };
+            paint_window_body(&img.clipped(r.x, r.y, r.w, r.h), d, i, win, frame, active, hot);
+            im.parts[k] = *part;
+            *im.prem.borrow_mut() = None;
+            IMAGE_PART.fetch_add(1, Relaxed);
+        }
+    }
+    super::render::cost(super::render::Cost::WinImage, crate::time::rdtsc().saturating_sub(t0));
+    slot.is_some()
+}
+
+/// Everything a window paints inside its own outline but the terminal
+/// grid: the frame, the caption, the menu bar and the client. Into the
+/// window's image normally, and straight onto the frame when there is no
+/// image -- `render verify`'s reference frame, or no memory for one.
+fn paint_window_body(fb: &Framebuffer, d: &Desktop, i: usize, win: &Window, frame: Rect, active: bool, hot: Option<usize>) {
+    let fb = *fb;
+    let c = theme::window(
+        &fb,
+        frame,
+        &win.title,
+        active,
+        win.state == WinState::Maximised,
+        !win.menus.is_empty(),
+        hot,
+    );
+    let client = c.client;
+    if client.is_empty() {
+        // Nothing left to draw inside the frame; the chrome is
+        // already painted.
+        return;
+    }
+
+    if let Some(bar) = c.menubar {
+        theme::panel(&fb, bar);
+        let open = match d.mode {
+            Mode::Menu { menu, .. } if active => Some(menu),
+            _ => None,
+        };
+        let labels = theme::menu_labels(bar, win.menus.iter().map(|m| m.label.as_str()));
+        for (mi, (m, lr)) in win.menus.iter().zip(labels).enumerate() {
+            let hot = Some(mi) == open
+                || d.hover == Hover::MenuLabel { win: i, menu: mi };
+            let (fg, bg) = if hot {
+                (theme::SELECT_TEXT, theme::SELECT)
+            } else {
+                (theme::TEXT, theme::FACE)
+            };
+            let ty = lr.y + (lr.h.saturating_sub(theme::text_h())) / 2;
+            fb.rect(lr.x, lr.y + 1, lr.w, lr.h.saturating_sub(2), bg);
+            theme::text(&fb, lr.x + 6, ty, &m.label, fg, bg);
+        }
+    }
+
+    match &win.content {
+        Content::Terminal(ch) => {
+            let well = client.shrink(2);
+            theme::well(&fb, well, theme::SCREEN);
+            let inner = well.shrink(3);
+            // A status strip along the foot of the *window*, with
+            // the grid reflowed into what is left. It goes on the
+            // main terminal only: the exec console is a transcript
+            // of one command and has no state of its own to
+            // report, and a second strip would be two rows of
+            // chrome saying the same thing.
+            let strip = if *ch == super::console::USER {
+                terminal_strip(well)
+            } else {
+                None
+            };
+            let grid = match strip {
+                Some(s) => Rect::new(inner.x, inner.y, inner.w, inner.h - s.h),
+                None => inner,
+            };
+            // The grid itself is the console's own surface, laid over
+            // this by `console_over` -- outside the window's image,
+            // because text arrives far more often than chrome changes.
+            let _ = grid;
+            if *ch == super::console::USER {
+                prompt_gutter(&fb, well, grid);
+            }
+            if let Some(strip) = strip {
+                terminal_status(&fb, strip);
+            }
+        }
+        Content::Panel(p) => {
+            theme::panel(&fb, client);
+            let hov = match d.hover {
+                Hover::Widget { win, idx } if win == i => Some(idx),
+                _ => None,
+            };
+            p.draw_in(&fb, client, active, hov);
+        }
+        Content::Browser(b) => b.draw_in(&fb, client, active),
+        Content::App(a) => paint_app(win, a.as_ref(), &fb, client, active),
+    }
+}
+
+fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
+    let fb = *target;
+    // Flip 3D, fully up, covers everything: nothing under it is painted.
+    if let Some(f) = unsafe { (*FLIP.get()).as_ref() } {
+        if f.live && (f.shown.1 >= 1.0 || !f.under.is_empty()) {
+            paint_flip(&fb, d, screen);
+            return;
+        }
+    }
+    use super::render::{cost, Cost};
+    let mut t = crate::time::rdtsc();
+    let lap = |what: Cost, t: &mut u64| {
+        let now = crate::time::rdtsc();
+        cost(what, now.saturating_sub(*t));
+        *t = now;
+    };
+    {
+        wallpaper_cached(&fb);
+        lap(Cost::Wallpaper, &mut t);
         draw_icons(&fb, d.hover);
+        lap(Cost::Icons, &mut t);
         let focus = d.focus();
         let sel = match d.mode {
             Mode::Taskbar { item } => Some(item),
             _ => None,
         };
         taskbar(&fb, d, sel);
+        paint_tray_text(&fb);
+        lap(Cost::Taskbar, &mut t);
 
-        // Every console starts this pass unpainted, and the loop below turns
-        // back on the ones it actually draws.
-        //
-        // A minimised window is skipped by the `continue` below, so its console
-        // was never reflowed *and* never told it was hidden: it kept the origin
-        // and the visible flag from the last time it was drawn, and the next
-        // line written to it went straight to the framebuffer at that stale
-        // position -- over the desktop, outside any window. The Executive does
-        // this on its own schedule, so minimising it and waiting produced
-        // `[mind t16] disabled` painted on the wallpaper.
-        //
-        // Nothing is lost by hiding one. An invisible console still updates its
-        // shadow grid, and `redraw_ch` repaints the whole log when its window
-        // comes back.
-        for ch in 0..super::console::NCONSOLE {
-            super::console::with_ch(ch, |c| c.set_visible(false));
-        }
         for (i, win) in d.windows.iter().enumerate() {
-            // A window that exists and has not arrived yet. `open_flourish`
-            // paints its chrome itself, at a rectangle that is on its way to
-            // this one; drawing it here as well would put the finished window
-            // under the animation of it.
-            if arriving() == Some(i) {
-                continue;
-            }
             if win.state == WinState::Minimised {
                 continue;
             }
             let active = Some(i) == focus;
             let frame = win.frame(screen);
+            // Nothing of this window falls in the area being repainted -- its
+            // shadow counted, which is the same rectangle its layer claims.
+            let reach = match win.shown.get() {
+                Some((r, _)) => {
+                    let a = shadowed(win, frame, active, &fb);
+                    let b = shadowed(win, r, active, &fb);
+                    let x0 = a.x.min(b.x);
+                    let y0 = a.y.min(b.y);
+                    Rect::new(x0, y0, (a.x + a.w).max(b.x + b.w) - x0, (a.y + a.h).max(b.y + b.h) - y0)
+                }
+                None => shadowed(win, frame, active, &fb),
+            };
+            if !fb.touches(reach.x, reach.y, reach.w, reach.h) {
+                continue;
+            }
             let hot = match d.hover {
                 Hover::Caption { win, which } if win == i => Some(which),
                 _ => None,
@@ -4354,133 +6045,52 @@ pub fn draw() {
             // cover it afterwards is a window in front, which is exactly what
             // should. No compositing, no second pass, no order to get right
             // beyond the one the loop already has.
-            if win.state != WinState::Maximised {
-                let (off, wide) = (theme::SHADOW_OFF, theme::SHADOW_W);
-                let right = frame.x + frame.w;
-                let bottom = frame.y + frame.h;
-                // Clamped to the screen: `snap_release` can put a window flush
-                // against an edge, and `MARGIN` only protects the un-snapped
-                // case.
-                let edge_x = screen.x + screen.w;
-                let edge_y = screen.y + screen.h;
-                let band_w = wide.min(edge_x.saturating_sub(right));
-                let band_h = wide.min(edge_y.saturating_sub(bottom));
-                // The right band starts a radius below the top. Without that
-                // the offset silhouette leaves a three-pixel nub above the
-                // rounded top-right corner, which is the one place a hard
-                // shadow gives the rounding away.
-                let top = frame.y + off + win.round;
-                fb.shade_rect(
-                    right,
-                    top,
-                    band_w,
-                    (bottom + off).saturating_sub(top),
-                    theme::SHADOW_NUM,
-                );
-                fb.shade_rect(
-                    frame.x + off,
-                    bottom,
-                    (frame.w + band_w).saturating_sub(off),
-                    band_h,
-                    theme::SHADOW_NUM,
-                );
+            // On its way in: out of its image, scaled and faded, shadow and
+            // all. The terminal's grid joins it when it lands -- the grid is
+            // not in the image, and a scaled console is not worth a second
+            // copy of it for four hundred milliseconds.
+            if let Some((to, o)) = win.shown.get() {
+                if ensure_image(fb.format(), d, i, win, frame, active, hot) {
+                    if let Some(im) = win.image.borrow().as_ref() {
+                        paint_transformed(&fb, &premultiplied(win, im), to, o, win_shadow(win, active));
+                    }
+                    continue;
+                }
+            }
+            if let Some((spec, dx, dy, alpha)) = win_shadow(win, active) {
+                super::shadow::cast(&fb, frame.x as i32, frame.y as i32, frame.w, frame.h, spec, dx, dy, alpha);
             }
 
             // Confine this window's paint to its own outline. A rectangular
             // window costs a load and a branch for the whole frame; a shaped
             // one simply does not write outside itself, and whatever the
             // back-to-front repaint already put there shows through.
-            with_window_shape(win, frame, || {
-                let c = theme::window(
-                    &fb,
-                    frame,
-                    &win.title,
-                    active,
-                    win.state == WinState::Maximised,
-                    !win.menus.is_empty(),
-                    hot,
-                );
-                let mut client = c.client;
-                if client.is_empty() {
-                    // Nothing left to draw inside the frame; the chrome is
-                    // already painted. `return` and not `continue`, because
-                    // this is the shape closure and not the loop.
-                    return;
-                }
-
-                if let Some(bar) = c.menubar {
-                    theme::panel(&fb, bar);
-                    let open = match d.mode {
-                        Mode::Menu { menu, .. } if active => Some(menu),
-                        _ => None,
-                    };
-                    let labels = theme::menu_labels(bar, win.menus.iter().map(|m| m.label.as_str()));
-                    for (mi, (m, lr)) in win.menus.iter().zip(labels).enumerate() {
-                        let hot = Some(mi) == open
-                            || d.hover == Hover::MenuLabel { win: i, menu: mi };
-                        let (fg, bg) = if hot {
-                            (theme::SELECT_TEXT, theme::SELECT)
-                        } else {
-                            (theme::TEXT, theme::FACE)
-                        };
-                        let ty = lr.y + (lr.h.saturating_sub(theme::text_h())) / 2;
-                        fb.rect(lr.x, lr.y + 1, lr.w, lr.h.saturating_sub(2), bg);
-                        theme::text(&fb, lr.x + 6, ty, &m.label, fg, bg);
-                    }
-                }
-
-                match &win.content {
-                    Content::Terminal(ch) => {
-                        let well = client.shrink(2);
-                        theme::well(&fb, well, theme::SCREEN);
-                        let inner = well.shrink(3);
-                        // A status strip along the foot of the *window*, with
-                        // the grid reflowed into what is left. It goes on the
-                        // main terminal only: the exec console is a transcript
-                        // of one command and has no state of its own to
-                        // report, and a second strip would be two rows of
-                        // chrome saying the same thing.
-                        let strip = if *ch == super::console::USER {
-                            terminal_strip(well)
-                        } else {
-                            None
-                        };
-                        let grid = match strip {
-                            Some(s) => Rect::new(inner.x, inner.y, inner.w, inner.h - s.h),
-                            None => inner,
-                        };
-                        // Each grid reflows into its own window. They are
-                        // different sizes and hold different text, so asking
-                        // for "the console" here would paint one of them
-                        // twice and the other never.
-                        super::console::with_ch(*ch, |c| {
-                            c.set_visible(true);
-                            c.reflow(grid.x, grid.y, grid.w, grid.h);
-                        });
-                        super::console::redraw_ch(*ch);
-                        if *ch == super::console::USER {
-                            prompt_gutter(&fb, well, grid);
-                        }
-                        if let Some(strip) = strip {
-                            terminal_status(&fb, strip);
-                        }
-                    }
-                    Content::Panel(p) => {
-                        theme::panel(&fb, client);
-                        let hov = match d.hover {
-                            Hover::Widget { win, idx } if win == i => Some(idx),
-                            _ => None,
-                        };
-                        p.draw_in(&fb, client, active, hov);
-                    }
-                    Content::Browser(b) => b.draw_in(&fb, client, active),
-                    Content::App(a) => a.draw_in(&fb, client, active),
-                }
-            });
+            //
+            // The window itself comes out of its image (`WinImage`) when it
+            // has one, which turns a window that is merely exposed -- by
+            // something moving over it, or a part of it changing -- into row
+            // copies. The terminal's grid goes over either way.
+            if REFERENCE.load(core::sync::atomic::Ordering::Relaxed) || !from_image(&fb, d, i, win, frame, active, hot) {
+                with_window_shape(&fb, win, frame, || paint_window_body(&fb, d, i, win, frame, active, hot));
             }
+            with_window_shape(&fb, win, frame, || console_over(&fb, win));
+            if active {
+                let maxed = win.state == WinState::Maximised;
+                let alpha = unsafe { (*FOCUS_RING.get()).2 };
+                focus_ring(&fb, frame, if maxed { 0 } else { win.round }, alpha, !maxed);
+            } else if DIM.load(core::sync::atomic::Ordering::Relaxed) < 256 && !super::quality::shed(2) {
+                dim_window(&fb, win, frame);
+            }
+        }
 
         // Over the windows, because the bar is drawn under them and a tip
         // stands above the bar.
+        lap(Cost::Windows, &mut t);
+        // Windows on their way out, above the windows and under the popups.
+        // (Where the arrival used to be painted -- which sat at the end of
+        // this function until a search for that end matched `dropdown`'s
+        // instead and put it inside that loop, once per menu row.)
+        paint_ghosts(&fb);
         taskbar_tip(&fb, d);
 
         // Popups last, over everything, because that is what a popup is.
@@ -4489,29 +6099,32 @@ pub fn draw() {
             match d.mode {
                 Mode::Menu { menu, item } => {
                     if let Some(m) = d.windows[f].menus.get(menu) {
-                        let inner = frame.shrink(theme::FRAME);
-                        let bar = Rect::new(inner.x, inner.y + theme::TITLE_H + 2, inner.w, MENU_H);
-                        let Some(lr) =
+                        let inner = frame.shrink(theme::frame_w());
+                        let bar = Rect::new(inner.x, inner.y + theme::title_h() + 2, inner.w, menu_h());
+                        // A label that cannot be placed skips its dropdown and
+                        // nothing else. This was a `return` out of the whole
+                        // painter, which ended the frame's overlays and its
+                        // cost accounting along with it.
+                        if let Some(lr) =
                             theme::menu_labels(bar, d.windows[f].menus.iter().map(|p| p.label.as_str()))
                                 .nth(menu)
-                        else {
-                            return;
-                        };
-                        dropdown(
-                            &fb,
-                            lr.x,
-                            inner.y + theme::TITLE_H + 2 + MENU_H,
-                            m.items.iter().map(|i| i.label.as_str()),
-                            item,
-                        );
+                        {
+                            dropdown(
+                                &fb,
+                                lr.x,
+                                inner.y + theme::title_h() + 2 + menu_h(),
+                                m.items.iter().map(|i| i.label.as_str()),
+                                item,
+                            );
+                        }
                     }
                 }
                 Mode::Sys { item } => {
-                    let inner = frame.shrink(theme::FRAME);
+                    let inner = frame.shrink(theme::frame_w());
                     dropdown(
                         &fb,
                         inner.x,
-                        inner.y + theme::TITLE_H,
+                        inner.y + theme::title_h(),
                         SYS_ITEMS.iter().copied(),
                         item,
                     );
@@ -4519,20 +6132,11 @@ pub fn draw() {
                 Mode::Move { .. } | Mode::Size { .. } => {
                     // A hint, because a mode with no indication that it is on is
                     // a keyboard that has stopped working.
-                    let msg = if matches!(d.mode, Mode::Move { .. }) {
-                        " Move: arrows, Enter to place, Esc to cancel "
-                    } else {
-                        " Size: arrows, Enter to keep, Esc to cancel "
-                    };
-                    let w = theme::text_w_of(msg);
-                    let r = Rect::new(
-                        (fb.width().saturating_sub(w)) / 2,
-                        MARGIN,
-                        w,
-                        MENU_H,
-                    );
-                    theme::panel(&fb, r);
-                    theme::text(&fb, r.x, r.y + 5, msg, theme::TEXT, theme::FACE);
+                    let msg = if matches!(d.mode, Mode::Move { .. }) { MOVE_HINT } else { SIZE_HINT };
+                    if let Some(r) = hint_rect(&fb, d) {
+                        theme::panel(&fb, r);
+                        theme::text(&fb, r.x, r.y + 5, msg, theme::TEXT, theme::FACE);
+                    }
                 }
                 // The taskbar draws its own selection, and it is not a popup
                 // over the focused window -- it is a fixture with the keyboard.
@@ -4543,7 +6147,8 @@ pub fn draw() {
                 | Mode::Taskbar { .. }
                 | Mode::Drag { .. }
                 | Mode::DragSize { .. }
-                | Mode::Start { .. } => {}
+                | Mode::Start { .. }
+                | Mode::Flip => {}
             }
         }
         if let Mode::Start { item } = d.mode {
@@ -4552,7 +6157,9 @@ pub fn draw() {
             // then the items over it, then the query row last. It carries one
             // more row than it has items, which is why it builds its own
             // `Popup` rather than going through `dropdown`.
-            theme::popup(&fb, &p);
+            let (spec, dx, dy, alpha) = START_SHADOW;
+            super::shadow::cast(&fb, p.panel.x as i32, p.panel.y as i32, p.panel.w, p.panel.h, spec, dx, dy, alpha);
+            theme::start_popup(&fb, &p);
             if p.wide_enough() {
                 for (i, (label, _)) in START_ITEMS.iter().enumerate() {
                     theme::list_row(&fb, p.row(i), label, i == item, true);
@@ -4573,18 +6180,17 @@ pub fn draw() {
                 theme::text(&fb, row.x + 4, row.y + 4, &shown, fg, theme::HILIGHT);
                 // A caret, so a selected empty box does not read as inert.
                 if is_query_row(item) {
-                    let cx = row.x + 4 + theme::text_w(shown.chars().count());
+                    let cx = row.x + 4 + theme::text_w_of(&shown);
                     fb.rect(cx, row.y + 4, 2, theme::text_h(), theme::TEXT);
                 }
             }
         }
-    });
-    super::render::drew();
-    super::compose::present();
-    // Put the pointer back where it was. Without this every keystroke that
-    // repaints would blink the arrow out until the mouse next moved.
-    if let Some((px, py)) = unsafe { *POS.get() } {
-        cursor_show(&real, px, py);
+        lap(Cost::Overlay, &mut t);
+    }
+    // Flip 3D on its way up or down, over the desktop it rises out of.
+    // Only when there is no still of the desktop to rise out of.
+    if unsafe { (*FLIP.get()).as_ref().is_some_and(|f| f.live && f.under.is_empty()) } {
+        paint_flip(&fb, d, screen);
     }
 }
 
@@ -4716,7 +6322,7 @@ fn sys_action(d: &mut Desktop, f: usize, item: usize, screen: Rect) {
         }
         3 => {
             if d.windows[f].closable {
-                d.windows.remove(f);
+                close_at(d, f);
             } else {
                 // The terminal is the shell. Minimising is the honest thing to
                 // offer instead of pretending a close happened.
@@ -4798,9 +6404,28 @@ pub fn key(k: u8) -> Route {
         return Route::Handled;
     }
 
+    // Super chords are the desktop's in every mode, like Alt-Tab.
+    if kbd::chord_of(k).is_some() {
+        super_key(k);
+        return Route::Handled;
+    }
+
     let mode = with(|d| d.mode).unwrap_or(Mode::Normal);
 
     match mode {
+        // Flip takes every key while it is up: Tab and the arrows turn it,
+        // Enter brings the front window forward, Esc puts things back.
+        Mode::Flip => {
+            match k {
+                b'\t' => flip_turn(1.0),
+                k if k == kbd::KEY_RIGHT || k == kbd::KEY_DOWN => flip_turn(1.0),
+                k if k == kbd::KEY_BACKTAB || k == kbd::KEY_LEFT || k == kbd::KEY_UP => flip_turn(-1.0),
+                b'\n' | b'\r' => flip_leave(true),
+                27 => flip_leave(false),
+                _ => {}
+            }
+            Route::Handled
+        }
         Mode::Normal => {
             if k == kbd::KEY_SYSMENU {
                 with(|d| d.mode = Mode::Sys { item: 0 });
@@ -4836,6 +6461,7 @@ pub fn key(k: u8) -> Route {
                         if b.key(k) { ui::Step::Redraw } else { ui::Step::Idle }
                     }
                     Content::App(a) => {
+                        app_input(a.as_ref());
                         if a.key(k) { ui::Step::Redraw } else { ui::Step::Idle }
                     }
                     _ => ui::Step::Idle,
@@ -4843,7 +6469,7 @@ pub fn key(k: u8) -> Route {
                 None => ui::Step::Idle,
             });
             match step {
-                Some(ui::Step::Redraw) => draw(),
+                Some(ui::Step::Redraw) => super::render::invalidate(),
                 Some(ui::Step::Close) => close_focused(),
                 Some(ui::Step::Do(Action::Run(cmd))) => {
                     focus_terminal();
@@ -5156,13 +6782,16 @@ pub fn redraw_over_terminal() {
         })
     })
     .unwrap_or(false);
-    if overlapped {
-        super::render::invalidate();
-    }
+    // Nothing to repair any more. The console painted its text straight into
+    // the back buffer over whatever covered it, and scrolled those pixels --
+    // window included -- up a row at a time, so this repainted the terminal
+    // between commands. It paints into a surface of its own now, which cannot
+    // reach anything else, so the overlap is drawn correctly by every frame.
+    let _ = overlapped;
 }
 
 pub fn take_pending() -> Option<String> {
-    let q = unsafe { &mut *PENDING.get() };
+    let mut q = PENDING.lock_irq();
     if q.is_empty() {
         return None;
     }
@@ -5172,5 +6801,5 @@ pub fn take_pending() -> Option<String> {
 /// How many commands are waiting. For the selftest, and for anything that
 /// wants to know whether a press landed.
 pub fn pending_len() -> usize {
-    unsafe { (*PENDING.get()).len() }
+    PENDING.lock_irq().len()
 }

@@ -46,13 +46,16 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 /// and eighty-seven times. The compositor fixes *that*, because it repaints on
 /// its own account whether or not anybody asked.
 ///
-/// What it did not do is remove the other writers. `desk.rs` still calls
-/// `draw()` directly in **fifty** places, so the push model is intact
-/// alongside the pull one and any task that runs one of those sites composes a
-/// frame. Measured: `composers` reads 1 after a `render probe` and 3 after
-/// opening a single window, because `focus_terminal` ends with a `draw()` and
-/// the shell calls it after every command. The two things that measure
-/// `composers` open no windows, which is why it read 1 for so long.
+/// It then took a second pass to remove the other writers. This said `desk.rs`
+/// called `draw()` directly in fifty places, which was true when written and
+/// is not now: those sites call `invalidate`, and the only callers of
+/// `desk::draw` left are the compositor (`main.rs`) and `gfx::measure` for
+/// `video bench`. `composers` reading more than 1 is therefore a bug, where it
+/// used to be expected after opening a window.
+///
+/// The writers that remain are not `draw` at all: the console flushes its own
+/// cells, the cursor writes the aperture, and three programs draw on the
+/// aperture directly. Those are what the 1.4.1 lease and scene phases remove.
 ///
 /// Marking is free and idempotent and the compositor decides when. A caller
 /// that marks twice costs one frame, and a caller that forgets is the bug this
@@ -80,8 +83,140 @@ pub fn enabled() -> bool {
 }
 
 /// Say the screen is out of date. Cheap, and safe from anywhere.
+///
+/// It also wakes the compositor, which sleeps whenever nothing is dirty. Only
+/// on the clean-to-dirty edge: a second mark during the same frame wakes
+/// nobody, so a caller that invalidates in a loop costs one swap a call.
+#[track_caller]
 pub fn invalidate() {
-    DIRTY.store(true, Ordering::Release);
+    if !DIRTY.swap(true, Ordering::AcqRel) {
+        asked_by(core::panic::Location::caller());
+        wake_compositor();
+    }
+}
+
+/// Who asked for frames, by source location, counted on the clean-to-dirty
+/// edge -- the asks that actually caused a frame. A desktop composing when
+/// nothing changed is somebody asking, and the line that asks is the answer;
+/// this is how a 50 Hz idle repaint is traced to its caller rather than
+/// guessed at. Sixteen slots, first come; a full table drops new callers and
+/// says so in the count.
+static ASKERS: crate::sync::Spin<[(Option<&'static core::panic::Location<'static>>, u64); 16]> =
+    crate::sync::Spin::new([(None, 0); 16]);
+
+fn asked_by(at: &'static core::panic::Location<'static>) {
+    let Some(mut t) = ASKERS.try_lock() else { return };
+    for slot in t.iter_mut() {
+        match slot.0 {
+            Some(l) if l.file() == at.file() && l.line() == at.line() => {
+                slot.1 += 1;
+                return;
+            }
+            None => {
+                *slot = (Some(at), 1);
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The callers that asked for frames, most first.
+pub fn askers() -> alloc::vec::Vec<(&'static str, u32, u64)> {
+    let t = ASKERS.lock_irq();
+    let mut v: alloc::vec::Vec<(&'static str, u32, u64)> =
+        t.iter().filter_map(|(l, n)| l.map(|l| (l.file(), l.line(), *n))).collect();
+    v.sort_by(|a, b| b.2.cmp(&a.2));
+    v
+}
+
+pub fn reset_askers() {
+    *ASKERS.lock_irq() = [(None, 0); 16];
+}
+
+/// Bring the compositor round now rather than at its next deadline. Safe from
+/// an interrupt handler: `task::wake` takes the task table with interrupts
+/// masked, so no holder on this core can be interrupted by it.
+pub fn wake_compositor() {
+    let i = COMP_TASK.load(Ordering::Acquire);
+    if i != u64::MAX {
+        crate::task::wake(i as usize);
+    }
+}
+
+/// What the compositor should do with this turn of its loop.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pace {
+    /// Compose now.
+    Compose,
+    /// A frame is wanted but the last one was under a frame-time ago: give
+    /// the core away and come straight back.
+    Wait,
+    /// Nothing is wanted. Sleep this many timer ticks unless woken first.
+    Sleep(u64),
+}
+
+/// Decide the turn, from nothing but numbers -- so every branch is asserted
+/// at `diag render` with no compositor running.
+///
+/// **The first frame after a quiet spell is immediate, and later ones
+/// coalesce to `FRAME_HZ`.** That falls out of one comparison rather than two
+/// timers (SerenityOS keeps an immediate one and a 60 Hz one): `next_frame` is
+/// a frame-time after the last composed frame, so after any pause it is
+/// already in the past and the frame goes at once, while during a burst it is
+/// in the future and the turn waits.
+///
+/// Asleep, the compositor still has periodic work -- the tray every tenth, a
+/// window arriving, polled USB devices -- so the sleep is to the nearest of
+/// those, `wake_in` ticks away, and never zero.
+pub fn pace(now: u64, next_frame: u64, dirty: bool, wake_in: u64) -> Pace {
+    if dirty {
+        if now >= next_frame { Pace::Compose } else { Pace::Wait }
+    } else {
+        Pace::Sleep(wake_in.max(1))
+    }
+}
+
+/// Damage reported by somebody who wrote pixels the scene cannot see.
+///
+/// Almost all damage is found by `scene::diff` comparing two frames, which
+/// needs nobody to report anything. These are for the writes that happen
+/// outside the scene: the console painting over a window that covers it, a
+/// program giving the screen back, a theme change. `full` is the bluntest of
+/// them -- everything, back buffer and screen both.
+static DAMAGE: crate::sync::Spin<super::region::Region> =
+    crate::sync::Spin::new(super::region::Region::new());
+/// The whole screen. An atomic rather than a field under the lock, because
+/// `lease::force_release` asks for it from the fault path, where a lock held
+/// by the code that faulted is one nobody will release.
+static FULL: AtomicBool = AtomicBool::new(true);
+
+/// Repaint this rectangle at the next frame whatever the scene says.
+#[track_caller]
+pub fn damage(r: super::theme::Rect) {
+    DAMAGE.lock_irq().add(r);
+    invalidate();
+}
+
+/// Repaint the whole screen at the next frame.
+#[track_caller]
+pub fn damage_all() {
+    FULL.store(true, Ordering::Release);
+    invalidate();
+}
+
+/// Take what was reported, for the frame about to be composed.
+pub fn take_damage() -> (super::region::Region, bool) {
+    let full = FULL.swap(false, Ordering::AcqRel);
+    let mut d = DAMAGE.lock_irq();
+    let out = *d;
+    d.clear();
+    (out, full)
+}
+
+/// Whether a repaint is pending, without claiming it.
+pub fn is_dirty() -> bool {
+    DIRTY.load(Ordering::Acquire)
 }
 
 /// Claim the pending repaint, if there is one.
@@ -171,6 +306,7 @@ pub fn tray_painted() {
 
 pub fn cursor_painted() {
     CURSORS.fetch_add(1, Ordering::Relaxed);
+    input_shown();
 }
 
 pub fn refused() {
@@ -186,6 +322,7 @@ pub fn presented(rows: u64) {
     let now = crate::time::rdtsc();
     PRESENTS.fetch_add(1, Ordering::Relaxed);
     if rows > 0 {
+        input_shown();
         WROTE.fetch_add(1, Ordering::Relaxed);
         ROWS.fetch_add(rows, Ordering::Relaxed);
     }
@@ -196,6 +333,279 @@ pub fn presented(rows: u64) {
         let gap = now - prev;
         MAX_GAP.fetch_max(gap, Ordering::Relaxed);
     }
+}
+
+// ---------------------------------------------------------------------------
+// What a frame costs, and how long a hand waits for the screen
+// ---------------------------------------------------------------------------
+
+/// The last `RING` composed frames, in microseconds: the whole of `desk::draw`
+/// and, separately, the present at the end of it.
+///
+/// **A distribution, because the mean is the wrong number twice over.** A
+/// desktop that composes in 2 ms nine frames in ten and 40 ms the tenth feels
+/// broken, and its mean reads 5.8 ms; and the budget a frame has to meet is
+/// 16.6 ms whatever the average did. So this keeps the samples and answers
+/// percentiles, plus a count of frames over budget. One writer (the
+/// compositor), so atomics are enough to make a reader on another task safe.
+const RING: usize = 128;
+static FRAME_US: [core::sync::atomic::AtomicU32; RING] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; RING];
+static PRESENT_US: [core::sync::atomic::AtomicU32; RING] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; RING];
+static FRAME_AT: AtomicU64 = AtomicU64::new(0);
+/// Frames whose compose plus present overran 16.6 ms.
+static OVER_BUDGET: AtomicU64 = AtomicU64::new(0);
+pub const BUDGET_US: u64 = 16_667;
+
+/// Record one composed frame. `start`, `presenting` and `end` are `rdtsc`
+/// readings: before composing, before presenting, and after.
+pub fn frame_timed(start: u64, presenting: u64, end: u64) {
+    let mhz = crate::time::tsc_mhz().max(1) as u64;
+    let total = end.saturating_sub(start) / mhz;
+    let present = end.saturating_sub(presenting) / mhz;
+    let i = FRAME_AT.fetch_add(1, Ordering::Relaxed) as usize % RING;
+    FRAME_US[i].store(total.min(u32::MAX as u64) as u32, Ordering::Relaxed);
+    PRESENT_US[i].store(present.min(u32::MAX as u64) as u32, Ordering::Relaxed);
+    if total > BUDGET_US {
+        OVER_BUDGET.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// `rdtsc` when an input event arrived that the screen has not shown yet.
+/// Zero means nothing is waiting. Only the *first* unanswered event is kept:
+/// what a person feels is how long the oldest movement went unanswered.
+static INPUT_AT: AtomicU64 = AtomicU64::new(0);
+static LATENCY_US: [core::sync::atomic::AtomicU32; RING] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; RING];
+static LATENCY_AT: AtomicU64 = AtomicU64::new(0);
+
+/// A pointer packet arrived. Called from `mouse::apply`, which is reached
+/// from an interrupt handler, so this does one compare-and-swap and nothing
+/// else.
+pub fn input_arrived() {
+    let _ = INPUT_AT.compare_exchange(0, crate::time::rdtsc(), Ordering::Relaxed, Ordering::Relaxed);
+    // The compositor sleeps when idle and the pointer is its job.
+    let i = COMP_TASK.load(Ordering::Acquire);
+    if i != u64::MAX && crate::task::wake(i as usize) {
+        WOKE_FOR_INPUT.store(true, Ordering::Release);
+    }
+}
+
+/// A keystroke is waiting to be routed. Wakes the compositor, and arms the
+/// same run-next preference a pointer packet does.
+pub fn key_arrived() {
+    let i = COMP_TASK.load(Ordering::Acquire);
+    if i != u64::MAX && crate::task::wake(i as usize) {
+        WOKE_FOR_INPUT.store(true, Ordering::Release);
+    }
+}
+
+/// Set when an input event woke the compositor and nothing has acted on it.
+static WOKE_FOR_INPUT: AtomicBool = AtomicBool::new(false);
+
+/// For an input interrupt, after its EOI: if the event it delivered woke the
+/// compositor, run the compositor now rather than at the end of the quantum.
+///
+/// Measured before this existed, with a foreground command on the same core
+/// that never yields (`render probe`): input-to-screen p50 3.5 ms, p95 7.0 ms,
+/// against 0.6 ms on an idle machine -- the event waited out the busy task's
+/// timer quantum. Only on core 0, where the compositor is pinned; on another
+/// core `schedule` would skip it anyway.
+pub fn preempt_for_input() {
+    if !WOKE_FOR_INPUT.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let i = COMP_TASK.load(Ordering::Acquire);
+    // Interrupting the compositor itself: it is already running, and a switch
+    // here would take the core away from the one task that wanted it.
+    if i == u64::MAX || crate::smp::this_cpu() != 0 || crate::task::current() == i as usize {
+        return;
+    }
+    crate::task::run_next(i as usize);
+    crate::task::preempt_from_interrupt();
+}
+
+/// Something reached the screen. If an input was waiting, its wait is over.
+///
+/// Called on every present and every cursor paint. That slightly flatters
+/// a present that did not include the movement -- it measures "the screen was
+/// updated after the input", which is an upper bound on responsiveness only
+/// once every input produces a present, which is what the compositor is for.
+fn input_shown() {
+    let t = INPUT_AT.swap(0, Ordering::Relaxed);
+    if t == 0 {
+        return;
+    }
+    let mhz = crate::time::tsc_mhz().max(1) as u64;
+    let us = crate::time::rdtsc().saturating_sub(t) / mhz;
+    let i = LATENCY_AT.fetch_add(1, Ordering::Relaxed) as usize % RING;
+    LATENCY_US[i].store(us.min(u32::MAX as u64) as u32, Ordering::Relaxed);
+}
+
+/// p50, p95 and max over a ring, and how many samples there were.
+fn percentiles(ring: &[core::sync::atomic::AtomicU32; RING], count: u64) -> (u32, u32, u32, usize) {
+    let n = (count as usize).min(RING);
+    if n == 0 {
+        return (0, 0, 0, 0);
+    }
+    let mut v: alloc::vec::Vec<u32> = ring[..n].iter().map(|a| a.load(Ordering::Relaxed)).collect();
+    v.sort_unstable();
+    let at = |q: usize| v[((n - 1) * q) / 100];
+    (at(50), at(95), v[n - 1], n)
+}
+
+pub struct Timing {
+    /// Compose + present, microseconds: p50, p95, max, samples.
+    pub frame: (u32, u32, u32, usize),
+    /// The present alone.
+    pub present: (u32, u32, u32, usize),
+    /// Input to the next update of the screen.
+    pub latency: (u32, u32, u32, usize),
+    pub over_budget: u64,
+}
+
+pub fn timing() -> Timing {
+    let frames = FRAME_AT.load(Ordering::Relaxed);
+    Timing {
+        frame: percentiles(&FRAME_US, frames),
+        present: percentiles(&PRESENT_US, frames),
+        latency: percentiles(&LATENCY_US, LATENCY_AT.load(Ordering::Relaxed)),
+        over_budget: OVER_BUDGET.load(Ordering::Relaxed),
+    }
+}
+
+/// Where a frame's time went, by kind of painter, summed since `reset`.
+///
+/// The plan's rule is that nothing is optimised unless this points at it: a
+/// frame time says a frame was slow and nothing about which layer made it so.
+/// `AppRender` is counted *inside* `Windows` -- it is the part of a window's
+/// cost spent redrawing an application's own surface, so the two say whether
+/// a slow window is chrome or content.
+#[derive(Clone, Copy)]
+pub enum Cost {
+    Wallpaper,
+    Icons,
+    Taskbar,
+    Windows,
+    AppRender,
+    WinImage,
+    Overlay,
+}
+
+const COSTS: usize = 7;
+static COST_CYCLES: [AtomicU64; COSTS] = [const { AtomicU64::new(0) }; COSTS];
+static COST_COUNT: [AtomicU64; COSTS] = [const { AtomicU64::new(0) }; COSTS];
+
+pub fn cost(what: Cost, cycles: u64) {
+    let i = what as usize;
+    COST_CYCLES[i].fetch_add(cycles, Ordering::Relaxed);
+    COST_COUNT[i].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Each kind's name, its total microseconds and how many times it ran.
+pub fn costs() -> [(&'static str, u64, u64); COSTS] {
+    let mhz = crate::time::tsc_mhz().max(1) as u64;
+    let names = ["wallpaper", "icons", "taskbar", "windows", "  app redraws", "  window images", "overlays"];
+    let mut out = [("", 0, 0); COSTS];
+    for i in 0..COSTS {
+        out[i] = (
+            names[i],
+            COST_CYCLES[i].load(Ordering::Relaxed) / mhz,
+            COST_COUNT[i].load(Ordering::Relaxed),
+        );
+    }
+    out
+}
+
+/// How much each composed frame repainted: rectangles and pixels, summed,
+/// so `render` can say what a frame cost against what a whole screen costs.
+static DAMAGE_RECTS: AtomicU64 = AtomicU64::new(0);
+static DAMAGE_PIXELS: AtomicU64 = AtomicU64::new(0);
+
+pub fn damaged(rects: u64, pixels: u64) {
+    DAMAGE_RECTS.fetch_add(rects, Ordering::Relaxed);
+    DAMAGE_PIXELS.fetch_add(pixels, Ordering::Relaxed);
+}
+
+pub fn damage_totals() -> (u64, u64) {
+    (DAMAGE_RECTS.load(Ordering::Relaxed), DAMAGE_PIXELS.load(Ordering::Relaxed))
+}
+
+/// Pixels read back from the aperture.
+///
+/// **It must stay at zero once the compositor exists.** The aperture is
+/// write-combining, and a read from WC memory is uncached and synchronous --
+/// roughly three orders of magnitude slower than a write, by the figure the
+/// Linux DRM maintainers give. Every reader is a bug or a boot-time console,
+/// and this is how the difference is told: `render` prints it.
+static MMIO_READS: AtomicU64 = AtomicU64::new(0);
+
+/// The source lines that read the aperture, by pixels read: the `asked by`
+/// instrument pointed at the one cost that must be zero.
+static READERS: crate::sync::Spin<[(Option<&'static core::panic::Location<'static>>, u64); 8]> =
+    crate::sync::Spin::new([(None, 0); 8]);
+
+#[track_caller]
+pub fn mmio_read(pixels: u64) {
+    MMIO_READS.fetch_add(pixels, Ordering::Relaxed);
+    let at = core::panic::Location::caller();
+    let Some(mut t) = READERS.try_lock() else { return };
+    for slot in t.iter_mut() {
+        match slot.0 {
+            Some(l) if l.file() == at.file() && l.line() == at.line() => {
+                slot.1 += pixels;
+                return;
+            }
+            None => {
+                *slot = (Some(at), pixels);
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Writes to a leased screen by somebody other than its holder, by source line.
+static INTRUDERS: crate::sync::Spin<[(Option<&'static core::panic::Location<'static>>, u64); 8]> =
+    crate::sync::Spin::new([(None, 0); 8]);
+
+pub fn intruded(at: &'static core::panic::Location<'static>) {
+    let Some(mut t) = INTRUDERS.try_lock() else { return };
+    for slot in t.iter_mut() {
+        match slot.0 {
+            Some(l) if l.file() == at.file() && l.line() == at.line() => {
+                slot.1 += 1;
+                return;
+            }
+            None => {
+                *slot = (Some(at), 1);
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn intruders() -> alloc::vec::Vec<(&'static str, u32, u64)> {
+    let t = INTRUDERS.lock_irq();
+    let mut v: alloc::vec::Vec<(&'static str, u32, u64)> =
+        t.iter().filter_map(|(l, n)| l.map(|l| (l.file(), l.line(), *n))).collect();
+    v.sort_by(|a, b| b.2.cmp(&a.2));
+    v
+}
+
+/// Who read the aperture since boot, most pixels first.
+pub fn mmio_readers() -> alloc::vec::Vec<(&'static str, u32, u64)> {
+    let t = READERS.lock_irq();
+    let mut v: alloc::vec::Vec<(&'static str, u32, u64)> =
+        t.iter().filter_map(|(l, n)| l.map(|l| (l.file(), l.line(), *n))).collect();
+    v.sort_by(|a, b| b.2.cmp(&a.2));
+    v
+}
+
+pub fn mmio_reads() -> u64 {
+    MMIO_READS.load(Ordering::Relaxed)
 }
 
 /// Start a fresh window. Everything below is measured from here.
@@ -211,7 +621,11 @@ pub fn presented(rows: u64) {
 /// this file knows, and `render reset` is typed casually.
 pub fn reset() {
     for c in [&DRAWS, &PRESENTS, &WROTE, &ROWS, &CLOCKS, &CURSORS, &REFUSED, &MAX_GAP,
-              &COMPOSERS, &WORST_BEAT] {
+              &COMPOSERS, &WORST_BEAT, &FRAME_AT, &OVER_BUDGET, &LATENCY_AT, &INPUT_AT,
+              &DAMAGE_RECTS, &DAMAGE_PIXELS] {
+        c.store(0, Ordering::Relaxed);
+    }
+    for c in COST_CYCLES.iter().chain(COST_COUNT.iter()) {
         c.store(0, Ordering::Relaxed);
     }
     // Not the identity -- resetting that would count the next frame as a new
@@ -219,6 +633,7 @@ pub fn reset() {
     COMPOSER.store(u64::MAX, Ordering::Relaxed);
     LAST.store(0, Ordering::Relaxed);
     SINCE.store(crate::time::rdtsc(), Ordering::Relaxed);
+    reset_askers();
 }
 
 pub struct Stats {
@@ -296,6 +711,8 @@ pub enum Phase {
     Frame,
     /// Painting the taskbar's uptime and charge.
     Tray,
+    /// Offering keystrokes to the desktop, and running what a key started.
+    Keys,
 }
 
 impl Phase {
@@ -307,6 +724,7 @@ impl Phase {
             Phase::Pointer => 3,
             Phase::Frame => 4,
             Phase::Tray => 5,
+            Phase::Keys => 6,
         }
     }
 
@@ -317,6 +735,7 @@ impl Phase {
             3 => Phase::Pointer,
             4 => Phase::Frame,
             5 => Phase::Tray,
+            6 => Phase::Keys,
             _ => Phase::Cold,
         }
     }
@@ -326,6 +745,7 @@ impl Phase {
             Phase::Cold => "never started",
             Phase::Turn => "between turns",
             Phase::Ops => "applying posted ops",
+            Phase::Keys => "routing keystrokes",
             Phase::Pointer => "reading the pointer",
             Phase::Frame => "composing a frame",
             Phase::Tray => "painting the taskbar readouts",
@@ -578,6 +998,13 @@ pub fn selftest() -> bool {
     // stray read reporting "composing a frame" would send somebody into the
     // window manager after a compositor that was never spawned.
     claim("and an unknown one reads as never started", Phase::of(99) == Phase::Cold);
+
+    // Pacing, every branch. Times are arbitrary TSC readings.
+    claim("dirty after a quiet spell composes at once", pace(1000, 400, true, 5) == Pace::Compose);
+    claim("dirty inside a frame-time waits for the deadline", pace(1000, 1200, true, 5) == Pace::Wait);
+    claim("clean sleeps until the nearest periodic job", pace(1000, 400, false, 7) == Pace::Sleep(7));
+    claim("and never for zero ticks, which would be a spin", pace(1000, 400, false, 0) == Pace::Sleep(1));
+    super::compose::cursor_checks(&mut claim);
 
     // The compositor is running while this runs, so it must not be reported as
     // gone. This is the false-alarm check, and it decides whether the alarm is

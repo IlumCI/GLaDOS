@@ -718,6 +718,13 @@ pub fn note_usb(port: u8, address: u8, id: Ident) {
     list.push(Node { id, at: Where::Usb { port, address }, entry: lookup(&id) });
 }
 
+/// Forget whatever was recorded on a USB port: its device left, or is
+/// about to be enumerated again under a new slot. Without this the list
+/// kept every device ever plugged in, which is an inventory of history.
+pub fn forget_usb(port: u8) {
+    nodes_mut().retain(|n| !matches!(n.at, Where::Usb { port: p, .. } if p == port));
+}
+
 /// The first PCI device a named driver claims, sweeping first if nobody has.
 ///
 /// This is what a driver's `probe` calls instead of walking the bus itself.

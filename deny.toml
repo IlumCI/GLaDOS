@@ -1,0 +1,43 @@
+# What an outside crate must be to enter the kernel. See the policy at the top
+# of Cargo.toml; `cargo deny check` runs in CI and here before a vendor update.
+
+[graph]
+targets = ["x86_64-unknown-uefi"]
+
+# Permissive licences only. Nothing in this tree is under the GPL -- it was once,
+# and the driver that brought it was removed (CLAUDE.md) -- and a dependency must
+# not bring it back by the side door. An allowlist, for the reason eval.rs gives
+# about BUILTINS: a denylist grants whatever it forgot to name.
+[licenses]
+allow = ["MIT", "Apache-2.0", "Zlib"]
+confidence-threshold = 0.9
+
+# The kernel itself is not published and carries no licence field; it is the
+# thing being protected, not a dependency.
+[licenses.private]
+ignore = true
+
+# Advisories against the vendored versions. The database is fetched, so this is
+# the one part of the check that needs the network.
+[advisories]
+yanked = "deny"
+ignore = [
+    # ttf-parser is unmaintained (its author's notice, 2026). Accepted, for one
+    # reason that must stay true: a font parser's risk is malformed input, and
+    # the only fonts this kernel parses are the three compiled into the image,
+    # each pinned by digest in assets/fonts/fonts.txt. **The day the machine
+    # reads a font it did not ship with** -- a Settings choice, a file from the
+    # namespace, a web font -- this exemption ends and the parser is replaced
+    # (skrifa is the maintained successor) before that feature lands.
+    { id = "RUSTSEC-2026-0192", reason = "only digest-pinned fonts compiled into the image are parsed" },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+# Crates come from crates.io, read and then vendored; nothing from a git URL or
+# another registry, which would be code nobody pinned.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

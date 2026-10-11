@@ -79,8 +79,8 @@ pub struct BootInfo {
     pub desc_size: usize,
     /// The framebuffer aperture. On this laptop it is a 64-bit BAR at
     /// 0x40_0000_0000 -- 256 GiB, far above the 18 GiB of RAM -- so the map
-    /// limit has to be widened to reach it, and it must not be treated as
-    /// device memory for caching purposes.
+    /// limit has to be widened to reach it. It is mapped write-combining
+    /// once the PAT allows it (see `install_paging`).
     pub fb_start: u64,
     /// One past the last byte of the framebuffer aperture. Our page tables have
     /// to cover this or the first write after `activate` faults.
@@ -852,12 +852,6 @@ pub fn clock_iterations() -> u64 {
     CLOCK_ITERS.load(Ordering::Relaxed)
 }
 
-/// A second task, deliberately CPU-bound.
-///
-/// It never yields, never sleeps and never blocks -- so if the shell stays
-/// responsive while this runs, that is preemption doing it and nothing else.
-/// The iteration counter is the headless proof: it can only advance while this
-/// task holds the CPU.
 /// Compose a frame when one is owed, and never mind who asked.
 ///
 /// The loop is deliberately dull. It does not know what changed, only that
@@ -887,6 +881,7 @@ fn comp_task() {
     // that should have caught it divided the error straight back out.
     // Anything measuring an interval uses the TSC.
     let mut next = time::rdtsc();
+    let mut app_due = 0u64;
     loop {
         // **The heartbeat, at the top and unconditionally.**
         //
@@ -911,6 +906,13 @@ fn comp_task() {
         // looking at the window list. Draining before composing means a window
         // asked for during the last frame appears in this one rather than the
         // next.
+        // USB input first and whoever holds the screen: a full-screen program
+        // reads the keyboard too, and a USB keyboard polled only while the
+        // desktop owned the screen went dead the moment anything else did.
+        dev::usbhid::poll();
+        // And the touchpad's keep-alive: a mouse byte whose interrupt was
+        // lost is collected here instead of jamming the controller for good.
+        dev::mouse::rescue();
         if !gfx::exclusive() {
             // The phase before each call that leaves this file, so a stall
             // names the thing it is stuck inside rather than the loop.
@@ -936,13 +938,24 @@ fn comp_task() {
             // is not allowed to happen underneath one.
             gfx::render::beat(gfx::render::Phase::Pointer);
             gfx::desk::poll_mouse();
-            // And the USB input devices, for the identical reason: a mouse on
-            // the bus is polled, not interrupt-driven, and polled from the
-            // shell's idle loop it stopped for the length of every command.
-            // After `poll_mouse` on purpose -- a report it delivers lands in
-            // `mouse::apply` and is read on the next turn, a few milliseconds
-            // later, which is well inside what a hand notices.
-            dev::usbhid::poll();
+            // **Keystrokes, here and not in the shell's idle loop.** The
+            // desktop's keys -- Alt-Tab, Super, a menu, every key for a window
+            // that is not the terminal -- were offered to the desktop only
+            // when the shell was idle, so a command that ran for ten seconds
+            // took Alt-Tab with it for ten seconds. In order, the head only,
+            // and the desktop's refusals go to the shell (`kbd::route`).
+            gfx::render::beat(gfx::render::Phase::Keys);
+            if gfx::desk::ready() {
+                dev::kbd::route(|k| match gfx::desk::key(k) {
+                    gfx::desk::Route::Handled => None,
+                    gfx::desk::Route::Shell(k) => Some(k),
+                });
+            }
+            // The USB devices are polled above, for every owner of the
+            // screen. They are polled rather than interrupt-driven, and polled
+            // from the shell's idle loop they stopped for the length of every
+            // command; a report lands in `mouse::apply` and is read here on
+            // the next turn, a few milliseconds later.
         }
 
         // **Back to `Turn` before the wait, or the resting state lies.**
@@ -956,45 +969,75 @@ fn comp_task() {
         // `Pointer` 13 ms ago, and a 43-second stall reported `Pointer` too.
         gfx::render::beat(gfx::render::Phase::Turn);
 
-        let now = time::rdtsc();
-        if now < next {
-            // **`yield_now` and deliberately not `hlt`.**
-            //
-            // `hlt` is the obvious way to wait for a deadline and it is wrong
-            // here, because this scheduler has no blocked state: `State` is
-            // `Unused`, `Ready` and `Running`, and a task cannot stop being
-            // runnable. So `hlt` halts *the core*, not this task -- and the
-            // next thing to run does not run until an interrupt arrives, which
-            // at 100 Hz is up to ten milliseconds. That is ten milliseconds
-            // taken from the shell, once per round trip, during exactly the
-            // long foreground commands this whole change exists to fix.
-            //
-            // Yielding costs a `rdtsc` and a compare per visit and hands the
-            // core to whoever is actually ready. Real sleeping needs a blocked
-            // state and a wake from `render::invalidate`, which is surgery on
-            // the most delicate loop in the tree and buys nothing while there
-            // is always a shell wanting the core.
-            task::yield_now();
-            continue;
-        }
-        let mhz = time::tsc_mhz().max(1) as u64;
-        next = now + (mhz * 1_000_000) / FRAME_HZ;
-
         // `render stall` lands here, and nowhere in a shipped path.
         gfx::render::stall_hook();
 
-        // A full-screen program owns the screen outright -- DOOM, the editor,
-        // a guest holding /dev/fb0 -- so the desktop stands down rather than
-        // contending. The repaint is owed for when it gives the screen back,
-        // so the flag goes back too.
+        // A full-screen program owns the screen outright -- the editor, a
+        // guest holding /dev/fb0, a ported program -- so the desktop stands
+        // down rather than contending, and the pending repaint stays pending
+        // for when the lease drops. A tick at a time, because the USB devices
+        // above still need polling for whoever does own the screen.
         if gfx::exclusive() {
-            if gfx::render::take_dirty() {
-                gfx::render::restore_dirty();
-            }
-            task::yield_now();
+            task::sleep_until_or(dev::lapic::ticks() + 1, || false);
             continue;
         }
-        let mut composed = false;
+
+        // **Sleep when there is nothing to do; compose at once when there is.**
+        //
+        // This loop used to spin to a 60 Hz deadline whether or not anything
+        // had changed, yielding between looks. That cost a core-share all the
+        // time and still added latency: a change arriving just after a frame
+        // waited out the deadline before anyone looked. `render::pace` decides
+        // now, from three numbers:
+        //
+        // - something is dirty and the last frame was more than a frame-time
+        //   ago: compose immediately. After any quiet spell this is the case,
+        //   so the first frame of a burst is never held back;
+        // - dirty, but a frame went out under a frame-time ago: give the core
+        //   away and look again -- bursts coalesce to `FRAME_HZ`;
+        // - nothing dirty: sleep until the nearest periodic job, and
+        //   `render::invalidate` or a pointer packet wakes it early.
+        //
+        // A sleep is tick-granular (10 ms), so the periodic jobs that need
+        // finer timing -- a window arriving, a pointer paint the 4 ms pacing
+        // deferred -- keep the loop in the yielding state instead (`busy`).
+        let now = time::rdtsc();
+        let ticks = dev::lapic::ticks();
+        // The tray repaints every tenth of a second; polled USB devices want a
+        // look every tick.
+        let tenth = crate::TIMER_HZ as u64 / 10;
+        let mut wake_in = if dev::usbhid::attached() > 0 { 1 } else { tenth - ticks % tenth };
+        // A program with a timer (`DeskApp::wake_ms`): a frame when its period
+        // is up, which costs nothing past the diff if its stamp did not move.
+        // The period is a property of what is open and the last frame said
+        // what that was; a program closed since then costs one empty frame.
+        if let Some(ms) = gfx::desk::app_wake_ms() {
+            let period = (ms as u64 * crate::TIMER_HZ as u64 / 1000).max(1);
+            if ticks >= app_due {
+                gfx::render::invalidate();
+                app_due = ticks + period;
+            }
+            wake_in = wake_in.min(app_due.saturating_sub(ticks).max(1));
+        }
+        let dirty = gfx::render::is_dirty() || gfx::desk::busy();
+        match gfx::render::pace(now, next, dirty, wake_in) {
+            gfx::render::Pace::Wait => {
+                task::yield_now();
+                continue;
+            }
+            gfx::render::Pace::Sleep(t) => {
+                gfx::render::beat(gfx::render::Phase::Tray);
+                gfx::desk::paint_tray();
+                gfx::render::beat(gfx::render::Phase::Turn);
+                task::sleep_until_or(ticks + t, || {
+                    gfx::render::is_dirty() || dev::mouse::pending() || dev::kbd::routable()
+                });
+                continue;
+            }
+            gfx::render::Pace::Compose => {}
+        }
+        let mhz = time::tsc_mhz().max(1) as u64;
+        next = now + (mhz * 1_000_000) / FRAME_HZ;
         if gfx::render::take_dirty() {
             // `draw` takes the painter's claim itself and refuses if another
             // task holds it, which is the right answer: that task is painting
@@ -1005,31 +1048,37 @@ fn comp_task() {
             gfx::desk::draw();
             if gfx::render::stats().draws == before {
                 gfx::render::restore_dirty();
-            } else {
-                composed = true;
             }
         }
 
-        // A window arriving, one frame at a time.
+        // Windows arriving and leaving: retire what has finished, and ask
+        // for the next frame while anything has not. Progress is the clock's
+        // (`gfx::anim`), so this only decides whether there is a next frame.
         //
-        // After the frame, because each step paints chrome on top of a freshly
-        // composed desktop and the composed desktop is what erases the step
-        // before it. This ran as a blocking loop on whichever task opened the
-        // window, calling `draw` itself six times -- so every task that opened
-        // a window was a compositor for a tenth of a second.
-        if gfx::desk::flourish_step() {
-            composed = true;
-        }
+        // The arrival used to run as a blocking loop on whichever task opened
+        // the window, calling `draw` itself six times -- so every task that
+        // opened a window was a compositor for a tenth of a second.
+        gfx::desk::anim_step();
 
-        // The taskbar's two readouts, after the frame rather than before it.
-        //
-        // `draw` paints the *well* they sit in and not the text inside it, so
-        // a composed frame erases them and they have to go back on top. Doing
-        // it in the other order leaves the tray blank until the next tenth of
-        // a second ticks, which is the flicker that had no name while the
-        // clock task owned this and could only repaint on its own schedule.
+        // The taskbar's two readouts. They are a part of the taskbar layer now,
+        // so a composed frame paints them rather than erasing them, and all
+        // this does is notice a new tenth of a second. It used to be told
+        // "after a frame, repaint whatever the time" -- right while the tray
+        // was written straight to the aperture over the frame, and a feedback
+        // loop once it became a layer: each frame asked for the next, and an
+        // empty desktop composed fifty frames a second to move four digits.
         gfx::render::beat(gfx::render::Phase::Tray);
-        gfx::desk::paint_tray(composed);
+        gfx::desk::paint_tray();
+
+        // **A turn after every frame, whatever `pace` would say.** A frame
+        // that takes longer than a frame-time finds the next deadline already
+        // past and would compose again at once -- and the paint claim is held
+        // for the whole of each frame, so a task waiting on `desk::with` only
+        // ever got the core while the claim was taken and gave it straight
+        // back. Found with `render verify on`, which makes every frame slow
+        // and froze the shell on its first `open`; a slow frame on hardware
+        // would have done the same.
+        task::yield_now();
     }
 }
 
@@ -1048,6 +1097,16 @@ fn radio_task() {
     }
 }
 
+/// The clock task: once-a-tick housekeeping.
+///
+/// **It was deliberately CPU-bound, and that stopped being worth it.** It
+/// never yielded, so a responsive shell beside it proved preemption -- a fine
+/// demonstration when preemption was new, and a full ten-millisecond quantum
+/// taken from every other task on core 0, every round, ever since. The
+/// compositor is one of those tasks, and a pointer packet arriving while this
+/// held the core waited for the quantum to end. Preemption has its own
+/// evidence now (`diag migrate`, the guest timer kills), so this sleeps a tick
+/// per turn. The iteration counter still says it is alive.
 fn clock_task() {
     let mut last = u64::MAX;
     loop {
@@ -1089,10 +1148,13 @@ fn clock_task() {
                 // blocks, and it is already awake once a second.
                 //
                 // `kprintln!` and not `serial_println!`, because it reaches
-                // all three sinks. The console paints through
-                // `compose::flush_rect` and takes no desktop claim, so it is
-                // the one painter that still works while the compositor holds
-                // the claim and is stuck inside a frame.
+                // all three sinks. **Only two of them while the compositor is
+                // the thing stuck**: since 1.4.1 the console paints into a
+                // surface the compositor places, so a stalled compositor shows
+                // nothing new on screen and this report reaches serial and the
+                // log. It used to flush its own cells to the aperture and was
+                // the one painter that kept working; that same flushing is
+                // what painted it over every window in front of it.
                 match gfx::render::watch() {
                     Some(gfx::render::Verdict::Stalled(h)) => {
                         console::on_channel(console::EXEC, || {
@@ -1132,6 +1194,11 @@ fn clock_task() {
                 }
 
                 ai::futures::sample();
+                // A USB device that came, went or came back is enumerated
+                // here, once a second at most and backing off while nothing
+                // answers -- never on the compositor, where a port that
+                // times out at every step froze the screen for ten seconds.
+                dev::usbhid::service();
                 // The thermal policy and the power-source policy, both of
                 // which were written and neither of which had a caller. A
                 // rule nothing runs is a rule that does not exist, and both
@@ -1159,7 +1226,10 @@ fn clock_task() {
             // instead is the watchdog above -- in words, on a channel the
             // screen cannot take away.
         }
-        core::hint::spin_loop();
+        // One tick. Everything above runs at most ten times a second or is a
+        // poll that a tick of lateness does not hurt -- the wireless state
+        // machine works in hundreds of milliseconds.
+        task::sleep_until(dev::lapic::ticks() + 1);
     }
 }
 
@@ -1354,6 +1424,20 @@ fn init_keyboard(acpi: &Option<acpi::Acpi>) {
 
     let report = dev::kbd::init(a, dev::lapic::id());
     let mouse = dev::mouse::init(a, dev::lapic::id());
+    // The keyboard's configuration as the mouse left it, which is what the
+    // machine runs with. The mouse's set-up once wrote a zero here and
+    // switched the keyboard off; the line says so if anything ever does again.
+    match dev::kbd::controller_config() {
+        Some(c) if c & 0x01 != 0 && c & 0x10 == 0 => {
+            kprintln!("  after the mouse: config {:#04x}, the keyboard still interrupts", c)
+        }
+        Some(c) => {
+            console::set_color(LTRED);
+            kprintln!("  after the mouse: config {:#04x} -- the keyboard will NOT interrupt", c);
+            console::set_color(LTGRAY_IDX);
+        }
+        None => kprintln!("  after the mouse: config unreadable"),
+    }
     if let Some(fb) = gfx::primary() {
         dev::mouse::set_bounds(fb.width() as i32, fb.height() as i32);
     }
@@ -1583,6 +1667,23 @@ fn install_paging(boot: &BootInfo, frames: &mut mem::frame::EarlyFrames) {
                 if cpu::wp_on() { 1 } else { 0 },
                 if nx { 1 } else { 0 }
             );
+            // **The framebuffer goes write-combining here**, after our own map
+            // is the live one: a PAT change under the firmware's tables would
+            // be a change to mappings this kernel did not build and cannot
+            // see. Stores to the aperture then gather into 64-byte bursts
+            // instead of going out one at a time uncached, which is what
+            // `efifb` and `simpledrm` do. Nothing reads the aperture once the
+            // compositor exists, which WC requires to be fast.
+            //
+            // A processor without a PAT keeps what it had, and says so.
+            let fb_len = boot.fb_end - boot.fb_start;
+            if cpu::mtrr::program(true)
+                && mem::paging::set_cache(boot.fb_start, fb_len, cpu::mtrr::Kind::Wc)
+            {
+                kprintln!("[boot] framebuffer    write-combining ({} KiB)", fb_len / 1024);
+            } else {
+                kprintln!("[boot] framebuffer    left as the firmware typed it (no PAT WC slot)");
+            }
         }
         None => {
             console::set_color(LTRED);
@@ -1708,8 +1809,12 @@ fn check_heap() -> bool {
     kprintln!("\n[selftest] heap:");
     console::set_color(LTGRAY_IDX);
     let (before, _) = mem::heap::HEAP.stats();
-    {
-        use alloc::format;
+    // Nothing is printed inside the measured window. Printing scrolls the
+    // console, and since the terminal's grid moved to the heap (1.4.1) every
+    // row that scrolls off is a small allocation the history keeps -- so two
+    // lines printed in here read as a 480-byte "leak" that was the scrollback
+    // doing its job, on every boot, in red.
+    let (len, v255, v16, used, total) = {
         use alloc::vec::Vec;
 
         // Pushing past capacity repeatedly forces grow-realloc-free cycles,
@@ -1718,15 +1823,15 @@ fn check_heap() -> bool {
         for i in 0..256u64 {
             v.push(i * i);
         }
-        let s = format!("  vec len {}  v[255]={}  v[16]={}", v.len(), v[255], v[16]);
-        kprintln!("{}", s);
         let (used, total) = mem::heap::HEAP.stats();
-        kprintln!("  in use {} B of {} B", used, total);
-    }
+        (v.len(), v[255], v[16], used, total)
+    };
     // Everything above is dropped. If alloc and dealloc round sizes the same
     // way this is exactly the baseline; any other number is a per-allocation
     // leak, and the sign says which way.
     let (after, _) = mem::heap::HEAP.stats();
+    kprintln!("  vec len {}  v[255]={}  v[16]={}", len, v255, v16);
+    kprintln!("  in use {} B of {} B", used, total);
     let ok = after == before;
     console::set_color(if ok { LTGREEN } else { LTRED });
     if ok {
@@ -2068,6 +2173,15 @@ fn selftest(acpi_ref: &Option<acpi::Acpi>) {
         kprintln!("
 [power]");
         dev::power::report();
+        // **Ask for a clock.** Nothing did, and the GF63 read 630 MHz -- 23%
+        // of its base -- with every frame paying for it: with hardware-
+        // managed states off the part sits wherever the firmware left it.
+        // Balanced is the part's own judgement over its whole range, and it
+        // is inside this guard because enabling is the step that faulted on
+        // this laptop once.
+        if dev::power::set_governor(dev::power::governor()) {
+            kprintln!("  governor {} applied", dev::power::governor().name());
+        }
         true
     });
 
@@ -2395,6 +2509,10 @@ fn panic(info: &PanicInfo) -> ! {
     if console::is_ready() {
         // A panic behind a progress bar helps nobody, and on the GF63 the
         // framebuffer is the only place a diagnostic can go.
+        // And whoever held the screen loses it: the console is the only
+        // diagnostic left and must be allowed to reach the aperture.
+        gfx::lease::force_release();
+        console::emergency_direct();
         gfx::splash::abandon();
         console::set_color(LTRED);
         console::_print(format_args!("\n*** KERNEL PANIC ***\n{}\n", info));

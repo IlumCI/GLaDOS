@@ -1,36 +1,39 @@
 [package]
 name = "glados"
-version = "1.4.0"
+version = "1.4.1"
 edition = "2021"
 description = "A from-scratch ring-0 operating system for the MSI MS-16R8"
+publish = false
 
-# No dependencies, deliberately. Everything here is written from scratch.
+# One dependency, for fonts, and the reasons it is allowed are the policy.
 #
-# That is mostly a choice and partly a constraint, and it is worth being exact
-# about which is which, because a wrong version of this comment briefly claimed
-# the constraint did not exist at all. Measured, on this machine:
+# 1.4.x opens the tree to outside crates, on three conditions that hold for
+# every one of them and are checked rather than intended:
 #
-#   * A pure-Rust crate with no build script and no proc macro WORKS.
-#     `typenum` compiles for x86_64-unknown-uefi in under 4 seconds. (It proves
-#     less than it seems to: typenum 1.20 sets `build = false`, so nothing was
-#     linked for the host. An earlier note cited it as evidence build scripts
-#     work. It is not.)
-#   * A proc-macro crate FAILS. `paste` dies with "linker `link.exe` not
-#     found" -- a proc macro is a host cdylib, and there is no MSVC linker
-#     here.
-#   * -Zbuild-std FAILS for the same reason, on compiler_builtins' build
-#     script. So the custom target in x86_64-glados.json stays unusable.
+#   * **Vendored.** `vendor/` holds the exact sources and `.cargo/config.toml`
+#     replaces crates.io with it, so a build is offline and byte-for-byte the
+#     code that was read. Updating a crate is a diff someone can review.
+#   * **Audited.** `deny.toml` allows MIT, Apache-2.0, Zlib and the font
+#     licences and nothing else, and refuses advisories; `cargo deny check`
+#     runs in CI. A crate pulling in a GPL dependency fails the build rather
+#     than the release.
+#   * **Credited.** NOTICE.md names every crate and every font with its licence.
 #
-# The practical line: anything that has to run on the host at build time is
-# out; plain library crates are in. That is why vendoring TLS is a real
-# obstacle rather than a preference -- rustls pulls proc macros, and ring
-# builds C. It would have to be a from-scratch or hand-vendored implementation.
+# Fonts are the only purpose so far, by decision: outline rasterising and its
+# table parser are a large, solved, correctness-critical piece of work with no
+# bearing on what makes this machine itself. Shapes, blur, glass and layout
+# stay this tree's own.
 #
-# Beyond that line, dependencies remain absent because writing this from
-# scratch is the point, and each one added would be a deliberate exception --
-# most likely for cryptography, where writing it from scratch is how you get a
-# security bug rather than an education.
+# **What the old version of this comment said was true on Windows and is not
+# on Arch.** It recorded that proc macros and build scripts failed for want of
+# an MSVC host linker. Re-measured on the Arch host, 2026-10-10: `paste` (a proc
+# macro) and `libm` (a build script) both compile for x86_64-unknown-uefi, and
+# so do fontdue and ab_glyph. fontdue was chosen over ab_glyph on the
+# measurement -- 0.65 us a glyph against 1.14-1.33 on Noto Sans and Cascadia
+# Code at 16 px -- and neither reads GPOS kerning, which is why
+# tools/fontsubset.py flattens it on the host.
 [dependencies]
+fontdue = { version = "0.9", default-features = false, features = ["hashbrown"] }
 
 [[bin]]
 name = "glados"

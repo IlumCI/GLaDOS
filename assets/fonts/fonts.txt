@@ -1,0 +1,8 @@
+# assets/fonts, written by tools/fontsubset.py -- name sha256 note
+OFL-NotoSans.txt cee9892f9f0cc8fe882c9e9537ee6a89621d86ee7ceaf70b02e2b2b1c25c061a licence, copied
+OFL-CascadiaCode.txt 51882cd3cdba4e16f220f44ddb08a635c38c44ea6e0975db2574f4be6f958238 licence, copied
+NotoSans-Regular.ttf 12204b75a54c495d066b9314eee1b7fda3a329981e15bce0b73e5753c6a6fe0c subset of 478c558ea716033c
+NotoSans-Regular.kern 0ed0a454fc2a23f06a23a79fd9975eacea718d74df047c885195baeb38020897 8155 pairs flattened from GPOS
+NotoSans-SemiBold.ttf e0cbfd645ebc62943bafb03346490ffa1e25b228a8a04a6aad610258cfb69b30 subset of a4e91fd530ac2b4e
+NotoSans-SemiBold.kern 620d1b06c9643362afab0fe0e1e23d05c80ea828483dd7e9114ea48bfe912b47 8196 pairs flattened from GPOS
+CascadiaCode-Regular.ttf c33ef522cdfeff99907fb54f3e97152bb18bfb9b56ec2fef4d4ceec51c8974a4 unmodified

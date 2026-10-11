@@ -367,8 +367,8 @@ pub fn hold_screen(on: bool) {
     if HOLDING.swap(on, Ordering::AcqRel) == on {
         return;
     }
-    crate::gfx::set_exclusive(on);
     if on {
+        *GUEST_LEASE.lock_irq() = crate::gfx::lease::take(crate::gfx::lease::Owner::Guest);
         // Blanked on the way in, for the reason `port::with_screen` gives: a
         // frame smaller than the screen is letterboxed by whatever the desktop
         // last composed there, and against black a painter that failed to
@@ -377,10 +377,16 @@ pub fn hold_screen(on: bool) {
             f.fill(crate::gfx::Color::new(0, 0, 0));
         }
     } else {
-        crate::gfx::compose::invalidate();
-        crate::gfx::render::invalidate();
+        // Dropping the lease forgets the shadow and asks for a frame, in that
+        // order -- the order this function used to have to get right itself.
+        let lease = GUEST_LEASE.lock_irq().take();
+        drop(lease);
     }
 }
+
+/// The guest's hold on the screen. Kept here rather than on any one thread,
+/// because the display belongs to the process and any thread may draw.
+static GUEST_LEASE: crate::sync::Spin<Option<crate::gfx::lease::Lease>> = crate::sync::Spin::new(None);
 
 pub fn holding() -> bool {
     HOLDING.load(core::sync::atomic::Ordering::Acquire)

@@ -167,7 +167,7 @@ impl Writer {
     }
 
     fn client_cols(client: Rect) -> usize {
-        ((client.w.saturating_sub(20)) / theme::text_w(1).max(1)) as usize
+        ((client.w.saturating_sub(20)) / theme::mono_col()) as usize
     }
 
     fn view_rows(client: Rect) -> usize {
@@ -201,6 +201,23 @@ impl Writer {
 }
 
 impl DeskApp for Writer {
+    /// The view and the state around the text. The text itself changes only
+    /// through this window's input, which redraws it regardless, so its
+    /// length stands in for it rather than a hash of the whole document.
+    fn stamp(&self) -> Option<u64> {
+        Some(super::scene::Stamp::of((
+            self.path.as_str(),
+            self.text.len(),
+            self.cursor,
+            self.scroll.get(),
+            self.cols.get(),
+            self.follow.get(),
+            self.editing_path,
+            self.dirty,
+            self.status.as_str(),
+        )))
+    }
+
     /// Text reflows, so this is only a floor against losing the window.
     fn min_size(&self) -> (u32, u32) {
         (280, 160)
@@ -218,12 +235,12 @@ impl DeskApp for Writer {
         if self.editing_path && focused {
             shown.push('_');
         }
-        let room = (inner.w / theme::text_w(1).max(1)) as usize;
+        let room = (inner.w / theme::mono_col()) as usize;
         // Taking a tail by subtracting a byte count from a byte length lands
         // inside a character whenever the path has one, and slicing there is
         // a panic rather than a mangled path.
         let tail = theme::tail_chars(&shown, room);
-        theme::text(fb, inner.x, inner.y, tail, theme::TEXT, if self.editing_path { theme::HILIGHT } else { theme::FACE });
+        theme::mono_text(fb, inner.x, inner.y, tail, theme::TEXT, if self.editing_path { theme::HILIGHT } else { theme::FACE });
 
         theme::well(fb, body, theme::HILIGHT);
         let text_area = body.shrink(4);
@@ -249,11 +266,11 @@ impl DeskApp for Writer {
         for (i, (a, b)) in rows.iter().enumerate().skip(scroll).take(view) {
             let y = text_area.y + (i - scroll) as u32 * (lh + 2);
             let line = &self.text[*a..*b];
-            theme::text(fb, text_area.x, y, line, theme::TEXT, theme::HILIGHT);
+            theme::mono_text(fb, text_area.x, y, line, theme::TEXT, theme::HILIGHT);
             // The caret: a block at the cursor cell, only where the document
             // has the keyboard.
             if focused && !self.editing_path && i == crow {
-                let cx = text_area.x + ccol as u32 * theme::text_w(1);
+                let cx = text_area.x + theme::mono_w(ccol);
                 fb.rect(cx, y, 2, lh, theme::APERTURE_DEEP);
             }
         }
@@ -264,9 +281,8 @@ impl DeskApp for Writer {
             "{}{}  ^S save  ^O path  ^N new   {}",
             self.path, flag, self.status
         );
-        let room = (client.w.saturating_sub(16) / theme::text_w(1).max(1)) as usize;
-        let shown = theme::head_chars(&line, room);
-        theme::text(fb, client.x + 8, sy, shown, theme::TEXT, theme::FACE);
+        let shown = theme::fit(&line, client.w.saturating_sub(16));
+        theme::text(fb, client.x + 8, sy, &shown, theme::TEXT, theme::FACE);
     }
 
     fn key(&mut self, k: u8) -> bool {
@@ -373,7 +389,7 @@ impl DeskApp for Writer {
             let cols = Self::client_cols(client);
             let rows = self.rows(cols);
             let row = self.scroll.get() + ((y - text_area.y as i32).max(0) as u32 / lh) as usize;
-            let col = ((x - text_area.x as i32).max(0) as u32 / theme::text_w(1).max(1)) as usize;
+            let col = ((x - text_area.x as i32).max(0) as u32 / theme::mono_col()) as usize;
             let (a, b) = *rows.get(row.min(rows.len() - 1)).unwrap_or(&(0, 0));
             self.cursor = self.byte_at_col(a, b, col);
             return true;

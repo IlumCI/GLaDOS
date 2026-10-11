@@ -378,6 +378,31 @@ static JOINED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::ne
 /// mining slices stuck `ready` for ever while `tasks` showed them as healthy.
 static COUNT: AtomicUsize = AtomicUsize::new(1);
 static SWITCHES: AtomicU64 = AtomicU64::new(0);
+
+/// A task to prefer at the next switch, once (`run_next`).
+static RUN_NEXT: AtomicUsize = AtomicUsize::new(NONE);
+
+/// Ask the next switch on a core allowed to run `index` to run it, ahead of
+/// the round-robin order. One-shot, and only a preference: a task that is not
+/// `Ready` by then is simply not chosen and the hint is gone.
+///
+/// For the compositor when the pointer has just woken it. Round-robin would
+/// otherwise give every other ready task its turn first, and the pointer's
+/// latency would be a property of how busy the machine happened to be.
+pub fn run_next(index: usize) {
+    RUN_NEXT.store(index, Ordering::Release);
+}
+
+/// Switch now, from an interrupt handler that has already sent its EOI --
+/// what the timer does at the end of every tick, offered to a handler whose
+/// event has made a task worth running at once. Interrupts are off for the
+/// whole handler (an interrupt gate), which is the condition `schedule` needs.
+pub fn preempt_from_interrupt() {
+    if ENABLED.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    schedule();
+}
 static ENABLED: AtomicUsize = AtomicUsize::new(0);
 
 /// Adopt the currently running thread of execution as task 0.
@@ -1378,6 +1403,42 @@ pub fn sleep_until(tick: u64) -> bool {
     !woken
 }
 
+/// As `sleep_until`, but give up the sleep as soon as `ready` holds.
+///
+/// `ready` is asked *after* the deadline is recorded and before yielding, and
+/// that order is the point. A sleeper that checks its condition first and
+/// records its deadline second has a window between the two where the event it
+/// waits for can arrive, find nobody asleep, and be lost -- and the task then
+/// sleeps out the whole deadline on a condition that is already true. With
+/// the deadline recorded first, an event in that window either makes `ready`
+/// true when it is asked, or reaches `wake`, which cancels a recorded deadline
+/// even before `schedule` has made it a sleep.
+pub fn sleep_until_or(tick: u64, ready: impl Fn() -> bool) -> bool {
+    let mut woken = false;
+    while crate::dev::lapic::ticks() < tick {
+        if !set_wake(tick) {
+            core::hint::spin_loop();
+            if ready() {
+                woken = true;
+                break;
+            }
+            continue;
+        }
+        if ready() {
+            woken = true;
+            break;
+        }
+        yield_now();
+        if take_woken() || ready() {
+            woken = true;
+            break;
+        }
+    }
+    set_wake(0);
+    let _ = take_woken();
+    !woken
+}
+
 /// Read and clear this task's wake flag.
 fn take_woken() -> bool {
     let me = crate::smp::this_cpu() as usize;
@@ -1415,6 +1476,21 @@ pub fn wake(index: usize) -> bool {
     }
     let mut t = TASKS.lock_irq();
     if t[index].state != State::Asleep {
+        // **A wake that arrives before the sleep is still a wake.** A task
+        // decides to sleep, records its deadline with `set_wake`, and only
+        // then yields -- and `schedule` is what turns that deadline into
+        // `Asleep`. A wake landing between the two used to find the task
+        // still `Running`, answer "nothing to wake", and lose the event: the
+        // task then slept out its whole deadline on a condition that had
+        // already changed. The compositor is the caller that cannot afford
+        // that, since its wake is `render::invalidate`. So a pending deadline
+        // is cancelled and the flag set, and the yield that follows returns
+        // straight away to a `sleep_until` that sees it.
+        if t[index].wake_at != 0 && t[index].state != State::Unused {
+            t[index].wake_at = 0;
+            t[index].woken = true;
+            return true;
+        }
         return false;
     }
     t[index].state = State::Ready;
@@ -1461,7 +1537,21 @@ fn schedule() {
         // `Ready` is the only claimable state. `Running` belongs to a core,
         // and `Handoff` is a stack whose pointer has not landed yet.
         let mut next = NONE;
+        let hint = RUN_NEXT.load(Ordering::Acquire);
+        if hint < n && hint != cur {
+            if t[hint].pin >= 0 && t[hint].pin != me as i16 {
+                // Another core's to run; left for it.
+            } else {
+                RUN_NEXT.store(NONE, Ordering::Release);
+                if t[hint].state == State::Ready {
+                    next = hint;
+                }
+            }
+        }
         for pass in 0..2 {
+            if next != NONE {
+                break;
+            }
             let start = cur + 1;
             for k in 0..n {
                 let i = (start + k) % n;

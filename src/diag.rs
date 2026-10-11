@@ -160,6 +160,91 @@ pub const SUITES: &[Suite] = &[
         run: crate::ai::glance::selftest,
     },
     Suite {
+        name: "region",
+        about: "damage as disjoint rectangles: exact under the cap, a bounding box past it",
+        run: crate::gfx::region::selftest,
+    },
+    Suite {
+        name: "blend",
+        about: "premultiplied alpha: division by 255 exact, AVX2 equal to scalar at every width",
+        run: crate::gfx::blend::selftest,
+    },
+    Suite {
+        name: "shape",
+        about: "anti-aliased geometry: coverage sums to each shape's area, symmetric, scissored",
+        run: crate::gfx::shape::selftest,
+    },
+    Suite {
+        name: "gradient",
+        about: "gradients in OKLab, dithered: exact ends, flat stays flat, no bands",
+        run: crate::gfx::grad::selftest,
+    },
+    Suite {
+        name: "shadow",
+        about: "soft shadows: a blurred box keeps its area, slices exactly, casts nothing under itself",
+        run: crate::gfx::shadow::selftest,
+    },
+    Suite {
+        name: "glass",
+        about: "Vista glass: the blur keeps a flat image flat and its variance, the colourisation is the formula",
+        run: crate::gfx::glass::selftest,
+    },
+    Suite {
+        name: "scale",
+        about: "bilinear on premultiplied pixels, a mip chain below half size, a copy at one to one",
+        run: crate::gfx::scale::selftest,
+    },
+    Suite {
+        name: "wall",
+        about: "the wallpaper: the sun is the boot screen's mark, clear of the hills, painted deterministically",
+        run: crate::gfx::wall::selftest,
+    },
+    Suite {
+        name: "anim",
+        about: "motion: curves exact at both ends and monotone, springs that settle, tweens on the clock",
+        run: crate::gfx::anim::selftest,
+    },
+    Suite {
+        name: "tile",
+        about: "dwindle tiling: fills the area exactly, splits the long side, gives a closed half back",
+        run: crate::gfx::tile::selftest,
+    },
+    Suite {
+        name: "flip",
+        about: "Flip 3D: depth shrinks and lifts, a turn moves every window one place, a flat quad covers its rectangle",
+        run: crate::gfx::flip::selftest,
+    },
+    Suite {
+        name: "quality",
+        about: "the governor: sheds a rung a slow window, earns one back after five easy ones, keeps to its range",
+        run: crate::gfx::quality::selftest,
+    },
+    Suite {
+        name: "icons",
+        about: "the desktop's pictograms: solid, clear at the corners, premultiplied, kept once drawn",
+        run: crate::gfx::icons::selftest,
+    },
+    Suite {
+        name: "fonts",
+        about: "the outline faces parse and draw, the kerning reads back, the licences ship",
+        run: crate::gfx::text::selftest,
+    },
+    Suite {
+        name: "scene",
+        about: "two frames compared: what moved, changed or restacked, and only that",
+        run: crate::gfx::scene::selftest,
+    },
+    Suite {
+        name: "lease",
+        about: "who owns the screen: refusal, reentry, release, and a forced release on a fault",
+        run: crate::gfx::lease::selftest,
+    },
+    Suite {
+        name: "pat",
+        about: "page attribute and MTRR decoding: what a store to the framebuffer really does",
+        run: crate::gfx::pat_selftest,
+    },
+    Suite {
         name: "paint",
         about: "ramps, shading and the window silhouette, which a screenshot cannot settle",
         run: crate::gfx::paint_selftest,
@@ -233,6 +318,11 @@ pub const SUITES: &[Suite] = &[
         name: "hid",
         about: "the USB usage-to-scancode table, and reports read as events",
         run: crate::dev::usbhid::selftest,
+    },
+    Suite {
+        name: "devmgr",
+        about: "the device manager: categories, internal against external, a snapshot",
+        run: crate::dev::manager::selftest,
     },
     Suite {
         name: "text",
@@ -680,7 +770,7 @@ fn web_selftest() -> bool {
 /// says it exists to prevent. A `static` cannot be read in a const context, so
 /// the array cannot be measured directly; naming its length is the next best
 /// thing and it is now the only place the number appears.
-const SLOTS: usize = 75;
+const SLOTS: usize = 93;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.

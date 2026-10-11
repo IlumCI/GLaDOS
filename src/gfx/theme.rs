@@ -60,6 +60,8 @@
 //! means one thing, so the bevel got new constants instead.
 
 use super::font;
+use super::text;
+use alloc::string::String;
 use super::{Color, Framebuffer};
 
 // --- surfaces ------------------------------------------------------------
@@ -94,22 +96,8 @@ pub const WELL_EDGE: Color = Color::new(0x6E, 0x9E, 0xB4);
 pub const LIST_SEL_IDLE: Color = Color::new(0xD3, 0xE2, 0xE9);
 /// The desktop behind everything.
 /// A representative mid-tone of the sky, for the few pictograms that fill a
-/// panel of their own against it. The wall itself is `WALL`.
+/// panel of their own against it. The wall itself is `gfx::wall`.
 pub const DESKTOP: Color = Color::new(0x0E, 0x4A, 0x66);
-/// The wall: a horizon. Deep water at the top, through cyan, to warm gold at
-/// the foot where the two halves of this scheme meet.
-///
-/// The dot grid that used to be here is gone. It read as a surface against a
-/// near-black fill and reads as dirt against a sky, and Aero's own walls are
-/// gradients and photographs rather than lattices.
-pub const WALL: [(u8, Color); 6] = [
-    (0, Color::new(0x06, 0x1C, 0x2C)),
-    (64, Color::new(0x0C, 0x44, 0x60)),
-    (130, Color::new(0x1B, 0x82, 0xA2)),
-    (186, Color::new(0x53, 0xBE, 0xC6)),
-    (212, Color::new(0xC7, 0x9A, 0x55)),
-    (255, Color::new(0x7A, 0x4C, 0x1A)),
-];
 /// The Aperture mark on the wall. A muted orange rather than the title bar's:
 /// at a fifth of the screen it would otherwise be the brightest thing on the
 /// desktop, and a wallpaper that outshines the windows is one nobody can work
@@ -129,78 +117,8 @@ pub const SUN: [(u8, Color); 5] = [
     (255, Color::new(0xD9, 0x64, 0x10)),
 ];
 
-// --- what is drawn on the wall -------------------------------------------
-//
-// A sky is a surface and not a picture. What makes this one the wall of a
-// machine that measures things is what is ruled on it: a graticule, an
-// instrument at the centre, and light.
-//
-// Every figure here is drawn as a *wash* rather than in a colour of its own,
-// which is the point of doing it with `tint` and is why the dot grid that
-// used to be here could not work. A fixed colour is subtle over one part of a
-// gradient and either invisible or filthy over the rest; a percentage of
-// white is equally faint over near-black water and over gold.
-
-/// The ink everything on the wall is washed in.
-pub const WALL_INK: Color = Color::new(0xFF, 0xFF, 0xFF);
-/// Pitch of the fine ruling, and of the heavy line every fourth one.
-pub const WALL_MINOR: u32 = 64;
-pub const WALL_MAJOR: u32 = 256;
-/// How much of the ink each carries, out of 256.
-pub const WALL_MINOR_NUM: u32 = 15;
-pub const WALL_MAJOR_NUM: u32 = 34;
-
-/// The atom. Semi-major and semi-minor axes as hundredths of the mark's
-/// radius, and how many tilts they are drawn at across a half turn.
-///
-/// The mark is the nucleus and needs no help to be one: it is already a ring
-/// with a filled centre, which is what the middle of every atomic diagram
-/// drawn between 1955 and 1965 looks like. Three orbits because that is the
-/// number the era settled on -- two reads as an eye and four as a flower.
-pub const WALL_ORBIT_A: u32 = 236;
-pub const WALL_ORBIT_B: u32 = 76;
-pub const WALL_ORBIT_TILTS: u32 = 3;
-pub const WALL_ORBIT: Color = Color::new(0x8F, 0xDC, 0xF0);
-/// Where on its orbit each electron sits, in sixty-fourths of a turn. Fixed,
-/// like the bubbles, because nothing in a paint path here is random.
-pub const WALL_ELECTRONS: [u32; 3] = [6, 27, 48];
-
-/// The dial the atom sits inside, and its graduations. An instrument has a
-/// scale on it, and the ticks point outward rather than in so the figure
-/// reads as emitting rather than as aiming.
-pub const WALL_DIAL: u32 = 268;
-pub const WALL_TICKS: u32 = 24;
-
-/// Bubbles: centre and radius, each as a percentage -- of the width, of the
-/// height, and of the height again -- so one table serves 1280x800 and the
-/// GF63's 1920x1080 without a second set of numbers.
-///
-/// A fixed table and not a scattering, because there is no randomness in a
-/// paint path here and there should not be: a wall that differed between two
-/// boots would make every screenshot comparison a judgement call.
-pub const WALL_BUBBLES: [(u32, u32, u32); 7] = [
-    (31, 17, 7),
-    (26, 68, 4),
-    (68, 16, 3),
-    (81, 47, 9),
-    (57, 84, 5),
-    (91, 76, 3),
-    (37, 37, 2),
-];
-/// How much of the sky a bubble keeps, the rim that catches the light, and
-/// the specular on it.
-pub const WALL_BUBBLE_NUM: u32 = 30;
-pub const WALL_RIM: Color = Color::new(0xBF, 0xEC, 0xF8);
-pub const WALL_SPEC: Color = Color::new(0xFF, 0xFF, 0xFF);
 pub const TEXT: Color = Color::new(0x00, 0x00, 0x00);
 pub const TEXT_DIM: Color = Color::new(0x76, 0x88, 0x90);
-/// The close button under the pointer.
-///
-/// The one control on a window that cannot be undone, and the one an operator
-/// coming from Windows identifies by colour before they read the glyph. Every
-/// other button here answers hover with a ring; this one answers with red,
-/// because "this is the destructive one" is worth saying twice.
-pub const CLOSE_HOT: Color = Color::new(0xE0, 0x43, 0x43);
 
 /// Status text on a panel face: working, needs attention, will not work.
 ///
@@ -252,40 +170,14 @@ pub const TITLE_OFF: [(u8, Color); 6] = [
     (246, Color::new(0xA6, 0xBB, 0xC6)),
     (255, Color::new(0xC8, 0xD8, 0xE0)),
 ];
-/// The window border, which is the caption's colour carried round the outside.
-pub const BORDER_ON: Color = Color::new(0xC4, 0x72, 0x14);
-pub const BORDER_OFF: Color = Color::new(0xA6, 0xBB, 0xC6);
 
-/// Minimise and maximise.
-pub const CAP_BTN: [(u8, Color); 5] = [
-    (0, Color::new(0xFF, 0xD9, 0xA6)),
-    (30, Color::new(0xF6, 0xA9, 0x3E)),
-    (128, Color::new(0xE6, 0x8D, 0x1C)),
-    (129, Color::new(0xCE, 0x7A, 0x14)),
-    (255, Color::new(0xB4, 0x65, 0x0F)),
-];
-pub const CAP_BTN_HOT: [(u8, Color); 5] = [
-    (0, Color::new(0xFF, 0xF0, 0xD8)),
-    (30, Color::new(0xFF, 0xC8, 0x78)),
-    (128, Color::new(0xF6, 0xA9, 0x3E)),
-    (129, Color::new(0xE6, 0x8D, 0x1C)),
-    (255, Color::new(0xCE, 0x7A, 0x14)),
-];
-/// Close. Red whether or not the pointer is on it -- see `CLOSE_HOT`.
+/// Close. Red whether or not the pointer is on it.
 pub const CAP_CLOSE: [(u8, Color); 5] = [
     (0, Color::new(0xFF, 0xA8, 0xA8)),
     (30, Color::new(0xE8, 0x5A, 0x5A)),
     (128, Color::new(0xD2, 0x3A, 0x3A)),
     (129, Color::new(0xBE, 0x2E, 0x2E)),
     (255, Color::new(0xA8, 0x24, 0x24)),
-];
-/// Its hovered form, built round `CLOSE_HOT` so the two cannot drift apart.
-pub const CAP_CLOSE_HOT: [(u8, Color); 5] = [
-    (0, Color::new(0xFF, 0xD0, 0xD0)),
-    (30, Color::new(0xF0, 0x80, 0x80)),
-    (128, CLOSE_HOT),
-    (129, Color::new(0xCE, 0x38, 0x38)),
-    (255, Color::new(0xB8, 0x2C, 0x2C)),
 ];
 /// The pale outline round a caption button, and the catchlight along the top
 /// row of the bar itself.
@@ -309,37 +201,11 @@ pub const BTN_DOWN: [(u8, Color); 5] = [
     (129, Color::new(0xE4, 0xF3, 0xF9)),
     (255, Color::new(0xF2, 0xFA, 0xFD)),
 ];
-/// Under the pointer. Aero's hover is a warm glow rather than a brighter
-/// grey, which is the one place the accent reaches a cool surface.
-pub const BTN_HOT: [(u8, Color); 5] = [
-    (0, Color::new(0xFF, 0xFF, 0xF4)),
-    (6, Color::new(0xFF, 0xF2, 0xCE)),
-    (128, Color::new(0xFF, 0xDF, 0x9C)),
-    (129, Color::new(0xFF, 0xC9, 0x6E)),
-    (255, Color::new(0xFF, 0xE6, 0xB4)),
-];
 /// The one-pixel outline XP puts round every button, and its lit form.
 pub const BTN_EDGE: Color = Color::new(0x6E, 0x9E, 0xB4);
 pub const BTN_EDGE_HOT: Color = APERTURE;
 
-/// The taskbar's pane, and how solid it is from top to foot.
-///
-/// A ramp of opacity rather than of colour, so the wall shows through it and
-/// the bar reads as a pane rather than as a painted strip. Most solid just
-/// under the gloss line and thinnest at the bottom, which is the shape every
-/// piece of Aero glass has.
-pub const GLASS: Color = Color::new(0x0E, 0x3E, 0x56);
-pub const GLASS_STOPS: [(u8, u32); 5] = [(0, 148), (12, 190), (128, 176), (129, 158), (255, 128)];
-/// The white gloss along the top of a pane, and how far down it reaches.
-pub const GLOSS: Color = Color::new(0xFF, 0xFF, 0xFF);
-pub const GLOSS_STOPS: [(u8, u32); 3] = [(0, 150), (40, 46), (255, 0)];
 
-/// One bright line where the bar meets the desktop.
-pub const TASK_EDGE: Color = Color::new(0xBF, 0xE8, 0xF6);
-/// The clock and battery recess. Darker than the bar, because a well on a
-/// coloured surface reads by being darker and not by being outlined.
-pub const TRAY: Color = Color::new(0x07, 0x2A, 0x3C);
-pub const TRAY_EDGE: Color = Color::new(0x9F, 0xCF, 0xE2);
 
 /// The terminal's status strip, which is the tray's colour given a ramp.
 ///
@@ -352,8 +218,8 @@ pub const STATUS_BAR: [(u8, Color); 3] = [
     (255, Color::new(0x05, 0x1F, 0x2D)),
 ];
 
-/// Start. Green in every real XP scheme, including the blue one, which is why
-/// it stays green here rather than following the accent.
+/// The green of an OK button: XP's Start green, kept for the one control that
+/// says yes since the Start button became an orb.
 pub const START: [(u8, Color); 7] = [
     (0, Color::new(0xD6, 0xF0, 0xA8)),
     (10, Color::new(0x9A, 0xDB, 0x62)),
@@ -363,17 +229,7 @@ pub const START: [(u8, Color); 7] = [
     (240, Color::new(0x3C, 0x84, 0x18)),
     (255, Color::new(0x6F, 0xBE, 0x3A)),
 ];
-pub const START_HOT: [(u8, Color); 7] = [
-    (0, Color::new(0xEC, 0xFB, 0xD2)),
-    (10, Color::new(0xBC, 0xEE, 0x8C)),
-    (120, Color::new(0x82, 0xCE, 0x50)),
-    (128, Color::new(0x6A, 0xB8, 0x3A)),
-    (129, Color::new(0x46, 0x90, 0x22)),
-    (240, Color::new(0x54, 0xA4, 0x28)),
-    (255, Color::new(0x8E, 0xD8, 0x56)),
-];
 pub const START_EDGE: Color = Color::new(0x8E, 0xD4, 0x6A);
-pub const START_TEXT: Color = Color::new(0xFF, 0xFF, 0xFF);
 
 /// A popup menu. White with a face-coloured gutter down its left and one
 /// border, which is what every Windows menu has been since XP.
@@ -383,24 +239,35 @@ pub const MENU_EDGE: Color = Color::new(0x8F, 0xB2, 0xC2);
 /// How wide the gutter is. Nothing is drawn in it yet -- XP puts an icon or a
 /// tick there -- and it is here because a menu without one reads as a list
 /// box, which is a different control that does a different thing.
-pub const MENU_GUTTER_W: u32 = 20;
+pub fn menu_gutter_w() -> u32 {
+    px(20)
+}
 
 /// How far a window's top corners are rounded.
 ///
 /// Six pixels against a thirty-pixel caption is XP's proportion at 96 dpi. The
 /// bottom corners stay square: the bottom edge is something you drag, and a
 /// rounded one reads as a control that has come loose from the frame.
-pub const WIN_ROUND: u32 = 8;
+pub fn win_round() -> u32 {
+    px(ROUND.load(core::sync::atomic::Ordering::Relaxed))
+}
 
-/// A window's drop shadow: how far it is offset, how wide it falls, and how
-/// much of the backdrop survives underneath it out of 256.
-///
-/// Aero's is soft and this one is not, because softness needs the backdrop at
-/// the moment the corner is drawn and the back-to-front repaint has already
-/// covered it. A hard band at 84% is what an opaque renderer can say honestly.
-pub const SHADOW_OFF: u32 = 3;
-pub const SHADOW_W: u32 = 5;
-pub const SHADOW_NUM: u32 = 214;
+/// How round a window's head is, logical (Settings): 8 by default, 0 square.
+static ROUND: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(8);
+
+pub fn set_round(logical: u32) {
+    ROUND.store(logical.min(16), core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn round_logical() -> u32 {
+    ROUND.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+// A window's shadow is `gfx::shadow` now, set in `desk::win_shadow`. It was a
+// hard five-pixel band at 84%, under a comment that softness "needs the
+// backdrop at the moment the corner is drawn and the back-to-front repaint has
+// already covered it" -- true of a renderer that painted straight to the
+// screen, and not of one that composes into a back buffer it can read.
 
 /// The console's own background, inside the terminal window's well.
 pub const SCREEN: Color = Color::new(0x0A, 0x0C, 0x10);
@@ -417,28 +284,63 @@ pub const LINK: Color = APERTURE;
 pub const HEADING: Color = HILIGHT;
 
 pub const CHROME_SCALE: u32 = 2;
+
+/// The interface's scale, in thousandths: 1250 is 125%, Windows' choice for
+/// this panel's 141 pixels to the inch, and the size every metric in this
+/// file was drawn at -- so `px(n)` is `n` at the default, and the look moves
+/// only when somebody moves the scale. Every metric goes through it, which
+/// is the whole of "logical pixels": a number written here is a size at
+/// 125%, and the screen gets that size at whatever the scale is.
+static SCALE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1250);
+
+/// The scale, in thousandths (1250 is 125%).
+pub fn scale() -> u32 {
+    SCALE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Set it, between 75% and 250%. Everything sized from it follows on the
+/// next frame; the caller asks for that frame.
+pub fn set_scale(permille: u32) {
+    SCALE.store(permille.clamp(750, 2500), core::sync::atomic::Ordering::Relaxed);
+}
+
+/// A size drawn at 125%, at the scale in force.
+pub fn px(n: u32) -> u32 {
+    ((n as u64 * scale() as u64 + 625) / 1250) as u32
+}
+
+/// The interface face's size at the scale in force.
+pub fn ui_size() -> f32 {
+    UI_PX * scale() as f32 / 1250.0
+}
 /// Height of a title bar at `CHROME_SCALE`, with room above and below the text.
 ///
 /// Fourteen rather than eight above a 16-pixel line. A caption is the surface
 /// somebody looks at to know which window has the keyboard, and the 3.1
 /// proportion crowds it: XP put air around the same text and that air is most
 /// of why one reads as modern and the other does not.
-pub const TITLE_H: u32 = font::GLYPH_H * CHROME_SCALE + 14;
+pub fn title_h() -> u32 {
+    px(font::GLYPH_H * CHROME_SCALE + 14)
+}
 /// Height of a menu bar and of one row in a dropdown.
 ///
 /// **Its own constant, and that is the point of it.** It was
 /// `= theme::TITLE_H` over in `desk`, which is a coincidence and not a fact:
 /// the moment the caption grew, every menu row and every dropdown row would
 /// have grown with it, silently, to thirty pixels around sixteen of text.
-pub const MENU_H: u32 = font::GLYPH_H * CHROME_SCALE + 6;
+pub fn menu_h() -> u32 {
+    px(font::GLYPH_H * CHROME_SCALE + 6)
+}
 /// Thickness of a window's outer frame.
 ///
 /// Three, and it is a coloured border now rather than a grey slab. XP's frame
 /// says which window is active along its whole length; 3.1's said only that
 /// there was an edge here to grab.
-pub const FRAME: u32 = 3;
+pub fn frame_w() -> u32 {
+    px(3)
+}
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct Rect {
     pub x: u32,
     pub y: u32,
@@ -536,17 +438,91 @@ pub fn well(fb: &Framebuffer, r: Rect, fill: Color) {
     outline(fb, r, WELL_EDGE);
 }
 
+// Interface text is Noto Sans and editable text is Cascadia Code, through
+// `gfx::text` (Q4c). The *layout* is still the bitmap's for now: `text_h` is
+// the 16-pixel row every window was laid out against, and `text_w(n)` is
+// still 16 pixels a character -- which stays a safe budget, since no glyph of
+// Noto Sans at 15 px is wider than 16, so a label sized by it can only come
+// out shorter than its room, never overlap what is beside it. The metrics
+// move to logical pixels with the restyle (Q8); this commit is the faces.
+//
+// Editable text is monospaced on purpose: a field and the Write window place
+// the caret at a *column*, and a column is a pixel offset only in a face
+// whose every advance is the same. `mono_w` is that advance.
+
+/// The interface face's size at `CHROME_SCALE`, and what a scale maps to.
+pub const UI_PX: f32 = 15.0;
+
+fn ui_px(scale: u32) -> f32 {
+    match scale {
+        0 | 1 => 10.5,
+        2 => ui_size(),
+        s => ui_size() * s as f32 / 2.0,
+    }
+}
+
+/// Set `s` in `face` with the top of its row at `y`, the cap height centred in
+/// a row of `row_h` pixels -- the vertical rule a 16-pixel bitmap cell used to
+/// supply for free. Fills `bg` behind the measured run when there is one.
+fn set(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color, bg: Option<Color>, face: text::Face, px: f32, row_h: u32) {
+    if let Some(bg) = bg {
+        let w = (text::measure(face, px, s) + 0.999) as u32;
+        fb.rect(x, y, w, row_h, bg);
+    }
+    // Cap height is about 0.71 em in both faces; centre that, and let
+    // descenders hang into the row's spare pixels below.
+    let cap = px * 0.714;
+    let base = y as f32 + (row_h as f32 + cap) / 2.0;
+    text::draw(fb, x as f32, (base + 0.5) as i32, face, px, s, fg);
+}
+
 pub fn text(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color, bg: Color) {
-    fb.draw_text(x, y, s, fg, bg, CHROME_SCALE);
+    set(fb, x, y, s, fg, Some(bg), text::Face::Ui, ui_size(), text_h());
+}
+
+/// Interface text in the semibold weight: captions and headings.
+pub fn text_strong(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color) {
+    set(fb, x, y, s, fg, None, text::Face::UiStrong, ui_size(), text_h());
+}
+
+/// Editable or column-aligned text, monospaced, on a `bg` field.
+pub fn mono_text(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color, bg: Color) {
+    set(fb, x, y, s, fg, Some(bg), text::Face::Mono, ui_size(), text_h());
+}
+
+/// The width of `n` columns of `mono_text`.
+pub fn mono_w(n: usize) -> u32 {
+    let adv = text::measure(text::Face::Mono, ui_size(), "M");
+    (n as f32 * adv + 0.5) as u32
+}
+
+/// The width of one column of `mono_text`, for hit-testing a press to a column.
+pub fn mono_col() -> u32 {
+    mono_w(1).max(1)
+}
+
+/// The measured width of `s` as `text_over_at` sets it at `scale`.
+pub fn text_w_of_at(s: &str, scale: u32) -> u32 {
+    (text::measure(text::Face::Ui, ui_px(scale), s) + 0.999) as u32
+}
+
+/// `fit` at a chosen scale.
+pub fn fit_at(s: &str, max: u32, scale: u32) -> String {
+    text::ellipsize(text::Face::Ui, ui_px(scale), s, max as f32)
+}
+
+/// `s` cut to fit `max` pixels of interface text, with an ellipsis if it was.
+pub fn fit(s: &str, max: u32) -> String {
+    text::ellipsize(text::Face::Ui, ui_size(), s, max as f32)
 }
 
 /// Height of one line of chrome text, the companion to `text_w`.
 pub fn text_h() -> u32 {
-    font::GLYPH_H * CHROME_SCALE
+    px(font::GLYPH_H * CHROME_SCALE)
 }
 
 pub fn text_w(len: usize) -> u32 {
-    len as u32 * font::GLYPH_W * CHROME_SCALE
+    px(len as u32 * font::GLYPH_W * CHROME_SCALE)
 }
 
 /// How wide a particular string draws.
@@ -559,7 +535,9 @@ pub fn text_w(len: usize) -> u32 {
 /// model supplies; `text_w` still takes a count, for the callers that are
 /// asking about columns rather than about a string.
 pub fn text_w_of(s: &str) -> u32 {
-    text_w(s.chars().count())
+    // Measured now, kerning and all: the face is proportional, so a count of
+    // anything -- bytes or characters -- is not a width.
+    (text::measure(text::Face::Ui, ui_size(), s) + 0.999) as u32
 }
 
 /// The first `n` characters, for a label that has to fit.
@@ -587,20 +565,6 @@ pub fn tail_chars(s: &str, n: usize) -> &str {
     }
 }
 
-/// The Aperture mark, small enough for a title bar.
-///
-/// Not the full boot logo: at this size the six-slash aperture turns to mush,
-/// so this is the ring and the hexagonal opening only, which is what stays
-/// legible when it is sixteen pixels across.
-fn mark(fb: &Framebuffer, cx: i32, cy: i32, r: i32, fg: Color) {
-    if r < 3 {
-        return;
-    }
-    fb.circle_thick(cx, cy, r, 2, fg);
-    let inner = (r * 45 / 100).max(2);
-    fb.fill_circle(cx, cy, inner, fg);
-}
-
 /// Where every part of a window is.
 ///
 /// One formula, and it lives here rather than in `desk` because
@@ -624,20 +588,20 @@ pub struct Chrome {
 }
 
 pub fn chrome(frame: Rect, has_menus: bool) -> Chrome {
-    let inner = frame.shrink(FRAME);
-    let title = Rect::new(inner.x, inner.y, inner.w, TITLE_H);
+    let inner = frame.shrink(frame_w());
+    let title = Rect::new(inner.x, inner.y, inner.w, title_h());
     // Two pixels of border show between the caption and the body, which under
     // Luna is a thin accent line rather than the gap it used to be.
     let body = Rect::new(
         inner.x,
-        inner.y + TITLE_H + 2,
+        inner.y + title_h() + 2,
         inner.w,
-        inner.h.saturating_sub(TITLE_H + 2),
+        inner.h.saturating_sub(title_h() + 2),
     );
     let (menubar, client) = if has_menus {
         (
-            Some(Rect::new(body.x, body.y, body.w, MENU_H)),
-            Rect::new(body.x, body.y + MENU_H, body.w, body.h.saturating_sub(MENU_H)),
+            Some(Rect::new(body.x, body.y, body.w, menu_h())),
+            Rect::new(body.x, body.y + menu_h(), body.w, body.h.saturating_sub(menu_h())),
         )
     } else {
         (None, body)
@@ -659,11 +623,16 @@ pub fn window(
     hot_caption: Option<usize>,
 ) -> Chrome {
     let c = chrome(r, has_menus);
-    // The border is the caption's colour carried round the outside, painted as
-    // the whole window and then covered. Two fills rather than four strips,
-    // and the strip between the caption and the body comes out of it for
-    // free.
-    fb.rect(r.x, r.y, r.w, r.h, if active { BORDER_ON } else { BORDER_OFF });
+    // The frame and caption are glass (1.4.1): the blurred wallpaper behind
+    // them, colourised. Four strips -- the top one taking in the caption and
+    // the line under it -- rather than the whole window, because the body is
+    // solid by decision and glass under it would be computed and covered.
+    let g = caption_glass(active);
+    let top_h = c.body.y.saturating_sub(r.y);
+    super::glass::fill(fb, r.x as i32, r.y as i32, r.w, top_h, 0, g);
+    super::glass::fill(fb, r.x as i32, c.body.y as i32, frame_w(), r.h.saturating_sub(top_h), 0, g);
+    super::glass::fill(fb, (r.x + r.w - frame_w()) as i32, c.body.y as i32, frame_w(), r.h.saturating_sub(top_h), 0, g);
+    super::glass::fill(fb, r.x as i32, (r.y + r.h - frame_w()) as i32, r.w, frame_w(), 0, g);
     if c.body.is_empty() {
         return c;
     }
@@ -686,29 +655,39 @@ pub fn window(
 pub struct Popup {
     pub panel: Rect,
     pub rows: usize,
+    /// Inset from the panel's edge to the first row: a menu's three pixels,
+    /// or the Start menu's glass frame.
+    pub pad: u32,
 }
 
 /// Inset from the panel edge to the first row.
-const POPUP_PAD: u32 = 3;
+fn popup_pad() -> u32 {
+    px(3)
+}
 
 impl Popup {
     /// Sized from its widest label in columns and its row count, clamped to
     /// whatever room is left on the right.
     pub fn sized(x: u32, y: u32, cols: usize, rows: usize, max_w: u32) -> Popup {
-        let w = (text_w(cols) + 24 + MENU_GUTTER_W).min(max_w);
-        let h = rows as u32 * MENU_H + POPUP_PAD * 2;
-        Popup { panel: Rect::new(x, y, w, h), rows }
+        Self::padded(x, y, cols, rows, max_w, popup_pad())
+    }
+
+    /// `sized`, with a frame of `pad` round the rows.
+    pub fn padded(x: u32, y: u32, cols: usize, rows: usize, max_w: u32, pad: u32) -> Popup {
+        let w = (text_w(cols) + 24 + menu_gutter_w() + 2 * (pad - popup_pad().min(pad))).min(max_w);
+        let h = rows as u32 * menu_h() + pad * 2;
+        Popup { panel: Rect::new(x, y, w, h), rows, pad }
     }
 
     /// Where row `i` is drawn: to the right of the gutter, which is why a
     /// selection bar stops at it rather than running under it.
     pub fn row(&self, i: usize) -> Rect {
-        let inset = POPUP_PAD + MENU_GUTTER_W;
+        let inset = self.pad + menu_gutter_w();
         Rect::new(
             self.panel.x + inset,
-            self.panel.y + POPUP_PAD + i as u32 * MENU_H,
-            self.panel.w.saturating_sub(inset + POPUP_PAD),
-            MENU_H,
+            self.panel.y + self.pad + i as u32 * menu_h(),
+            self.panel.w.saturating_sub(inset + self.pad),
+            menu_h(),
         )
     }
 
@@ -724,7 +703,7 @@ impl Popup {
         if y < p.y as i32 || y >= (p.y + p.h) as i32 {
             return None;
         }
-        let row = (y - (p.y + POPUP_PAD) as i32) / MENU_H as i32;
+        let row = (y - (p.y + self.pad) as i32) / menu_h() as i32;
         if row >= 0 && (row as usize) < self.rows {
             Some(row as usize)
         } else {
@@ -738,15 +717,42 @@ impl Popup {
     /// width arithmetic on a narrow one used to wrap to four billion -- not a
     /// crash but a fill loop long enough to look like a hang.
     pub fn wide_enough(&self) -> bool {
-        self.panel.w >= MENU_GUTTER_W + 16
+        self.panel.w >= menu_gutter_w() + 16
     }
 }
+
+/// The Start menu's frame: Vista's, a pane of the focused caption's glass
+/// round a white body, so the menu reads as part of the bar it came out of.
+pub fn start_popup(fb: &Framebuffer, p: &Popup) {
+    let r = p.panel;
+    super::glass::fill(fb, r.x as i32, r.y as i32, r.w, r.h, 8, caption_glass(true));
+    let m = p.pad.saturating_sub(2);
+    let body = Rect::new(r.x + m, r.y + m, r.w.saturating_sub(2 * m), r.h.saturating_sub(2 * m));
+    fb.rect(body.x, body.y, body.w, body.h, MENU_BG);
+    fb.rect(body.x + 1, body.y + 1, menu_gutter_w() + 2, body.h.saturating_sub(2), MENU_GUTTER);
+    outline(fb, body, MENU_EDGE);
+}
+
+/// The light edge along the top of a strip that sits on the bar.
+pub const TRAY_EDGE: Color = Color::new(0x9F, 0xCF, 0xE2);
+
+/// The taskbar's glass: Vista's black, darker than any caption, so the bar
+/// reads as the floor the windows stand on.
+pub const TASKBAR_GLASS: super::glass::Glass = super::glass::Glass {
+    tint: Color::new(18, 24, 34),
+    glow: Color::new(80, 100, 130),
+    blur: 46,
+    afterglow: 14,
+    color: 40,
+    gloss: 34,
+    gloss_end: 0.5,
+};
 
 /// The ground a popup's rows sit on: white, a gutter, and one border.
 pub fn popup(fb: &Framebuffer, p: &Popup) {
     let r = p.panel;
     fb.rect(r.x, r.y, r.w, r.h, MENU_BG);
-    fb.rect(r.x + 1, r.y + 1, MENU_GUTTER_W, r.h.saturating_sub(2), MENU_GUTTER);
+    fb.rect(r.x + 1, r.y + 1, menu_gutter_w(), r.h.saturating_sub(2), MENU_GUTTER);
     outline(fb, r, MENU_EDGE);
 }
 
@@ -776,20 +782,20 @@ pub fn menu_labels<'a>(
 /// button that highlights in one place and presses in another is the bug
 /// that duplicated layout always becomes.
 pub fn caption_buttons(bar: Rect) -> [Rect; 3] {
-    let s = bar.h.saturating_sub(9);
-    let y = bar.y + (bar.h.saturating_sub(s)) / 2;
-    let close_x = bar.x + bar.w.saturating_sub(s + 5);
-    // The close button sits apart from the pair, as it has since 95 -- the
-    // one you reach for blind should not share an edge with the one that
-    // merely tidies. XP itself puts all three flush and this keeps the gap:
-    // the argument for it did not stop being true because Redmond stopped
-    // making it.
-    let max_x = close_x.saturating_sub(s + 4);
-    let min_x = max_x.saturating_sub(s + 2);
+    // Vista's proportions: a short glass pair and a close button half as wide
+    // again as both, so the one reached for blind is the biggest target on the
+    // bar. The gap before close stays, for the argument it has always made.
+    let h = bar.h.saturating_sub(10);
+    let y = bar.y + (bar.h.saturating_sub(h)) / 2;
+    let small = h * 7 / 5;
+    let wide = h * 11 / 5;
+    let close_x = bar.x + bar.w.saturating_sub(wide + 6);
+    let max_x = close_x.saturating_sub(small + 4);
+    let min_x = max_x.saturating_sub(small + 2);
     [
-        Rect::new(min_x, y, s, s),
-        Rect::new(max_x, y, s, s),
-        Rect::new(close_x, y, s, s),
+        Rect::new(min_x, y, small, h),
+        Rect::new(max_x, y, small, h),
+        Rect::new(close_x, y, wide, h),
     ]
 }
 
@@ -801,82 +807,163 @@ pub fn title_bar(
     maximised: bool,
     hot_caption: Option<usize>,
 ) {
-    fb.vgrad(r.x, r.y, r.w, r.h, if active { &TITLE_ON } else { &TITLE_OFF });
-    // A one-pixel catchlight along the very top. The stop table is
-    // proportional and so cannot express an absolute one-pixel edge at any
-    // height, which is the intended division of labour between the ramp and
-    // the line drawn on top of it.
-    fb.rect(r.x, r.y, r.w, 1, if active { CAP_EDGE } else { EDGE_LIGHT });
+    // The caption is glass, laid by `window` with the frame; drawn again here
+    // only so `title_bar` stays callable on its own, as `mindwin` does.
+    super::glass::fill(fb, r.x as i32, r.y as i32, r.w, r.h, 0, caption_glass(active));
 
     let pad = 6;
     let cy = r.y + r.h / 2;
-    mark(fb, (r.x + pad + 8) as i32, cy as i32, (r.h as i32 / 2) - 4, TITLE_TEXT);
+    // The Aperture mark itself, where this used to be a ring round a dot --
+    // which is what the mark became at sixteen pixels with no anti-aliasing,
+    // and stopped needing to be once the icons could draw it.
+    let n = 22u32.min(r.h.saturating_sub(4));
+    let kind = if active { super::icons::MARK } else { super::icons::MARK_IDLE };
+    super::icons::lay(fb, kind, (r.x + pad + 8).saturating_sub(n / 2), cy.saturating_sub(n / 2), n);
 
     let tx = r.x + pad + 22;
     let ty = r.y + (r.h - font::GLYPH_H * CHROME_SCALE) / 2;
     let btns = caption_buttons(r);
-    // Clip by characters rather than pixels, and stop short of the buttons:
-    // a title that runs under the close box reads as a title bar with no
-    // close box.
+    // Fitted by measuring, and stopped short of the buttons: a title that
+    // runs under the close box reads as a title bar with no close box. The
+    // one-pixel black shadow the bitmap needed is gone -- anti-aliased text
+    // reads on the ramp without it, and a hard offset copy is the most
+    // 1998 thing a caption can wear.
     let text_end = btns[0].x.saturating_sub(6);
-    let room = (text_end.saturating_sub(tx) / (font::GLYPH_W * CHROME_SCALE)) as usize;
-    let shown = head_chars(title, room);
-    // Over a gradient there is no one background colour, so the glyphs carry
-    // their own shadow instead of a box.
-    text_over(fb, tx + 1, ty + 1, shown, DARKEDGE);
-    text_over(fb, tx, ty, shown, if active { TITLE_TEXT } else { TITLE_IDLE });
+    let shown = fit(title, text_end.saturating_sub(tx));
+    text_strong(fb, tx, ty, &shown, if active { TITLE_TEXT } else { TITLE_IDLE });
 
-    // The caption buttons: rounded ramps on the caption's own ramp, glyphs
-    // drawn by hand because the font has no box-drawing worth the name.
-    //
-    // **Close is red whether or not the pointer is on it.** That overturns the
-    // note on `CLOSE_HOT`, which argued the red was the hover feedback and
-    // that every other control here answers hover with a ring. Under Luna the
-    // red is the control's identity rather than its response, and an operator
-    // coming from any Windows since XP finds it by colour before they read the
-    // glyph. Hover still says something -- it brightens.
+    // The caption buttons, Vista's: glass minimise and maximise with dark
+    // glyphs, and a wider close in red with a soft glow -- red whether or not
+    // the pointer is on it, since under Vista as under Luna the colour is the
+    // control's identity and hover only brightens it.
     for (i, b) in btns.iter().enumerate() {
-        let hot = hot_caption == Some(i);
-        let close = i == 2;
-        let stops: &[(u8, Color)] = match (close, hot) {
-            (true, true) => &CAP_CLOSE_HOT,
-            (true, false) => &CAP_CLOSE,
-            (false, true) => &CAP_BTN_HOT,
-            (false, false) => &CAP_BTN,
-        };
-        control(fb, *b, stops, CAP_EDGE);
-        let ink = CAP_INK;
-        let g = b.shrink(4);
-        if g.is_empty() {
-            continue;
+        caption_button(fb, r, *b, i, hot_caption == Some(i), maximised);
+    }
+}
+
+/// What tints the caption and frame glass, chosen at run time (`win glass`)
+/// until the Settings window owns it.
+///
+/// Sky by default, chosen over Aperture orange against the three side by
+/// side: the accent still marks focus, selection and links, and a caption
+/// that is the colour of the room rather than of the machine lets it.
+static CAPTION_TINT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(1);
+
+pub const TINTS: [&str; 3] = ["warm", "sky", "graphite"];
+
+pub fn set_caption_tint(name: &str) -> bool {
+    match TINTS.iter().position(|t| *t == name) {
+        Some(i) => {
+            CAPTION_TINT.store(i as u8, core::sync::atomic::Ordering::Relaxed);
+            true
         }
-        match i {
-            // Minimise: the bar along the bottom.
-            0 => fb.rect(g.x, g.y + g.h.saturating_sub(3), g.w, 3, ink),
-            // Maximise, or restore when already maximised: one frame with a
-            // thick lid, or two overlapping ones.
-            1 => {
-                if maximised {
-                    let s = g.w.saturating_sub(4);
-                    fb.frame(g.x + 4, g.y, s, s, ink);
-                    fb.rect(g.x + 4, g.y, s, 2, ink);
-                    fb.rect(g.x, g.y + 4, s, s, stops[2].1);
-                    fb.frame(g.x, g.y + 4, s, s, ink);
-                    fb.rect(g.x, g.y + 4, s, 2, ink);
-                } else {
-                    fb.frame(g.x, g.y, g.w, g.h, ink);
-                    fb.rect(g.x, g.y, g.w, 2, ink);
+        None => false,
+    }
+}
+
+pub fn caption_tint() -> &'static str {
+    TINTS[CAPTION_TINT.load(core::sync::atomic::Ordering::Relaxed) as usize % TINTS.len()]
+}
+
+/// The glass a caption wears. The focused window's carries the tint; the
+/// rest are a neutral glass, darker, so focus reads at a glance -- the cue a
+/// title bar's colour has always been.
+pub fn caption_glass(active: bool) -> super::glass::Glass {
+    use super::glass::Glass;
+    // The tint takes a third of the colour here where Vista's default took
+    // eight per cent. Measured on the night wallpaper: at Vista's balance all
+    // three tints came out the same dark grey, because a blurred dark sky is
+    // what the other two terms are made of. Vista's walls were bright.
+    if !active {
+        // Unfocused: a pale, cool, plainly transparent glass, so the focused
+        // caption is the one with colour in it -- and dark text reads on it.
+        return Glass { tint: Color::new(206, 214, 226), glow: Color::new(226, 232, 242), blur: 26, afterglow: 14, color: 60, gloss: 40, gloss_end: 0.5 };
+    }
+    match CAPTION_TINT.load(core::sync::atomic::Ordering::Relaxed) {
+        // Aperture orange: the machine's own colour on the surface it speaks
+        // through. Offered, not the default.
+        0 => Glass { tint: Color::new(242, 128, 32), glow: Color::new(255, 176, 96), blur: 34, afterglow: 26, color: 40, gloss: 56, gloss_end: 0.5 },
+        // Vista's own "Sky", at this balance.
+        1 => Glass { tint: Color::new(0x74, 0xb8, 0xfc), glow: Color::new(0x74, 0xb8, 0xfc), blur: 34, afterglow: 26, color: 40, gloss: 56, gloss_end: 0.5 },
+        // Smoke.
+        _ => Glass { tint: Color::new(52, 58, 72), glow: Color::new(150, 160, 180), blur: 40, afterglow: 30, color: 30, gloss: 46, gloss_end: 0.5 },
+    }
+}
+
+/// One caption button, drawn per pixel from a rounded box's distance: a
+/// vertical ramp, a gloss on the upper half, a pale rim, and for close a red
+/// glow outside it, clipped to the caption so it never leaves the window.
+fn caption_button(fb: &Framebuffer, bar: Rect, b: Rect, kind: usize, hot: bool, maximised: bool) {
+    use super::blend::{opaque, over_px, premul};
+    let close = kind == 2;
+    let (top, bot, rim) = match (close, hot) {
+        (true, false) => ([236u8, 120, 100, 255], [170u8, 30, 20, 255], [255u8, 220, 210, 170]),
+        (true, true) => ([255, 150, 126, 255], [206, 44, 30, 255], [255, 236, 228, 200]),
+        (false, false) => ([214, 232, 250, 205], [120, 160, 200, 205], [255, 255, 255, 160]),
+        (false, true) => ([236, 246, 255, 230], [150, 190, 230, 230], [255, 255, 255, 200]),
+    };
+    let glow = if close { if hot { 150.0 } else { 110.0 } } else { 0.0 };
+    let reach = if close { 5i32 } else { 0 };
+    let clip = fb.clipped(bar.x, bar.y, bar.w, bar.h);
+    let (bx, by, bw, bh) = (b.x as f32, b.y as f32, b.w as f32, b.h as f32);
+    let rad = 4.0f32;
+    let enc = |c: [u8; 4]| premul(fb.encode(Color::new(c[0], c[1], c[2])) & 0x00FF_FFFF, c[3]);
+    let x0 = (b.x as i32 - reach).max(bar.x as i32);
+    let x1 = ((b.x + b.w) as i32 + reach).min((bar.x + bar.w) as i32);
+    let y0 = (b.y as i32 - reach).max(bar.y as i32);
+    let y1 = ((b.y + b.h) as i32 + reach).min((bar.y + bar.h) as i32);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let mut row: alloc::vec::Vec<u32> = alloc::vec![0; (x1 - x0) as usize];
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let d = super::shape::sd_rbox(px, py, bx + bw / 2.0, by + bh / 2.0, bw / 2.0, bh / 2.0, rad);
+            let mut p = 0u32;
+            if glow > 0.0 && d > 0.0 {
+                let a = glow * crate::ai::tensor::expf(-(d * d) / 8.0);
+                p = premul(fb.encode(Color::new(255, 70, 40)) & 0x00FF_FFFF, a as u8);
+            }
+            let cov = (0.5 - d).clamp(0.0, 1.0);
+            if cov > 0.0 {
+                let t = ((py - by) / bh).clamp(0.0, 1.0);
+                let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t) as u8;
+                let body = [lerp(top[0], bot[0]), lerp(top[1], bot[1]), lerp(top[2], bot[2]), lerp(top[3], bot[3])];
+                let a = (body[3] as f32 * cov) as u8;
+                p = over_px(premul(fb.encode(Color::new(body[0], body[1], body[2])) & 0x00FF_FFFF, a), p);
+                if py < by + bh * 0.48 {
+                    p = over_px(premul(opaque(fb.encode(Color::new(255, 255, 255))) & 0x00FF_FFFF, (60.0 * cov) as u8), p);
+                }
+                let edge = (0.5 - (d + 0.6).abs()).clamp(0.0, 1.0);
+                if edge > 0.0 {
+                    p = over_px(super::blend::scale_px(enc(rim), (edge * 255.0) as u32), p);
                 }
             }
-            // Close: the cross, two pixels wide so it reads at this size.
-            _ => {
-                let (x0, y0) = (g.x as i32, g.y as i32);
-                let (x1, y1) = ((g.x + g.w) as i32 - 1, (g.y + g.h) as i32 - 1);
-                fb.line(x0, y0, x1, y1, ink);
-                fb.line(x0 + 1, y0, x1, y1 - 1, ink);
-                fb.line(x0, y1, x1, y0, ink);
-                fb.line(x0 + 1, y1, x1, y0 + 1, ink);
+            row[(x - x0) as usize] = p;
+        }
+        clip.over_row(x0 as u32, y as u32, &row);
+    }
+    // The glyph, anti-aliased, white on red and dark on glass.
+    let ink = if close { premul(fb.encode(Color::new(255, 255, 255)) & 0x00FF_FFFF, 255) }
+              else { premul(fb.encode(Color::new(30, 45, 70)) & 0x00FF_FFFF, 255) };
+    let (cx, cy) = (bx + bw / 2.0, by + bh / 2.0);
+    let s = (bh * 0.22).max(3.0);
+    let lw = (bh * 0.09).max(1.4);
+    match kind {
+        0 => super::shape::line(&clip, cx - s, cy + s * 0.55, cx + s, cy + s * 0.55, lw * 1.1, ink),
+        1 => {
+            let bxx = |x: f32, y: f32, w: f32| super::shape::Box::new(x as i32, y as i32, w as u32, w as u32);
+            if maximised {
+                super::shape::ring(&clip, bxx(cx - s * 0.6, cy - s * 1.0, s * 1.6), 1, lw as u32, ink);
+                super::shape::ring(&clip, bxx(cx - s * 1.0, cy - s * 0.6, s * 1.6), 1, lw as u32, ink);
+            } else {
+                super::shape::ring(&clip, bxx(cx - s, cy - s, s * 2.0), 1, lw as u32, ink);
             }
+        }
+        _ => {
+            super::shape::line(&clip, cx - s, cy - s, cx + s, cy + s, lw * 1.2, ink);
+            super::shape::line(&clip, cx - s, cy + s, cx + s, cy - s, lw * 1.2, ink);
         }
     }
 }
@@ -899,23 +986,7 @@ pub fn text_over(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color) {
 /// crisp bitmap rather than a shrunk one, because the font *is* eight pixels
 /// and two was always a doubling.
 pub fn text_over_at(fb: &Framebuffer, x: u32, y: u32, s: &str, fg: Color, scale: u32) {
-    let scale = scale.max(1);
-    let mut cx = x;
-    for b in s.chars() {
-        let rows = font::rows(font::index_of(b));
-        for (gy, bits) in rows.iter().enumerate() {
-            for gx in 0..font::GLYPH_W {
-                if bits & (0x80 >> gx) != 0 {
-                    for dy in 0..scale {
-                        for dx in 0..scale {
-                            fb.put(cx + gx * scale + dx, y + gy as u32 * scale + dy, fb.raw(fg));
-                        }
-                    }
-                }
-            }
-        }
-        cx += font::GLYPH_W * scale;
-    }
+    set(fb, x, y, s, fg, None, text::Face::Ui, ui_px(scale), text_h_at(scale));
 }
 
 /// Row height and column width at a chosen scale, the companions to
@@ -966,9 +1037,9 @@ pub fn button_at(
         }
     }
 
-    let room = (r.w.saturating_sub(6) / (font::GLYPH_W * scale.max(1))) as usize;
-    let label = head_chars(label, room);
-    let tw = text_w_at(label.chars().count(), scale);
+    let label = fit_at(label, r.w.saturating_sub(6), scale);
+    let label = label.as_str();
+    let tw = text_w_of_at(label, scale);
     let tx = r.x + (r.w.saturating_sub(tw)) / 2 + u32::from(pressed);
     let ty = r.y + (r.h.saturating_sub(text_h_at(scale))) / 2 + u32::from(pressed);
     // `text_over` rather than `text`: the face is a ramp now, so stamping one
@@ -1001,9 +1072,8 @@ pub fn list_row_at(
     };
     fb.rect(r.x, r.y, r.w, r.h, bg);
     let ty = r.y + (r.h.saturating_sub(text_h_at(scale))) / 2;
-    let room = (r.w / (font::GLYPH_W * scale.max(1))).saturating_sub(1) as usize;
-    let shown = head_chars(label, room);
-    text_over_at(fb, r.x + 4, ty, shown, fg, scale);
+    let shown = fit_at(label, r.w.saturating_sub(8), scale);
+    text_over_at(fb, r.x + 4, ty, &shown, fg, scale);
 }
 
 /// A vertical groove, for dividing a bar into sections.
@@ -1012,92 +1082,11 @@ pub fn separator_v(fb: &Framebuffer, x: u32, y: u32, h: u32) {
     fb.rect(x + 1, y, 1, h, EDGE_LIGHT);
 }
 
-// --- icon bodies ----------------------------------------------------------
-//
-// One light source for the whole set, which is the entire point of putting
-// these here rather than letting each drawing carry its own gradient. Ten
-// private ramps is ten chances for one icon to be lit from the left while its
-// neighbour is lit from above, and nothing catches that but an eye.
-//
-// Every ramp runs light at the top to dark at the bottom, matching `SUN` and
-// `TITLE_ON` and the wallpaper's own horizon. The hard step at 128/129 that
-// the chrome ramps use is deliberately absent: a caption is a plate and takes
-// a gloss break, a solid object is a solid object.
+// The icons are `gfx::icons` since 1.4.1: lit objects drawn by signed
+// distance, each carrying its own ramps. The shared icon ramps, edge, gloss
+// and inks that were here served the rectangle-and-frame drawings they
+// replaced.
 
-/// Cool aqua, for glass and water-like bodies -- the globe, the sliders.
-pub const ICON_GLASS: [(u8, Color); 4] = [
-    (0, Color::new(0x9C, 0xDD, 0xF2)),
-    (90, Color::new(0x4F, 0xA8, 0xCE)),
-    (180, Color::new(0x2A, 0x74, 0x9C)),
-    (255, Color::new(0x18, 0x4C, 0x6C)),
-];
-
-/// The warm half of the palette, for anything the machine speaks through.
-pub const ICON_WARM: [(u8, Color); 4] = [
-    (0, Color::new(0xFF, 0xD8, 0x8E)),
-    (90, Color::new(0xF7, 0xA8, 0x33)),
-    (180, Color::new(0xDC, 0x7E, 0x14)),
-    (255, Color::new(0xA8, 0x58, 0x0C)),
-];
-
-/// Paper, which is not flat white: a page lit from above has a shadow side.
-pub const ICON_PAPER: [(u8, Color); 4] = [
-    (0, Color::new(0xFF, 0xFF, 0xFF)),
-    (110, Color::new(0xF4, 0xF8, 0xFA)),
-    (200, Color::new(0xDD, 0xE7, 0xEC)),
-    (255, Color::new(0xC4, 0xD3, 0xDA)),
-];
-
-/// A dark body -- a screen, a mine. Never pure black; a black object in a lit
-/// scene still catches the sky.
-pub const ICON_DARK: [(u8, Color); 4] = [
-    (0, Color::new(0x3A, 0x4A, 0x56)),
-    (70, Color::new(0x1C, 0x26, 0x30)),
-    (180, Color::new(0x10, 0x16, 0x1E)),
-    (255, Color::new(0x06, 0x0A, 0x10)),
-];
-
-/// The paint palette's board.
-pub const ICON_WOOD: [(u8, Color); 3] = [
-    (0, Color::new(0xD8, 0xAE, 0x74)),
-    (140, Color::new(0xB0, 0x86, 0x50)),
-    (255, Color::new(0x7E, 0x5C, 0x33)),
-];
-
-/// The thin edge every icon body carries, and the specular that sits on top
-/// of it. One pixel each: an icon is 40 across and a two-pixel outline is a
-/// fifth of its face.
-pub const ICON_EDGE: Color = Color::new(0x2E, 0x4A, 0x5A);
-pub const ICON_SPEC: Color = HILIGHT;
-
-/// How much white the gloss band carries, out of 256, and how far down the
-/// body it reaches, out of 256.
-pub const ICON_GLOSS_NUM: u32 = 64;
-pub const ICON_GLOSS_SPAN: u32 = 110;
-
-/// How much a base shadow keeps of what is under it, out of 256. Higher is
-/// fainter; `SHADOW_NUM` is 214 for a window and an icon wants less weight
-/// than a window.
-pub const ICON_SHADE_NUM: u32 = 224;
-
-// The three ink wells on the paint palette, and the globe's water. These were
-// `Color::new` literals inside `pictogram` and belonged to no palette, so a
-// reskin moved the whole interface and left the icons behind -- which is
-// exactly what happened when the desktop went Aero and nine drawings did not.
-pub const INK_BLUE: Color = Color::new(0x30, 0x70, 0xC0);
-pub const INK_GREEN: Color = Color::new(0x30, 0xA0, 0x40);
-pub const INK_RED: Color = Color::new(0xC0, 0x30, 0x30);
-
-/// The Aperture mark at button size, on a raised face.
-///
-/// Small enough that the six blades are mush, so this is the ring and the
-/// opening -- the same reduction `mark` makes for a title bar, exposed because
-/// the app bar wants it too.
-/// White, not `APERTURE_DEEP`. Its one caller is the Start button, which is
-/// green now, and a deep orange on that green reads as mud.
-pub fn aperture_dot(fb: &Framebuffer, cx: u32, cy: u32, r: i32) {
-    mark(fb, cx as i32, cy as i32, r.max(3), HILIGHT);
-}
 
 // --- dashboard painters ---------------------------------------------------
 //
@@ -1169,11 +1158,10 @@ pub fn tabs(fb: &Framebuffer, r: Rect, labels: &[&str], sel: usize) -> alloc::ve
             if on { &TITLE_ON } else { &BTN },
             if on { BTN_EDGE_HOT } else { BTN_EDGE },
         );
-        let room = (t.w / text_w(1)).saturating_sub(1) as usize;
-        let shown = head_chars(label, room);
-        let tx = t.x + (t.w.saturating_sub(text_w_of(shown))) / 2;
+        let shown = fit(label, t.w.saturating_sub(8));
+        let tx = t.x + (t.w.saturating_sub(text_w_of(&shown))) / 2;
         let ty = t.y + (t.h.saturating_sub(text_h())) / 2;
-        text_over(fb, tx, ty, shown, if on { TITLE_TEXT } else { TEXT });
+        text_over(fb, tx, ty, &shown, if on { TITLE_TEXT } else { TEXT });
         out.push(t);
     }
     out
@@ -1190,11 +1178,10 @@ pub fn pill(fb: &Framebuffer, r: Rect, label: &str, ok: bool) {
         if ok { &START } else { &CAP_CLOSE },
         if ok { START_EDGE } else { CAP_EDGE },
     );
-    let room = (r.w / text_w(1)).saturating_sub(1) as usize;
-    let shown = head_chars(label, room);
-    let tx = r.x + (r.w.saturating_sub(text_w_of(shown))) / 2;
+    let shown = fit(label, r.w.saturating_sub(8));
+    let tx = r.x + (r.w.saturating_sub(text_w_of(&shown))) / 2;
     let ty = r.y + (r.h.saturating_sub(text_h())) / 2;
-    text_over(fb, tx, ty, shown, CAP_INK);
+    text_over(fb, tx, ty, &shown, CAP_INK);
 }
 
 /// A name against a value, on one line.
@@ -1207,11 +1194,9 @@ pub fn kv(fb: &Framebuffer, r: Rect, name: &str, value: &str, tone: Color) {
         return;
     }
     let gutter = text_w(14);
-    let room = (r.w / text_w(1)) as usize;
-    text_over(fb, r.x, r.y, head_chars(name, room.min(13)), TEXT_DIM);
+    text_over(fb, r.x, r.y, &fit(name, r.w.min(gutter).saturating_sub(8)), TEXT_DIM);
     if r.w > gutter {
-        let vroom = ((r.w - gutter) / text_w(1)) as usize;
-        text_over(fb, r.x + gutter, r.y, head_chars(value, vroom), tone);
+        text_over(fb, r.x + gutter, r.y, &fit(value, r.w - gutter), tone);
     }
 }
 

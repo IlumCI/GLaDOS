@@ -163,10 +163,15 @@ pub fn build_identity_map(
 
             let mut flags = PRESENT | WRITABLE | HUGE;
 
-            // The framebuffer is device memory, but it is linear and we only
-            // ever write to it, so write-back is both correct (the iGPU snoops)
-            // and far faster than uncacheable would be. Everything else that is
-            // not RAM is a register file and must not be cached.
+            // The framebuffer starts write-back here and is switched to
+            // write-combining by `install_paging` once the PAT has a WC slot
+            // (`paging::set_cache`). Write-back was the whole story for a long
+            // time, on the belief that "the iGPU snoops"; it does not --
+            // Intel's display engine is not coherent with the LLC, which is
+            // why i915 pins scanout uncached and Linux maps the firmware
+            // framebuffer WC -- and on QEMU the MTRRs override it to UC
+            // anyway (`video cache`). Everything else that is not RAM is a
+            // register file and must not be cached.
             let overlaps_fb = phys < fb_end && (phys + LARGE_PAGE_SIZE) > fb_start;
             if !overlaps_fb && !addr_is_ram(phys, mmap, mmap_size, desc_size) {
                 flags |= WRITE_THROUGH | CACHE_DISABLE;
@@ -597,6 +602,116 @@ pub fn query(addr: u64) -> Option<Perm> {
         // non-executable while the processor happily runs it would be a
         // comfortable lie.
         exec: e & NX == 0 || !crate::cpu::nx_on(),
+    })
+}
+
+/// The PAT slot the leaf entry for `addr` selects, under the current CR3.
+///
+/// Its own walk rather than `entry_for`, because the answer depends on which
+/// level the leaf is at and `entry_for` does not say: the PAT bit is bit 12 of
+/// a 2 MiB or 1 GiB entry and bit 7 of a 4 KiB one -- where bit 7 of a large
+/// entry is the page-size flag. Reading the wrong one reports a slot the
+/// processor is not using.
+pub fn pat_slot(addr: u64) -> Option<u8> {
+    let (i4, i3, i2, i1) = (
+        ((addr >> 39) & 511) as usize,
+        ((addr >> 30) & 511) as usize,
+        ((addr >> 21) & 511) as usize,
+        ((addr >> 12) & 511) as usize,
+    );
+    let bits = |e: u64, pat: u64| {
+        crate::cpu::mtrr::slot(e & WRITE_THROUGH != 0, e & CACHE_DISABLE != 0, e & pat != 0)
+    };
+    unsafe {
+        let pml4 = table(crate::cpu::read_cr3() & ADDR_MASK);
+        if pml4[i4] & PRESENT == 0 {
+            return None;
+        }
+        let pdpt = table(pml4[i4] & ADDR_MASK);
+        let e3 = pdpt[i3];
+        if e3 & PRESENT == 0 {
+            return None;
+        }
+        if e3 & HUGE != 0 {
+            return Some(bits(e3, 1 << 12));
+        }
+        let pd = table(e3 & ADDR_MASK);
+        let e2 = pd[i2];
+        if e2 & PRESENT == 0 {
+            return None;
+        }
+        if e2 & HUGE != 0 {
+            return Some(bits(e2, 1 << 12));
+        }
+        let pt = table(e2 & ADDR_MASK);
+        let e1 = pt[i1];
+        if e1 & PRESENT == 0 {
+            return None;
+        }
+        Some(bits(e1, 1 << 7))
+    }
+}
+
+/// Give a range one of three memory types through its leaf entries' PWT and
+/// PCD bits: write-back (slot 0), write-combining (slot 1, once
+/// `cpu::mtrr::program` has made it WC) or uncacheable (slot 3).
+///
+/// For the framebuffer, and that is the only caller it should have: changing
+/// the type of RAM the allocator hands out would alias it against every other
+/// mapping of the same frames, which the manual leaves undefined.
+///
+/// PWT and PCD sit at bits 3 and 4 of an entry at every level, so the same two
+/// bits are right whether the leaf is a 4 KiB, 2 MiB or 1 GiB page -- unlike
+/// the PAT bit, which this never sets. The range is walked a 4 KiB page at a
+/// time so a part of it that `protect` already split is covered too; a large
+/// leaf is simply rewritten more than once with the same value.
+///
+/// Dirty lines are written back first, since a range moving from write-back
+/// to anything else must not leave data behind in the cache that the new type
+/// will never flush. The TLB is reloaded after. Only this core's TLB, and the
+/// other cores are **not** guaranteed to catch up: `schedule` skips the CR3
+/// write when both roots are the kernel's, so a core that only ever runs
+/// kernel tasks may keep the old type for the aperture indefinitely. That is
+/// safe for one reason, which must stay true: nothing on another core touches
+/// the aperture. Guests holding `/dev/fb0` are pinned to core 0, and work split
+/// across cores (`smp::parallel_split`) writes the back buffer, never the
+/// screen. A shootdown is what this needs the day either stops being so.
+///
+/// **A second mapping of the aperture with another type can exist, in one
+/// narrow case**, found by reading rather than by a claim. Every guest root
+/// is built by `Space::sharing_kernel`, which copies the kernel's PML4
+/// entries -- pointers to the same PDPTs -- so ordinarily the aperture's leaf
+/// exists once and every root walks it. But `map_low` privatises tables on its
+/// way down (`Space::step`), so a guest that places a fixed image in the same
+/// gigabyte as the aperture gets a private copy of the aperture's page
+/// directory, carrying the cache bits current *when it was copied*. If this
+/// function then changes the type, that guest's root keeps the old one: the
+/// aliasing the paragraph above forbids for RAM. It needs `video cache` (a
+/// test verb) run while such a guest is alive and that guest writing
+/// `/dev/fb0`; boot sets the type before any space exists, and `video cache`
+/// refuses while any guest is alive. That refusal is the whole defence, so a
+/// second runtime caller must either keep it or walk every live space.
+pub fn set_cache(at: u64, len: u64, kind: crate::cpu::mtrr::Kind) -> bool {
+    use crate::cpu::mtrr::Kind;
+    let bits = match kind {
+        Kind::Wb => 0,
+        Kind::Wc if crate::cpu::mtrr::programmed() => WRITE_THROUGH,
+        Kind::Uc => WRITE_THROUGH | CACHE_DISABLE,
+        _ => return false,
+    };
+    crate::cpu::without_interrupts(|| unsafe {
+        core::arch::asm!("wbinvd", options(nostack, preserves_flags));
+        let mut a = at & !(PAGE_SIZE - 1);
+        let mut all = true;
+        while a < at + len {
+            match entry_for(a, false) {
+                Some(e) => *e = (*e & !(WRITE_THROUGH | CACHE_DISABLE)) | bits,
+                None => all = false,
+            }
+            a += PAGE_SIZE;
+        }
+        crate::cpu::write_cr3(crate::cpu::read_cr3());
+        all
     })
 }
 

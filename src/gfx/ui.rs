@@ -41,11 +41,21 @@ use crate::dev::kbd;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-const TEXT_H: u32 = font::GLYPH_H * theme::CHROME_SCALE;
-const ROW_H: u32 = TEXT_H + 8;
-const BTN_H: u32 = TEXT_H + 16;
-const GAP: u32 = 6;
-const PAD: u32 = 10;
+fn text_h() -> u32 {
+    theme::text_h()
+}
+fn row_h() -> u32 {
+    text_h() + theme::px(8)
+}
+fn btn_h() -> u32 {
+    text_h() + theme::px(16)
+}
+fn gap() -> u32 {
+    theme::px(6)
+}
+fn pad() -> u32 {
+    theme::px(10)
+}
 /// Character column the value in a `Status` row starts at.
 /// Characters reserved for a status row's name, before its value starts.
 ///
@@ -63,7 +73,7 @@ const STATUS_COL: usize = 14;
 /// things a panel can do is exactly the set of things that can be typed --
 /// which keeps the GUI from becoming a second, smaller system with its own
 /// capabilities.
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub enum Action {
     Run(String),
     /// Run this command with the panel's field text appended. `Apply("window")`
@@ -80,7 +90,7 @@ pub enum Action {
 }
 
 /// How a status line should read at a glance.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tone {
     /// Working.
     Ok,
@@ -129,6 +139,7 @@ pub fn note(text: &str) -> Widget {
     Widget::Note(lines)
 }
 
+#[derive(Hash)]
 pub enum Widget {
     Label(String),
     Sep,
@@ -160,24 +171,43 @@ pub enum Widget {
     /// settings without either panel needing its own key handling.
     Field { name: String, text: String, cursor: usize, submit: Action },
     Button { label: String, action: Action },
+    /// A setting and its choices on one line: a name with its value, and a
+    /// small button per choice. Left and Right pick, Enter and a press run
+    /// the choice. One widget rather than a button per row, because a page
+    /// of settings as full-width buttons is three screens of buttons.
+    Choices { name: String, options: Vec<(String, Action)>, sel: usize },
+}
+
+/// Where each of a `Choices` row's buttons is: right-aligned, in order.
+fn choice_rects(r: Rect, options: &[(String, Action)]) -> Vec<Rect> {
+    let widths: Vec<u32> = options.iter().map(|(l, _)| theme::text_w_of(l) + pad() * 2).collect();
+    let total: u32 = widths.iter().sum::<u32>() + gap() * widths.len().saturating_sub(1) as u32;
+    let mut x = (r.x + r.w).saturating_sub(total);
+    let mut out = Vec::new();
+    for w in widths {
+        out.push(Rect::new(x, r.y, w, r.h.saturating_sub(gap())));
+        x += w + gap();
+    }
+    out
 }
 
 impl Widget {
     fn height(&self) -> u32 {
         match self {
-            Widget::Label(_) => TEXT_H + GAP,
-            Widget::Sep => GAP * 2,
-            Widget::Heading(_) => TEXT_H + GAP + 6,
-            Widget::Status { .. } => TEXT_H + 4,
-            Widget::Note(lines) => lines.len() as u32 * TEXT_H + GAP,
-            Widget::List { items, .. } => items.len() as u32 * ROW_H + 8,
-            Widget::Field { .. } => TEXT_H + 14,
-            Widget::Button { .. } => BTN_H,
+            Widget::Label(_) => text_h() + gap(),
+            Widget::Sep => gap() * 2,
+            Widget::Heading(_) => text_h() + gap() + 6,
+            Widget::Status { .. } => text_h() + 4,
+            Widget::Note(lines) => lines.len() as u32 * text_h() + gap(),
+            Widget::List { items, .. } => items.len() as u32 * row_h() + 8,
+            Widget::Field { .. } => text_h() + 14,
+            Widget::Button { .. } => btn_h(),
+            Widget::Choices { .. } => btn_h(),
         }
     }
 
     fn focusable(&self) -> bool {
-        matches!(self, Widget::List { .. } | Widget::Field { .. } | Widget::Button { .. })
+        matches!(self, Widget::List { .. } | Widget::Field { .. } | Widget::Button { .. } | Widget::Choices { .. })
     }
 
     /// A one-line description for the serial transcript.
@@ -196,6 +226,7 @@ impl Widget {
             }
             Widget::Field { text, cursor, .. } => (mark, text.as_str(), *cursor),
             Widget::Button { label, .. } => (mark, label.as_str(), 0),
+            Widget::Choices { name, sel, .. } => (mark, name.as_str(), *sel),
         }
     }
 }
@@ -215,6 +246,12 @@ pub struct Panel {
 }
 
 impl Panel {
+    /// Everything `draw_in` reads besides focus and hover, which the desktop
+    /// adds: the scene stamps a panel's client area with it.
+    pub fn stamp(&self) -> u64 {
+        super::scene::Stamp::of((self.title.as_str(), &self.widgets, self.focus))
+    }
+
     pub fn new(title: &str, widgets: Vec<Widget>) -> Self {
         let mut p = Self { title: String::from(title), widgets, focus: 0 };
         if !p.widgets.get(0).map(|w| w.focusable()).unwrap_or(false) {
@@ -258,7 +295,7 @@ impl Panel {
                 }
                 a => Step::Do(a.clone()),
             },
-            Some(Widget::List { items, sel }) => match items.get(*sel) {
+            Some(Widget::List { items, sel }) | Some(Widget::Choices { options: items, sel, .. }) => match items.get(*sel) {
                 Some((_, Action::Close)) => Step::Close,
                 Some((_, a)) => Step::Do(a.clone()),
                 None => Step::Idle,
@@ -321,8 +358,17 @@ impl Panel {
         }
     }
 
-    /// Text editing inside a focused `Field`. Anything else leaves it alone.
+    /// Text editing inside a focused `Field`, and picking in a `Choices`.
+    /// Anything else leaves it alone.
     fn edit(&mut self, k: u8) -> Step {
+        if let Some(Widget::Choices { options, sel, .. }) = self.widgets.get_mut(self.focus) {
+            match k {
+                kbd::KEY_LEFT if *sel > 0 => *sel -= 1,
+                kbd::KEY_RIGHT if *sel + 1 < options.len() => *sel += 1,
+                _ => return Step::Idle,
+            }
+            return Step::Redraw;
+        }
         let Some(Widget::Field { text, cursor, .. }) = self.widgets.get_mut(self.focus) else {
             // Left and Right still have to do something sensible elsewhere:
             // in a list they mean nothing, so they mean nothing here.
@@ -383,16 +429,16 @@ impl Panel {
     /// not in this list is not on screen and must not be clickable.
     fn rects(&self, client: Rect) -> Vec<(usize, Rect)> {
         let mut out = Vec::new();
-        let mut y = client.y + PAD;
-        let x = client.x + PAD;
-        let w = client.w.saturating_sub(PAD * 2);
+        let mut y = client.y + pad();
+        let x = client.x + pad();
+        let w = client.w.saturating_sub(pad() * 2);
         for (i, widget) in self.widgets.iter().enumerate() {
             let h = widget.height();
             if y + h > client.y + client.h {
                 break;
             }
             out.push((i, Rect::new(x, y, w, h)));
-            y += h + GAP;
+            y += h + gap();
         }
         out
     }
@@ -425,9 +471,20 @@ impl Panel {
         self.focus = i;
         match &mut self.widgets[i] {
             Widget::Button { .. } => self.activate(),
+            Widget::Choices { options, sel, .. } => {
+                match choice_rects(r, options).iter().position(|b| {
+                    px >= b.x as i32 && px < (b.x + b.w) as i32 && py >= b.y as i32 && py < (b.y + b.h) as i32
+                }) {
+                    Some(j) => {
+                        *sel = j;
+                        self.activate()
+                    }
+                    None => Step::Redraw,
+                }
+            }
             Widget::List { items, sel } => {
                 let inner = r.shrink(2);
-                let row = (py - inner.y as i32) / ROW_H as i32;
+                let row = (py - inner.y as i32) / row_h() as i32;
                 if row < 0 || row as usize >= items.len() {
                     return Step::Redraw;
                 }
@@ -446,13 +503,12 @@ impl Panel {
                 let cap = theme::text_w(name.len() + 1);
                 let well = Rect::new(r.x + cap, r.y, r.w.saturating_sub(cap), r.h - 2);
                 let inner = well.shrink(3);
-                let room = (inner.w / (font::GLYPH_W * theme::CHROME_SCALE)) as usize;
+                let room = (inner.w / theme::mono_col()) as usize;
                 if room > 0 {
                     // The same window the paint pass shows, so the caret lands
                     // on the character that was actually under the pointer.
                     let off = cursor.saturating_sub(room.saturating_sub(1));
-                    let col = ((px - inner.x as i32).max(0) as u32
-                        / (font::GLYPH_W * theme::CHROME_SCALE)) as usize;
+                    let col = ((px - inner.x as i32).max(0) as u32 / theme::mono_col()) as usize;
                     *cursor = (off + col).min(text.len());
                 }
                 Step::Redraw
@@ -499,11 +555,11 @@ impl Panel {
                 Widget::Label(t) => {
                     theme::text(fb, x, y, t, theme::TEXT, theme::FACE);
                 }
-                Widget::Sep => theme::separator(fb, x, y + GAP / 2, w),
+                Widget::Sep => theme::separator(fb, x, y + gap() / 2, w),
                 Widget::Heading(t) => {
                     theme::text(fb, x, y + 4, t, theme::TEXT, theme::FACE);
-                    let uw = theme::text_w(t.chars().count()).min(w);
-                    fb.rect(x, y + 4 + TEXT_H + 2, uw, 2, theme::APERTURE);
+                    let uw = theme::text_w_of(t).min(w);
+                    fb.rect(x, y + 4 + text_h() + 2, uw, 2, theme::APERTURE);
                 }
                 Widget::Status { name, value, tone } => {
                     // One column for every row on the page, so the values line
@@ -550,7 +606,7 @@ impl Panel {
                 }
                 Widget::Note(lines) => {
                     for (j, line) in lines.iter().enumerate() {
-                        theme::text(fb, x, y + j as u32 * TEXT_H, line, theme::TEXT_DIM, theme::FACE);
+                        theme::text(fb, x, y + j as u32 * text_h(), line, theme::TEXT_DIM, theme::FACE);
                     }
                 }
                 Widget::List { items, sel } => {
@@ -558,8 +614,8 @@ impl Panel {
                     theme::well(fb, r, theme::FACE);
                     let inner = r.shrink(2);
                     for (j, (label, _)) in items.iter().enumerate() {
-                        let row = Rect::new(inner.x, inner.y + j as u32 * ROW_H, inner.w, ROW_H);
-                        if row.y + ROW_H > inner.y + inner.h {
+                        let row = Rect::new(inner.x, inner.y + j as u32 * row_h(), inner.w, row_h());
+                        if row.y + row_h() > inner.y + inner.h {
                             break;
                         }
                         theme::list_row(fb, row, label, j == *sel, focused);
@@ -574,21 +630,29 @@ impl Panel {
                     // Scroll so the caret stays visible, exactly as the shell's
                     // own line editor does -- a field narrower than its
                     // contents is the normal case, not an error.
-                    let room = (inner.w / (font::GLYPH_W * theme::CHROME_SCALE)) as usize;
+                    let room = (inner.w / theme::mono_col()) as usize;
                     if room > 0 {
                         let off = cursor.saturating_sub(room.saturating_sub(1));
                         let end = (off + room).min(text.len());
-                        theme::text(fb, inner.x, inner.y, &text[off..end], theme::TEXT, theme::HILIGHT);
+                        theme::mono_text(fb, inner.x, inner.y, &text[off..end], theme::TEXT, theme::HILIGHT);
                         if focused {
-                            let cx = inner.x
-                                + (cursor - off) as u32 * font::GLYPH_W * theme::CHROME_SCALE;
-                            fb.rect(cx, inner.y, 2, TEXT_H, theme::TEXT);
+                            let cx = inner.x + theme::mono_w(cursor - off);
+                            fb.rect(cx, inner.y, 2, text_h(), theme::TEXT);
                         }
                     }
                 }
                 Widget::Button { label, .. } => {
-                    let bw = (theme::text_w_of(label) + PAD * 4).min(w);
-                    theme::button(fb, Rect::new(x, y, bw, h - GAP), label, focused, false);
+                    let bw = (theme::text_w_of(label) + pad() * 4).min(w);
+                    theme::button(fb, Rect::new(x, y, bw, h - gap()), label, focused, false);
+                }
+                Widget::Choices { name, options, sel } => {
+                    let ty = y + (h.saturating_sub(gap() + text_h())) / 2;
+                    let rects = choice_rects(r, options);
+                    let room = rects.first().map_or(w, |b| b.x.saturating_sub(x + gap()));
+                    theme::text(fb, x, ty, &theme::fit(name, room), theme::TEXT, theme::FACE);
+                    for (j, (b, (label, _))) in rects.iter().zip(options.iter()).enumerate() {
+                        theme::button(fb, *b, label, focused && j == *sel, false);
+                    }
                 }
             }
         }
@@ -620,6 +684,31 @@ pub fn parse_keys(spec: &str) -> Vec<u8> {
     let mut out = Vec::new();
     for part in spec.split(',') {
         let p = part.trim();
+        // `super-<key>` and `super-shift-<arrow>`: the chord byte the decoder
+        // makes, from the same function, so a driven chord is the chord.
+        if let Some(rest) = p.strip_prefix("super-") {
+            let (shift, rest) = match rest.strip_prefix("shift-") {
+                Some(r) => (true, r),
+                None => (false, rest),
+            };
+            let key = match rest {
+                "enter" | "return" => Some(b'\n'),
+                "tab" => Some(b'\t'),
+                "left" => Some(kbd::KEY_LEFT),
+                "right" => Some(kbd::KEY_RIGHT),
+                "up" => Some(kbd::KEY_UP),
+                "down" => Some(kbd::KEY_DOWN),
+                one if one.len() == 1 && one.as_bytes()[0].is_ascii_alphabetic() => {
+                    Some(one.as_bytes()[0].to_ascii_lowercase())
+                }
+                _ => None,
+            };
+            match key.and_then(|k| kbd::super_chord(k, shift)) {
+                Some(c) => out.push(c),
+                None => crate::kprintln!("  no such Super chord: {}", p),
+            }
+            continue;
+        }
         let k = match p {
             "tab" => b'\t',
             "backtab" | "shift-tab" => kbd::KEY_BACKTAB,
@@ -630,7 +719,7 @@ pub fn parse_keys(spec: &str) -> Vec<u8> {
             "taskbar" | "ctrl-esc" => kbd::KEY_TASKBAR,
             // "start" moved here from the taskbar, where it was a lie: it
             // focused the bar, and anybody typing it means the menu.
-            "start" | "startmenu" | "win" => kbd::KEY_STARTMENU,
+            "start" | "startmenu" | "win" | "super" => kbd::KEY_STARTMENU,
             "up" => kbd::KEY_UP,
             "down" => kbd::KEY_DOWN,
             "left" => kbd::KEY_LEFT,
@@ -681,10 +770,10 @@ impl Panel {
     /// looked like -- they hug their content, and that is most of why they read
     /// as objects rather than as regions.
     pub fn preferred(&self) -> (u32, u32) {
-        let mut h = PAD * 2;
+        let mut h = pad() * 2;
         let mut text_cols = self.title.len() + 4;
         for w in &self.widgets {
-            h += w.height() + GAP;
+            h += w.height() + gap();
             let cols = match w {
                 Widget::Label(t) => t.len(),
                 Widget::Sep => 0,
@@ -694,6 +783,9 @@ impl Panel {
                 // A field wants room to type in, not just room for its caption.
                 Widget::Field { name, .. } => name.len() + 28,
                 Widget::Button { label, .. } => label.len() + 4,
+                Widget::Choices { name, options, .. } => {
+                    name.len() + 2 + options.iter().map(|o| o.0.len() + 3).sum::<usize>()
+                }
                 Widget::Heading(t) => t.len(),
                 // Both columns, so a long value widens the window instead of
                 // being clipped by it.
@@ -703,8 +795,8 @@ impl Panel {
             text_cols = text_cols.max(cols);
         }
         (
-            theme::text_w(text_cols) + PAD * 4 + theme::FRAME * 2,
-            h + theme::TITLE_H + 2 + theme::FRAME * 2,
+            theme::text_w(text_cols) + pad() * 4 + theme::frame_w() * 2,
+            h + theme::title_h() + 2 + theme::frame_w() * 2,
         )
     }
 }
@@ -736,7 +828,9 @@ pub fn panel_named(name: &str) -> Option<Panel> {
         "attention" | "window" => Some(attention_panel()),
         "diag" | "diagnostics" => Some(diagnostics_panel()),
         "files" => Some(file_browser("/")),
-        "settings" | "network" => Some(settings("net")),
+        "network" => Some(settings("net")),
+        // The Desktop page: the one an operator means by Settings.
+        "settings" | "desktop" => Some(settings("desk")),
         // The settings pages by name, so the shell can open any of them
         // directly. `win open wifi` is the one that matters: a page whose
         // whole job is explaining why something does not work is useless if
@@ -750,6 +844,10 @@ pub fn panel_named(name: &str) -> Option<Panel> {
         // `win open app:todo`. Guarded, so it goes before the bare arm it
         // would otherwise sit behind and never be reached from.
         n if n.starts_with("app:") => crate::app::panel(&n[4..]).map(|(_, p)| p),
+        // A route (`set:desk`, `files:/ai`) is a name too: the shell opens
+        // one as a routed window, which rebuilds itself when a command it
+        // ran changes what it shows.
+        route if route.contains(':') => panel_for_route(route).map(|(_, p)| p),
         _ => None,
     }
 }
@@ -1238,6 +1336,7 @@ pub fn settings(page: &str) -> Panel {
             (String::from("System"), Action::Browse(String::from("set:sys"))),
             (String::from("Power"), Action::Browse(String::from("set:power"))),
             (String::from("Updates"), Action::Browse(String::from("set:updates"))),
+            (String::from("Desktop"), Action::Browse(String::from("set:desk"))),
             (String::from("Programs"), Action::Browse(String::from("programs:"))),
         ],
         sel,
@@ -1252,6 +1351,23 @@ pub fn settings(page: &str) -> Panel {
         // beside System so that no existing index moves: the two lists agree
         // only because somebody keeps them agreeing.
         "updates" => (5usize, updates_rows()),
+        // Six, after Updates and before Programs, which is a link rather than
+        // a page. Each row is a setting and its choices; every choice runs
+        // `desk <key> <value>`, so the page is the verb with buttons on.
+        "desk" => (
+            6usize,
+            {
+                let mut v = alloc::vec![Widget::Heading(String::from("Desktop"))];
+                for (name, options) in crate::gfx::settings::rows() {
+                    v.push(Widget::Choices {
+                        name,
+                        options: options.into_iter().map(|(l, c)| (l, Action::Run(c))).collect(),
+                        sel: 0,
+                    });
+                }
+                v
+            },
+        ),
         "model" => (
             2usize,
             alloc::vec![
