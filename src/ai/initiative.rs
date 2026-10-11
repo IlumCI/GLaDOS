@@ -495,13 +495,16 @@ fn tick_inner(forced: bool) {
         }
     };
 
+    // While the nervous system sleeps the mind sets itself nothing either:
+    // a machine whose brain is resting does not go looking for work.
+    let resting = crate::brain::asleep();
     let decision = decide(
         ENABLED.load(Ordering::Relaxed),
         busy,
         seconds_since_input,
         since_episode,
-        planner_ready,
-        proposal.as_deref(),
+        planner_ready && !resting,
+        if resting { None } else { proposal.as_deref() },
         gap,
     );
 

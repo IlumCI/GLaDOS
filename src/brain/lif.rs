@@ -36,6 +36,10 @@ pub enum Role {
     Approach,
     Avoid,
     Arousal,
+    /// The animal's own aminergic cells, read as neuromodulator levels.
+    Dopamine,
+    Octopamine,
+    Serotonin,
 }
 
 pub struct Group {
@@ -159,6 +163,9 @@ impl Connectome {
                 0 => Role::Approach,
                 1 => Role::Avoid,
                 2 => Role::Arousal,
+                3 => Role::Dopamine,
+                4 => Role::Octopamine,
+                5 => Role::Serotonin,
                 _ => return Err("a readout role this kernel does not know"),
             };
             let k = u32_at(d, p + 4).ok_or("truncated readout")? as usize;
@@ -261,6 +268,14 @@ pub struct Sim {
     pub t: u64,
     /// TSC cycles spent in delivery, integration and scatter, for `brain`.
     pub cost: [u64; 3],
+    /// Neuromodulation, as two global terms. `gain` scales every synapse, in
+    /// thousandths; `bias` shifts every neuron's resting drive, in
+    /// nanovolts. Neutral is 1000 and 0, where the arithmetic is the
+    /// oracle's exactly -- `w * w_syn * 1000 / 1000` is `w * w_syn` in
+    /// integers -- so every exactness claim is made at neutral and still
+    /// means what it meant.
+    pub gain: i64,
+    bias: i64,
     /// Synapses scattered, for the same.
     pub scattered: u64,
     pub rng: Rng,
@@ -284,6 +299,8 @@ impl Sim {
             nore: vec![false; c.n],
             t: 0,
             cost: [0; 3],
+            gain: 1000,
+            bias: 0,
             scattered: 0,
             rng: Rng::new(seed),
             counts: vec![0; c.n],
@@ -356,7 +373,7 @@ impl Sim {
                     if self.ring[out + j] == 0 {
                         self.touched[os].push(j as u32);
                     }
-                    self.ring[out + j] += c.w[k] as i64 * c.w_syn;
+                    self.ring[out + j] += c.w[k] as i64 * c.w_syn * self.gain / 1000;
                 }
                 self.scattered += (b - a) as u64;
             }
@@ -385,6 +402,7 @@ impl Sim {
     fn integrate<const TM: i64, const TS: i64>(&mut self, c: &Connectome, fired: &mut Vec<u32>) {
         let dm = |x: i64| if TM != 0 { x / TM } else { x / c.tau_m };
         let ds = |x: i64| if TS != 0 { x / TS } else { x / c.tau_syn };
+        let bias = self.bias;
         // One neuron's update; answers whether it is now at a fixed point.
         let mut one = |i: usize, sim: &mut Sim| -> bool {
             let mut v = sim.v[i];
@@ -396,7 +414,7 @@ impl Sim {
                 r -= 1;
                 v = c.vreset;
             } else {
-                v += dm(c.v0 - v + g);
+                v += dm(c.v0 - v + g + bias);
                 g -= ds(g);
                 if v > c.vth {
                     v = c.vreset;
@@ -414,7 +432,7 @@ impl Sim {
             // step change anything" and not "is g zero" -- truncating decay
             // leaves a residue under tau_syn that never reaches zero, and the
             // first version kept 125,772 fly neurons awake forever on it.
-            r == 0 && ds(g) == 0 && dm(c.v0 - v + g) == 0 && v <= c.vth
+            r == 0 && ds(g) == 0 && dm(c.v0 - v + g + bias) == 0 && v <= c.vth
         };
         if self.dense {
             for i in 0..c.n {
@@ -450,6 +468,25 @@ impl Sim {
                 self.active.clear();
             }
         }
+    }
+
+    /// Change the resting drive. Every neuron's fixed point moves with it, so
+    /// the ones being skipped as inert are not inert any more: all of them
+    /// wake, and the next steps settle them at the new rest. Rare by
+    /// construction -- the caller quantises the bias -- so the one dense pass
+    /// it costs is nothing.
+    pub fn set_bias(&mut self, c: &Connectome, nv: i64) {
+        if nv == self.bias {
+            return;
+        }
+        self.bias = nv;
+        for i in 0..c.n {
+            self.wake(i);
+        }
+    }
+
+    pub fn bias(&self) -> i64 {
+        self.bias
     }
 
     /// Neurons awake right now, for `brain`.

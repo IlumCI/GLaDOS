@@ -76,6 +76,9 @@ W_SYN_NV = 275_000           # 0.275 mV per synapse
 W_POI_NV = 250 * W_SYN_NV    # Shiu's f_poi = 250: one input spike is a spike
 
 ROLE_APPROACH, ROLE_AVOID, ROLE_AROUSAL = 0, 1, 2
+# Neuromodulator populations: the animal's own aminergic cells, whose
+# activity the kernel turns into global gain and excitability.
+ROLE_DOPAMINE, ROLE_OCTOPAMINE, ROLE_SEROTONIN = 3, 4, 5
 
 # What the OS's senses reach in the worm. Named cells, each a textbook
 # function; the kernel's `brain::senses` table points at these by name.
@@ -104,6 +107,13 @@ WORM_READOUTS = {
     # without passing through gap junctions this model drops.
     "seek": (ROLE_APPROACH, ["AIYL", "AIYR"]),
     "command": (ROLE_AROUSAL, ["AVAL", "AVAR", "AVBL", "AVBR", "AVDL", "AVDR", "AVEL", "AVER", "PVCL", "PVCR"]),
+    # The worm's aminergic neurons (Chase & Koelle 2007): dopamine in the
+    # mechanosensory CEP/ADE/PDE, serotonin in NSM/ADF/HSN, and octopamine
+    # (RIC) with tyramine (RIM) standing in for the fly's octopamine -- the
+    # invertebrate noradrenaline, arousal.
+    "dopamine": (ROLE_DOPAMINE, ["CEPDL", "CEPDR", "CEPVL", "CEPVR", "ADEL", "ADER", "PDEL", "PDER"]),
+    "octopamine": (ROLE_OCTOPAMINE, ["RICL", "RICR", "RIML", "RIMR"]),
+    "serotonin": (ROLE_SEROTONIN, ["NSML", "NSMR", "ADFL", "ADFR", "HSNL", "HSNR"]),
 }
 
 WORM_FILES = {
@@ -535,6 +545,13 @@ def build_fly(src: Path, dst: Path):
                                          or r["cell_type"].startswith("aIPg") or r["hemibrain_type"].startswith("aIPg"))),
         # Everything that leaves the brain for the body.
         "descending": (ROLE_AROUSAL, where(lambda r: r["super_class"] == "descending")),
+        # Aminergic cells by identified type, not by transmitter prediction:
+        # the predictions call Kenyon cells dopaminergic, a known artefact.
+        "dopamine": (ROLE_DOPAMINE, where(lambda r: any(t.startswith(p) for t in (r["cell_type"], r["hemibrain_type"])
+                                                      for p in ("PAM", "PPL1", "PPL2", "PPM")))),
+        "octopamine": (ROLE_OCTOPAMINE, where(lambda r: r["cell_type"].startswith("OA-") or r["hemibrain_type"].startswith("OA-"))),
+        "serotonin": (ROLE_SEROTONIN, where(lambda r: any(t.startswith("5-HT") or t == "CSD"
+                                                      for t in (r["cell_type"], r["hemibrain_type"])))),
     }
     if idx[FLY_MN9[0]] not in readouts["feeding"][1]:
         raise SystemExit("Shiu's MN9 is not among the CB0701 neurons -- the canary would not be his experiment")

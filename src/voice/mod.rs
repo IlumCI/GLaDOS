@@ -95,7 +95,12 @@ pub fn status() -> String {
 /// silence so the controller's loop back to the start lands in quiet.
 pub fn render(sentence: &str) -> Vec<u8> {
     let a = crate::brain::now();
-    let style = synth::Style::from_affect(a.valence, a.arousal);
+    let mut style = synth::Style::from_affect(a.valence, a.arousal);
+    if a.asleep {
+        // Talking in its sleep, if anybody asks it to: slower and lower.
+        style.rate *= 0.85;
+        style.f0 *= 0.92;
+    }
     let mono = synth::render(&text::tokens(sentence), style);
     let tail = (synth::RATE / 4) as usize;
     let mut pcm = Vec::with_capacity((mono.len() + tail) * 4);

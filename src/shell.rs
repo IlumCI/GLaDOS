@@ -4914,6 +4914,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                     _ => kprintln!("  pace wants a percent of one core, 1..100"),
                 },
+                ["sleep"] => {
+                    crate::brain::request_sleep(true);
+                    kprintln!("  it will rest at the next second -- touch or speech wakes it");
+                }
+                ["wake"] => {
+                    crate::brain::request_sleep(false);
+                    kprintln!("  waking");
+                }
                 ["on"] => crate::brain::set_on(true),
                 ["off"] => crate::brain::set_on(false),
                 ["poke", sense] | ["poke", sense, _] => match crate::brain::Sense::parse(sense) {
@@ -4924,7 +4932,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                     None => kprintln!("  senses: touch voice food noxious thermal"),
                 },
-                _ => kprintln!("  usage: brain [on|off|pace <percent>|poke <sense> [ms]]"),
+                _ => kprintln!("  usage: brain [on|off|sleep|wake|pace <percent>|poke <sense> [ms]]"),
             }
         }
         "intent" => {

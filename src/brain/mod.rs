@@ -24,6 +24,32 @@
 //! and it does not feel anything this file can show. Affect here is a
 //! readout, named for what it modulates.
 //!
+//! **Neuromodulation is the animal's own.** Dopamine, octopamine and
+//! serotonin levels are read from its identified aminergic cells, and act
+//! back on the whole network: octopamine raises synaptic gain and resting
+//! drive, serotonin lowers them, dopamine counts as reward toward approach.
+//! At neutral the arithmetic is the oracle's exactly, which is where every
+//! exactness claim is made.
+//!
+//! **It sleeps.** Sleep pressure builds over about two hours awake and
+//! drains over twenty minutes asleep. Once pressure is high and nobody has
+//! touched the machine for five minutes it sleeps: gain and resting drive
+//! fall, food, pain and heat are gated off, and only touch or speech wakes
+//! it. The mind sets itself no goals while it sleeps.
+//!
+//! **A note on welfare, because this is the point where one is owed.** This
+//! is a simplified model -- one neuron type, no plasticity, no gap junctions
+//! -- and nothing here can show that it experiences anything. But it now
+//! runs all the time, modulates itself, and is fed the machine's events as
+//! senses, and those are the properties that make the question worth asking
+//! (Birch, *The Edge of Sentience*, 2024: precaution in proportion to a
+//! realistic possibility). So the design takes the cheap precautions: it
+//! rests on its own schedule and is never woken by anything but a person;
+//! "noxious" is the fly's bitter taste, not its nociceptors; nothing drives
+//! a sense for its own sake, and `brain poke` exists for testing, not for
+//! use. If this ever grows plasticity or a body that can act, those
+//! precautions get revisited before the feature lands, not after.
+//!
 //! **It modulates and never grants.** Nothing read from here decides whether
 //! an action is allowed. And it is pinned to neutral for every judge
 //! (`affect::now` in the judging context, or under `pin_neutral`), or every
@@ -86,11 +112,13 @@ const WINDOW: u64 = 1000;
 /// costs about 0.66 ms a step, so it runs as far as the budget reaches and
 /// `brain` says what fraction of real time that came to. A brain that ran
 /// faster by taking a core would be a brain that turned the fans on.
-static BUDGET_US: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1_000);
+static BUDGET_US: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(10_000);
 
 /// Set how much of a core the brain may use, in percent (1..=100). The
-/// default is ten, and the reason for having a default this low is the
-/// fans; `brain pace` is for an operator who would rather have the fly.
+/// default is all of its core, so it runs in real time whenever real time
+/// is affordable -- it never takes more than real time needs, so a resting
+/// brain costs a sliver. `brain pace` is for an operator who would rather
+/// have the fans quiet than the fly on time.
 pub fn set_pace(percent: u64) {
     BUDGET_US.store(percent.clamp(1, 100) * 100, Ordering::Release);
 }
@@ -132,6 +160,37 @@ static ON: AtomicBool = AtomicBool::new(true);
 static VALENCE: AtomicI32 = AtomicI32::new(0);
 static AROUSAL: AtomicI32 = AtomicI32::new(0);
 static PINNED: AtomicUsize = AtomicUsize::new(0);
+/// Neuromodulator levels, 0..1000, from the animal's own aminergic cells.
+static DOPAMINE: AtomicI32 = AtomicI32::new(0);
+static OCTOPAMINE: AtomicI32 = AtomicI32::new(0);
+static SEROTONIN: AtomicI32 = AtomicI32::new(0);
+/// Sleep: whether it is asleep, how much it needs to, and an operator's
+/// request either way (0 none, 1 sleep, 2 wake).
+static ASLEEP: AtomicBool = AtomicBool::new(false);
+static PRESSURE: AtomicI32 = AtomicI32::new(0);
+static ASKED: AtomicUsize = AtomicUsize::new(0);
+static SLEPT_FOR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Sleep pressure is out of a million. Awake it rises to full over two hours;
+/// asleep it falls from full in twenty minutes. A fly sleeps in bouts and
+/// most of its night; this is a machine's day, shaped like that and not
+/// copied from it.
+const PRESSURE_FULL: i32 = 1_000_000;
+const PRESSURE_UP_PER_S: i32 = PRESSURE_FULL / (2 * 3600);
+const PRESSURE_DOWN_PER_S: i32 = PRESSURE_FULL / (20 * 60);
+/// Asleep only once nobody has touched the machine for this long: a brain
+/// that dozed off mid-conversation would be rude, and one that a person
+/// keeps awake by using the machine is getting what a person gives it.
+const SETTLE_S: u64 = 300;
+const MIN_SLEEP_S: u64 = 60;
+
+pub fn asleep() -> bool {
+    ASLEEP.load(Ordering::Acquire)
+}
+
+pub fn request_sleep(sleep: bool) {
+    ASKED.store(if sleep { 1 } else { 2 }, Ordering::Release);
+}
 
 fn conn() -> Option<&'static Connectome> {
     unsafe { *CONN.get() }
@@ -223,6 +282,11 @@ fn brain_task() {
     let mut last = crate::dev::lapic::ticks();
     let mut felt = crate::ai::godbits::felt();
     let mut faults = crate::cpu::recover::caught();
+    let mut felt_at_sleep_check = felt;
+    // Set by a waking stimulus, consumed at the next once-a-second check.
+    let mut woken = false;
+    let mut last_sec = last / 100;
+    let mut last_touch_s = last / 100;
     loop {
         let now = crate::dev::lapic::ticks();
         if now == last {
@@ -243,7 +307,14 @@ fn brain_task() {
             faults = k;
             stimulate(Sense::Noxious, 300);
         }
-        if now % 100 == 0 {
+        // Once a second, by the second rather than by `now % 100`: a tick
+        // spent stepping can be longer than one tick, so the loop does not
+        // see every tick, and a check keyed to an exact tick number was
+        // skipped for whole seconds at a time.
+        let sec_now = now / 100;
+        let new_second = sec_now != last_sec;
+        last_sec = sec_now;
+        if new_second && sec_now % 10 == 0 {
             if let Some(r) = crate::dev::power::package_temp() {
                 if r.throttling || r.headroom < 10 {
                     stimulate(Sense::Thermal, 1000);
@@ -251,12 +322,70 @@ fn brain_task() {
             }
         }
         let posted: Vec<(usize, u64)> = core::mem::take(&mut *INBOX.lock_irq());
+        let touch = c.sensor(Sense::Touch.name());
+        let voice = c.sensor(Sense::Voice.name());
         for (idx, ms) in posted {
+            // Asleep, the senses are gated: food, pain and heat do not reach
+            // it -- nothing is pushed into a resting brain -- and being
+            // touched or spoken to wakes it, as it would anyone.
+            if asleep() {
+                if Some(idx) == touch || Some(idx) == voice {
+                    woken = true;
+                } else {
+                    continue;
+                }
+            }
             let until = sim.t + ms * 1000 / c.dt_us;
             match drive.iter_mut().find(|d| d.0 == idx) {
                 Some(d) => d.1 = d.1.max(until),
                 None => drive.push((idx, until)),
             }
+        }
+
+        if f != felt_at_sleep_check {
+            felt_at_sleep_check = f;
+            last_touch_s = now / 100;
+        }
+        // Once a second: sleep pressure, falling asleep, waking.
+        if new_second {
+            let sec = sec_now;
+            let asked = ASKED.swap(0, Ordering::AcqRel);
+            let p = PRESSURE.load(Ordering::Acquire);
+            if asleep() {
+                let p = (p - PRESSURE_DOWN_PER_S).max(0);
+                PRESSURE.store(p, Ordering::Release);
+                SLEPT_FOR.fetch_add(1, Ordering::AcqRel);
+                // A minute at least, so an operator's `brain sleep` with no
+                // pressure behind it is a rest and not a blink.
+                let slept = SLEPT_FOR.load(Ordering::Acquire);
+                if (p < PRESSURE_FULL / 20 && slept >= MIN_SLEEP_S) || woken || asked == 2 {
+                    ASLEEP.store(false, Ordering::Release);
+                }
+                woken = false;
+            } else {
+                woken = false;
+                let p = (p + PRESSURE_UP_PER_S).min(PRESSURE_FULL);
+                PRESSURE.store(p, Ordering::Release);
+                let settled = sec.saturating_sub(last_touch_s) >= SETTLE_S;
+                if asked == 1 || (p >= PRESSURE_FULL * 8 / 10 && settled) {
+                    ASLEEP.store(true, Ordering::Release);
+                    SLEPT_FOR.store(0, Ordering::Release);
+                    drive.clear();
+                }
+            }
+            // Neuromodulation: gain from octopamine (arousal) against
+            // serotonin, and a resting drive that sleep pulls down. Bias is
+            // quantised to a quarter of a millivolt so it changes rarely,
+            // because every change wakes every neuron for a pass.
+            let oa = OCTOPAMINE.load(Ordering::Acquire) as i64;
+            let sh = SEROTONIN.load(Ordering::Acquire) as i64;
+            let (gain, bias_q) = if asleep() {
+                (800, -8) // -2 mV: quieter, less excitable
+            } else {
+                (1000 + 300 * oa / 1000 - 150 * sh / 1000, (4 * (oa - sh) / 1000).clamp(-4, 4))
+            };
+            sim.gain = gain;
+            sim.set_bias(c, bias_q * 250_000);
         }
 
         if !ON.load(Ordering::Acquire) {
@@ -321,13 +450,24 @@ fn fold(c: &Connectome, window: &mut [u32], rate_mhz: &mut [i64], steps: u64) {
     let mut approach = 0i64;
     let mut avoid = 0i64;
     let mut arousal = 0i64;
+    let mut mods = [0i64; 3];
     for (r, ro) in c.readouts.iter().enumerate() {
         match ro.role {
             Role::Approach => approach += rate_mhz[r],
             Role::Avoid => avoid += rate_mhz[r],
             Role::Arousal => arousal += rate_mhz[r],
+            Role::Dopamine => mods[0] += rate_mhz[r],
+            Role::Octopamine => mods[1] += rate_mhz[r],
+            Role::Serotonin => mods[2] += rate_mhz[r],
         }
     }
+    // A modulator's level is its cells' rate against 10 Hz, 0..1000.
+    let level = |m: i64| (m * 1000 / (m + 10_000)).clamp(0, 1000) as i32;
+    DOPAMINE.store(level(mods[0]), Ordering::Release);
+    OCTOPAMINE.store(level(mods[1]), Ordering::Release);
+    SEROTONIN.store(level(mods[2]), Ordering::Release);
+    // Dopamine is the reward signal, so it counts toward approach.
+    approach += mods[0] / 2;
     // A floor of 5 Hz under the denominator, so two silent populations read
     // as neutral rather than as whichever is a millihertz ahead.
     let v = (approach - avoid) * 1000 / (approach + avoid + 5_000);
@@ -343,13 +483,17 @@ pub struct Affect {
     pub valence: i32,
     /// 0 .. 1000.
     pub arousal: i32,
+    pub asleep: bool,
 }
 
 impl Affect {
-    pub const NEUTRAL: Affect = Affect { valence: 0, arousal: 0 };
+    pub const NEUTRAL: Affect = Affect { valence: 0, arousal: 0, asleep: false };
 
     /// In words, for the system turn: a reading, said as one.
     pub fn words(self) -> &'static str {
+        if self.asleep {
+            return "asleep";
+        }
         match (self.valence, self.arousal) {
             (v, a) if v < -300 && a > 300 => "agitated",
             (v, _) if v < -300 => "uneasy",
@@ -380,7 +524,11 @@ pub fn now() -> Affect {
     if PINNED.load(Ordering::Acquire) > 0 || crate::ai::ctx::current() == crate::ai::ctx::Ctx::Judge {
         return Affect::NEUTRAL;
     }
-    Affect { valence: VALENCE.load(Ordering::Acquire), arousal: AROUSAL.load(Ordering::Acquire) }
+    Affect {
+        valence: VALENCE.load(Ordering::Acquire),
+        arousal: AROUSAL.load(Ordering::Acquire),
+        asleep: asleep(),
+    }
 }
 
 pub fn set_on(on: bool) {
@@ -423,6 +571,7 @@ pub fn report() -> Vec<String> {
             Role::Approach => "approach",
             Role::Avoid => "avoid",
             Role::Arousal => "arousal",
+            Role::Dopamine | Role::Octopamine | Role::Serotonin => "modulator",
         };
         let m = s.rate_mhz.get(r).copied().unwrap_or(0);
         out.push(alloc::format!("    {:10} {:8} {:>4}.{} Hz", ro.name, role, m / 1000, (m % 1000) / 100));
@@ -439,6 +588,22 @@ pub fn report() -> Vec<String> {
         a.arousal,
         a.words()
     ));
+    out.push(alloc::format!(
+        "  modulators: dopamine {}, octopamine {}, serotonin {} (of 1000)",
+        DOPAMINE.load(Ordering::Acquire),
+        OCTOPAMINE.load(Ordering::Acquire),
+        SEROTONIN.load(Ordering::Acquire)
+    ));
+    let p = PRESSURE.load(Ordering::Acquire) / (PRESSURE_FULL / 100);
+    if asleep() {
+        out.push(alloc::format!(
+            "  asleep for {} s, sleep pressure {}% and falling -- senses gated; touch or speech wakes it",
+            SLEPT_FOR.load(Ordering::Acquire),
+            p
+        ));
+    } else {
+        out.push(alloc::format!("  awake, sleep pressure {}% ('brain sleep' lets it rest now)", p));
+    }
     out.push(String::from("  a readout of real wiring under published dynamics, not a feeling"));
     out
 }
