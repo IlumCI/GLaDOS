@@ -613,6 +613,42 @@ def build_worm(src: Path, dst: Path):
     print(f"  wrote {dst} ({dst.stat().st_size} bytes)")
 
 
+# --- check ----------------------------------------------------------------------
+
+# What the kernel asks a staged file for. Senses by name (`brain::Sense`);
+# readouts by role, since affect sums every readout of a role and never asks
+# a name. A file lacking one still loads and the kernel goes without, so a
+# release built from it would ship a brain with valence or arousal stuck at
+# neutral and nothing saying why.
+SENSES_WANTED = ["voice", "touch", "food", "noxious", "thermal"]
+ROLES_WANTED = {ROLE_APPROACH: "approach", ROLE_AVOID: "avoid", ROLE_AROUSAL: "arousal"}
+
+
+def check(path: Path) -> int:
+    """Read a built file by walking it, and require the populations the kernel
+    reads. Standard library only, so a release job can run it with no numpy:
+    the digest says these are the bytes that were recorded, and this says the
+    bytes recorded were a brain."""
+    try:
+        b = Brain(path.read_bytes())
+    except ValueError as why:
+        print(f"FAIL {path}: {why}")
+        return 1
+    print(f"  {path}: {b.n} neurons, {b.e} connections, dt {b.dt_us} us")
+    have = {role for role, cells in b.readouts.values() if cells}
+    missing = [s for s in SENSES_WANTED if not b.sensors.get(s)] + \
+              [f"a readout for {name}" for role, name in ROLES_WANTED.items() if role not in have]
+    for name, cells in b.sensors.items():
+        print(f"  sense   {name:12} {len(cells)}")
+    for name, (_, cells) in b.readouts.items():
+        print(f"  readout {name:12} {len(cells)}")
+    if missing:
+        print(f"FAIL empty or absent: {', '.join(missing)}")
+        return 1
+    print("ok   walks to its last byte; every sense, and approach, avoid and arousal readouts, populated")
+    return 0
+
+
 # --- selftest -------------------------------------------------------------------
 
 def selftest() -> bool:
@@ -661,6 +697,8 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd")
     f = sub.add_parser("fetch"); f.add_argument("rung"); f.add_argument("dst")
     bld = sub.add_parser("build"); bld.add_argument("rung"); bld.add_argument("src"); bld.add_argument("dst")
+    c = sub.add_parser("check", help="read a built file back and name what the kernel will look for")
+    c.add_argument("file")
     s = sub.add_parser("sim")
     s.add_argument("file"); s.add_argument("--poke", action="append", default=[])
     s.add_argument("--rate", type=int, default=150); s.add_argument("--ms", type=int, default=500)
@@ -673,6 +711,8 @@ def main() -> int:
         {"worm": fetch_worm, "fly": fetch_fly}[a.rung](Path(a.dst)); return 0
     if a.cmd == "build":
         {"worm": build_worm, "fly": build_fly}[a.rung](Path(a.src), Path(a.dst)); return 0
+    if a.cmd == "check":
+        return check(Path(a.file))
     if a.cmd == "sim":
         b = Brain(Path(a.file).read_bytes())
         steps = a.ms * 1000 // b.dt_us

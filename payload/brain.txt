@@ -1,0 +1,6 @@
+# payload manifest -- sha256, size, name
+#
+# Written by tools/payload.py. The bytes an ISO build must fetch
+# before it can run mkiso.py, and what they have to hash to.
+ccfaa0baa88b09b54643bd3f432ecde0311aaadec67c0ea735f571248391fc96  3022  LICENSE-BRAIN.TXT
+880c3af071bdb6d12c60d9861c4670850a4ad975ca8902c823d0468e8221a10f  92225916  brain.bin

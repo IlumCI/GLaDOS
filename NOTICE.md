@@ -153,6 +153,29 @@ What was changed, as CC BY asks: synapse counts are summed per ordered pair
 of neurons, gap junctions and non-neuronal cells are dropped, and neuron names
 are normalised (`AS01` becomes `AS1`).
 
+**The adult fly**, `\GLADOS\brain.bin` on the 0.6B install image, is not
+compiled in. It is built by `tools/connectome.py build fly`, byte for byte
+reproducibly, from pinned copies of:
+
+- **The FlyWire connectome, materialization v783.** Dorkenwald, S. et al.
+  (2024), "Neuronal wiring diagram of an adult brain", *Nature* 634:124-138;
+  Schlegel, P. et al. (2024), "Whole-brain annotation and multi-connectome
+  cell typing of *Drosophila*", *Nature* 634:139-152. Licensed CC BY 4.0.
+- **Transmitter predictions**, Eckstein, N. et al. (2024), *Cell*
+  187:2574-2594, which give each connection its sign.
+- **Cell-type annotations**, flyconnectome/flywire_annotations, Supplemental
+  file 1, cited as that repository asks (with Matsliah, A. et al. (2024),
+  *Nature* 634:166-180).
+- **The connectivity table**, `Connectivity_783.parquet` from Shiu et al.'s
+  philshiu/Drosophila_brain_model, MIT License, Copyright (c) 2023 Philip
+  Shiu and Nico Spiller.
+
+What was changed: connections are summed per ordered pair, gap junctions are
+dropped, each connection is signed by its presynaptic neuron's predicted
+transmitter as Shiu signed them, and named sensor and readout populations are
+added. `LICENSE-BRAIN.TXT` travels beside the file with the same attribution
+and the MIT text in full.
+
 ## Pronouncing dictionary (from 1.4.2)
 
 `assets/voice/lexicon.bin` is CMUdict, repacked by `tools/lexicon.py`

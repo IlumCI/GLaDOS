@@ -247,6 +247,10 @@ jobs:
             # image only: the 2B images are 1.90 GB against GitHub's 2 GB
             # asset limit, and it does not fit beside them.
             voice: true
+            # The adult fly's connectome (payload/brain.txt, 92 MB), same
+            # reason and same image. Without it the kernel runs the worm it
+            # carries compiled in, so the 2B images still have a brain.
+            brain: true
           # The 2B distill, Apache-2.0. Its payload is canonical at seq 512,
           # which is not a context worth shipping for a model this size, so
           # both variants stamp. The weights are uploaded once and these two
@@ -365,9 +369,31 @@ jobs:
           for f in $(grep -v '^#' payload/voice.txt | awk 'NF >= 3 {print $3}'); do
             gh release download payload-voice-v1 --dir payload-voice --clobber --pattern "$f"
           done
+          # kokoro.py imports numpy at the top and the runner's python has
+          # none; the selftest needs nothing else (torch only converts).
+          python3 -m pip install --quiet --disable-pip-version-check numpy
           python3 tools/kokoro.py --selftest
           python3 tools/payload.py verify payload-voice payload/voice.txt
           mv payload-voice/* payload-dir/
+
+      # The fly, \GLADOS\brain.bin and its attribution, from a pinned release
+      # in the voice's shape. The digest says these are the bytes
+      # `connectome.py build fly` produced, which it does byte for byte from
+      # the pinned sources; `check` walks them to the last byte and requires
+      # every sense and an approach, avoid and arousal readout, with the
+      # standard library alone, since the runner has no numpy.
+      - name: Fetch the fly's connectome
+        if: matrix.brain == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p payload-brain
+          for f in $(grep -v '^#' payload/brain.txt | awk 'NF >= 3 {print $3}'); do
+            gh release download payload-brain-fly-v1 --dir payload-brain --clobber --pattern "$f"
+          done
+          python3 tools/payload.py verify payload-brain payload/brain.txt
+          python3 tools/connectome.py check payload-brain/brain.bin
+          mv payload-brain/* payload-dir/
 
       - name: Build the ISO
         run: |
