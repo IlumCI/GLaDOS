@@ -220,6 +220,13 @@ pub fn verb_first_language(cmd: &str, rest: &str) -> bool {
         return false;
     }
     let words: alloc::vec::Vec<&str> = rest.split_whitespace().collect();
+    // One word after a command is an argument, whatever word it is: `diag
+    // all`, `voice on`, `brain off`. "all" is a function word, and for the
+    // life of this check the command that runs every test suite was being
+    // handed to the chat model, which found it was not a command.
+    if words.len() < 2 {
+        return false;
+    }
     let argish = words.iter().any(|w| w.starts_with('/') || w.starts_with('-') || w.parse::<i64>().is_ok() || w.contains('.'));
     let sentence = words.iter().any(|w| FUNCTION_WORDS.contains(&w.to_lowercase().as_str()));
     sentence && !argish
@@ -384,12 +391,13 @@ pub fn selftest() -> bool {
     unsafe { *PENDING.get() = Some(String::from("remove /tmp/x")) };
     let no = matches!(answer("no"), Some(Decision::Say(_))) && answer("y").is_none();
     let unrelated = answer("ls").is_none();
-    let rows: [(&str, bool); 29] = [
+    let rows: [(&str, bool); 30] = [
         ("'help me find the big files' is a sentence, not the help command", verb_first_language("help", "me find the big files")),
         ("'ls /ai' is a command", !verb_first_language("ls", "/ai")),
         ("'cat the readme please' is a sentence", verb_first_language("cat", "the readme please")),
         ("a prose verb keeps its prose: 'remember my name is Ana'", !verb_first_language("remember", "my name is Ana")),
         ("an unknown first word is not this rule's business", !verb_first_language("hello", "there you")),
+        ("'diag all' is a command with one argument, however function-word the argument", !verb_first_language("diag", "all") && !verb_first_language("voice", "on")),
         ("'start over' forgets the conversation", starts_over("Start over.")),
         ("an ordinary sentence does not", !starts_over("start over the download")),
         ("y runs the offered task, at full trust, verbatim", yes),
