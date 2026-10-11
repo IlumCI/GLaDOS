@@ -371,6 +371,7 @@ pub fn turn(message: &str, opts: &super::GenOpts) -> usize {
     super::generate(&prompt, &framed);
     if let Some(said) = super::echo_end() {
         log_push(false, &said);
+        crate::voice::speak_reply(&said);
     }
 
     unsafe { *TURNS.get() += 1 };

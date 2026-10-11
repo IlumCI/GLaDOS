@@ -4875,6 +4875,27 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 kprintln!("  a request is already pending");
             }
         }
+        "say" => {
+            if rest.trim().is_empty() {
+                kprintln!("  usage: say <text>");
+            } else {
+                let n = crate::voice::say(rest);
+                kprintln!("  {} sentence(s) queued", n);
+            }
+        }
+        "voice" => match rest.trim() {
+            "on" => {
+                crate::voice::set_on(true);
+                kprintln!("  replies are spoken now");
+            }
+            "off" => {
+                crate::voice::set_on(false);
+                kprintln!("  quiet");
+            }
+            "stop" | "hush" => crate::voice::hush(),
+            "" => kprintln!("  {}", crate::voice::status()),
+            _ => kprintln!("  usage: voice [on|off|stop]"),
+        },
         "brain" => {
             // The connectome: what it is, what it reads, and a way to drive
             // it by hand -- the headless test, for the reason `linux feed`
@@ -5957,40 +5978,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 kprintln!("  no ECAM: the bus cannot be read");
                 return;
             };
-            let bring_up = |pick: Option<usize>| -> bool {
-                let found = crate::dev::hda::find(ecam);
-                if found.is_empty() {
-                    kprintln!("  no HD Audio controller on the bus");
-                    return false;
-                }
-                // The one asked for, or the first whose codecs have an output
-                // wired to something -- an HDMI-only controller has none.
-                let order: alloc::vec::Vec<usize> = match pick {
-                    Some(i) => alloc::vec![i],
-                    None => (0..found.len()).collect(),
-                };
-                for i in order {
-                    let Some(d) = found.get(i).copied() else {
-                        kprintln!("  no controller {}", i);
-                        return false;
-                    };
-                    match crate::dev::hda::Hda::up(ecam, d) {
-                        Ok(h) => {
-                            let has = h.output().is_some();
-                            for line in crate::dev::hda::describe(&h) {
-                                kprintln!("  {}", line);
-                            }
-                            if has || pick.is_some() {
-                                crate::dev::hda::hold(h);
-                                return true;
-                            }
-                        }
-                        Err(f) => kprintln!("  {:04x}:{:04x}: {}", d.vendor, d.device, f.why()),
-                    }
-                }
-                kprintln!("  no controller has an output to play to");
-                false
-            };
+            let bring_up = |pick: Option<usize>| -> bool { crate::dev::hda::bring_up(ecam, pick, true) };
             match sub {
                 "" => {
                     let found = crate::dev::hda::find(ecam);

@@ -579,6 +579,55 @@ pub fn with<R>(f: impl FnOnce(&mut Hda) -> R) -> Option<R> {
     HELD.lock().as_mut().map(|s| f(&mut s.0))
 }
 
+/// Bring a controller up and hold it: the one asked for, or the first whose
+/// codecs have an output wired to something -- an HDMI-only controller has
+/// none. `verbose` prints what was found, which the shell wants and the
+/// voice, bringing one up on its own behalf, does not.
+pub fn bring_up(ecam: u64, pick: Option<usize>, verbose: bool) -> bool {
+    let found = find(ecam);
+    if found.is_empty() {
+        if verbose {
+            crate::kprintln!("  no HD Audio controller on the bus");
+        }
+        return false;
+    }
+    let order: Vec<usize> = match pick {
+        Some(i) => alloc::vec![i],
+        None => (0..found.len()).collect(),
+    };
+    for i in order {
+        let Some(d) = found.get(i).copied() else {
+            if verbose {
+                crate::kprintln!("  no controller {}", i);
+            }
+            return false;
+        };
+        match Hda::up(ecam, d) {
+            Ok(h) => {
+                let has = h.output().is_some();
+                if verbose {
+                    for line in describe(&h) {
+                        crate::kprintln!("  {}", line);
+                    }
+                }
+                if has || pick.is_some() {
+                    hold(h);
+                    return true;
+                }
+            }
+            Err(f) => {
+                if verbose {
+                    crate::kprintln!("  {:04x}:{:04x}: {}", d.vendor, d.device, f.why());
+                }
+            }
+        }
+    }
+    if verbose {
+        crate::kprintln!("  no controller has an output to play to");
+    }
+    false
+}
+
 /// A sine at `hz`, `ms` long, 48 kHz stereo 16-bit, at a quarter of full
 /// scale. **One second exactly when looped**, so a whole number of cycles of
 /// any whole-number frequency fits and the loop point does not click.

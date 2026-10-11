@@ -280,6 +280,11 @@ pub const SUITES: &[Suite] = &[
         run: crate::ai::ctx::selftest,
     },
     Suite {
+        name: "voice",
+        about: "what is never read aloud, words to phones, and a deterministic formant voice",
+        run: crate::voice::selftest,
+    },
+    Suite {
         name: "brain",
         about: "the connectome agrees with its oracle spike for spike, and the nociceptor still drives reversal",
         run: crate::brain::selftest,
@@ -785,7 +790,7 @@ fn web_selftest() -> bool {
 /// says it exists to prevent. A `static` cannot be read in a const context, so
 /// the array cannot be measured directly; naming its length is the next best
 /// thing and it is now the only place the number appears.
-const SLOTS: usize = 96;
+const SLOTS: usize = 97;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.

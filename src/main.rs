@@ -22,6 +22,7 @@ mod checklist;
 mod repair;
 mod ai;
 mod brain;
+mod voice;
 mod app;
 mod cpu;
 mod crypto;
@@ -682,6 +683,9 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     ai::intent::load();
     // A nervous system, before the mind that will read it.
     brain::init(boot.brain.as_ref().map(|b| b.as_slice()));
+    // The voice task; it brings the audio controller up the first time it
+    // has something to say.
+    voice::init(acpi.as_ref().and_then(|a| a.mcfg));
 
     // **The router fits itself, because waiting to be asked is not a feature.**
     //
