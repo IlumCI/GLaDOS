@@ -837,8 +837,41 @@ impl Tape {
     }
 }
 
+/// A direction added to the residual stream as it enters one layer, at a
+/// strength relative to the stream's own size there.
+///
+/// This is how a nervous system reaches the model without a word of text:
+/// `mind::introspect` turns what the brain did into a direction and the model
+/// is asked whether it noticed anything. It lives on a `State`, so it reaches
+/// exactly the forward passes that state is used for -- a scratch state built
+/// for a trial -- and never the conversation, an agent's episode or a judge,
+/// whose states nothing sets it on. Relative strength, because the stream's
+/// norm varies by position and by layer by an order of magnitude, and an
+/// absolute vector would be a shout at one position and a whisper at the
+/// next.
+#[derive(Clone, Debug)]
+pub struct Steer {
+    pub layer: usize,
+    /// Unit length, `dim` long.
+    pub dir: Vec<f32>,
+    /// Added as `alpha * |x| * dir`.
+    pub alpha: f32,
+}
+
+impl Steer {
+    fn apply(&self, x: &mut [f32]) {
+        let n = tensor::sqrtf(x.iter().map(|v| v * v).sum::<f32>());
+        let k = self.alpha * n;
+        for (xi, di) in x.iter_mut().zip(self.dir.iter()) {
+            *xi += k * di;
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct State {
+    /// See `Steer`. `None` everywhere but a trial's scratch state.
+    pub steer: Option<Steer>,
     x: Vec<f32>,
     xb: Vec<f32>,
     xb2: Vec<f32>,
@@ -1010,6 +1043,7 @@ impl State {
             moe_gu: vec![0.0; if cfg.n_experts > 0 { 2 * cfg.hidden_dim } else { 0 }],
             dim: cfg.dim,
             cap,
+            steer: None,
         }
     }
 
@@ -2121,6 +2155,12 @@ impl Model {
         self.embed_mat().row_into(tok, &mut s.x);
 
         for l in 0..c.n_layers {
+            // Before the tape: what is recorded is what the layer really
+            // received, so a gradient through a steered pass is the gradient
+            // of that pass.
+            if let Some(st) = s.steer.as_ref().filter(|st| st.layer == l) {
+                st.apply(&mut s.x);
+            }
             // The residual stream as it enters this layer. Everything the
             // layer goes on to compute is a function of this and the frozen
             // weights, which is why nothing else is kept.
@@ -2914,6 +2954,15 @@ impl Model {
             }
 
             for l in 0..c.n_layers {
+                // The same injection `forward_dense` makes, per position, or
+                // a prompt prefilled and a token decoded would see two
+                // different models -- the adapter bug this function already
+                // records once.
+                if let Some(st) = s.steer.as_ref().filter(|st| st.layer == l) {
+                    for t in 0..n {
+                        st.apply(&mut x[t * d..(t + 1) * d]);
+                    }
+                }
                 // --- attention ---
                 for t in 0..n {
                     tensor::rmsnorm_eps(
@@ -3231,6 +3280,9 @@ impl Model {
         self.embed_mat().row_into(tok, &mut s.x);
 
         for l in 0..c.n_layers {
+            if let Some(st) = s.steer.as_ref().filter(|st| st.layer == l) {
+                st.apply(&mut s.x);
+            }
             tensor::rmsnorm_1p(&mut s.xb[..c.dim], &s.x, self.rms_att_w(l), eps);
             match c.layer_kind(l) {
                 LayerKind::Linear => self.delta_net(s, l),

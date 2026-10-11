@@ -152,6 +152,13 @@ struct Snapshot {
     per_step: [u64; 4],
 }
 
+/// The observation window: how many of each sense's strongest direct targets
+/// are watched. See `observation_ids`.
+pub const OBS_PER_SENSE: usize = 48;
+/// Cumulative spike counts over the observation window, and the brain time
+/// in microseconds they were taken at. Published every readout window.
+static OBS: Spin<(u64, Vec<u32>)> = Spin::new((0, Vec::new()));
+
 static SNAP: Spin<Snapshot> = Spin::new(Snapshot { t: 0, rate_mhz: Vec::new(), driving: Vec::new(), awake: 0, pace: 0, per_step: [0; 4] });
 
 static ON: AtomicBool = AtomicBool::new(true);
@@ -260,6 +267,71 @@ pub fn stimulate(s: Sense, ms: u64) {
     }
 }
 
+/// The neurons a trial watches, beyond the readouts: for each sensor
+/// population, by name, the `OBS_PER_SENSE` neurons it reaches most strongly
+/// in one synapse (summed |weight|, ties to the lower id), sensors themselves
+/// excluded and nobody counted twice.
+///
+/// Electrodes in the areas that receive each sense, an equal number per
+/// sense so a population of twenty cells is not drowned by one of four
+/// hundred. Chosen from the wiring alone, never from a trial, so nothing about
+/// what a trial delivered decides where it is looked at. The same rule as
+/// `tools/connectome.py`'s ceiling measurement, which is what the
+/// preregistration quotes.
+pub fn observation_ids(c: &Connectome) -> Vec<u32> {
+    let mut is_sensor = alloc::vec![false; c.n];
+    for g in c.sensors.iter() {
+        for &i in g.ids.iter() {
+            is_sensor[i as usize] = true;
+        }
+    }
+    let mut order: Vec<usize> = (0..c.sensors.len()).collect();
+    order.sort_by(|&a, &b| c.sensors[a].name.cmp(&c.sensors[b].name));
+    let mut out: Vec<u32> = Vec::new();
+    let mut score = alloc::vec![0u64; c.n];
+    for gi in order {
+        let mut touched: Vec<u32> = Vec::new();
+        for &src in c.sensors[gi].ids.iter() {
+            let (a, b) = (c.rows[src as usize] as usize, c.rows[src as usize + 1] as usize);
+            for e in a..b {
+                let t = c.col[e];
+                if is_sensor[t as usize] {
+                    continue;
+                }
+                if score[t as usize] == 0 {
+                    touched.push(t);
+                }
+                score[t as usize] += c.w[e].unsigned_abs() as u64;
+            }
+        }
+        touched.sort_by(|&a, &b| score[b as usize].cmp(&score[a as usize]).then(a.cmp(&b)));
+        let mut taken = 0;
+        for &t in touched.iter() {
+            if taken == OBS_PER_SENSE {
+                break;
+            }
+            taken += 1;
+            if !out.contains(&t) {
+                out.push(t);
+            }
+        }
+        for &t in touched.iter() {
+            score[t as usize] = 0;
+        }
+    }
+    out
+}
+
+/// The observation: brain time in microseconds, then cumulative spikes per
+/// watched neuron followed by per readout. `None` with no brain running.
+pub fn observe() -> Option<(u64, Vec<u32>)> {
+    let o = OBS.lock_irq();
+    if o.1.is_empty() {
+        return None;
+    }
+    Some((o.0, o.1.clone()))
+}
+
 fn brain_task() {
     let Some(c) = conn() else { return };
     let mut sim = Sim::new(c, crate::time::rdtsc() | 1);
@@ -270,6 +342,12 @@ fn brain_task() {
             member[i as usize].push(r as u8);
         }
     }
+    let watched = observation_ids(c);
+    let mut obs_slot = alloc::vec![u32::MAX; c.n];
+    for (k, &i) in watched.iter().enumerate() {
+        obs_slot[i as usize] = k as u32;
+    }
+    let mut obs = alloc::vec![0u32; watched.len() + nr];
     let mut drive: Vec<(usize, u64)> = Vec::new();
     let mut window = alloc::vec![0u32; nr];
     let mut window_start = 0u64;
@@ -406,6 +484,11 @@ fn brain_task() {
             for &i in fired.iter() {
                 for &r in member[i as usize].iter() {
                     window[r as usize] += 1;
+                    obs[watched.len() + r as usize] = obs[watched.len() + r as usize].wrapping_add(1);
+                }
+                let k = obs_slot[i as usize];
+                if k != u32::MAX {
+                    obs[k as usize] = obs[k as usize].wrapping_add(1);
                 }
             }
             if sim.t - window_start >= WINDOW {
@@ -426,6 +509,11 @@ fn brain_task() {
                 sim.cost = [0; 3];
                 sim.scattered = 0;
                 drop(s);
+                {
+                    let mut o = OBS.lock_irq();
+                    o.0 = sim.t * c.dt_us;
+                    o.1.clone_from(&obs);
+                }
                 window_start = sim.t;
                 window_ticks = 0;
             }

@@ -38,6 +38,7 @@ mod aiksi;
 mod linux;
 mod log;
 mod mem;
+mod mind;
 mod mine;
 mod net;
 mod pkg;

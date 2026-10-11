@@ -6418,6 +6418,23 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 },
             }
         }
+        "mind" if rest.trim_start().starts_with("introspect") => {
+            // The preregistered introspection test (design/indicators.md).
+            // `calibrate` alone picks the strengths and touches no brain.
+            let args: Vec<&str> = rest.split_whitespace().skip(1).collect();
+            let mut out = Vec::new();
+            if args.first() == Some(&"calibrate") {
+                crate::mind::calibrate(&mut out);
+            } else {
+                let n = args.first().and_then(|v| v.parse().ok()).unwrap_or(125usize);
+                let ms = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(500u64);
+                let seed = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(20261012u64);
+                crate::mind::introspect(n, ms, seed, &mut out);
+            }
+            for l in out {
+                kprintln!("{}", l);
+            }
+        }
         "mind" if rest.trim() == "open" => {
             // The workspace. One command because the arrangement is the point:
             // a machine reporting on itself in four places at once reads as a
