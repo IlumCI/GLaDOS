@@ -41,6 +41,9 @@ static ON: AtomicBool = AtomicBool::new(true);
 static ECAM: AtomicU64 = AtomicU64::new(0);
 static SPOKEN: AtomicUsize = AtomicUsize::new(0);
 static SPEAKING: AtomicBool = AtomicBool::new(false);
+/// The mask the last sentence was rendered with, in thousandths, for the
+/// status line: what was heard, not what the brain reads now.
+static LAST_MASK: AtomicUsize = AtomicUsize::new(1000);
 /// Sentences waiting, at most. A reply longer than this is cut rather than
 /// queued for minutes of speech nobody can stop.
 const QUEUE_MAX: usize = 24;
@@ -96,13 +99,18 @@ pub fn hush() {
 }
 
 pub fn status() -> String {
+    let d = dial(crate::brain::now());
     alloc::format!(
-        "voice {}, {} sentence(s) waiting, {} spoken this boot{}",
+        "voice {}, {} sentence(s) waiting, {} spoken this boot{}; {}, mask {:.2} (valence {:+.2}, arousal {:.2})",
         if on() { "on -- replies are spoken" } else { "off" },
         QUEUE.lock_irq().len(),
         SPOKEN.load(Ordering::Acquire),
-        if SPEAKING.load(Ordering::Acquire) { ", speaking now" } else { "" }
-    )
+        if SPEAKING.load(Ordering::Acquire) { ", speaking now" } else { "" },
+        if neural::model().is_some() { "neural" } else { "formant" },
+        d.mask,
+        d.valence,
+        d.arousal
+    ) + &alloc::format!("; the last sentence wore mask {:.2}", LAST_MASK.load(Ordering::Acquire) as f32 / 1000.0)
 }
 
 /// Render one sentence to playable PCM: 48 kHz stereo 16-bit, with a tail of
@@ -112,7 +120,9 @@ pub fn render(sentence: &str) -> Vec<u8> {
     // The neural voice when one is staged, the formant voice otherwise.
     // The mask is the brain's composure: whole while things go well, and
     // worn down by what goes badly. Rest restores it.
-    let mono: Vec<i16> = match neural::render(&text::strip(sentence), dial(a)) {
+    let d = dial(a);
+    LAST_MASK.store((d.mask * 1000.0) as usize, Ordering::Release);
+    let mono: Vec<i16> = match neural::render(&text::strip(sentence), d) {
         Some(y) => to_48k(&y),
         None => {
             let mut style = synth::Style::from_affect(a.valence, a.arousal);

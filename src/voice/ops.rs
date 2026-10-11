@@ -26,6 +26,36 @@ use alloc::vec::Vec;
 
 const CHUNK: usize = 128;
 
+/// Frames `[0, t)` split across every core, `width` multiply-adds each.
+///
+/// `smp::parallel_split` takes a bare function and a context word, so the
+/// closure travels as a fat pointer inside a struct on this stack, which
+/// outlives the call because the split does not return until every
+/// chunk has run. The closure writes disjoint frame ranges of one output
+/// through a raw pointer, which is the same bargain `Mat::matvec` makes
+/// for rows. Answers serially when there is nobody to help or another
+/// split is in flight; nested splits therefore cost nothing and do
+/// nothing, which is what lets a convolution inside a split LSTM run.
+fn par_frames(t: usize, width: usize, f: &(dyn Fn(usize, usize) + Sync)) {
+    struct Job<'a> {
+        f: &'a (dyn Fn(usize, usize) + Sync),
+    }
+    unsafe fn run(ctx: usize, lo: usize, hi: usize) {
+        let j = unsafe { &*(ctx as *const Job) };
+        (j.f)(lo, hi);
+    }
+    let job = Job { f };
+    if !crate::smp::parallel_split(&job as *const Job as usize, run, t, width) {
+        f(0, t);
+    }
+}
+
+/// `out[lo*c..hi*c]` as a slice, from a pointer shared across cores. The
+/// caller promises the ranges never overlap.
+unsafe fn frames_mut<'a>(out: usize, c: usize, lo: usize, hi: usize) -> &'a mut [f32] {
+    unsafe { core::slice::from_raw_parts_mut((out as *mut f32).add(lo * c), (hi - lo) * c) }
+}
+
 pub fn sigmoid(x: f32) -> f32 {
     tensor::sigmoid(x)
 }
@@ -58,12 +88,16 @@ pub fn snake(x: &mut [f32], c: usize, alpha: &[f32]) {
 pub fn linear(w: &Mat, b: Option<&[f32]>, x: &[f32], t: usize, cin: usize, cout: usize) -> Vec<f32> {
     debug_assert_eq!(x.len(), t * cin);
     let mut out = vec![0f32; t * cout];
-    let mut done = 0;
-    while done < t {
-        let n = (t - done).min(CHUNK);
-        w.matvec_batch(&mut out[done * cout..(done + n) * cout], &x[done * cin..(done + n) * cin], n);
-        done += n;
-    }
+    let optr = out.as_mut_ptr() as usize;
+    par_frames(t, cin * cout, &|lo, hi| {
+        let mut done = lo;
+        while done < hi {
+            let n = (hi - done).min(CHUNK);
+            let o = unsafe { frames_mut(optr, cout, done, done + n) };
+            w.matvec_batch(o, &x[done * cin..(done + n) * cin], n);
+            done += n;
+        }
+    });
     if let Some(b) = b {
         for frame in out.chunks_mut(cout) {
             tensor::add_into(frame, b);
@@ -95,32 +129,36 @@ impl Conv1d {
         let to = self.out_len(t);
         let cols = self.cin * self.k;
         let mut out = vec![0f32; to * self.cout];
-        let mut col = vec![0f32; CHUNK * cols];
-        let mut done = 0;
-        while done < to {
-            let n = (to - done).min(CHUNK);
-            for i in 0..n {
-                let row = &mut col[i * cols..(i + 1) * cols];
-                let base = ((done + i) * self.stride) as isize - self.pad as isize;
-                for j in 0..self.k {
-                    let src = base + (j * self.dil) as isize;
-                    if src >= 0 && (src as usize) < t {
-                        let s = src as usize;
-                        // column order is (channel, tap), matching the
-                        // weight's (out, in, k) flattened to (out, in*k)
-                        for c in 0..self.cin {
-                            row[c * self.k + j] = x[s * self.cin + c];
-                        }
-                    } else {
-                        for c in 0..self.cin {
-                            row[c * self.k + j] = 0.0;
+        let optr = out.as_mut_ptr() as usize;
+        par_frames(to, cols * self.cout, &|lo, hi| {
+            let mut col = vec![0f32; CHUNK * cols];
+            let mut done = lo;
+            while done < hi {
+                let n = (hi - done).min(CHUNK);
+                for i in 0..n {
+                    let row = &mut col[i * cols..(i + 1) * cols];
+                    let base = ((done + i) * self.stride) as isize - self.pad as isize;
+                    for j in 0..self.k {
+                        let src = base + (j * self.dil) as isize;
+                        if src >= 0 && (src as usize) < t {
+                            let s = src as usize;
+                            // column order is (channel, tap), matching the
+                            // weight's (out, in, k) flattened to (out, in*k)
+                            for c in 0..self.cin {
+                                row[c * self.k + j] = x[s * self.cin + c];
+                            }
+                        } else {
+                            for c in 0..self.cin {
+                                row[c * self.k + j] = 0.0;
+                            }
                         }
                     }
                 }
+                let o = unsafe { frames_mut(optr, self.cout, done, done + n) };
+                self.w.matvec_batch(o, &col[..n * cols], n);
+                done += n;
             }
-            self.w.matvec_batch(&mut out[done * self.cout..(done + n) * self.cout], &col[..n * cols], n);
-            done += n;
-        }
+        });
         if let Some(b) = self.b {
             for frame in out.chunks_mut(self.cout) {
                 tensor::add_into(frame, b);
