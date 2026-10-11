@@ -4840,7 +4840,16 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             }
             "stop" | "hush" => crate::voice::hush(),
             "" => kprintln!("  {}", crate::voice::status()),
-            _ => kprintln!("  usage: voice [on|off|stop]"),
+            "model" => kprintln!("  {}", crate::voice::neural::status()),
+            r if r.starts_with("verify ") => {
+                // The neural voice against the host's reference pass,
+                // stage by stage; the path is a GLADOSV1 dump from
+                // `tools/kokoro.py --dump`.
+                for line in crate::voice::neural::verify(r[7..].trim()) {
+                    kprintln!("  {}", line);
+                }
+            }
+            _ => kprintln!("  usage: voice [on|off|stop|model|verify <dump>]"),
         },
         "brain" => {
             // The connectome: what it is, what it reads, and a way to drive

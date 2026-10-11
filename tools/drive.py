@@ -672,6 +672,12 @@ def main():
         i = argv.index("--brain")
         brain_src = Path(argv[i + 1])
         del argv[i:i + 2]
+    # The neural voice, staged as \GLADOS\voice.bin on the same terms.
+    voice_src = None
+    if "--voice" in argv:
+        i = argv.index("--voice")
+        voice_src = Path(argv[i + 1])
+        del argv[i:i + 2]
     # --stage-iso names the checkpoint it stages. Saying the model twice would
     # invite staging one while booting the other, so the flag carries both
     # meanings and an explicit --model still wins.
@@ -733,6 +739,13 @@ def main():
         print(f"[drive] staged {brain_src} as \\GLADOS\\brain.bin")
     elif brain_target.exists():
         brain_target.unlink()
+    voice_target = esp / "GLADOS" / "voice.bin"
+    if voice_src is not None:
+        if not voice_target.exists() or differs(voice_src, voice_target):
+            voice_target.write_bytes(voice_src.read_bytes())
+        print(f"[drive] staged {voice_src} as \\GLADOS\\voice.bin")
+    elif voice_target.exists():
+        voice_target.unlink()
     # The WAD staging went with `src/doom/`. A stale copy on the ESP would be
     # a file nothing reads, so it is cleared rather than left.
     old_wad = esp / "GLADOS" / "DOOM.WAD"

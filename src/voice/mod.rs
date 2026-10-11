@@ -16,10 +16,15 @@
 //! same `say`), as the 1.4.0 plan ordered: this one is small, deterministic,
 //! and needs nothing from the boot volume.
 
+pub mod fft;
 pub mod g2p;
+pub mod kokoro;
+pub mod neural;
+pub mod ops;
 pub mod phone;
 pub mod synth;
 pub mod text;
+pub mod vfile;
 
 use crate::sync::Spin;
 use alloc::collections::VecDeque;
@@ -38,7 +43,8 @@ static SPEAKING: AtomicBool = AtomicBool::new(false);
 /// queued for minutes of speech nobody can stop.
 const QUEUE_MAX: usize = 24;
 
-pub fn init(ecam: Option<u64>) {
+pub fn init(ecam: Option<u64>, staged: Option<&'static [u8]>) {
+    neural::init(staged);
     if let Some(b) = crate::sysbox::read_blob("/etc/voice") {
         ON.store(b.as_slice() != b"off", Ordering::Release);
     }
@@ -155,6 +161,10 @@ pub fn selftest() -> bool {
     rows.extend(text::checks());
     rows.extend(g2p::checks());
     rows.extend(synth::checks());
+    rows.extend(vfile::checks());
+    rows.extend(ops::checks());
+    rows.extend(kokoro::checks());
+    rows.extend(fft::checks());
     let mut ok = true;
     for (what, good) in &rows {
         console::set_color(if *good { LTGREEN } else { LTRED });
