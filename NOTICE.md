@@ -181,6 +181,25 @@ apostrophes). Its licence, reproduced as it asks:
     the contributions of many volunteers to the expansion and improvement of
     this dictionary.
 
+
+### The neural voice: Kokoro-82M and misaki
+
+`\GLADOS\voice.bin` (`tools/kokoro.py`, not in this repository, shipped on
+the install image from the `payload-voice-v1` release) is **Kokoro-82M**
+by hexgrad, Apache-2.0, converted in place: weight norm folded, the
+vocoder's convolutions int8 per row, nothing retrained. Its `af_bella`
+voice vector rides with it. The same file carries **misaki**'s US English
+lexicon (`us_gold.json` and `us_silver.json`), by the same author under
+the same licence, repacked as GLADOSX1. The Apache-2.0 licence text is
+beside the file on the image as `LICENSE-VOICE.TXT`.
+
+The style over it -- the rule-based contour, the mask, the envelope
+resynthesis in `src/voice/style.rs` -- is this tree's own and is derived
+from no recording. **No audio of any performer, and none from the game
+this machine is named after, was used in building or tuning it**: the
+prototype's measurements were of its own renders, against delivery
+statistics described in words.
+
     THIS SOFTWARE IS PROVIDED BY CARNEGIE MELLON UNIVERSITY ``AS IS'' AND
     ANY EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
     THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR

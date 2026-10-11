@@ -6061,6 +6061,85 @@ success path has never run: the ports answer 0xFF, both status bits look set
 forever, and only the timeout is proven. Every battery figure seen under
 emulation is the firmware's fallback branch rather than a reading.
 
+### The voice: Kokoro-82M in the kernel, and the mask over it
+
+`src/voice/` speaks. Two voices behind one `say`: a formant synthesiser
+(`synth.rs`, compiled in, deterministic, and judged illegible by the person
+who has to listen to it) and **Kokoro-82M** (`kokoro.rs`), which runs when
+`\GLADOS\voice.bin` is staged. `tools/kokoro.py` converts the checkpoint
+and packs misaki's lexicon beside it; `drive.py --voice out/voice.bin`
+stages it; `voice say <text>` speaks headlessly, and QEMU's HDA output is
+captured with `--qemu-late "-audiodev wav,id=snd0,path=X.wav -device
+ich9-intel-hda -device hda-output,audiodev=snd0"`. Nothing speaks a
+recording: NOTICE.md says what went in.
+
+**The port is verified stage by stage, and that is the reason it works.**
+`kokoro.py --dump` writes one forward pass with every intermediate *and the
+random harmonic source itself*; `voice verify <dump>` runs the same ids
+through the kernel, feeds that source into its generator in place of its
+own, and prints the largest disagreement per stage. With f32 weights every
+front-end stage agrees to 1e-5 of its range and the waveform to 1.2e-3 of
+0.35; with the shipped int8 decoder, 0.21 dB rms on the envelope. Three
+bugs came out of that and none was findable by listening: the converter's
+"already written" set was keyed by bare name, so the text encoder's LSTM
+(which shares names with the predictor's) was never written; the source
+module's per-frame phase has to be multiplied by the 300-sample upsample
+factor; and the STFT's DC and Nyquist phases must come from an exact zero
+imaginary part, because the reference's FFT gets one and says +pi where
+rounding noise picks -pi, and the convolution after it reads the phase as
+a number.
+
+**Int8 is measured, per module.** On a smoothed log spectrum against f32,
+the vocoder in int8 costs 0.56 dB rms and moves pitch by nothing; the
+front end in int8 costs 1.47 dB and moves pitch 2.5 Hz. So
+`kokoro.py --q8 decoder` is the default and the front end stays f32. The
+transposed convolutions are stored `(k, out, in)` and stay f32 too, since a
+per-row scale there would be one scale per tap.
+
+**The style is Valve's recipe replicated** (`style.rs`): a rule-based plan
+writes each phrase's timing and melody the way the synthesiser the original
+was performed after did, Kokoro performs exactly that timing by having its
+predicted durations replaced, and then its voice is taken away -- the 5 ms
+spectral envelope survives, cepstrally liftered, and under it goes a source
+of this file's own. WORLD's pitch tracker, aperiodicity and vocoder, which
+the host prototype used, turned out unnecessary once voicing came from
+Kokoro's own pitch prediction (12.5 ms frames; indexing them as 5 ms was a
+bug once). Pulses go at **fractional** sample positions by a phase rotation
+of the response: on whole samples, at 196 Hz the spacing alternates 122/123
+and that is a subharmonic.
+
+**The mask is one number**, 1.0 composed and 0.0 gone, and every knob
+derives from it. Composed is a machine -- one held note, no breath, loudness
+evened, the envelope at 28 coefficients -- because pushing Kokoro *toward* a
+machine cost a word each time and the user heard it; the machine source
+costs none. It fades out between 1.0 and 0.7; below that the voice is the
+"K" recipe the user picked. The brain drives it (`voice::dial`): whole at
+any non-negative valence, slipping a quarter below neutral, gone most of the
+way down, whole again asleep. `voice` prints the dial read now and the mask
+the last sentence actually wore, because a poke that has decayed by the
+time the queue reaches the sentence looks exactly like a dial that is not
+wired.
+
+**Timing was the legibility knob and not the source.** The metronomic
+blend (`mech` 0.65) squeezed "you are" out of "you are awake" on every
+source tried; at 0.3 every word survives and the machine quality is the
+source's. The check is a speech recogniser over the capture, which is a
+cheap instrument and not a judge: it says whether the words are there.
+
+**Words are never dropped** (`ipa.rs`): misaki's lexicon exact, lower and
+capitalised, then a contraction's stem plus clitic, then CMUdict and the
+letter rules through one ARPAbet-to-misaki table. The formant voice's
+silent skip of a word it lacked was heard as hiccups.
+
+**Speed.** The vocoder is about 26 GMAC per second of audio. Convolutions
+split their frames across cores (`ops::par_frames`, the `Mat::matvec` row
+split one level up); `voice verify` reads 5.2 s for 2.67 s of audio at
+`-smp 2` under KVM, 8.6 s serial. The GF63's figure is owed.
+
+**`tensor::sinf` is good to 1e-4 and that is not a twiddle.** `fft.rs`
+carries its own `sincos` and tables the twiddles rather than recurring
+them; the first boot's own claim caught a transform that did not invert.
+
 ### Text, and the font
 
 `src/gfx/font.rs` draws 325 glyphs at 8x8 and `src/gfx/console.rs` decodes
