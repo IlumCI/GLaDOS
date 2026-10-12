@@ -373,14 +373,22 @@ impl Sim {
         let slot = self.t as usize % self.slots;
         let base = slot * n;
         let c0 = crate::time::rdtsc();
+        // Delivery. With most of the brain awake it happens inside the dense
+        // pass instead, each slice reading its own stretch of this slot in
+        // order -- a walk of the touched list there is a random walk over a
+        // megabyte, and it measured as large as the integration itself.
+        // Exact either way: delivery adds to g, the Poisson kicks below add
+        // to v, and nothing reads one before the other is done.
         let due = core::mem::take(&mut self.touched[slot]);
-        for &i in due.iter() {
-            let i = i as usize;
-            let x = self.ring[base + i];
-            if x != 0 {
-                self.g[i] += x;
-                self.ring[base + i] = 0;
-                self.wake(i);
+        if !self.dense {
+            for &i in due.iter() {
+                let i = i as usize;
+                let x = self.ring[base + i];
+                if x != 0 {
+                    self.g[i] += x;
+                    self.ring[base + i] = 0;
+                    self.wake(i);
+                }
             }
         }
         let mut due = due;
@@ -402,9 +410,9 @@ impl Sim {
         // a 7.6 ms step on the fly. Any other constants take the general path,
         // which computes the same thing slowly.
         if c.tau_m == 200 && c.tau_syn == 50 {
-            self.integrate::<200, 50>(c, fired);
+            self.integrate::<200, 50>(c, base, fired);
         } else {
-            self.integrate::<0, 0>(c, fired);
+            self.integrate::<0, 0>(c, base, fired);
         }
         for &(i, _) in driven {
             self.nore[i as usize] = false;
@@ -446,11 +454,20 @@ impl Sim {
     /// prefetcher's favourite thing. The same updates either way, so the
     /// switch changes no spike, which `diag brain` checks by digest.
     #[inline(always)]
-    fn integrate<const TM: i64, const TS: i64>(&mut self, c: &Connectome, fired: &mut Vec<u32>) {
+    fn integrate<const TM: i64, const TS: i64>(&mut self, c: &Connectome, base: usize, fired: &mut Vec<u32>) {
         let bias = self.bias;
         if self.dense {
-            if !self.integrate_parallel::<TM, TS>(c, fired) {
+            if !self.integrate_parallel::<TM, TS>(c, base, fired) {
                 for i in 0..c.n {
+                    let x = self.ring[base + i];
+                    if x != 0 {
+                        self.g[i] += x;
+                        self.ring[base + i] = 0;
+                        if !self.on[i] {
+                            self.on[i] = true;
+                            self.awake += 1;
+                        }
+                    }
                     if self.on[i] {
                         let (spiked, inert) = neuron::<TM, TS>(
                             c,
@@ -525,7 +542,7 @@ impl Sim {
     ///
     /// Answers false having done nothing when there is no help to be had --
     /// no other core, another job in flight -- and the caller walks serially.
-    fn integrate_parallel<const TM: i64, const TS: i64>(&mut self, c: &Connectome, fired: &mut Vec<u32>) -> bool {
+    fn integrate_parallel<const TM: i64, const TS: i64>(&mut self, c: &Connectome, base: usize, fired: &mut Vec<u32>) -> bool {
         if self.parts.len() != PARTS {
             self.parts = (0..PARTS).map(|_| Vec::new()).collect();
         }
@@ -533,6 +550,7 @@ impl Sim {
             p.clear();
         }
         let mut retired = [0usize; PARTS];
+        let mut woke = [0usize; PARTS];
         struct Job {
             c: *const Connectome,
             bias: i64,
@@ -546,6 +564,8 @@ impl Sim {
             nore: *const bool,
             parts: *mut Vec<u32>,
             retired: *mut usize,
+            woke: *mut usize,
+            ring: *mut i64,
         }
         unsafe fn run<const TM: i64, const TS: i64>(ctx: usize, lo: usize, hi: usize) {
             let j = unsafe { &*(ctx as *const Job) };
@@ -554,9 +574,18 @@ impl Sim {
                 // Slices never overlap, so no two cores touch one neuron.
                 let (a, b) = (p * j.len, ((p + 1) * j.len).min(j.n));
                 let out = unsafe { &mut *j.parts.add(p) };
-                let mut gone = 0;
+                let (mut gone, mut up) = (0, 0);
                 for i in a..b {
                     unsafe {
+                        let x = *j.ring.add(i);
+                        if x != 0 {
+                            *j.g.add(i) += x;
+                            *j.ring.add(i) = 0;
+                            if !*j.on.add(i) {
+                                *j.on.add(i) = true;
+                                up += 1;
+                            }
+                        }
                         if !*j.on.add(i) {
                             continue;
                         }
@@ -578,7 +607,10 @@ impl Sim {
                         }
                     }
                 }
-                unsafe { *j.retired.add(p) = gone };
+                unsafe {
+                    *j.retired.add(p) = gone;
+                    *j.woke.add(p) = up;
+                }
             }
         }
         let job = Job {
@@ -594,6 +626,8 @@ impl Sim {
             nore: self.nore.as_ptr(),
             parts: self.parts.as_mut_ptr(),
             retired: retired.as_mut_ptr(),
+            woke: woke.as_mut_ptr(),
+            ring: unsafe { self.ring.as_mut_ptr().add(base) },
         };
         // `width` is a cost hint, not a count: about sixteen operations a
         // neuron, so the fly's 138,639 clear the fabric's floor and the
@@ -604,7 +638,7 @@ impl Sim {
         }
         for (p, out) in self.parts.iter().enumerate() {
             fired.extend_from_slice(out);
-            self.awake -= retired[p];
+            self.awake = self.awake + woke[p] - retired[p];
         }
         true
     }

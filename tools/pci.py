@@ -51,7 +51,7 @@ class Graph:
                      np.asarray(b.w, dtype=np.int64))
 
 
-def simulate(b: cx.Brain, g: Graph, steps: int, pulses, record, bin_steps: int, seed: int, gain: int = 1000):
+def simulate(b: cx.Brain, g: Graph, steps: int, pulses, record, bin_steps: int, seed: int, gain: int = 1000, bias: int = 0):
     """Step the brain `steps` times; `pulses` is a list of (sensor, rate_hz,
     first_step, last_step_exclusive). Returns spike counts per (bin, recorded
     neuron) and total counts per neuron.
@@ -100,7 +100,7 @@ def simulate(b: cx.Brain, g: Graph, steps: int, pulses, record, bin_steps: int, 
         refr[r] -= 1
         v[r] = b.vreset
         live = ~r
-        v[live] += tdiv(b.v0 - v[live] + gg[live], b.tau_m)
+        v[live] += tdiv(b.v0 - v[live] + gg[live] + bias, b.tau_m)
         gg[live] -= tdiv(gg[live], b.tau_syn)
         fired = np.nonzero(live & (v > b.vth))[0]
         if fired.size:
