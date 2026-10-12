@@ -124,12 +124,12 @@ pub fn introspect(n: usize, ms: u64, seed: u64, out: &mut Vec<String>) {
         done += 1;
         // Three seconds of brain time between trials, for the last one's
         // response and its neuromodulation to decay.
+        // Waited for, not timed: a brain that cannot reach it is a run that
+        // stops here, never an interval quietly shortened.
         let Some(now) = crate::brain::observe() else { break };
-        let hz = crate::TIMER_HZ as u64;
-        let give_up = crate::dev::lapic::ticks() + 20 * hz;
-        while crate::brain::observe().map(|o| o.0).unwrap_or(u64::MAX) < now.0 + 3_000_000 && crate::dev::lapic::ticks() < give_up {
-            let t = crate::dev::lapic::ticks();
-            crate::task::sleep_until(t + 1);
+        if introspect::wait_brain(now.0 + 3_000_000).is_none() {
+            out.push(alloc::format!("  the brain stalled after trial {}", i + 1));
+            break;
         }
     }
     let path = alloc::format!("/ai/mind/introspect-{}.tsv", seed);

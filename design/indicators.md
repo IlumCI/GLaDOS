@@ -208,6 +208,78 @@ run is recorded here.**
 
 ---
 
-## 2. Perturbational complexity (to be preregistered before its first run)
+## 2. Perturbational complexity (draft, not yet preregistered)
+
+### 2.1 What PCI is, and what it is not here
+
+The perturbational complexity index (Casali et al. 2013, *Science
+Translational Medicine* 5:198ra105) perturbs a brain and measures how
+complex its response is. The response is binarised across sources and time,
+then compressed with Lempel-Ziv; a response that is both widespread and
+differentiated compresses poorly and scores high. In humans it separates
+wakefulness and dreaming from deep sleep, anaesthesia and the vegetative
+state, with an empirical cutoff (PCI* = 0.31) calibrated on human cortex
+under TMS-EEG.
+
+**That cutoff does not transfer and is never quoted here.** This is a
+simplified LIF model of an insect connectome with no basal activity,
+measured by spikes rather than by EEG. Here PCI is a descriptive measure of
+the response's integration and differentiation, compared only against
+controls built from the same model. The claim it can support is "the real
+wiring responds with more integrated-and-differentiated activity than the
+same parts wired at random". It cannot support "the system is conscious".
+
+### 2.2 Protocol (to be fixed before the first run)
+
+- **Where.** The host oracle (`tools/connectome.py`), whose arithmetic the
+  kernel matches spike for spike, so a run is reproducible by anyone from
+  the pinned sources. Both the fly and the worm.
+- **Perturbation.** A pulse: one sensor population driven at 1000 Hz for
+  10 ms of brain time, starting from rest. One site per sense (5 senses),
+  20 seeds per site.
+- **Response matrix.** The observation set of 1.4 plus readouts, in 5 ms
+  bins over the 300 ms after pulse onset. A bin is *significant* when the
+  mean count over the 20 seeds exceeds the largest mean count in any bin of
+  a 300 ms pre-pulse baseline taken the same way. With no basal activity
+  that baseline is zero, and the rule is stated anyway so that it holds
+  once neuromodulation gives the brain a resting rate.
+- **PCI.** LZ76 complexity of the binary matrix, read time-major, normalised
+  by `L * H(p) / log2 L`. Here `L` is the matrix size and `H(p)` the binary
+  entropy of its fraction of ones, as in Casali 2013.
+- **Controls.**
+  - (a) **Shuffled wiring**: every neuron keeps its out-degree and its
+    multiset of signed weights, but the targets are drawn uniformly without
+    replacement from all neurons by splitmix64 (seed to be fixed here). Ten
+    shuffles.
+  - (b) **Severed recurrence**: synapses onto neurons outside the sensory
+    layer's direct targets are removed, leaving a feed-forward sheet.
+- **Endpoint.** Intact PCI against each control, per animal: the five sites'
+  values compared by one-sided Mann-Whitney U at 0.05 / 4 (2 animals x 2
+  controls). Every value is reported, not only the test.
+- **Prediction.** Intact exceeds both controls on the fly, because its
+  recurrent central complex and mushroom body are exactly what the shuffle
+  destroys. On the worm we predict a smaller margin and do not predict its
+  sign against control (a), since a random graph of 300 neurons can be as
+  recurrent as the real one.
+
+**Open before fixing:** the significance rule in the presence of
+neuromodulation (only relevant to a kernel-side PCI, which comes later), and
+whether the workspace loop of section 3 is in the perturbed system. If it is,
+there is a third control: the loop cut.
 
 ## 3. The indicator audit (to be written from the code's own claims)
+
+## Amendments to section 1
+
+**2026-10-12, amendment 1 (implementation, no change to the protocol).**
+The first run (`cba3e52`) recomputed the calibration exactly (0.125 /
+0.0625) and then stopped on trial 1, with no trial scored. The cause was the
+harness, not the brain. Its waits gave up after a fixed wall time (10 s for a
+window, 20 s for the inter-trial interval). After a poke the fly woke 91,371
+of its 138,639 neurons and stepped at 9% of real time, so a 500 ms window
+needed more than 10 s and the wait gave up. The inter-trial wait had the
+worse version of the same flaw: it would have shortened the 3 s interval
+without saying so. Both now give up only when the brain's clock stops
+advancing for 10 s. Every quantity in section 1 is unchanged. The rerun uses
+the same seed, so it schedules the same trial order the stopped run
+attempted.
