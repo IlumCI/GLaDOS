@@ -208,7 +208,13 @@ run is recorded here.**
 
 ---
 
-## 2. Perturbational complexity (draft, not yet preregistered)
+## 2. Perturbational complexity (preregistered 2026-10-12)
+
+**Status: preregistered.** This section was written and committed with
+`tools/pci.py` before any PCI value was computed. The only runs before it
+were the tool's selftest and one timed simulation per animal, which printed
+its duration and spike count and no complexity value. (Fly: 25.7 s and 974
+spikes for one 300 ms run. Worm: 0.1 s and 49 spikes.)
 
 ### 2.1 What PCI is, and what it is not here
 
@@ -229,43 +235,49 @@ controls built from the same model. The claim it can support is "the real
 wiring responds with more integrated-and-differentiated activity than the
 same parts wired at random". It cannot support "the system is conscious".
 
-### 2.2 Protocol (to be fixed before the first run)
+### 2.2 Protocol
 
-- **Where.** The host oracle (`tools/connectome.py`), whose arithmetic the
-  kernel matches spike for spike, so a run is reproducible by anyone from
-  the pinned sources. Both the fly and the worm.
-- **Perturbation.** A pulse: one sensor population driven at 1000 Hz for
-  10 ms of brain time, starting from rest. One site per sense (5 senses),
-  20 seeds per site.
-- **Response matrix.** The observation set of 1.4 plus readouts, in 5 ms
-  bins over the 300 ms after pulse onset. A bin is *significant* when the
-  mean count over the 20 seeds exceeds the largest mean count in any bin of
-  a 300 ms pre-pulse baseline taken the same way. With no basal activity
-  that baseline is zero, and the rule is stated anyway so that it holds
-  once neuromodulation gives the brain a resting rate.
-- **PCI.** LZ76 complexity of the binary matrix, read time-major, normalised
-  by `L * H(p) / log2 L`. Here `L` is the matrix size and `H(p)` the binary
-  entropy of its fraction of ones, as in Casali 2013.
+- **Where.** The host oracle's arithmetic (`tools/pci.py`, which reproduces
+  `connectome.simulate_np` spike for spike under a constant drive, a claim
+  in its selftest), so anyone can rerun it from the pinned files: the fly
+  `brain.bin` (`880c3af0...`) and the worm `assets/brain/worm.bin`
+  (`52012440...`).
+- **Perturbation.** From rest, one sensor population is driven at 1000 Hz
+  for 10 ms of brain time. One site per sensor population (5 per animal,
+  `voice` included), 20 seeds per site (splitmix64 seeds 1000..1019).
+- **Recording.** The worm: every non-sensor neuron (275). The fly: the
+  introspection test's observation set together with 1,000 non-sensor
+  neurons drawn by PCG64 seed `0x504349` (1,228 in all). Sensors are never
+  recorded, because a pulse makes them fire by construction.
+- **Response matrix.** 5 ms bins over the 300 ms from pulse onset. A cell
+  (bin, neuron) is significant when its mean count over the 20 seeds exceeds
+  the largest mean in any bin of the pre-pulse baseline. Every brain here is
+  silent at rest, so that maximum is zero and a cell is significant when any
+  seed spiked there. The rule is written in full so it still holds once a
+  brain has a resting rate.
+- **PCI.** LZ76 complexity (Kaspar-Schuster) of the binary matrix, read
+  time-major, times `log2 L` over `L * H(p)`. Here `L` is the matrix size and
+  `H(p)` the binary entropy of its fraction of ones (Casali 2013). A matrix
+  with nothing significant scores 0.
 - **Controls.**
-  - (a) **Shuffled wiring**: every neuron keeps its out-degree and its
-    multiset of signed weights, but the targets are drawn uniformly without
-    replacement from all neurons by splitmix64 (seed to be fixed here). Ten
-    shuffles.
-  - (b) **Severed recurrence**: synapses onto neurons outside the sensory
-    layer's direct targets are removed, leaving a feed-forward sheet.
-- **Endpoint.** Intact PCI against each control, per animal: the five sites'
-  values compared by one-sided Mann-Whitney U at 0.05 / 4 (2 animals x 2
+  - (a) **Shuffled wiring:** every neuron keeps its out-degree and its
+    multiset of signed weights. Its targets are drawn uniformly without
+    replacement from all other neurons, by PCG64 seeds 1 to 10. Ten shuffles
+    per animal.
+  - (b) **Severed recurrence:** only synapses leaving sensor neurons remain,
+    so the stimulus reaches its first layer and goes no further.
+- **Endpoint.** Per animal, the 5 intact site values against each control's
+  values: 5 for severed, and 50 for shuffled (10 shuffles x 5 sites). One-
+  sided Mann-Whitney U, intact greater, at 0.05 / 4 (2 animals x 2
   controls). Every value is reported, not only the test.
-- **Prediction.** Intact exceeds both controls on the fly, because its
-  recurrent central complex and mushroom body are exactly what the shuffle
-  destroys. On the worm we predict a smaller margin and do not predict its
-  sign against control (a), since a random graph of 300 neurons can be as
+- **Prediction.** On the fly, intact exceeds both controls: its recurrent
+  central brain is exactly what the shuffle destroys and the severing
+  removes. On the worm, intact exceeds severed. Against shuffled wiring we
+  do not predict a sign, since a random graph of 300 neurons can be as
   recurrent as the real one.
-
-**Open before fixing:** the significance rule in the presence of
-neuromodulation (only relevant to a kernel-side PCI, which comes later), and
-whether the workspace loop of section 3 is in the perturbed system. If it is,
-there is a third control: the loop cut.
+- **Not in this run:** the kernel's own brain (neuromodulation gives it a
+  state the oracle does not have) and the workspace loop of section 3. Each
+  is preregistered separately, with the loop cut as its control.
 
 ## 3. The indicator audit (to be written from the code's own claims)
 
