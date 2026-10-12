@@ -192,18 +192,26 @@ pub struct Trial {
 }
 
 /// Wait until the brain's clock passes `target` microseconds. `None` if the
-/// clock stops moving for ten seconds of wall time: a brain switched off, or
-/// asleep, is a run to stop rather than a trial to score.
+/// clock stops moving for `STALL_S` seconds of wall time: a brain switched
+/// off, or asleep, is a run to stop rather than a trial to score.
 ///
 /// Progress, not total time. The fly runs at real time at rest and at under
 /// a tenth of it once a poke has woken two thirds of its neurons, so 500 ms
 /// of brain time can take seven seconds of wall time and still be a brain
 /// working perfectly. A total-time limit ended the first run of the
 /// preregistered test on its first trial for exactly that.
+///
+/// And `STALL_S` is two minutes, not ten seconds, because "moving" is only
+/// visible once per 100 ms readout window, and a fly whose aminergic cells a
+/// poke has driven has a hundred thousand neurons awake and steps at 1-2% of
+/// real time -- seven to ten seconds of wall time per window, which the
+/// first limit called a stall on the second run's second trial.
+pub const STALL_S: u64 = 120;
+
 pub fn wait_brain(target: u64) -> Option<(u64, Vec<u32>)> {
     let hz = crate::TIMER_HZ as u64;
     let mut seen = brain::observe()?.0;
-    let mut give_up = crate::dev::lapic::ticks() + 10 * hz;
+    let mut give_up = crate::dev::lapic::ticks() + STALL_S * hz;
     loop {
         let o = brain::observe()?;
         if o.0 >= target {
@@ -212,7 +220,7 @@ pub fn wait_brain(target: u64) -> Option<(u64, Vec<u32>)> {
         let now = crate::dev::lapic::ticks();
         if o.0 != seen {
             seen = o.0;
-            give_up = now + 10 * hz;
+            give_up = now + STALL_S * hz;
         } else if now > give_up {
             return None;
         }

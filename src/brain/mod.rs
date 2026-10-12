@@ -332,6 +332,19 @@ pub fn observe() -> Option<(u64, Vec<u32>)> {
     Some((o.0, o.1.clone()))
 }
 
+/// Readout windows between neuromodulation updates: one second of brain
+/// time at `WINDOW` steps of 0.1 ms.
+const MOD_EVERY: u64 = 10;
+
+/// Gain (thousandths) and quantised resting drive (quarter millivolts) from
+/// the octopamine and serotonin levels. Pure, so `diag brain` can hold it.
+pub fn modulation(oa: i64, sh: i64, asleep: bool) -> (i64, i64) {
+    if asleep {
+        return (800, -8); // -2 mV: quieter, less excitable
+    }
+    (1000 + 300 * oa / 1000 - 150 * sh / 1000, (4 * (oa - sh) / 1000).clamp(-4, 4))
+}
+
 fn brain_task() {
     let Some(c) = conn() else { return };
     let mut sim = Sim::new(c, crate::time::rdtsc() | 1);
@@ -365,6 +378,7 @@ fn brain_task() {
     let mut woken = false;
     let mut last_sec = last / 100;
     let mut last_touch_s = last / 100;
+    let mut mod_windows = 0u64;
     loop {
         let now = crate::dev::lapic::ticks();
         if now == last {
@@ -451,19 +465,6 @@ fn brain_task() {
                     drive.clear();
                 }
             }
-            // Neuromodulation: gain from octopamine (arousal) against
-            // serotonin, and a resting drive that sleep pulls down. Bias is
-            // quantised to a quarter of a millivolt so it changes rarely,
-            // because every change wakes every neuron for a pass.
-            let oa = OCTOPAMINE.load(Ordering::Acquire) as i64;
-            let sh = SEROTONIN.load(Ordering::Acquire) as i64;
-            let (gain, bias_q) = if asleep() {
-                (800, -8) // -2 mV: quieter, less excitable
-            } else {
-                (1000 + 300 * oa / 1000 - 150 * sh / 1000, (4 * (oa - sh) / 1000).clamp(-4, 4))
-            };
-            sim.gain = gain;
-            sim.set_bias(c, bias_q * 250_000);
         }
 
         if !ON.load(Ordering::Acquire) {
@@ -493,6 +494,31 @@ fn brain_task() {
             }
             if sim.t - window_start >= WINDOW {
                 fold(c, &mut window, &mut rate_mhz, sim.t - window_start);
+                // Neuromodulation: gain from octopamine (arousal) against
+                // serotonin, and a resting drive that sleep pulls down. Bias
+                // is quantised to a quarter of a millivolt so it changes
+                // rarely, because every change wakes every neuron for a pass.
+                //
+                // **Once per second of brain time, here, and never per wall
+                // second.** It was in the wall-clock block, and that was a
+                // spiral: a poke moves the modulators, a moved bias wakes all
+                // 138,639 fly neurons, the brain drops to 2% of real time, a
+                // wall second becomes 20 ms of brain time in which the levels
+                // barely move -- and the next wall second recomputes, nudges
+                // the bias and wakes everyone again. The introspection test
+                // found it as a brain that never came back to rest; the host
+                // oracle showed the dynamics do come back, within 250 ms of
+                // the poke ending, even at gain 1.3. The levels are folded in
+                // brain time, so what they drive is updated in brain time.
+                mod_windows += 1;
+                if mod_windows >= MOD_EVERY {
+                    mod_windows = 0;
+                    let oa = OCTOPAMINE.load(Ordering::Acquire) as i64;
+                    let sh = SEROTONIN.load(Ordering::Acquire) as i64;
+                    let (gain, bias_q) = modulation(oa, sh, asleep());
+                    sim.gain = gain;
+                    sim.set_bias(c, bias_q * 250_000);
+                }
                 let pace = WINDOW * 100 / (window_ticks * 100).max(1);
                 let mut s = SNAP.lock_irq();
                 s.t = sim.t;
@@ -750,6 +776,8 @@ pub fn selftest() -> bool {
     let mut r = lif::Rng::new(1);
     claim("splitmix64 matches its published first output", r.next() == 0x910A_2DEC_8902_5CC1);
     claim("truncating division agrees with the oracle on negatives", -7i64 / 2 == -3);
+    claim("no modulators is neutral gain and no bias", modulation(0, 0, false) == (1000, 0));
+    claim("asleep is quieter whatever the modulators", modulation(900, 0, true) == (800, -8));
 
     match Connectome::parse(WORM) {
         Err(why) => claim(why, false),

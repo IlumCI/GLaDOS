@@ -51,7 +51,7 @@ class Graph:
                      np.asarray(b.w, dtype=np.int64))
 
 
-def simulate(b: cx.Brain, g: Graph, steps: int, pulses, record, bin_steps: int, seed: int):
+def simulate(b: cx.Brain, g: Graph, steps: int, pulses, record, bin_steps: int, seed: int, gain: int = 1000):
     """Step the brain `steps` times; `pulses` is a list of (sensor, rate_hz,
     first_step, last_step_exclusive). Returns spike counts per (bin, recorded
     neuron) and total counts per neuron.
@@ -60,7 +60,10 @@ def simulate(b: cx.Brain, g: Graph, steps: int, pulses, record, bin_steps: int, 
     g, Poisson kicks to v in table order (one draw per driven neuron per
     step, while its pulse is on), refractory hold, integrate, decay, spike."""
     n = g.n
-    w = g.w * b.w_syn
+    # The kernel's neuromodulated synapse, `w * w_syn * gain / 1000` with
+    # Rust's truncation toward zero; at the default 1000 it is `w * w_syn`.
+    wq = g.w * b.w_syn * gain
+    w = np.sign(wq) * (np.abs(wq) // 1000)
     v = np.full(n, b.v0, dtype=np.int64)
     gg = np.zeros(n, dtype=np.int64)
     refr = np.zeros(n, dtype=np.int64)

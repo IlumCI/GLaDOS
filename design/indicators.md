@@ -295,3 +295,21 @@ without saying so. Both now give up only when the brain's clock stops
 advancing for 10 s. Every quantity in section 1 is unchanged. The rerun uses
 the same seed, so it schedules the same trial order the stopped run
 attempted.
+
+**2026-10-12, amendment 2 (kernel and implementation, before any trial is
+analysed).** The rerun with amendment 1 scored 2 trials and stopped. Every
+condition answered "nothing" on both, and they are not analysed. The brain
+looked stuck: 109,304 neurons awake, modulators near their ceiling, 2% of
+real time. The host oracle refuted the obvious cause. The fly falls silent
+within 250 ms of a poke ending even at synaptic gain 1.3, so this is not a
+runaway. It is cost. The cells a thermal or food poke drives project across
+most of the brain, so a hundred thousand neurons sit slightly perturbed for
+about 200 ms of brain time each, and stepping them costs about 8 ms per
+0.1 ms step under QEMU. Two changes, both committed before the next run:
+neuromodulation now updates once per second of brain time instead of wall
+time (it had been re-waking every neuron each wall second while the brain
+was slow), and the harness's stall limit is 120 s of no progress (a 100 ms
+readout window now takes up to 10 s of wall time). No quantity in section 1
+changes. The kernel under test is the commit carrying this amendment, with
+any performance work after it. That work changes no spike; `diag brain`'s
+oracle digests are the check.
