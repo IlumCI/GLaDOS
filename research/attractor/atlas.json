@@ -1,0 +1,16114 @@
+{
+"5-HTPMPV01": {
+"n": 2,
+"core_late": 0
+},
+"ALBN1": {
+"n": 2,
+"core_late": 0
+},
+"ALIN3": {
+"n": 4,
+"core_late": 477
+},
+"ALIN6": {
+"n": 2,
+"core_late": 0
+},
+"ALON1": {
+"n": 2,
+"core_late": 0
+},
+"AN_AVLP_12": {
+"n": 2,
+"core_late": 0
+},
+"AN_AVLP_20": {
+"n": 2,
+"core_late": 0
+},
+"AN_AVLP_GNG_16": {
+"n": 2,
+"core_late": 0
+},
+"AN_AVLP_GNG_2": {
+"n": 2,
+"core_late": 0
+},
+"AN_AVLP_PVLP_10": {
+"n": 2,
+"core_late": 0
+},
+"AN_AVLP_PVLP_7": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_105": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_160": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_197": {
+"n": 15,
+"core_late": 0
+},
+"AN_GNG_41": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_71": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_99": {
+"n": 3,
+"core_late": 0
+},
+"AN_GNG_IPS_7": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_SAD33": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_SAD_23": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_SAD_33": {
+"n": 4,
+"core_late": 0
+},
+"AN_GNG_WED_2": {
+"n": 4,
+"core_late": 0
+},
+"AN_LH_AVLP_1": {
+"n": 4,
+"core_late": 477
+},
+"AN_SPS_IPS_1": {
+"n": 2,
+"core_late": 0
+},
+"AN_VES_GNG_1": {
+"n": 2,
+"core_late": 0
+},
+"AN_VES_GNG_8": {
+"n": 4,
+"core_late": 0
+},
+"AN_multi_106": {
+"n": 4,
+"core_late": 0
+},
+"AN_multi_112": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_115": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_118": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_120": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_124": {
+"n": 10,
+"core_late": 0
+},
+"AN_multi_14": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_22": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_27": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_31": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_44": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_55": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_7": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_73": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_79": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_82": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_91": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_96": {
+"n": 2,
+"core_late": 0
+},
+"AOTU012": {
+"n": 2,
+"core_late": 0
+},
+"AOTU032,AOTU034": {
+"n": 12,
+"core_late": 0
+},
+"AOTU053": {
+"n": 3,
+"core_late": 0
+},
+"APDN3": {
+"n": 6,
+"core_late": 0
+},
+"ATL030": {
+"n": 2,
+"core_late": 0
+},
+"ATL035,ATL036": {
+"n": 5,
+"core_late": 0
+},
+"AVLP001": {
+"n": 2,
+"core_late": 0
+},
+"AVLP010": {
+"n": 8,
+"core_late": 0
+},
+"AVLP015": {
+"n": 2,
+"core_late": 0
+},
+"AVLP018": {
+"n": 2,
+"core_late": 0
+},
+"AVLP021": {
+"n": 2,
+"core_late": 0
+},
+"AVLP024a": {
+"n": 2,
+"core_late": 0
+},
+"AVLP025": {
+"n": 2,
+"core_late": 0
+},
+"AVLP028": {
+"n": 10,
+"core_late": 0
+},
+"AVLP031": {
+"n": 2,
+"core_late": 0
+},
+"AVLP037,AVLP038": {
+"n": 4,
+"core_late": 0
+},
+"AVLP040": {
+"n": 9,
+"core_late": 0
+},
+"AVLP043": {
+"n": 4,
+"core_late": 0
+},
+"AVLP045": {
+"n": 10,
+"core_late": 0
+},
+"AVLP049": {
+"n": 6,
+"core_late": 0
+},
+"AVLP069": {
+"n": 13,
+"core_late": 0
+},
+"AVLP080": {
+"n": 2,
+"core_late": 0
+},
+"AVLP088": {
+"n": 2,
+"core_late": 0
+},
+"AVLP097": {
+"n": 2,
+"core_late": 0
+},
+"AVLP102": {
+"n": 2,
+"core_late": 0
+},
+"AVLP143b": {
+"n": 2,
+"core_late": 0
+},
+"AVLP151": {
+"n": 2,
+"core_late": 0
+},
+"AVLP162": {
+"n": 2,
+"core_late": 0
+},
+"AVLP187": {
+"n": 9,
+"core_late": 0
+},
+"AVLP190,AVLP191": {
+"n": 16,
+"core_late": 0
+},
+"AVLP201": {
+"n": 2,
+"core_late": 0
+},
+"AVLP215": {
+"n": 2,
+"core_late": 0
+},
+"AVLP218b": {
+"n": 4,
+"core_late": 0
+},
+"AVLP224_a": {
+"n": 5,
+"core_late": 0
+},
+"AVLP243": {
+"n": 4,
+"core_late": 0
+},
+"AVLP253,AVLP254": {
+"n": 4,
+"core_late": 0
+},
+"AVLP280": {
+"n": 2,
+"core_late": 0
+},
+"AVLP284": {
+"n": 3,
+"core_late": 0
+},
+"AVLP288": {
+"n": 4,
+"core_late": 0
+},
+"AVLP297": {
+"n": 9,
+"core_late": 0
+},
+"AVLP299_c": {
+"n": 5,
+"core_late": 0
+},
+"AVLP304": {
+"n": 3,
+"core_late": 0
+},
+"AVLP310a": {
+"n": 4,
+"core_late": 0
+},
+"AVLP313": {
+"n": 2,
+"core_late": 0
+},
+"AVLP316": {
+"n": 4,
+"core_late": 0
+},
+"AVLP344": {
+"n": 3,
+"core_late": 0
+},
+"AVLP371": {
+"n": 2,
+"core_late": 0
+},
+"AVLP394": {
+"n": 4,
+"core_late": 0
+},
+"AVLP398": {
+"n": 2,
+"core_late": 0
+},
+"AVLP428": {
+"n": 2,
+"core_late": 0
+},
+"AVLP433_b": {
+"n": 2,
+"core_late": 0
+},
+"AVLP437": {
+"n": 2,
+"core_late": 0
+},
+"AVLP443": {
+"n": 2,
+"core_late": 0
+},
+"AVLP447": {
+"n": 2,
+"core_late": 0
+},
+"AVLP454_a": {
+"n": 10,
+"core_late": 0
+},
+"AVLP459": {
+"n": 4,
+"core_late": 0
+},
+"AVLP473": {
+"n": 2,
+"core_late": 0
+},
+"AVLP477": {
+"n": 2,
+"core_late": 0
+},
+"AVLP488": {
+"n": 4,
+"core_late": 0
+},
+"AVLP494": {
+"n": 6,
+"core_late": 0
+},
+"AVLP501": {
+"n": 2,
+"core_late": 0
+},
+"AVLP508": {
+"n": 2,
+"core_late": 0
+},
+"AVLP531": {
+"n": 2,
+"core_late": 0
+},
+"AVLP537": {
+"n": 2,
+"core_late": 0
+},
+"AVLP550a": {
+"n": 4,
+"core_late": 0
+},
+"AVLP565": {
+"n": 2,
+"core_late": 0
+},
+"AVLP568": {
+"n": 2,
+"core_late": 0
+},
+"AVLP572": {
+"n": 2,
+"core_late": 0
+},
+"AVLP575": {
+"n": 2,
+"core_late": 0
+},
+"AVLP586": {
+"n": 2,
+"core_late": 0
+},
+"AVLP594": {
+"n": 2,
+"core_late": 0
+},
+"AstA1": {
+"n": 2,
+"core_late": 0
+},
+"CB0008": {
+"n": 2,
+"core_late": 0
+},
+"CB0011": {
+"n": 2,
+"core_late": 0
+},
+"CB0024": {
+"n": 2,
+"core_late": 0
+},
+"CB0032": {
+"n": 2,
+"core_late": 0
+},
+"CB0040": {
+"n": 2,
+"core_late": 0
+},
+"CB0049": {
+"n": 2,
+"core_late": 0
+},
+"CB0062": {
+"n": 2,
+"core_late": 0
+},
+"CB0073": {
+"n": 2,
+"core_late": 0
+},
+"CB0091": {
+"n": 2,
+"core_late": 0
+},
+"CB0109": {
+"n": 2,
+"core_late": 0
+},
+"CB0125": {
+"n": 2,
+"core_late": 0
+},
+"CB0130": {
+"n": 2,
+"core_late": 0
+},
+"CB0137": {
+"n": 2,
+"core_late": 0
+},
+"CB0144": {
+"n": 2,
+"core_late": 0
+},
+"CB0154": {
+"n": 2,
+"core_late": 0
+},
+"CB0166": {
+"n": 2,
+"core_late": 0
+},
+"CB0196": {
+"n": 2,
+"core_late": 0
+},
+"CB0211": {
+"n": 2,
+"core_late": 0
+},
+"CB0224": {
+"n": 2,
+"core_late": 0
+},
+"CB0230": {
+"n": 2,
+"core_late": 0
+},
+"CB0248": {
+"n": 2,
+"core_late": 0
+},
+"CB0259": {
+"n": 2,
+"core_late": 0
+},
+"CB0272": {
+"n": 2,
+"core_late": 0
+},
+"CB0282": {
+"n": 2,
+"core_late": 0
+},
+"CB0298": {
+"n": 2,
+"core_late": 0
+},
+"CB0311": {
+"n": 2,
+"core_late": 0
+},
+"CB0320": {
+"n": 2,
+"core_late": 0
+},
+"CB0340": {
+"n": 2,
+"core_late": 0
+},
+"CB0345": {
+"n": 3,
+"core_late": 0
+},
+"CB0373": {
+"n": 2,
+"core_late": 0
+},
+"CB0396": {
+"n": 2,
+"core_late": 0
+},
+"CB0404": {
+"n": 2,
+"core_late": 0
+},
+"CB0410": {
+"n": 2,
+"core_late": 0
+},
+"CB0424": {
+"n": 2,
+"core_late": 0
+},
+"CB0432": {
+"n": 2,
+"core_late": 0
+},
+"CB0442": {
+"n": 2,
+"core_late": 0
+},
+"CB0449": {
+"n": 2,
+"core_late": 0
+},
+"CB0457": {
+"n": 2,
+"core_late": 0
+},
+"CB0469": {
+"n": 2,
+"core_late": 0
+},
+"CB0481": {
+"n": 2,
+"core_late": 0
+},
+"CB0487": {
+"n": 2,
+"core_late": 0
+},
+"CB0497": {
+"n": 2,
+"core_late": 0
+},
+"CB0508": {
+"n": 2,
+"core_late": 0
+},
+"CB0519": {
+"n": 2,
+"core_late": 0
+},
+"CB0524": {
+"n": 2,
+"core_late": 0
+},
+"CB0534": {
+"n": 2,
+"core_late": 0
+},
+"CB0542": {
+"n": 2,
+"core_late": 0
+},
+"CB0550": {
+"n": 2,
+"core_late": 0
+},
+"CB0573": {
+"n": 2,
+"core_late": 0
+},
+"CB0591": {
+"n": 3,
+"core_late": 0
+},
+"CB0619": {
+"n": 2,
+"core_late": 0
+},
+"CB0626": {
+"n": 2,
+"core_late": 0
+},
+"CB0631": {
+"n": 2,
+"core_late": 0
+},
+"CB0641": {
+"n": 2,
+"core_late": 0
+},
+"CB0645": {
+"n": 2,
+"core_late": 0
+},
+"CB0649": {
+"n": 2,
+"core_late": 0
+},
+"CB0655": {
+"n": 2,
+"core_late": 0
+},
+"CB0665": {
+"n": 2,
+"core_late": 0
+},
+"CB0674": {
+"n": 1,
+"core_late": 0
+},
+"CB0683": {
+"n": 2,
+"core_late": 0
+},
+"CB0689": {
+"n": 2,
+"core_late": 0
+},
+"CB0717": {
+"n": 4,
+"core_late": 0
+},
+"CB0734": {
+"n": 4,
+"core_late": 0
+},
+"CB0746": {
+"n": 4,
+"core_late": 0
+},
+"CB0761": {
+"n": 2,
+"core_late": 0
+},
+"CB0778": {
+"n": 2,
+"core_late": 0
+},
+"CB0788": {
+"n": 2,
+"core_late": 0
+},
+"CB0802": {
+"n": 2,
+"core_late": 0
+},
+"CB0844": {
+"n": 2,
+"core_late": 0
+},
+"CB0865": {
+"n": 4,
+"core_late": 0
+},
+"CB0889": {
+"n": 2,
+"core_late": 0
+},
+"CB0894": {
+"n": 2,
+"core_late": 0
+},
+"CB0938": {
+"n": 4,
+"core_late": 0
+},
+"CB0947": {
+"n": 6,
+"core_late": 0
+},
+"CB0952": {
+"n": 6,
+"core_late": 0
+},
+"CB0957": {
+"n": 6,
+"core_late": 0
+},
+"CB0965": {
+"n": 5,
+"core_late": 0
+},
+"CB0968": {
+"n": 3,
+"core_late": 0
+},
+"CB0972": {
+"n": 5,
+"core_late": 0
+},
+"CB0979b": {
+"n": 8,
+"core_late": 0
+},
+"CB0993": {
+"n": 6,
+"core_late": 0
+},
+"CB0997": {
+"n": 10,
+"core_late": 0
+},
+"CB1005": {
+"n": 2,
+"core_late": 0
+},
+"CB1011": {
+"n": 10,
+"core_late": 0
+},
+"CB1015": {
+"n": 1,
+"core_late": 0
+},
+"CB1020": {
+"n": 5,
+"core_late": 0
+},
+"CB1029": {
+"n": 7,
+"core_late": 0
+},
+"CB1033": {
+"n": 7,
+"core_late": 0
+},
+"CB1039": {
+"n": 3,
+"core_late": 0
+},
+"CB1050": {
+"n": 4,
+"core_late": 0
+},
+"CB1056": {
+"n": 4,
+"core_late": 0
+},
+"CB1059": {
+"n": 3,
+"core_late": 0
+},
+"CB1064": {
+"n": 4,
+"core_late": 0
+},
+"CB1072": {
+"n": 12,
+"core_late": 0
+},
+"CB1077": {
+"n": 4,
+"core_late": 0
+},
+"CB1084": {
+"n": 7,
+"core_late": 0
+},
+"CB1089": {
+"n": 5,
+"core_late": 0
+},
+"CB1094": {
+"n": 12,
+"core_late": 0
+},
+"CB1101": {
+"n": 6,
+"core_late": 0
+},
+"CB1104": {
+"n": 2,
+"core_late": 0
+},
+"CB1108": {
+"n": 2,
+"core_late": 0
+},
+"CB1115": {
+"n": 2,
+"core_late": 0
+},
+"CB1125": {
+"n": 10,
+"core_late": 0
+},
+"CB1130": {
+"n": 5,
+"core_late": 0
+},
+"CB1138": {
+"n": 12,
+"core_late": 0
+},
+"CB1148": {
+"n": 9,
+"core_late": 0
+},
+"CB1151": {
+"n": 4,
+"core_late": 0
+},
+"CB1154": {
+"n": 16,
+"core_late": 0
+},
+"CB1159": {
+"n": 3,
+"core_late": 0
+},
+"CB1167": {
+"n": 4,
+"core_late": 0
+},
+"CB1170": {
+"n": 5,
+"core_late": 0
+},
+"CB1173": {
+"n": 2,
+"core_late": 0
+},
+"CB1182": {
+"n": 4,
+"core_late": 0
+},
+"CB1185": {
+"n": 4,
+"core_late": 0
+},
+"CB1200": {
+"n": 4,
+"core_late": 0
+},
+"CB1210": {
+"n": 3,
+"core_late": 0
+},
+"CB1218": {
+"n": 2,
+"core_late": 0
+},
+"CB1221": {
+"n": 4,
+"core_late": 0
+},
+"CB1236": {
+"n": 6,
+"core_late": 0
+},
+"CB1240": {
+"n": 2,
+"core_late": 0
+},
+"CB1244": {
+"n": 6,
+"core_late": 1
+},
+"CB1247": {
+"n": 4,
+"core_late": 0
+},
+"CB1259": {
+"n": 5,
+"core_late": 0
+},
+"CB1268": {
+"n": 9,
+"core_late": 0
+},
+"CB1275": {
+"n": 2,
+"core_late": 0
+},
+"CB1279": {
+"n": 4,
+"core_late": 0
+},
+"CB1286": {
+"n": 3,
+"core_late": 0
+},
+"CB1291": {
+"n": 6,
+"core_late": 0
+},
+"CB1296": {
+"n": 7,
+"core_late": 0
+},
+"CB1301": {
+"n": 3,
+"core_late": 0
+},
+"CB1306": {
+"n": 4,
+"core_late": 0
+},
+"CB1314": {
+"n": 4,
+"core_late": 0
+},
+"CB1320": {
+"n": 2,
+"core_late": 0
+},
+"CB1326": {
+"n": 2,
+"core_late": 0
+},
+"CB1329": {
+"n": 9,
+"core_late": 0
+},
+"CB1334": {
+"n": 3,
+"core_late": 0
+},
+"CB1344": {
+"n": 3,
+"core_late": 0
+},
+"CB1350": {
+"n": 4,
+"core_late": 0
+},
+"CB1357": {
+"n": 12,
+"core_late": 0
+},
+"CB1365": {
+"n": 4,
+"core_late": 0
+},
+"CB1375": {
+"n": 4,
+"core_late": 0
+},
+"CB1382": {
+"n": 7,
+"core_late": 0
+},
+"CB1393": {
+"n": 5,
+"core_late": 0
+},
+"CB1399": {
+"n": 6,
+"core_late": 0
+},
+"CB1407": {
+"n": 5,
+"core_late": 0
+},
+"CB1413": {
+"n": 3,
+"core_late": 0
+},
+"CB1419": {
+"n": 6,
+"core_late": 0
+},
+"CB1428": {
+"n": 3,
+"core_late": 0
+},
+"CB1434": {
+"n": 7,
+"core_late": 0
+},
+"CB1440": {
+"n": 6,
+"core_late": 0
+},
+"CB1444": {
+"n": 4,
+"core_late": 0
+},
+"CB1448": {
+"n": 4,
+"core_late": 0
+},
+"CB1461": {
+"n": 2,
+"core_late": 0
+},
+"CB1466": {
+"n": 8,
+"core_late": 0
+},
+"CB1472": {
+"n": 2,
+"core_late": 0
+},
+"CB1483": {
+"n": 2,
+"core_late": 0
+},
+"CB1490": {
+"n": 5,
+"core_late": 0
+},
+"CB1495": {
+"n": 4,
+"core_late": 0
+},
+"CB1501": {
+"n": 6,
+"core_late": 0
+},
+"CB1510": {
+"n": 4,
+"core_late": 0
+},
+"CB1513": {
+"n": 7,
+"core_late": 0
+},
+"CB1519": {
+"n": 4,
+"core_late": 0
+},
+"CB1527": {
+"n": 3,
+"core_late": 0
+},
+"CB1533": {
+"n": 2,
+"core_late": 0
+},
+"CB1544": {
+"n": 7,
+"core_late": 0
+},
+"CB1551": {
+"n": 2,
+"core_late": 0
+},
+"CB1554": {
+"n": 4,
+"core_late": 0
+},
+"CB1559": {
+"n": 4,
+"core_late": 0
+},
+"CB1566": {
+"n": 2,
+"core_late": 0
+},
+"CB1573": {
+"n": 3,
+"core_late": 0
+},
+"CB1577": {
+"n": 5,
+"core_late": 0
+},
+"CB1584": {
+"n": 4,
+"core_late": 0
+},
+"CB1590": {
+"n": 5,
+"core_late": 0
+},
+"CB1604": {
+"n": 6,
+"core_late": 0
+},
+"CB1619": {
+"n": 4,
+"core_late": 0
+},
+"CB1628": {
+"n": 4,
+"core_late": 0
+},
+"CB1635": {
+"n": 5,
+"core_late": 0
+},
+"CB1640": {
+"n": 10,
+"core_late": 0
+},
+"CB1650": {
+"n": 2,
+"core_late": 0
+},
+"CB1656": {
+"n": 6,
+"core_late": 0
+},
+"CB1660": {
+"n": 4,
+"core_late": 0
+},
+"CB1663": {
+"n": 4,
+"core_late": 0
+},
+"CB1667": {
+"n": 4,
+"core_late": 0
+},
+"CB1672": {
+"n": 3,
+"core_late": 0
+},
+"CB1679": {
+"n": 6,
+"core_late": 0
+},
+"CB1687": {
+"n": 4,
+"core_late": 0
+},
+"CB1696": {
+"n": 9,
+"core_late": 0
+},
+"CB1699": {
+"n": 5,
+"core_late": 0
+},
+"CB1704": {
+"n": 3,
+"core_late": 0
+},
+"CB1726": {
+"n": 2,
+"core_late": 0
+},
+"CB1733": {
+"n": 2,
+"core_late": 0
+},
+"CB1738": {
+"n": 9,
+"core_late": 0
+},
+"CB1744": {
+"n": 5,
+"core_late": 0
+},
+"CB1752": {
+"n": 5,
+"core_late": 0
+},
+"CB1757": {
+"n": 4,
+"core_late": 0
+},
+"CB1760": {
+"n": 6,
+"core_late": 0
+},
+"CB1771": {
+"n": 3,
+"core_late": 0
+},
+"CB1776": {
+"n": 6,
+"core_late": 0
+},
+"CB1784": {
+"n": 3,
+"core_late": 0
+},
+"CB1794": {
+"n": 7,
+"core_late": 0
+},
+"CB1800": {
+"n": 3,
+"core_late": 0
+},
+"CB1808": {
+"n": 3,
+"core_late": 0
+},
+"CB1815": {
+"n": 3,
+"core_late": 0
+},
+"CB1821": {
+"n": 2,
+"core_late": 0
+},
+"CB1841": {
+"n": 4,
+"core_late": 0
+},
+"CB1846": {
+"n": 5,
+"core_late": 0
+},
+"CB1852": {
+"n": 4,
+"core_late": 0
+},
+"CB1860": {
+"n": 6,
+"core_late": 0
+},
+"CB1865": {
+"n": 2,
+"core_late": 0
+},
+"CB1874": {
+"n": 2,
+"core_late": 0
+},
+"CB1877": {
+"n": 4,
+"core_late": 0
+},
+"CB1883": {
+"n": 3,
+"core_late": 0
+},
+"CB1895": {
+"n": 8,
+"core_late": 0
+},
+"CB1902": {
+"n": 4,
+"core_late": 0
+},
+"CB1916": {
+"n": 4,
+"core_late": 0
+},
+"CB1923": {
+"n": 10,
+"core_late": 0
+},
+"CB1927": {
+"n": 2,
+"core_late": 0
+},
+"CB1931": {
+"n": 2,
+"core_late": 0
+},
+"CB1935": {
+"n": 3,
+"core_late": 0
+},
+"CB1943": {
+"n": 4,
+"core_late": 0
+},
+"CB1946": {
+"n": 3,
+"core_late": 0
+},
+"CB1950": {
+"n": 3,
+"core_late": 0
+},
+"CB1961": {
+"n": 3,
+"core_late": 0
+},
+"CB1966": {
+"n": 3,
+"core_late": 0
+},
+"CB1976": {
+"n": 4,
+"core_late": 0
+},
+"CB1982": {
+"n": 3,
+"core_late": 0
+},
+"CB1990": {
+"n": 5,
+"core_late": 0
+},
+"CB2003": {
+"n": 4,
+"core_late": 0
+},
+"CB2006": {
+"n": 4,
+"core_late": 0
+},
+"CB2015": {
+"n": 4,
+"core_late": 0
+},
+"CB2021": {
+"n": 8,
+"core_late": 0
+},
+"CB2026": {
+"n": 3,
+"core_late": 0
+},
+"CB2032": {
+"n": 2,
+"core_late": 0
+},
+"CB2036": {
+"n": 6,
+"core_late": 0
+},
+"CB2045": {
+"n": 4,
+"core_late": 0
+},
+"CB2048": {
+"n": 5,
+"core_late": 1
+},
+"CB2056": {
+"n": 8,
+"core_late": 0
+},
+"CB2064": {
+"n": 9,
+"core_late": 0
+},
+"CB2069": {
+"n": 2,
+"core_late": 0
+},
+"CB2075": {
+"n": 4,
+"core_late": 0
+},
+"CB2079": {
+"n": 5,
+"core_late": 0
+},
+"CB2089": {
+"n": 8,
+"core_late": 0
+},
+"CB2096": {
+"n": 2,
+"core_late": 0
+},
+"CB2105": {
+"n": 4,
+"core_late": 0
+},
+"CB2112": {
+"n": 2,
+"core_late": 0
+},
+"CB2119": {
+"n": 2,
+"core_late": 0
+},
+"CB2122": {
+"n": 4,
+"core_late": 0
+},
+"CB2127": {
+"n": 3,
+"core_late": 0
+},
+"CB2131": {
+"n": 7,
+"core_late": 0
+},
+"CB2140": {
+"n": 4,
+"core_late": 0
+},
+"CB2145": {
+"n": 5,
+"core_late": 0
+},
+"CB2151": {
+"n": 3,
+"core_late": 0
+},
+"CB2154": {
+"n": 3,
+"core_late": 0
+},
+"CB2164": {
+"n": 3,
+"core_late": 0
+},
+"CB2172": {
+"n": 2,
+"core_late": 0
+},
+"CB2179": {
+"n": 4,
+"core_late": 0
+},
+"CB2184": {
+"n": 3,
+"core_late": 0
+},
+"CB2189": {
+"n": 2,
+"core_late": 0
+},
+"CB2196": {
+"n": 5,
+"core_late": 0
+},
+"CB2203": {
+"n": 6,
+"core_late": 0
+},
+"CB2211": {
+"n": 4,
+"core_late": 0
+},
+"CB2218": {
+"n": 5,
+"core_late": 0
+},
+"CB2226": {
+"n": 5,
+"core_late": 0
+},
+"CB2232": {
+"n": 5,
+"core_late": 0
+},
+"CB2242": {
+"n": 11,
+"core_late": 0
+},
+"CB2247": {
+"n": 2,
+"core_late": 0
+},
+"CB2260": {
+"n": 3,
+"core_late": 0
+},
+"CB2267_a": {
+"n": 4,
+"core_late": 0
+},
+"CB2271": {
+"n": 4,
+"core_late": 0
+},
+"CB2277": {
+"n": 5,
+"core_late": 0
+},
+"CB2281": {
+"n": 2,
+"core_late": 0
+},
+"CB2290": {
+"n": 9,
+"core_late": 0
+},
+"CB2296": {
+"n": 4,
+"core_late": 0
+},
+"CB2299": {
+"n": 4,
+"core_late": 0
+},
+"CB2308": {
+"n": 4,
+"core_late": 0
+},
+"CB2313": {
+"n": 5,
+"core_late": 0
+},
+"CB2321": {
+"n": 4,
+"core_late": 0
+},
+"CB2336": {
+"n": 4,
+"core_late": 0
+},
+"CB2341": {
+"n": 5,
+"core_late": 0
+},
+"CB2344": {
+"n": 6,
+"core_late": 0
+},
+"CB2353": {
+"n": 11,
+"core_late": 0
+},
+"CB2372": {
+"n": 3,
+"core_late": 0
+},
+"CB2378": {
+"n": 2,
+"core_late": 0
+},
+"CB2387": {
+"n": 6,
+"core_late": 0
+},
+"CB2398": {
+"n": 4,
+"core_late": 0
+},
+"CB2406": {
+"n": 4,
+"core_late": 0
+},
+"CB2414": {
+"n": 4,
+"core_late": 0
+},
+"CB2421": {
+"n": 4,
+"core_late": 0
+},
+"CB2427": {
+"n": 2,
+"core_late": 0
+},
+"CB2436": {
+"n": 4,
+"core_late": 0
+},
+"CB2446": {
+"n": 3,
+"core_late": 0
+},
+"CB2452": {
+"n": 4,
+"core_late": 0
+},
+"CB2465": {
+"n": 2,
+"core_late": 0
+},
+"CB2471": {
+"n": 5,
+"core_late": 0
+},
+"CB2479": {
+"n": 7,
+"core_late": 0
+},
+"CB2491": {
+"n": 4,
+"core_late": 0
+},
+"CB2494": {
+"n": 5,
+"core_late": 0
+},
+"CB2501": {
+"n": 7,
+"core_late": 0
+},
+"CB2505": {
+"n": 4,
+"core_late": 0
+},
+"CB2510": {
+"n": 4,
+"core_late": 0
+},
+"CB2519": {
+"n": 3,
+"core_late": 0
+},
+"CB2524": {
+"n": 5,
+"core_late": 0
+},
+"CB2530": {
+"n": 2,
+"core_late": 0
+},
+"CB2534": {
+"n": 7,
+"core_late": 0
+},
+"CB2541": {
+"n": 5,
+"core_late": 0
+},
+"CB2549": {
+"n": 2,
+"core_late": 0
+},
+"CB2553": {
+"n": 4,
+"core_late": 0
+},
+"CB2556": {
+"n": 7,
+"core_late": 0
+},
+"CB2560": {
+"n": 2,
+"core_late": 0
+},
+"CB2566": {
+"n": 2,
+"core_late": 0
+},
+"CB2571": {
+"n": 5,
+"core_late": 0
+},
+"CB2579": {
+"n": 2,
+"core_late": 0
+},
+"CB2582": {
+"n": 3,
+"core_late": 0
+},
+"CB2585": {
+"n": 5,
+"core_late": 0
+},
+"CB2593": {
+"n": 5,
+"core_late": 0
+},
+"CB2598": {
+"n": 2,
+"core_late": 0
+},
+"CB2602": {
+"n": 3,
+"core_late": 0
+},
+"CB2611": {
+"n": 4,
+"core_late": 0
+},
+"CB2616": {
+"n": 4,
+"core_late": 0
+},
+"CB2623": {
+"n": 3,
+"core_late": 0
+},
+"CB2632": {
+"n": 2,
+"core_late": 0
+},
+"CB2653": {
+"n": 2,
+"core_late": 0
+},
+"CB2661": {
+"n": 3,
+"core_late": 0
+},
+"CB2669": {
+"n": 2,
+"core_late": 0
+},
+"CB2677": {
+"n": 4,
+"core_late": 0
+},
+"CB2680": {
+"n": 2,
+"core_late": 0
+},
+"CB2688": {
+"n": 4,
+"core_late": 0
+},
+"CB2693": {
+"n": 6,
+"core_late": 0
+},
+"CB2699": {
+"n": 2,
+"core_late": 0
+},
+"CB2703": {
+"n": 6,
+"core_late": 0
+},
+"CB2711": {
+"n": 3,
+"core_late": 0
+},
+"CB2715": {
+"n": 4,
+"core_late": 0
+},
+"CB2724": {
+"n": 3,
+"core_late": 0
+},
+"CB2729": {
+"n": 2,
+"core_late": 0
+},
+"CB2736": {
+"n": 3,
+"core_late": 0
+},
+"CB2744": {
+"n": 11,
+"core_late": 0
+},
+"CB2747": {
+"n": 2,
+"core_late": 0
+},
+"CB2755": {
+"n": 2,
+"core_late": 0
+},
+"CB2759": {
+"n": 4,
+"core_late": 0
+},
+"CB2764": {
+"n": 2,
+"core_late": 0
+},
+"CB2767": {
+"n": 3,
+"core_late": 0
+},
+"CB2772": {
+"n": 3,
+"core_late": 0
+},
+"CB2781": {
+"n": 3,
+"core_late": 0
+},
+"CB2789": {
+"n": 4,
+"core_late": 0
+},
+"CB2793": {
+"n": 2,
+"core_late": 0
+},
+"CB2798": {
+"n": 2,
+"core_late": 0
+},
+"CB2802": {
+"n": 3,
+"core_late": 0
+},
+"CB2809": {
+"n": 2,
+"core_late": 0
+},
+"CB2813": {
+"n": 4,
+"core_late": 0
+},
+"CB2820": {
+"n": 6,
+"core_late": 0
+},
+"CB2828": {
+"n": 6,
+"core_late": 0
+},
+"CB2834": {
+"n": 5,
+"core_late": 0
+},
+"CB2844": {
+"n": 2,
+"core_late": 0
+},
+"CB2851": {
+"n": 3,
+"core_late": 0
+},
+"CB2855": {
+"n": 2,
+"core_late": 0
+},
+"CB2862": {
+"n": 4,
+"core_late": 0
+},
+"CB2880": {
+"n": 2,
+"core_late": 0
+},
+"CB2884": {
+"n": 4,
+"core_late": 0
+},
+"CB2887": {
+"n": 4,
+"core_late": 0
+},
+"CB2895": {
+"n": 4,
+"core_late": 0
+},
+"CB2904": {
+"n": 2,
+"core_late": 0
+},
+"CB2908": {
+"n": 4,
+"core_late": 0
+},
+"CB2911": {
+"n": 4,
+"core_late": 0
+},
+"CB2918": {
+"n": 2,
+"core_late": 0
+},
+"CB2922": {
+"n": 4,
+"core_late": 0
+},
+"CB2927": {
+"n": 2,
+"core_late": 0
+},
+"CB2932": {
+"n": 4,
+"core_late": 0
+},
+"CB2938": {
+"n": 2,
+"core_late": 0
+},
+"CB2952": {
+"n": 4,
+"core_late": 0
+},
+"CB2960": {
+"n": 5,
+"core_late": 0
+},
+"CB2966": {
+"n": 4,
+"core_late": 0
+},
+"CB2973": {
+"n": 3,
+"core_late": 0
+},
+"CB2978": {
+"n": 3,
+"core_late": 0
+},
+"CB2983": {
+"n": 2,
+"core_late": 0
+},
+"CB2989": {
+"n": 10,
+"core_late": 0
+},
+"CB2998": {
+"n": 4,
+"core_late": 0
+},
+"CB3001": {
+"n": 4,
+"core_late": 0
+},
+"CB3006": {
+"n": 3,
+"core_late": 0
+},
+"CB3009": {
+"n": 2,
+"core_late": 0
+},
+"CB3014": {
+"n": 4,
+"core_late": 0
+},
+"CB3019": {
+"n": 5,
+"core_late": 0
+},
+"CB3023": {
+"n": 4,
+"core_late": 0
+},
+"CB3033": {
+"n": 6,
+"core_late": 0
+},
+"CB3038": {
+"n": 2,
+"core_late": 0
+},
+"CB3045": {
+"n": 2,
+"core_late": 0
+},
+"CB3049": {
+"n": 4,
+"core_late": 0
+},
+"CB3056": {
+"n": 8,
+"core_late": 0
+},
+"CB3063": {
+"n": 3,
+"core_late": 0
+},
+"CB3073": {
+"n": 4,
+"core_late": 0
+},
+"CB3077": {
+"n": 2,
+"core_late": 0
+},
+"CB3081": {
+"n": 5,
+"core_late": 0
+},
+"CB3085": {
+"n": 4,
+"core_late": 0
+},
+"CB3093": {
+"n": 3,
+"core_late": 0
+},
+"CB3107": {
+"n": 3,
+"core_late": 0
+},
+"CB3110": {
+"n": 6,
+"core_late": 1
+},
+"CB3117": {
+"n": 3,
+"core_late": 0
+},
+"CB3123": {
+"n": 2,
+"core_late": 0
+},
+"CB3131": {
+"n": 2,
+"core_late": 0
+},
+"CB3134b": {
+"n": 2,
+"core_late": 0
+},
+"CB3142": {
+"n": 4,
+"core_late": 0
+},
+"CB3147": {
+"n": 3,
+"core_late": 0
+},
+"CB3154": {
+"n": 2,
+"core_late": 0
+},
+"CB3162": {
+"n": 4,
+"core_late": 0
+},
+"CB3172": {
+"n": 2,
+"core_late": 0
+},
+"CB3179": {
+"n": 2,
+"core_late": 0
+},
+"CB3183": {
+"n": 3,
+"core_late": 0
+},
+"CB3190": {
+"n": 3,
+"core_late": 0
+},
+"CB3194": {
+"n": 4,
+"core_late": 0
+},
+"CB3199": {
+"n": 4,
+"core_late": 0
+},
+"CB3203": {
+"n": 2,
+"core_late": 0
+},
+"CB3208": {
+"n": 4,
+"core_late": 0
+},
+"CB3218": {
+"n": 4,
+"core_late": 0
+},
+"CB3227": {
+"n": 2,
+"core_late": 0
+},
+"CB3231": {
+"n": 5,
+"core_late": 0
+},
+"CB3240": {
+"n": 2,
+"core_late": 0
+},
+"CB3248": {
+"n": 6,
+"core_late": 0
+},
+"CB3260": {
+"n": 2,
+"core_late": 0
+},
+"CB3269": {
+"n": 6,
+"core_late": 0
+},
+"CB3275a": {
+"n": 4,
+"core_late": 0
+},
+"CB3278": {
+"n": 2,
+"core_late": 0
+},
+"CB3283": {
+"n": 4,
+"core_late": 0
+},
+"CB3286": {
+"n": 2,
+"core_late": 0
+},
+"CB3291": {
+"n": 2,
+"core_late": 0
+},
+"CB3295": {
+"n": 3,
+"core_late": 0
+},
+"CB3300": {
+"n": 8,
+"core_late": 0
+},
+"CB3308": {
+"n": 5,
+"core_late": 0
+},
+"CB3315": {
+"n": 2,
+"core_late": 0
+},
+"CB3318": {
+"n": 4,
+"core_late": 0
+},
+"CB3328": {
+"n": 4,
+"core_late": 0
+},
+"CB3336": {
+"n": 2,
+"core_late": 0
+},
+"CB3341": {
+"n": 2,
+"core_late": 0
+},
+"CB3347": {
+"n": 2,
+"core_late": 0
+},
+"CB3354": {
+"n": 2,
+"core_late": 0
+},
+"CB3361": {
+"n": 3,
+"core_late": 0
+},
+"CB3373": {
+"n": 2,
+"core_late": 0
+},
+"CB3380": {
+"n": 2,
+"core_late": 0
+},
+"CB3383": {
+"n": 5,
+"core_late": 2
+},
+"CB3387": {
+"n": 2,
+"core_late": 0
+},
+"CB3393": {
+"n": 3,
+"core_late": 0
+},
+"CB3399": {
+"n": 3,
+"core_late": 0
+},
+"CB3406": {
+"n": 2,
+"core_late": 0
+},
+"CB3414": {
+"n": 4,
+"core_late": 0
+},
+"CB3418": {
+"n": 2,
+"core_late": 0
+},
+"CB3434": {
+"n": 4,
+"core_late": 0
+},
+"CB3447": {
+"n": 3,
+"core_late": 0
+},
+"CB3454": {
+"n": 3,
+"core_late": 0
+},
+"CB3458": {
+"n": 4,
+"core_late": 0
+},
+"CB3464": {
+"n": 5,
+"core_late": 0
+},
+"CB3469": {
+"n": 2,
+"core_late": 0
+},
+"CB3476": {
+"n": 4,
+"core_late": 0
+},
+"CB3496": {
+"n": 2,
+"core_late": 0
+},
+"CB3504": {
+"n": 3,
+"core_late": 0
+},
+"CB3509": {
+"n": 4,
+"core_late": 0
+},
+"CB3515": {
+"n": 3,
+"core_late": 0
+},
+"CB3531": {
+"n": 4,
+"core_late": 0
+},
+"CB3534": {
+"n": 6,
+"core_late": 0
+},
+"CB3544": {
+"n": 2,
+"core_late": 0
+},
+"CB3548": {
+"n": 5,
+"core_late": 0
+},
+"CB3554": {
+"n": 5,
+"core_late": 0
+},
+"CB3557": {
+"n": 3,
+"core_late": 0
+},
+"CB3566": {
+"n": 2,
+"core_late": 0
+},
+"CB3571": {
+"n": 2,
+"core_late": 0
+},
+"CB3577": {
+"n": 2,
+"core_late": 0
+},
+"CB3584": {
+"n": 2,
+"core_late": 0
+},
+"CB3604": {
+"n": 3,
+"core_late": 0
+},
+"CB3610": {
+"n": 2,
+"core_late": 1
+},
+"CB3623": {
+"n": 6,
+"core_late": 1
+},
+"CB3631": {
+"n": 2,
+"core_late": 0
+},
+"CB3639": {
+"n": 2,
+"core_late": 0
+},
+"CB3653": {
+"n": 2,
+"core_late": 0
+},
+"CB3657": {
+"n": 2,
+"core_late": 0
+},
+"CB3666": {
+"n": 4,
+"core_late": 0
+},
+"CB3673a": {
+"n": 2,
+"core_late": 0
+},
+"CB3680": {
+"n": 2,
+"core_late": 0
+},
+"CB3692": {
+"n": 2,
+"core_late": 0
+},
+"CB3698": {
+"n": 2,
+"core_late": 0
+},
+"CB3706": {
+"n": 2,
+"core_late": 0
+},
+"CB3715": {
+"n": 2,
+"core_late": 0
+},
+"CB3723": {
+"n": 3,
+"core_late": 0
+},
+"CB3727": {
+"n": 4,
+"core_late": 0
+},
+"CB3730": {
+"n": 2,
+"core_late": 0
+},
+"CB3735": {
+"n": 7,
+"core_late": 0
+},
+"CB3739": {
+"n": 5,
+"core_late": 0
+},
+"CB3747": {
+"n": 2,
+"core_late": 0
+},
+"CB3755": {
+"n": 4,
+"core_late": 0
+},
+"CB3762": {
+"n": 3,
+"core_late": 0
+},
+"CB3776": {
+"n": 2,
+"core_late": 0
+},
+"CB3780": {
+"n": 2,
+"core_late": 0
+},
+"CB3787": {
+"n": 4,
+"core_late": 0
+},
+"CB3790": {
+"n": 4,
+"core_late": 0
+},
+"CB3796": {
+"n": 3,
+"core_late": 0
+},
+"CB3805": {
+"n": 2,
+"core_late": 0
+},
+"CB3868": {
+"n": 4,
+"core_late": 0
+},
+"CB3871": {
+"n": 4,
+"core_late": 0
+},
+"CB3895": {
+"n": 5,
+"core_late": 0
+},
+"CB3899": {
+"n": 4,
+"core_late": 0
+},
+"CB3905": {
+"n": 3,
+"core_late": 0
+},
+"CB3908": {
+"n": 6,
+"core_late": 0
+},
+"CB3920": {
+"n": 2,
+"core_late": 0
+},
+"CB3931": {
+"n": 2,
+"core_late": 0
+},
+"CB3937": {
+"n": 4,
+"core_late": 0
+},
+"CB3966": {
+"n": 2,
+"core_late": 0
+},
+"CB3983": {
+"n": 6,
+"core_late": 0
+},
+"CB4159": {
+"n": 2,
+"core_late": 0
+},
+"CB4186": {
+"n": 1,
+"core_late": 0
+},
+"CB4202": {
+"n": 1,
+"core_late": 0
+},
+"CB4220": {
+"n": 6,
+"core_late": 0
+},
+"CB4244": {
+"n": 20,
+"core_late": 0
+},
+"CL002": {
+"n": 2,
+"core_late": 0
+},
+"CL007": {
+"n": 2,
+"core_late": 0
+},
+"CL010": {
+"n": 2,
+"core_late": 0
+},
+"CL013": {
+"n": 5,
+"core_late": 0
+},
+"CL021": {
+"n": 2,
+"core_late": 0
+},
+"CL024a": {
+"n": 4,
+"core_late": 0
+},
+"CL026": {
+"n": 2,
+"core_late": 0
+},
+"CL029a": {
+"n": 2,
+"core_late": 0
+},
+"CL032": {
+"n": 2,
+"core_late": 0
+},
+"CL048": {
+"n": 7,
+"core_late": 0
+},
+"CL058": {
+"n": 2,
+"core_late": 0
+},
+"CL064": {
+"n": 2,
+"core_late": 0
+},
+"CL067": {
+"n": 2,
+"core_late": 0
+},
+"CL070b": {
+"n": 2,
+"core_late": 0
+},
+"CL072": {
+"n": 2,
+"core_late": 0
+},
+"CL075a": {
+"n": 2,
+"core_late": 0
+},
+"CL078b": {
+"n": 2,
+"core_late": 0
+},
+"CL083": {
+"n": 4,
+"core_late": 0
+},
+"CL086_b": {
+"n": 6,
+"core_late": 0
+},
+"CL089_a": {
+"n": 5,
+"core_late": 0
+},
+"CL090_c": {
+"n": 14,
+"core_late": 0
+},
+"CL093": {
+"n": 2,
+"core_late": 0
+},
+"CL098": {
+"n": 2,
+"core_late": 0
+},
+"CL099c": {
+"n": 3,
+"core_late": 0
+},
+"CL102": {
+"n": 2,
+"core_late": 0
+},
+"CL110": {
+"n": 2,
+"core_late": 0
+},
+"CL113": {
+"n": 4,
+"core_late": 0
+},
+"CL120b": {
+"n": 4,
+"core_late": 0
+},
+"CL127": {
+"n": 4,
+"core_late": 0
+},
+"CL128c": {
+"n": 5,
+"core_late": 0
+},
+"CL132": {
+"n": 4,
+"core_late": 0
+},
+"CL136": {
+"n": 2,
+"core_late": 0
+},
+"CL142": {
+"n": 2,
+"core_late": 0
+},
+"CL152": {
+"n": 4,
+"core_late": 0
+},
+"CL159": {
+"n": 2,
+"core_late": 0
+},
+"CL165": {
+"n": 5,
+"core_late": 0
+},
+"CL175": {
+"n": 2,
+"core_late": 0
+},
+"CL187": {
+"n": 2,
+"core_late": 0
+},
+"CL200": {
+"n": 2,
+"core_late": 0
+},
+"CL214": {
+"n": 2,
+"core_late": 0
+},
+"CL235": {
+"n": 6,
+"core_late": 0
+},
+"CL245": {
+"n": 2,
+"core_late": 0
+},
+"CL250": {
+"n": 2,
+"core_late": 0
+},
+"CL255": {
+"n": 6,
+"core_late": 0
+},
+"CL263": {
+"n": 2,
+"core_late": 0
+},
+"CL266_a": {
+"n": 6,
+"core_late": 0
+},
+"CL268": {
+"n": 5,
+"core_late": 0
+},
+"CL271": {
+"n": 2,
+"core_late": 0
+},
+"CL273": {
+"n": 3,
+"core_late": 0
+},
+"CL283c": {
+"n": 4,
+"core_late": 0
+},
+"CL292a": {
+"n": 2,
+"core_late": 0
+},
+"CL294": {
+"n": 2,
+"core_late": 0
+},
+"CL315": {
+"n": 2,
+"core_late": 0
+},
+"CL322": {
+"n": 2,
+"core_late": 0
+},
+"CL336": {
+"n": 2,
+"core_late": 0
+},
+"CL352": {
+"n": 2,
+"core_late": 0
+},
+"CL360": {
+"n": 2,
+"core_late": 0
+},
+"CL364": {
+"n": 2,
+"core_late": 0
+},
+"CRE006": {
+"n": 2,
+"core_late": 0
+},
+"CRE009": {
+"n": 2,
+"core_late": 0
+},
+"CRE018": {
+"n": 6,
+"core_late": 0
+},
+"CRE023": {
+"n": 2,
+"core_late": 0
+},
+"CRE027": {
+"n": 4,
+"core_late": 0
+},
+"CRE043": {
+"n": 14,
+"core_late": 0
+},
+"CRE049": {
+"n": 2,
+"core_late": 0
+},
+"CRE060,CRE067": {
+"n": 6,
+"core_late": 0
+},
+"CRE066": {
+"n": 4,
+"core_late": 0
+},
+"CRE072": {
+"n": 4,
+"core_late": 0
+},
+"CRE076": {
+"n": 2,
+"core_late": 0
+},
+"CRE080a": {
+"n": 2,
+"core_late": 0
+},
+"CRE081": {
+"n": 4,
+"core_late": 0
+},
+"CRE088": {
+"n": 2,
+"core_late": 0
+},
+"CRE096": {
+"n": 2,
+"core_late": 0
+},
+"CRE103b": {
+"n": 7,
+"core_late": 0
+},
+"CRE108": {
+"n": 2,
+"core_late": 0
+},
+"CSD": {
+"n": 2,
+"core_late": 477
+},
+"DA3_adPN": {
+"n": 4,
+"core_late": 0
+},
+"DC4_adPN": {
+"n": 2,
+"core_late": 477
+},
+"DL2d_adPN": {
+"n": 10,
+"core_late": 477
+},
+"DL4_adPN": {
+"n": 2,
+"core_late": 477
+},
+"DM4_vPN": {
+"n": 2,
+"core_late": 0
+},
+"DN1-l": {
+"n": 2,
+"core_late": 0
+},
+"DNa10": {
+"n": 2,
+"core_late": 0
+},
+"DNb09": {
+"n": 2,
+"core_late": 0
+},
+"DNbe007": {
+"n": 2,
+"core_late": 1
+},
+"DNd02": {
+"n": 2,
+"core_late": 0
+},
+"DNg07": {
+"n": 16,
+"core_late": 0
+},
+"DNg106": {
+"n": 14,
+"core_late": 0
+},
+"DNg27": {
+"n": 2,
+"core_late": 0
+},
+"DNg51": {
+"n": 4,
+"core_late": 0
+},
+"DNg79": {
+"n": 4,
+"core_late": 0
+},
+"DNg90": {
+"n": 2,
+"core_late": 0
+},
+"DNge039": {
+"n": 2,
+"core_late": 0
+},
+"DNge047": {
+"n": 2,
+"core_late": 0
+},
+"DNge068": {
+"n": 2,
+"core_late": 0
+},
+"DNge098": {
+"n": 2,
+"core_late": 0
+},
+"DNge121": {
+"n": 2,
+"core_late": 0
+},
+"DNge138": {
+"n": 2,
+"core_late": 0
+},
+"DNp02": {
+"n": 2,
+"core_late": 0
+},
+"DNp08": {
+"n": 2,
+"core_late": 0
+},
+"DNp103": {
+"n": 2,
+"core_late": 0
+},
+"DNp14": {
+"n": 2,
+"core_late": 0
+},
+"DNp27": {
+"n": 2,
+"core_late": 0
+},
+"DNp31": {
+"n": 2,
+"core_late": 0
+},
+"DNp38": {
+"n": 2,
+"core_late": 0
+},
+"DNp45": {
+"n": 2,
+"core_late": 0
+},
+"DNp48": {
+"n": 2,
+"core_late": 0
+},
+"DNp56": {
+"n": 2,
+"core_late": 0
+},
+"DNp64": {
+"n": 2,
+"core_late": 0
+},
+"DNpe001": {
+"n": 2,
+"core_late": 0
+},
+"DNpe025": {
+"n": 2,
+"core_late": 0
+},
+"DNpe028": {
+"n": 2,
+"core_late": 0
+},
+"DNpe031": {
+"n": 4,
+"core_late": 0
+},
+"DNpe040": {
+"n": 2,
+"core_late": 0
+},
+"DNpe046": {
+"n": 2,
+"core_late": 0
+},
+"DP1l_vPN": {
+"n": 2,
+"core_late": 0
+},
+"DSKMP3": {
+"n": 4,
+"core_late": 0
+},
+"ExR6": {
+"n": 2,
+"core_late": 0
+},
+"FB2B": {
+"n": 4,
+"core_late": 0
+},
+"FB4G": {
+"n": 2,
+"core_late": 0
+},
+"FB4P,FB4Q": {
+"n": 7,
+"core_late": 0
+},
+"FB5D,FB5E": {
+"n": 3,
+"core_late": 0
+},
+"FB6C": {
+"n": 9,
+"core_late": 0
+},
+"FB6P": {
+"n": 2,
+"core_late": 0
+},
+"FB6V": {
+"n": 2,
+"core_late": 0
+},
+"FC1C,FC1E": {
+"n": 37,
+"core_late": 0
+},
+"HRN_VP4": {
+"n": 29,
+"core_late": 477
+},
+"IB012": {
+"n": 2,
+"core_late": 0
+},
+"IB017": {
+"n": 2,
+"core_late": 0
+},
+"IB038": {
+"n": 4,
+"core_late": 0
+},
+"IB064": {
+"n": 2,
+"core_late": 0
+},
+"IB093": {
+"n": 3,
+"core_late": 0
+},
+"IB116": {
+"n": 2,
+"core_late": 0
+},
+"JO-CM": {
+"n": 35,
+"core_late": 0
+},
+"JO-ED2_c": {
+"n": 17,
+"core_late": 0
+},
+"JO-FV": {
+"n": 166,
+"core_late": 0
+},
+"KCab-p": {
+"n": 128,
+"core_late": 2
+},
+"KCapbp-m": {
+"n": 338,
+"core_late": 2
+},
+"KCg-s1": {
+"n": 2,
+"core_late": 0
+},
+"LAL002": {
+"n": 2,
+"core_late": 0
+},
+"LAL023": {
+"n": 4,
+"core_late": 0
+},
+"LAL031": {
+"n": 4,
+"core_late": 0
+},
+"LAL055": {
+"n": 2,
+"core_late": 0
+},
+"LAL101": {
+"n": 2,
+"core_late": 0
+},
+"LAL115": {
+"n": 2,
+"core_late": 0
+},
+"LAL129": {
+"n": 2,
+"core_late": 0
+},
+"LAL142": {
+"n": 2,
+"core_late": 0
+},
+"LAL147c": {
+"n": 2,
+"core_late": 0
+},
+"LAL154": {
+"n": 2,
+"core_late": 0
+},
+"LAL160,LAL161": {
+"n": 4,
+"core_late": 0
+},
+"LAL176,LAL177": {
+"n": 4,
+"core_late": 0
+},
+"LAL185": {
+"n": 4,
+"core_late": 0
+},
+"LAL190": {
+"n": 2,
+"core_late": 0
+},
+"LAL195": {
+"n": 2,
+"core_late": 0
+},
+"LB1d": {
+"n": 8,
+"core_late": 0
+},
+"LB2c": {
+"n": 7,
+"core_late": 0
+},
+"LB3b": {
+"n": 25,
+"core_late": 477
+},
+"LB4a": {
+"n": 4,
+"core_late": 0
+},
+"LC20b": {
+"n": 47,
+"core_late": 0
+},
+"LC25": {
+"n": 60,
+"core_late": 0
+},
+"LC28d": {
+"n": 18,
+"core_late": 0
+},
+"LC35": {
+"n": 8,
+"core_late": 0
+},
+"LC39": {
+"n": 8,
+"core_late": 0
+},
+"LC41": {
+"n": 12,
+"core_late": 0
+},
+"LC45a": {
+"n": 14,
+"core_late": 0
+},
+"LCe01a": {
+"n": 22,
+"core_late": 0
+},
+"LCe04": {
+"n": 37,
+"core_late": 0
+},
+"LCe08": {
+"n": 5,
+"core_late": 0
+},
+"LHAD1a2": {
+"n": 13,
+"core_late": 0
+},
+"LHAD1a4b": {
+"n": 2,
+"core_late": 0
+},
+"LHAD1b2_a,LHAD1b2_c": {
+"n": 15,
+"core_late": 0
+},
+"LHAD1b5": {
+"n": 11,
+"core_late": 0
+},
+"LHAD1c2c": {
+"n": 5,
+"core_late": 0
+},
+"LHAD1d2": {
+"n": 6,
+"core_late": 0
+},
+"LHAD1f3a": {
+"n": 2,
+"core_late": 0
+},
+"LHAD1f3d": {
+"n": 2,
+"core_late": 0
+},
+"LHAD1g1": {
+"n": 2,
+"core_late": 0
+},
+"LHAD1k1": {
+"n": 2,
+"core_late": 0
+},
+"LHAD2c2": {
+"n": 5,
+"core_late": 0
+},
+"LHAD2c3c": {
+"n": 2,
+"core_late": 0
+},
+"LHAD2e3": {
+"n": 2,
+"core_late": 0
+},
+"LHAD3d4": {
+"n": 2,
+"core_late": 0
+},
+"LHAV1a1": {
+"n": 6,
+"core_late": 0
+},
+"LHAV1b1": {
+"n": 2,
+"core_late": 0
+},
+"LHAV1d2": {
+"n": 10,
+"core_late": 0
+},
+"LHAV2a3b": {
+"n": 2,
+"core_late": 0
+},
+"LHAV2b10": {
+"n": 8,
+"core_late": 0
+},
+"LHAV2b6": {
+"n": 4,
+"core_late": 0
+},
+"LHAV2b9": {
+"n": 2,
+"core_late": 0
+},
+"LHAV2f2_b": {
+"n": 4,
+"core_late": 0
+},
+"LHAV2g2_a": {
+"n": 6,
+"core_late": 0
+},
+"LHAV2g5": {
+"n": 2,
+"core_late": 0
+},
+"LHAV2k6": {
+"n": 2,
+"core_late": 0
+},
+"LHAV2o1": {
+"n": 2,
+"core_late": 0
+},
+"LHAV3a1_c": {
+"n": 2,
+"core_late": 0
+},
+"LHAV3d1": {
+"n": 2,
+"core_late": 0
+},
+"LHAV3e3b": {
+"n": 2,
+"core_late": 0
+},
+"LHAV3g2": {
+"n": 4,
+"core_late": 0
+},
+"LHAV3j1": {
+"n": 2,
+"core_late": 1
+},
+"LHAV3k4": {
+"n": 2,
+"core_late": 0
+},
+"LHAV3m1": {
+"n": 2,
+"core_late": 0
+},
+"LHAV3q1": {
+"n": 2,
+"core_late": 0
+},
+"LHAV4a6": {
+"n": 2,
+"core_late": 0
+},
+"LHAV4c1": {
+"n": 8,
+"core_late": 0
+},
+"LHAV4e1_a": {
+"n": 2,
+"core_late": 0
+},
+"LHAV4g1a": {
+"n": 4,
+"core_late": 0
+},
+"LHAV4i1": {
+"n": 2,
+"core_late": 0
+},
+"LHAV5a1": {
+"n": 6,
+"core_late": 0
+},
+"LHAV5a2_a2": {
+"n": 10,
+"core_late": 0
+},
+"LHAV5a2_b": {
+"n": 4,
+"core_late": 0
+},
+"LHAV5e1": {
+"n": 2,
+"core_late": 0
+},
+"LHAV6c1a": {
+"n": 4,
+"core_late": 0
+},
+"LHAV6g1": {
+"n": 2,
+"core_late": 0
+},
+"LHAV7a1b": {
+"n": 3,
+"core_late": 0
+},
+"LHAV7a3": {
+"n": 8,
+"core_late": 0
+},
+"LHAV7a5": {
+"n": 7,
+"core_late": 0
+},
+"LHAV8a1": {
+"n": 2,
+"core_late": 0
+},
+"LHAV9a1_c": {
+"n": 5,
+"core_late": 0
+},
+"LHCENT12a": {
+"n": 2,
+"core_late": 0
+},
+"LHCENT13_b": {
+"n": 2,
+"core_late": 0
+},
+"LHCENT14": {
+"n": 2,
+"core_late": 0
+},
+"LHCENT5": {
+"n": 2,
+"core_late": 0
+},
+"LHCENT9": {
+"n": 2,
+"core_late": 0
+},
+"LHPD2a4_a,SIP049": {
+"n": 1,
+"core_late": 0
+},
+"LHPD2d1": {
+"n": 2,
+"core_late": 0
+},
+"LHPD3a5": {
+"n": 4,
+"core_late": 0
+},
+"LHPD4b1a": {
+"n": 4,
+"core_late": 0
+},
+"LHPD5a1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV10c1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV1c1": {
+"n": 4,
+"core_late": 0
+},
+"LHPV2a1_a": {
+"n": 6,
+"core_late": 0
+},
+"LHPV2a4": {
+"n": 6,
+"core_late": 0
+},
+"LHPV2c2a": {
+"n": 3,
+"core_late": 0
+},
+"LHPV2d1": {
+"n": 4,
+"core_late": 0
+},
+"LHPV2g1": {
+"n": 4,
+"core_late": 0
+},
+"LHPV2i1b": {
+"n": 2,
+"core_late": 0
+},
+"LHPV3a1": {
+"n": 4,
+"core_late": 0
+},
+"LHPV3b1_b": {
+"n": 6,
+"core_late": 0
+},
+"LHPV4a1,LHPV4a2": {
+"n": 4,
+"core_late": 0
+},
+"LHPV4a2": {
+"n": 6,
+"core_late": 0
+},
+"LHPV4a7b": {
+"n": 2,
+"core_late": 0
+},
+"LHPV4b1": {
+"n": 4,
+"core_late": 0
+},
+"LHPV4b9": {
+"n": 3,
+"core_late": 0
+},
+"LHPV4d3": {
+"n": 5,
+"core_late": 0
+},
+"LHPV4h1": {
+"n": 6,
+"core_late": 0
+},
+"LHPV4m1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV5b1": {
+"n": 20,
+"core_late": 0
+},
+"LHPV5b4": {
+"n": 2,
+"core_late": 0
+},
+"LHPV5c2": {
+"n": 3,
+"core_late": 0
+},
+"LHPV5e1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV5g1_a,SMP270": {
+"n": 8,
+"core_late": 0
+},
+"LHPV5i1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV6a10": {
+"n": 2,
+"core_late": 0
+},
+"LHPV6c2": {
+"n": 2,
+"core_late": 0
+},
+"LHPV6g1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV6j1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV6l1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV6o1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV6r1": {
+"n": 9,
+"core_late": 0
+},
+"LHPV7a2": {
+"n": 4,
+"core_late": 0
+},
+"LHPV9b1": {
+"n": 2,
+"core_late": 0
+},
+"LLPC4": {
+"n": 6,
+"core_late": 0
+},
+"LN60b": {
+"n": 2,
+"core_late": 0
+},
+"LPC2": {
+"n": 116,
+"core_late": 0
+},
+"LPT42_Nod4": {
+"n": 2,
+"core_late": 0
+},
+"LPT50": {
+"n": 2,
+"core_late": 0
+},
+"LPT54": {
+"n": 2,
+"core_late": 0
+},
+"LT36": {
+"n": 2,
+"core_late": 0
+},
+"LT51": {
+"n": 22,
+"core_late": 0
+},
+"LT57": {
+"n": 22,
+"core_late": 1
+},
+"LT64": {
+"n": 4,
+"core_late": 0
+},
+"LT70": {
+"n": 8,
+"core_late": 0
+},
+"LT75": {
+"n": 2,
+"core_late": 0
+},
+"LT79": {
+"n": 2,
+"core_late": 0
+},
+"LT85": {
+"n": 2,
+"core_late": 1
+},
+"LTe02": {
+"n": 4,
+"core_late": 0
+},
+"LTe05": {
+"n": 2,
+"core_late": 0
+},
+"LTe13": {
+"n": 2,
+"core_late": 1
+},
+"LTe17": {
+"n": 2,
+"core_late": 0
+},
+"LTe21": {
+"n": 2,
+"core_late": 0
+},
+"LTe28": {
+"n": 2,
+"core_late": 0
+},
+"LTe37": {
+"n": 4,
+"core_late": 0
+},
+"LTe40": {
+"n": 2,
+"core_late": 0
+},
+"LTe42c": {
+"n": 2,
+"core_late": 0
+},
+"LTe48": {
+"n": 2,
+"core_late": 0
+},
+"LTe53": {
+"n": 2,
+"core_late": 0
+},
+"LTe56": {
+"n": 2,
+"core_late": 0
+},
+"LTe59a": {
+"n": 2,
+"core_late": 0
+},
+"LTe64": {
+"n": 16,
+"core_late": 0
+},
+"LTe69": {
+"n": 2,
+"core_late": 0
+},
+"LTe72": {
+"n": 2,
+"core_late": 0
+},
+"LTe76": {
+"n": 2,
+"core_late": 1
+},
+"LgAG7": {
+"n": 6,
+"core_late": 0
+},
+"Li31": {
+"n": 2,
+"core_late": 0
+},
+"MBON01": {
+"n": 2,
+"core_late": 0
+},
+"MBON04": {
+"n": 2,
+"core_late": 0
+},
+"MBON07": {
+"n": 4,
+"core_late": 0
+},
+"MBON11": {
+"n": 2,
+"core_late": 0
+},
+"MBON14": {
+"n": 4,
+"core_late": 0
+},
+"MBON16": {
+"n": 2,
+"core_late": 0
+},
+"MBON18": {
+"n": 2,
+"core_late": 3
+},
+"MBON21": {
+"n": 2,
+"core_late": 0
+},
+"MBON24": {
+"n": 2,
+"core_late": 0
+},
+"MBON27": {
+"n": 2,
+"core_late": 0
+},
+"MBON30": {
+"n": 2,
+"core_late": 0
+},
+"MBON33": {
+"n": 2,
+"core_late": 0
+},
+"MLt1": {
+"n": 95,
+"core_late": 0
+},
+"MTe03": {
+"n": 47,
+"core_late": 0
+},
+"MTe07": {
+"n": 15,
+"core_late": 0
+},
+"MTe13": {
+"n": 5,
+"core_late": 0
+},
+"MTe17a": {
+"n": 2,
+"core_late": 0
+},
+"MTe22": {
+"n": 2,
+"core_late": 0
+},
+"MTe25": {
+"n": 2,
+"core_late": 0
+},
+"MTe28": {
+"n": 2,
+"core_late": 2
+},
+"MTe32": {
+"n": 2,
+"core_late": 0
+},
+"MTe35": {
+"n": 2,
+"core_late": 0
+},
+"MTe40": {
+"n": 2,
+"core_late": 0
+},
+"MTe44": {
+"n": 2,
+"core_late": 1
+},
+"MTe47": {
+"n": 4,
+"core_late": 0
+},
+"MTe51": {
+"n": 99,
+"core_late": 0
+},
+"MTe54": {
+"n": 56,
+"core_late": 0
+},
+"M_adPNm4": {
+"n": 4,
+"core_late": 0
+},
+"M_adPNm7": {
+"n": 2,
+"core_late": 0
+},
+"M_l2PN10t19b": {
+"n": 2,
+"core_late": 0
+},
+"M_l2PNm15": {
+"n": 2,
+"core_late": 477
+},
+"M_lPNm11A": {
+"n": 7,
+"core_late": 0
+},
+"M_lPNm11D": {
+"n": 11,
+"core_late": 477
+},
+"M_lvPNm25": {
+"n": 5,
+"core_late": 0
+},
+"M_lvPNm28": {
+"n": 2,
+"core_late": 0
+},
+"M_lvPNm35": {
+"n": 5,
+"core_late": 477
+},
+"M_lvPNm40": {
+"n": 4,
+"core_late": 0
+},
+"M_lvPNm43": {
+"n": 4,
+"core_late": 0
+},
+"M_lvPNm46": {
+"n": 6,
+"core_late": 2
+},
+"M_smPN6t2": {
+"n": 2,
+"core_late": 0
+},
+"M_spPN5t10": {
+"n": 3,
+"core_late": 477
+},
+"M_vPNml52": {
+"n": 2,
+"core_late": 0
+},
+"M_vPNml55": {
+"n": 2,
+"core_late": 0
+},
+"M_vPNml63": {
+"n": 6,
+"core_late": 0
+},
+"M_vPNml67": {
+"n": 4,
+"core_late": 0
+},
+"M_vPNml75": {
+"n": 4,
+"core_late": 0
+},
+"M_vPNml80": {
+"n": 2,
+"core_late": 0
+},
+"M_vPNml86": {
+"n": 3,
+"core_late": 0
+},
+"MeMe_e05": {
+"n": 2,
+"core_late": 0
+},
+"OA-AL2b1": {
+"n": 2,
+"core_late": 0
+},
+"OA-ASM2": {
+"n": 2,
+"core_late": 0
+},
+"OA-VPM4": {
+"n": 2,
+"core_late": 0
+},
+"OA-VUMa4": {
+"n": 2,
+"core_late": 0
+},
+"OCC01a": {
+"n": 2,
+"core_late": 0
+},
+"ORN_D": {
+"n": 31,
+"core_late": 477
+},
+"ORN_DA3": {
+"n": 30,
+"core_late": 477
+},
+"ORN_DC1": {
+"n": 39,
+"core_late": 477
+},
+"ORN_DC4": {
+"n": 22,
+"core_late": 9
+},
+"ORN_DL2v": {
+"n": 18,
+"core_late": 477
+},
+"ORN_DL5": {
+"n": 42,
+"core_late": 477
+},
+"ORN_DM3": {
+"n": 61,
+"core_late": 477
+},
+"ORN_DM6": {
+"n": 52,
+"core_late": 477
+},
+"ORN_V": {
+"n": 67,
+"core_late": 477
+},
+"ORN_VA2": {
+"n": 67,
+"core_late": 477
+},
+"ORN_VA5": {
+"n": 12,
+"core_late": 477
+},
+"ORN_VA7m": {
+"n": 22,
+"core_late": 1
+},
+"ORN_VC3": {
+"n": 31,
+"core_late": 477
+},
+"ORN_VL1": {
+"n": 78,
+"core_late": 477
+},
+"ORN_VM1": {
+"n": 25,
+"core_late": 477
+},
+"ORN_VM4": {
+"n": 75,
+"core_late": 477
+},
+"ORN_VM6l": {
+"n": 21,
+"core_late": 477
+},
+"ORN_VM7d": {
+"n": 33,
+"core_late": 477
+},
+"PAM01": {
+"n": 41,
+"core_late": 1
+},
+"PAM04": {
+"n": 32,
+"core_late": 0
+},
+"PAM07": {
+"n": 18,
+"core_late": 0
+},
+"PAM10": {
+"n": 15,
+"core_late": 0
+},
+"PAM13": {
+"n": 12,
+"core_late": 0
+},
+"PLP001": {
+"n": 2,
+"core_late": 0
+},
+"PLP005": {
+"n": 2,
+"core_late": 0
+},
+"PLP009": {
+"n": 6,
+"core_late": 0
+},
+"PLP013": {
+"n": 4,
+"core_late": 0
+},
+"PLP017": {
+"n": 4,
+"core_late": 0
+},
+"PLP021": {
+"n": 3,
+"core_late": 0
+},
+"PLP024": {
+"n": 1,
+"core_late": 0
+},
+"PLP026,PLP027": {
+"n": 8,
+"core_late": 0
+},
+"PLP032": {
+"n": 2,
+"core_late": 0
+},
+"PLP037a": {
+"n": 2,
+"core_late": 0
+},
+"PLP041,PLP043": {
+"n": 10,
+"core_late": 0
+},
+"PLP042c": {
+"n": 13,
+"core_late": 0
+},
+"PLP046b": {
+"n": 3,
+"core_late": 0
+},
+"PLP051": {
+"n": 2,
+"core_late": 0
+},
+"PLP053b": {
+"n": 4,
+"core_late": 0
+},
+"PLP057a": {
+"n": 2,
+"core_late": 0
+},
+"PLP060": {
+"n": 2,
+"core_late": 0
+},
+"PLP065a": {
+"n": 2,
+"core_late": 0
+},
+"PLP067b": {
+"n": 4,
+"core_late": 0
+},
+"PLP071": {
+"n": 4,
+"core_late": 0
+},
+"PLP079": {
+"n": 2,
+"core_late": 0
+},
+"PLP086b": {
+"n": 4,
+"core_late": 0
+},
+"PLP089b": {
+"n": 7,
+"core_late": 0
+},
+"PLP094": {
+"n": 2,
+"core_late": 0
+},
+"PLP097": {
+"n": 2,
+"core_late": 0
+},
+"PLP103b": {
+"n": 6,
+"core_late": 0
+},
+"PLP109,PLP112": {
+"n": 4,
+"core_late": 0
+},
+"PLP116": {
+"n": 2,
+"core_late": 0
+},
+"PLP123": {
+"n": 2,
+"core_late": 0
+},
+"PLP130": {
+"n": 2,
+"core_late": 0
+},
+"PLP139,PLP140": {
+"n": 4,
+"core_late": 0
+},
+"PLP143": {
+"n": 2,
+"core_late": 0
+},
+"PLP150a": {
+"n": 2,
+"core_late": 0
+},
+"PLP154": {
+"n": 2,
+"core_late": 0
+},
+"PLP158": {
+"n": 7,
+"core_late": 0
+},
+"PLP161": {
+"n": 4,
+"core_late": 0
+},
+"PLP169": {
+"n": 2,
+"core_late": 0
+},
+"PLP173": {
+"n": 5,
+"core_late": 0
+},
+"PLP180": {
+"n": 7,
+"core_late": 0
+},
+"PLP185,PLP186": {
+"n": 9,
+"core_late": 0
+},
+"PLP197": {
+"n": 2,
+"core_late": 0
+},
+"PLP208": {
+"n": 2,
+"core_late": 0
+},
+"PLP213": {
+"n": 2,
+"core_late": 0
+},
+"PLP217": {
+"n": 2,
+"core_late": 0
+},
+"PLP222": {
+"n": 2,
+"core_late": 0
+},
+"PLP231": {
+"n": 4,
+"core_late": 0
+},
+"PLP239": {
+"n": 2,
+"core_late": 0
+},
+"PLP246": {
+"n": 2,
+"core_late": 0
+},
+"PLP249": {
+"n": 2,
+"core_late": 0
+},
+"PLP252": {
+"n": 2,
+"core_late": 0
+},
+"PPL102": {
+"n": 2,
+"core_late": 0
+},
+"PPL105": {
+"n": 2,
+"core_late": 1
+},
+"PPL108": {
+"n": 2,
+"core_late": 0
+},
+"PPL203": {
+"n": 2,
+"core_late": 0
+},
+"PPM1202": {
+"n": 4,
+"core_late": 0
+},
+"PS002": {
+"n": 6,
+"core_late": 0
+},
+"PS011": {
+"n": 2,
+"core_late": 0
+},
+"PS048b": {
+"n": 2,
+"core_late": 0
+},
+"PS063": {
+"n": 2,
+"core_late": 0
+},
+"PS091": {
+"n": 2,
+"core_late": 0
+},
+"PS097": {
+"n": 7,
+"core_late": 0
+},
+"PS115": {
+"n": 2,
+"core_late": 0
+},
+"PS126": {
+"n": 2,
+"core_late": 0
+},
+"PS141,PS147": {
+"n": 4,
+"core_late": 0
+},
+"PS156": {
+"n": 2,
+"core_late": 0
+},
+"PS164,PS165": {
+"n": 4,
+"core_late": 0
+},
+"PS182": {
+"n": 2,
+"core_late": 0
+},
+"PS199": {
+"n": 2,
+"core_late": 0
+},
+"PS217": {
+"n": 2,
+"core_late": 0
+},
+"PS239": {
+"n": 4,
+"core_late": 0
+},
+"PS260": {
+"n": 4,
+"core_late": 0
+},
+"PS269": {
+"n": 3,
+"core_late": 0
+},
+"PV7c11": {
+"n": 2,
+"core_late": 0
+},
+"PVLP006": {
+"n": 7,
+"core_late": 0
+},
+"PVLP009": {
+"n": 4,
+"core_late": 0
+},
+"PVLP016": {
+"n": 2,
+"core_late": 0
+},
+"PVLP021": {
+"n": 4,
+"core_late": 0
+},
+"PVLP033": {
+"n": 7,
+"core_late": 0
+},
+"PVLP074": {
+"n": 9,
+"core_late": 0
+},
+"PVLP084": {
+"n": 2,
+"core_late": 0
+},
+"PVLP093": {
+"n": 2,
+"core_late": 0
+},
+"PVLP100": {
+"n": 3,
+"core_late": 0
+},
+"PVLP102": {
+"n": 3,
+"core_late": 0
+},
+"PVLP106": {
+"n": 2,
+"core_late": 0
+},
+"PVLP111": {
+"n": 10,
+"core_late": 0
+},
+"PVLP122b": {
+"n": 4,
+"core_late": 0
+},
+"PVLP137": {
+"n": 2,
+"core_late": 0
+},
+"PVLP150": {
+"n": 2,
+"core_late": 0
+},
+"PhG14": {
+"n": 2,
+"core_late": 0
+},
+"PhG2": {
+"n": 5,
+"core_late": 0
+},
+"SAD008": {
+"n": 6,
+"core_late": 0
+},
+"SAD011,SAD019": {
+"n": 9,
+"core_late": 0
+},
+"SAD021_c": {
+"n": 4,
+"core_late": 0
+},
+"SAD043": {
+"n": 2,
+"core_late": 0
+},
+"SAD047": {
+"n": 10,
+"core_late": 0
+},
+"SAD080": {
+"n": 2,
+"core_late": 0
+},
+"SAD085": {
+"n": 2,
+"core_late": 0
+},
+"SA_MDA_4": {
+"n": 6,
+"core_late": 0
+},
+"SIP013b": {
+"n": 4,
+"core_late": 0
+},
+"SIP018": {
+"n": 2,
+"core_late": 0
+},
+"SIP025": {
+"n": 2,
+"core_late": 0
+},
+"SIP028a": {
+"n": 3,
+"core_late": 0
+},
+"SIP032,SIP059": {
+"n": 6,
+"core_late": 0
+},
+"SIP046": {
+"n": 2,
+"core_late": 0
+},
+"SIP052": {
+"n": 2,
+"core_late": 0
+},
+"SIP055,SLP245": {
+"n": 10,
+"core_late": 0
+},
+"SIP066": {
+"n": 4,
+"core_late": 0
+},
+"SIP076": {
+"n": 19,
+"core_late": 0
+},
+"SIP087": {
+"n": 2,
+"core_late": 0
+},
+"SIP090": {
+"n": 2,
+"core_late": 0
+},
+"SLP005": {
+"n": 2,
+"core_late": 0
+},
+"SLP011": {
+"n": 2,
+"core_late": 0
+},
+"SLP016": {
+"n": 2,
+"core_late": 0
+},
+"SLP024a": {
+"n": 5,
+"core_late": 0
+},
+"SLP025b": {
+"n": 3,
+"core_late": 0
+},
+"SLP028b": {
+"n": 2,
+"core_late": 0
+},
+"SLP032": {
+"n": 2,
+"core_late": 0
+},
+"SLP035": {
+"n": 3,
+"core_late": 0
+},
+"SLP044_d": {
+"n": 5,
+"core_late": 0
+},
+"SLP056": {
+"n": 2,
+"core_late": 0
+},
+"SLP060": {
+"n": 2,
+"core_late": 0
+},
+"SLP065": {
+"n": 5,
+"core_late": 0
+},
+"SLP068": {
+"n": 2,
+"core_late": 0
+},
+"SLP071": {
+"n": 2,
+"core_late": 0
+},
+"SLP075": {
+"n": 2,
+"core_late": 0
+},
+"SLP079": {
+"n": 2,
+"core_late": 0
+},
+"SLP083": {
+"n": 2,
+"core_late": 0
+},
+"SLP102": {
+"n": 9,
+"core_late": 0
+},
+"SLP109,SLP143": {
+"n": 5,
+"core_late": 0
+},
+"SLP119": {
+"n": 2,
+"core_late": 0
+},
+"SLP126": {
+"n": 2,
+"core_late": 0
+},
+"SLP130": {
+"n": 2,
+"core_late": 0
+},
+"SLP134": {
+"n": 2,
+"core_late": 0
+},
+"SLP149": {
+"n": 2,
+"core_late": 0
+},
+"SLP152": {
+"n": 8,
+"core_late": 0
+},
+"SLP157": {
+"n": 4,
+"core_late": 0
+},
+"SLP162a": {
+"n": 3,
+"core_late": 0
+},
+"SLP184": {
+"n": 2,
+"core_late": 0
+},
+"SLP208": {
+"n": 2,
+"core_late": 0
+},
+"SLP211": {
+"n": 2,
+"core_late": 0
+},
+"SLP212c": {
+"n": 2,
+"core_late": 0
+},
+"SLP215": {
+"n": 2,
+"core_late": 0
+},
+"SLP222": {
+"n": 4,
+"core_late": 0
+},
+"SLP226": {
+"n": 4,
+"core_late": 0
+},
+"SLP230": {
+"n": 2,
+"core_late": 0
+},
+"SLP235": {
+"n": 2,
+"core_late": 1
+},
+"SLP238": {
+"n": 2,
+"core_late": 0
+},
+"SLP240_b": {
+"n": 6,
+"core_late": 0
+},
+"SLP244": {
+"n": 4,
+"core_late": 0
+},
+"SLP255": {
+"n": 2,
+"core_late": 0
+},
+"SLP261,SLP262": {
+"n": 1,
+"core_late": 0
+},
+"SLP269": {
+"n": 2,
+"core_late": 0
+},
+"SLP275": {
+"n": 12,
+"core_late": 0
+},
+"SLP281": {
+"n": 2,
+"core_late": 0
+},
+"SLP287": {
+"n": 3,
+"core_late": 0
+},
+"SLP288c": {
+"n": 3,
+"core_late": 0
+},
+"SLP291": {
+"n": 3,
+"core_late": 0
+},
+"SLP298": {
+"n": 3,
+"core_late": 0
+},
+"SLP305": {
+"n": 2,
+"core_late": 0
+},
+"SLP308b": {
+"n": 2,
+"core_late": 0
+},
+"SLP314": {
+"n": 8,
+"core_late": 0
+},
+"SLP327": {
+"n": 4,
+"core_late": 0
+},
+"SLP355": {
+"n": 2,
+"core_late": 0
+},
+"SLP358": {
+"n": 2,
+"core_late": 0
+},
+"SLP369,SLP370": {
+"n": 11,
+"core_late": 0
+},
+"SLP377": {
+"n": 2,
+"core_late": 0
+},
+"SLP380": {
+"n": 2,
+"core_late": 0
+},
+"SLP384": {
+"n": 2,
+"core_late": 0
+},
+"SLP388": {
+"n": 2,
+"core_late": 0
+},
+"SLP391": {
+"n": 2,
+"core_late": 0
+},
+"SLP395": {
+"n": 2,
+"core_late": 0
+},
+"SLP400b": {
+"n": 2,
+"core_late": 0
+},
+"SLP405": {
+"n": 37,
+"core_late": 0
+},
+"SLP412_b": {
+"n": 2,
+"core_late": 0
+},
+"SLP435": {
+"n": 2,
+"core_late": 0
+},
+"SLP443": {
+"n": 2,
+"core_late": 0
+},
+"SLP450": {
+"n": 8,
+"core_late": 0
+},
+"SLP456": {
+"n": 2,
+"core_late": 0
+},
+"SLP464": {
+"n": 4,
+"core_late": 0
+},
+"SLPpm3_H02": {
+"n": 2,
+"core_late": 0
+},
+"SLPpm3_P03": {
+"n": 2,
+"core_late": 0
+},
+"SMP001": {
+"n": 2,
+"core_late": 0
+},
+"SMP010": {
+"n": 2,
+"core_late": 0
+},
+"SMP012": {
+"n": 4,
+"core_late": 0
+},
+"SMP019": {
+"n": 9,
+"core_late": 0
+},
+"SMP025b": {
+"n": 3,
+"core_late": 0
+},
+"SMP027": {
+"n": 2,
+"core_late": 0
+},
+"SMP031": {
+"n": 2,
+"core_late": 0
+},
+"SMP036": {
+"n": 2,
+"core_late": 0
+},
+"SMP039": {
+"n": 4,
+"core_late": 0
+},
+"SMP042": {
+"n": 2,
+"core_late": 0
+},
+"SMP048": {
+"n": 2,
+"core_late": 1
+},
+"SMP051": {
+"n": 2,
+"core_late": 0
+},
+"SMP056": {
+"n": 2,
+"core_late": 0
+},
+"SMP063,SMP064": {
+"n": 4,
+"core_late": 0
+},
+"SMP075a": {
+"n": 2,
+"core_late": 0
+},
+"SMP079": {
+"n": 4,
+"core_late": 0
+},
+"SMP085": {
+"n": 4,
+"core_late": 0
+},
+"SMP096": {
+"n": 4,
+"core_late": 0
+},
+"SMP105_b": {
+"n": 13,
+"core_late": 0
+},
+"SMP108": {
+"n": 2,
+"core_late": 0
+},
+"SMP114": {
+"n": 2,
+"core_late": 0
+},
+"SMP119": {
+"n": 2,
+"core_late": 0
+},
+"SMP123b": {
+"n": 2,
+"core_late": 0
+},
+"SMP142,SMP145": {
+"n": 4,
+"core_late": 0
+},
+"SMP146": {
+"n": 2,
+"core_late": 0
+},
+"SMP154": {
+"n": 2,
+"core_late": 0
+},
+"SMP159": {
+"n": 2,
+"core_late": 0
+},
+"SMP164": {
+"n": 2,
+"core_late": 0
+},
+"SMP170": {
+"n": 4,
+"core_late": 0
+},
+"SMP175": {
+"n": 2,
+"core_late": 0
+},
+"SMP178": {
+"n": 2,
+"core_late": 0
+},
+"SMP183": {
+"n": 2,
+"core_late": 0
+},
+"SMP191": {
+"n": 2,
+"core_late": 0
+},
+"SMP193b": {
+"n": 4,
+"core_late": 0
+},
+"SMP202": {
+"n": 2,
+"core_late": 0
+},
+"SMP206": {
+"n": 2,
+"core_late": 0
+},
+"SMP210": {
+"n": 6,
+"core_late": 0
+},
+"SMP237": {
+"n": 2,
+"core_late": 0
+},
+"SMP240": {
+"n": 2,
+"core_late": 0
+},
+"SMP248a": {
+"n": 4,
+"core_late": 0
+},
+"SMP250": {
+"n": 2,
+"core_late": 0
+},
+"SMP256": {
+"n": 2,
+"core_late": 0
+},
+"SMP272": {
+"n": 2,
+"core_late": 0
+},
+"SMP284a": {
+"n": 2,
+"core_late": 0
+},
+"SMP313": {
+"n": 2,
+"core_late": 0
+},
+"SMP317a": {
+"n": 2,
+"core_late": 0
+},
+"SMP326a": {
+"n": 4,
+"core_late": 0
+},
+"SMP331a": {
+"n": 4,
+"core_late": 0
+},
+"SMP340": {
+"n": 2,
+"core_late": 0
+},
+"SMP353": {
+"n": 2,
+"core_late": 0
+},
+"SMP360": {
+"n": 4,
+"core_late": 0
+},
+"SMP362": {
+"n": 4,
+"core_late": 0
+},
+"SMP384": {
+"n": 2,
+"core_late": 0
+},
+"SMP388": {
+"n": 2,
+"core_late": 0
+},
+"SMP389c": {
+"n": 2,
+"core_late": 0
+},
+"SMP398": {
+"n": 4,
+"core_late": 0
+},
+"SMP406": {
+"n": 11,
+"core_late": 0
+},
+"SMP413": {
+"n": 4,
+"core_late": 0
+},
+"SMP423": {
+"n": 2,
+"core_late": 0
+},
+"SMP427": {
+"n": 9,
+"core_late": 0
+},
+"SMP446a": {
+"n": 2,
+"core_late": 0
+},
+"SMP448": {
+"n": 5,
+"core_late": 0
+},
+"SMP452": {
+"n": 9,
+"core_late": 0
+},
+"SMP457": {
+"n": 2,
+"core_late": 2
+},
+"SMP476": {
+"n": 2,
+"core_late": 0
+},
+"SMP493": {
+"n": 2,
+"core_late": 0
+},
+"SMP501,SMP502": {
+"n": 4,
+"core_late": 0
+},
+"SMP506": {
+"n": 2,
+"core_late": 0
+},
+"SMP509b": {
+"n": 2,
+"core_late": 0
+},
+"SMP526": {
+"n": 2,
+"core_late": 0
+},
+"SMP530": {
+"n": 4,
+"core_late": 0
+},
+"SMP542": {
+"n": 2,
+"core_late": 0
+},
+"SMP549": {
+"n": 2,
+"core_late": 0
+},
+"SMP553": {
+"n": 2,
+"core_late": 0
+},
+"SMP561": {
+"n": 2,
+"core_late": 0
+},
+"SMP572": {
+"n": 4,
+"core_late": 0
+},
+"SMP578": {
+"n": 8,
+"core_late": 0
+},
+"SMP586": {
+"n": 2,
+"core_late": 0
+},
+"SMP591": {
+"n": 7,
+"core_late": 0
+},
+"SMP596": {
+"n": 2,
+"core_late": 0
+},
+"SMPp&v1A_S02": {
+"n": 2,
+"core_late": 0
+},
+"TPMN1": {
+"n": 63,
+"core_late": 0
+},
+"TRN_VP3a": {
+"n": 7,
+"core_late": 477
+},
+"VA1d_adPN": {
+"n": 6,
+"core_late": 477
+},
+"VA2_adPN": {
+"n": 2,
+"core_late": 477
+},
+"VA5_lPN": {
+"n": 6,
+"core_late": 477
+},
+"VC4_adPN": {
+"n": 5,
+"core_late": 477
+},
+"VES003": {
+"n": 2,
+"core_late": 0
+},
+"VES012": {
+"n": 2,
+"core_late": 0
+},
+"VES016": {
+"n": 2,
+"core_late": 0
+},
+"VES020": {
+"n": 6,
+"core_late": 0
+},
+"VES025": {
+"n": 2,
+"core_late": 0
+},
+"VES040": {
+"n": 2,
+"core_late": 0
+},
+"VES053": {
+"n": 2,
+"core_late": 0
+},
+"VES058": {
+"n": 2,
+"core_late": 0
+},
+"VES064": {
+"n": 2,
+"core_late": 0
+},
+"VES075": {
+"n": 2,
+"core_late": 0
+},
+"VESa2_H02": {
+"n": 2,
+"core_late": 0
+},
+"VL2a_vPN": {
+"n": 5,
+"core_late": 0
+},
+"VM3_adPN": {
+"n": 4,
+"core_late": 477
+},
+"VM5v_adPN": {
+"n": 6,
+"core_late": 477
+},
+"VP1d_il2PN": {
+"n": 2,
+"core_late": 477
+},
+"VP1m+VP2_lvPN1": {
+"n": 2,
+"core_late": 0
+},
+"VP2+VC5_l2PN": {
+"n": 2,
+"core_late": 0
+},
+"VP3+_l2PN": {
+"n": 6,
+"core_late": 477
+},
+"VP4+_vPN": {
+"n": 2,
+"core_late": 0
+},
+"VP5+Z_adPN": {
+"n": 2,
+"core_late": 0
+},
+"WED004": {
+"n": 9,
+"core_late": 0
+},
+"WED012": {
+"n": 4,
+"core_late": 0
+},
+"WED020_b": {
+"n": 4,
+"core_late": 0
+},
+"WED038a": {
+"n": 6,
+"core_late": 0
+},
+"WED045": {
+"n": 2,
+"core_late": 0
+},
+"WED061": {
+"n": 4,
+"core_late": 0
+},
+"WED075": {
+"n": 2,
+"core_late": 0
+},
+"WED089": {
+"n": 2,
+"core_late": 0
+},
+"WED092c": {
+"n": 4,
+"core_late": 0
+},
+"WED094c": {
+"n": 2,
+"core_late": 0
+},
+"WED100": {
+"n": 4,
+"core_late": 0
+},
+"WED107": {
+"n": 2,
+"core_late": 0
+},
+"WED125": {
+"n": 3,
+"core_late": 0
+},
+"WED163b": {
+"n": 2,
+"core_late": 0
+},
+"WED168": {
+"n": 6,
+"core_late": 0
+},
+"WEDPN10B": {
+"n": 2,
+"core_late": 0
+},
+"WEDPN14": {
+"n": 5,
+"core_late": 0
+},
+"WEDPN2A": {
+"n": 6,
+"core_late": 0
+},
+"WEDPN4": {
+"n": 2,
+"core_late": 0
+},
+"WEDPN6B, WEDPN6C": {
+"n": 14,
+"core_late": 0
+},
+"WEDPN8B": {
+"n": 9,
+"core_late": 0
+},
+"Z_vPNml1": {
+"n": 2,
+"core_late": 0
+},
+"aMe12": {
+"n": 7,
+"core_late": 0
+},
+"aMe17a2": {
+"n": 2,
+"core_late": 0
+},
+"aMe20": {
+"n": 2,
+"core_late": 2
+},
+"aMe25": {
+"n": 2,
+"core_late": 0
+},
+"aMe5": {
+"n": 55,
+"core_late": 0
+},
+"aMe9": {
+"n": 4,
+"core_late": 0
+},
+"aSP-f3": {
+"n": 8,
+"core_late": 0
+},
+"aSP-g2": {
+"n": 10,
+"core_late": 0
+},
+"aSP22": {
+"n": 2,
+"core_late": 0
+},
+"cL08": {
+"n": 2,
+"core_late": 0
+},
+"cL13": {
+"n": 2,
+"core_late": 0
+},
+"cL18": {
+"n": 6,
+"core_late": 0
+},
+"cL22b": {
+"n": 2,
+"core_late": 0
+},
+"cLP02": {
+"n": 91,
+"core_late": 0
+},
+"cLP05": {
+"n": 2,
+"core_late": 0
+},
+"cM08c": {
+"n": 4,
+"core_late": 0
+},
+"cMLLP01": {
+"n": 2,
+"core_late": 0
+},
+"l2LN22": {
+"n": 4,
+"core_late": 0
+},
+"lLN8": {
+"n": 4,
+"core_late": 0
+},
+"mAL4": {
+"n": 28,
+"core_late": 0
+},
+"mAL5A": {
+"n": 6,
+"core_late": 0
+},
+"mALB1": {
+"n": 2,
+"core_late": 0
+},
+"mALB4": {
+"n": 2,
+"core_late": 0
+},
+"mALD1": {
+"n": 2,
+"core_late": 0
+},
+"mALD4": {
+"n": 2,
+"core_late": 0
+},
+"mAL_f3": {
+"n": 10,
+"core_late": 0
+},
+"pC1a": {
+"n": 2,
+"core_late": 0
+},
+"pC1e": {
+"n": 2,
+"core_late": 0
+},
+"v2LN31": {
+"n": 2,
+"core_late": 0
+},
+"v2LN34E": {
+"n": 6,
+"core_late": 0
+},
+"v2LN39a": {
+"n": 4,
+"core_late": 0
+},
+"v2LN4": {
+"n": 6,
+"core_late": 2
+},
+"v2LN41b": {
+"n": 2,
+"core_late": 0
+},
+"v2LN46a": {
+"n": 3,
+"core_late": 0
+},
+"v2LN49": {
+"n": 4,
+"core_late": 0
+},
+"vCal1": {
+"n": 2,
+"core_late": 0
+},
+"vLN26": {
+"n": 2,
+"core_late": 0
+},
+"5-HTPLP01": {
+"n": 4,
+"core_late": 0
+},
+"5-HTPMPV03": {
+"n": 2,
+"core_late": 0
+},
+"ALIN1": {
+"n": 4,
+"core_late": 0
+},
+"ALIN4": {
+"n": 2,
+"core_late": 0
+},
+"ALIN7": {
+"n": 2,
+"core_late": 0
+},
+"ALON2": {
+"n": 2,
+"core_late": 0
+},
+"AN_AVLP_13": {
+"n": 2,
+"core_late": 0
+},
+"AN_AVLP_21": {
+"n": 2,
+"core_late": 0
+},
+"AN_AVLP_GNG_17": {
+"n": 2,
+"core_late": 0
+},
+"AN_AVLP_GNG_4": {
+"n": 2,
+"core_late": 0
+},
+"AN_AVLP_PVLP_2": {
+"n": 2,
+"core_late": 0
+},
+"AN_AVLP_PVLP_8": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_109": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_172": {
+"n": 16,
+"core_late": 0
+},
+"AN_GNG_30": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_68": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_82": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_FLA_2": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_PRW_1": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_SAD_12": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_SAD_24": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_VES_1": {
+"n": 2,
+"core_late": 0
+},
+"AN_IPS_GNG_7": {
+"n": 12,
+"core_late": 0
+},
+"AN_SAD_GNG_1": {
+"n": 2,
+"core_late": 0
+},
+"AN_SPS_IPS_2": {
+"n": 6,
+"core_late": 0
+},
+"AN_VES_GNG_2": {
+"n": 2,
+"core_late": 0
+},
+"AN_VES_WED_1": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_11": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_113": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_116": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_119": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_121": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_125": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_18": {
+"n": 4,
+"core_late": 0
+},
+"AN_multi_25": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_28": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_32": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_50": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_62": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_70": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_76": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_8": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_83": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_93": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_99": {
+"n": 2,
+"core_late": 0
+},
+"AOTU021": {
+"n": 4,
+"core_late": 0
+},
+"AOTU042": {
+"n": 4,
+"core_late": 0
+},
+"AOTU065": {
+"n": 2,
+"core_late": 0
+},
+"ATL002": {
+"n": 2,
+"core_late": 0
+},
+"ATL033": {
+"n": 2,
+"core_late": 0
+},
+"ATL042": {
+"n": 2,
+"core_late": 0
+},
+"AVLP008": {
+"n": 10,
+"core_late": 0
+},
+"AVLP013": {
+"n": 4,
+"core_late": 0
+},
+"AVLP016": {
+"n": 2,
+"core_late": 0
+},
+"AVLP019": {
+"n": 2,
+"core_late": 0
+},
+"AVLP022": {
+"n": 2,
+"core_late": 0
+},
+"AVLP024b": {
+"n": 2,
+"core_late": 0
+},
+"AVLP026": {
+"n": 11,
+"core_late": 0
+},
+"AVLP029": {
+"n": 2,
+"core_late": 0
+},
+"AVLP032": {
+"n": 2,
+"core_late": 0
+},
+"AVLP038": {
+"n": 3,
+"core_late": 0
+},
+"AVLP041": {
+"n": 3,
+"core_late": 0
+},
+"AVLP044_a": {
+"n": 4,
+"core_late": 0
+},
+"AVLP046": {
+"n": 4,
+"core_late": 0
+},
+"AVLP053": {
+"n": 2,
+"core_late": 0
+},
+"AVLP076": {
+"n": 2,
+"core_late": 0
+},
+"AVLP082": {
+"n": 2,
+"core_late": 0
+},
+"AVLP089": {
+"n": 4,
+"core_late": 0
+},
+"AVLP098": {
+"n": 2,
+"core_late": 0
+},
+"AVLP107": {
+"n": 4,
+"core_late": 0
+},
+"AVLP147": {
+"n": 4,
+"core_late": 0
+},
+"AVLP156": {
+"n": 2,
+"core_late": 0
+},
+"AVLP164": {
+"n": 3,
+"core_late": 0
+},
+"AVLP189_a": {
+"n": 4,
+"core_late": 0
+},
+"AVLP195": {
+"n": 4,
+"core_late": 0
+},
+"AVLP209": {
+"n": 2,
+"core_late": 0
+},
+"AVLP217": {
+"n": 2,
+"core_late": 0
+},
+"AVLP219a": {
+"n": 4,
+"core_late": 0
+},
+"AVLP227": {
+"n": 6,
+"core_late": 0
+},
+"AVLP244": {
+"n": 6,
+"core_late": 1
+},
+"AVLP257": {
+"n": 2,
+"core_late": 0
+},
+"AVLP281": {
+"n": 2,
+"core_late": 0
+},
+"AVLP286": {
+"n": 2,
+"core_late": 0
+},
+"AVLP294": {
+"n": 4,
+"core_late": 0
+},
+"AVLP299_a": {
+"n": 4,
+"core_late": 0
+},
+"AVLP300_a": {
+"n": 6,
+"core_late": 0
+},
+"AVLP306": {
+"n": 6,
+"core_late": 0
+},
+"AVLP312a": {
+"n": 3,
+"core_late": 0
+},
+"AVLP314": {
+"n": 2,
+"core_late": 0
+},
+"AVLP317": {
+"n": 2,
+"core_late": 0
+},
+"AVLP345": {
+"n": 2,
+"core_late": 0
+},
+"AVLP380b": {
+"n": 4,
+"core_late": 0
+},
+"AVLP396": {
+"n": 2,
+"core_late": 0
+},
+"AVLP402": {
+"n": 2,
+"core_late": 0
+},
+"AVLP432": {
+"n": 2,
+"core_late": 0
+},
+"AVLP434_b": {
+"n": 2,
+"core_late": 0
+},
+"AVLP439": {
+"n": 2,
+"core_late": 0
+},
+"AVLP445": {
+"n": 2,
+"core_late": 0
+},
+"AVLP448": {
+"n": 2,
+"core_late": 0
+},
+"AVLP454_b": {
+"n": 10,
+"core_late": 0
+},
+"AVLP464": {
+"n": 2,
+"core_late": 0
+},
+"AVLP475a": {
+"n": 2,
+"core_late": 0
+},
+"AVLP478": {
+"n": 2,
+"core_late": 0
+},
+"AVLP489": {
+"n": 4,
+"core_late": 0
+},
+"AVLP496a": {
+"n": 4,
+"core_late": 0
+},
+"AVLP504": {
+"n": 2,
+"core_late": 0
+},
+"AVLP520": {
+"n": 2,
+"core_late": 0
+},
+"AVLP534": {
+"n": 2,
+"core_late": 0
+},
+"AVLP538": {
+"n": 2,
+"core_late": 0
+},
+"AVLP562": {
+"n": 2,
+"core_late": 0
+},
+"AVLP566": {
+"n": 4,
+"core_late": 0
+},
+"AVLP570": {
+"n": 4,
+"core_late": 0
+},
+"AVLP573": {
+"n": 2,
+"core_late": 0
+},
+"AVLP578": {
+"n": 2,
+"core_late": 0
+},
+"AVLP590": {
+"n": 2,
+"core_late": 0
+},
+"AVLP595": {
+"n": 2,
+"core_late": 0
+},
+"BM_Taste": {
+"n": 72,
+"core_late": 0
+},
+"CB0009": {
+"n": 2,
+"core_late": 0
+},
+"CB0019": {
+"n": 2,
+"core_late": 0
+},
+"CB0027": {
+"n": 2,
+"core_late": 0
+},
+"CB0033": {
+"n": 2,
+"core_late": 0
+},
+"CB0046": {
+"n": 2,
+"core_late": 0
+},
+"CB0053": {
+"n": 2,
+"core_late": 0
+},
+"CB0065": {
+"n": 2,
+"core_late": 0
+},
+"CB0082": {
+"n": 2,
+"core_late": 0
+},
+"CB0097": {
+"n": 2,
+"core_late": 0
+},
+"CB0115": {
+"n": 5,
+"core_late": 0
+},
+"CB0128": {
+"n": 2,
+"core_late": 0
+},
+"CB0131": {
+"n": 2,
+"core_late": 0
+},
+"CB0138": {
+"n": 2,
+"core_late": 0
+},
+"CB0150": {
+"n": 2,
+"core_late": 0
+},
+"CB0159": {
+"n": 2,
+"core_late": 0
+},
+"CB0177": {
+"n": 2,
+"core_late": 0
+},
+"CB0197": {
+"n": 2,
+"core_late": 0
+},
+"CB0219": {
+"n": 2,
+"core_late": 0
+},
+"CB0225": {
+"n": 2,
+"core_late": 0
+},
+"CB0233": {
+"n": 2,
+"core_late": 0
+},
+"CB0249": {
+"n": 2,
+"core_late": 0
+},
+"CB0267": {
+"n": 2,
+"core_late": 0
+},
+"CB0279": {
+"n": 2,
+"core_late": 0
+},
+"CB0294": {
+"n": 2,
+"core_late": 0
+},
+"CB0305": {
+"n": 2,
+"core_late": 0
+},
+"CB0313": {
+"n": 2,
+"core_late": 0
+},
+"CB0324": {
+"n": 2,
+"core_late": 0
+},
+"CB0341": {
+"n": 2,
+"core_late": 0
+},
+"CB0356": {
+"n": 2,
+"core_late": 0
+},
+"CB0376": {
+"n": 2,
+"core_late": 0
+},
+"CB0397": {
+"n": 2,
+"core_late": 0
+},
+"CB0407": {
+"n": 2,
+"core_late": 0
+},
+"CB0413": {
+"n": 2,
+"core_late": 0
+},
+"CB0429": {
+"n": 2,
+"core_late": 0
+},
+"CB0437": {
+"n": 2,
+"core_late": 0
+},
+"CB0444": {
+"n": 2,
+"core_late": 0
+},
+"CB0450": {
+"n": 2,
+"core_late": 0
+},
+"CB0461": {
+"n": 2,
+"core_late": 0
+},
+"CB0477": {
+"n": 2,
+"core_late": 0
+},
+"CB0483": {
+"n": 2,
+"core_late": 0
+},
+"CB0495": {
+"n": 2,
+"core_late": 0
+},
+"CB0499": {
+"n": 2,
+"core_late": 0
+},
+"CB0510": {
+"n": 2,
+"core_late": 0
+},
+"CB0521": {
+"n": 2,
+"core_late": 0
+},
+"CB0525": {
+"n": 2,
+"core_late": 0
+},
+"CB0539": {
+"n": 2,
+"core_late": 0
+},
+"CB0543": {
+"n": 2,
+"core_late": 0
+},
+"CB0559": {
+"n": 2,
+"core_late": 0
+},
+"CB0580": {
+"n": 2,
+"core_late": 0
+},
+"CB0610": {
+"n": 2,
+"core_late": 0
+},
+"CB0623": {
+"n": 2,
+"core_late": 0
+},
+"CB0627": {
+"n": 2,
+"core_late": 0
+},
+"CB0638": {
+"n": 2,
+"core_late": 0
+},
+"CB0642": {
+"n": 2,
+"core_late": 0
+},
+"CB0646": {
+"n": 2,
+"core_late": 0
+},
+"CB0650": {
+"n": 4,
+"core_late": 0
+},
+"CB0656": {
+"n": 2,
+"core_late": 0
+},
+"CB0666": {
+"n": 2,
+"core_late": 0
+},
+"CB0678": {
+"n": 2,
+"core_late": 0
+},
+"CB0685": {
+"n": 2,
+"core_late": 0
+},
+"CB0690": {
+"n": 2,
+"core_late": 0
+},
+"CB0718": {
+"n": 2,
+"core_late": 0
+},
+"CB0739": {
+"n": 6,
+"core_late": 0
+},
+"CB0749": {
+"n": 2,
+"core_late": 0
+},
+"CB0766": {
+"n": 3,
+"core_late": 0
+},
+"CB0784": {
+"n": 4,
+"core_late": 0
+},
+"CB0799": {
+"n": 2,
+"core_late": 0
+},
+"CB0812": {
+"n": 2,
+"core_late": 0
+},
+"CB0848": {
+"n": 2,
+"core_late": 0
+},
+"CB0874": {
+"n": 2,
+"core_late": 0
+},
+"CB0890": {
+"n": 2,
+"core_late": 0
+},
+"CB0930": {
+"n": 6,
+"core_late": 0
+},
+"CB0939": {
+"n": 2,
+"core_late": 0
+},
+"CB0948": {
+"n": 4,
+"core_late": 0
+},
+"CB0955": {
+"n": 14,
+"core_late": 0
+},
+"CB0958a": {
+"n": 8,
+"core_late": 0
+},
+"CB0966": {
+"n": 2,
+"core_late": 0
+},
+"CB0969": {
+"n": 2,
+"core_late": 0
+},
+"CB0973": {
+"n": 8,
+"core_late": 0
+},
+"CB0985": {
+"n": 2,
+"core_late": 0
+},
+"CB0994": {
+"n": 5,
+"core_late": 1
+},
+"CB0999": {
+"n": 6,
+"core_late": 0
+},
+"CB1006": {
+"n": 2,
+"core_late": 0
+},
+"CB1012": {
+"n": 6,
+"core_late": 0
+},
+"CB1016": {
+"n": 3,
+"core_late": 0
+},
+"CB1023": {
+"n": 10,
+"core_late": 0
+},
+"CB1031": {
+"n": 4,
+"core_late": 0
+},
+"CB1035": {
+"n": 4,
+"core_late": 0
+},
+"CB1046": {
+"n": 13,
+"core_late": 0
+},
+"CB1051": {
+"n": 6,
+"core_late": 0
+},
+"CB1057": {
+"n": 4,
+"core_late": 0
+},
+"CB1060": {
+"n": 5,
+"core_late": 0
+},
+"CB1067": {
+"n": 4,
+"core_late": 0
+},
+"CB1073": {
+"n": 7,
+"core_late": 0
+},
+"CB1078": {
+"n": 26,
+"core_late": 0
+},
+"CB1085": {
+"n": 5,
+"core_late": 0
+},
+"CB1090": {
+"n": 7,
+"core_late": 0
+},
+"CB1097": {
+"n": 5,
+"core_late": 0
+},
+"CB1102": {
+"n": 4,
+"core_late": 0
+},
+"CB1105": {
+"n": 2,
+"core_late": 0
+},
+"CB1113": {
+"n": 2,
+"core_late": 0
+},
+"CB1117": {
+"n": 3,
+"core_late": 0
+},
+"CB1126": {
+"n": 4,
+"core_late": 0
+},
+"CB1132": {
+"n": 4,
+"core_late": 0
+},
+"CB1141,CB1285": {
+"n": 12,
+"core_late": 0
+},
+"CB1149": {
+"n": 6,
+"core_late": 0
+},
+"CB1152": {
+"n": 6,
+"core_late": 0
+},
+"CB1155": {
+"n": 6,
+"core_late": 0
+},
+"CB1160": {
+"n": 5,
+"core_late": 0
+},
+"CB1168": {
+"n": 9,
+"core_late": 0
+},
+"CB1171": {
+"n": 6,
+"core_late": 0
+},
+"CB1175": {
+"n": 4,
+"core_late": 0
+},
+"CB1183": {
+"n": 5,
+"core_late": 0
+},
+"CB1188": {
+"n": 6,
+"core_late": 0
+},
+"CB1201": {
+"n": 7,
+"core_late": 0
+},
+"CB1213": {
+"n": 5,
+"core_late": 0
+},
+"CB1219": {
+"n": 6,
+"core_late": 0
+},
+"CB1226": {
+"n": 4,
+"core_late": 0
+},
+"CB1237": {
+"n": 5,
+"core_late": 0
+},
+"CB1241": {
+"n": 4,
+"core_late": 0
+},
+"CB1245": {
+"n": 4,
+"core_late": 0
+},
+"CB1248": {
+"n": 2,
+"core_late": 0
+},
+"CB1260": {
+"n": 6,
+"core_late": 0
+},
+"CB1271": {
+"n": 8,
+"core_late": 0
+},
+"CB1276": {
+"n": 5,
+"core_late": 0
+},
+"CB1280": {
+"n": 3,
+"core_late": 0
+},
+"CB1287": {
+"n": 2,
+"core_late": 0
+},
+"CB1292": {
+"n": 6,
+"core_late": 0
+},
+"CB1298": {
+"n": 7,
+"core_late": 0
+},
+"CB1302": {
+"n": 3,
+"core_late": 0
+},
+"CB1308": {
+"n": 2,
+"core_late": 0
+},
+"CB1316": {
+"n": 4,
+"core_late": 0
+},
+"CB1321": {
+"n": 5,
+"core_late": 2
+},
+"CB1327": {
+"n": 5,
+"core_late": 0
+},
+"CB1331b": {
+"n": 2,
+"core_late": 0
+},
+"CB1337": {
+"n": 5,
+"core_late": 0
+},
+"CB1345": {
+"n": 7,
+"core_late": 0
+},
+"CB1352": {
+"n": 6,
+"core_late": 0
+},
+"CB1359": {
+"n": 14,
+"core_late": 0
+},
+"CB1368": {
+"n": 4,
+"core_late": 0
+},
+"CB1377": {
+"n": 2,
+"core_late": 0
+},
+"CB1387": {
+"n": 7,
+"core_late": 0
+},
+"CB1394_d": {
+"n": 8,
+"core_late": 0
+},
+"CB1401": {
+"n": 9,
+"core_late": 0
+},
+"CB1408": {
+"n": 2,
+"core_late": 0
+},
+"CB1414": {
+"n": 4,
+"core_late": 0
+},
+"CB1420": {
+"n": 7,
+"core_late": 0
+},
+"CB1432": {
+"n": 4,
+"core_late": 0
+},
+"CB1437": {
+"n": 6,
+"core_late": 0
+},
+"CB1441": {
+"n": 2,
+"core_late": 0
+},
+"CB1446": {
+"n": 4,
+"core_late": 0
+},
+"CB1454": {
+"n": 9,
+"core_late": 0
+},
+"CB1462": {
+"n": 4,
+"core_late": 0
+},
+"CB1470": {
+"n": 3,
+"core_late": 0
+},
+"CB1473": {
+"n": 5,
+"core_late": 477
+},
+"CB1485": {
+"n": 2,
+"core_late": 0
+},
+"CB1491": {
+"n": 3,
+"core_late": 0
+},
+"CB1499": {
+"n": 2,
+"core_late": 0
+},
+"CB1503": {
+"n": 4,
+"core_late": 0
+},
+"CB1511": {
+"n": 7,
+"core_late": 0
+},
+"CB1514": {
+"n": 3,
+"core_late": 0
+},
+"CB1522": {
+"n": 3,
+"core_late": 0
+},
+"CB1529": {
+"n": 4,
+"core_late": 0
+},
+"CB1539": {
+"n": 4,
+"core_late": 0
+},
+"CB1545": {
+"n": 6,
+"core_late": 0
+},
+"CB1552": {
+"n": 9,
+"core_late": 0
+},
+"CB1557": {
+"n": 4,
+"core_late": 0
+},
+"CB1560": {
+"n": 2,
+"core_late": 0
+},
+"CB1567": {
+"n": 5,
+"core_late": 0
+},
+"CB1574": {
+"n": 6,
+"core_late": 0
+},
+"CB1578": {
+"n": 5,
+"core_late": 0
+},
+"CB1587": {
+"n": 7,
+"core_late": 0
+},
+"CB1593": {
+"n": 6,
+"core_late": 0
+},
+"CB1605": {
+"n": 6,
+"core_late": 0
+},
+"CB1626": {
+"n": 4,
+"core_late": 0
+},
+"CB1629": {
+"n": 7,
+"core_late": 0
+},
+"CB1636": {
+"n": 2,
+"core_late": 0
+},
+"CB1644": {
+"n": 2,
+"core_late": 0
+},
+"CB1654": {
+"n": 5,
+"core_late": 0
+},
+"CB1657": {
+"n": 6,
+"core_late": 0
+},
+"CB1661": {
+"n": 3,
+"core_late": 0
+},
+"CB1664": {
+"n": 8,
+"core_late": 0
+},
+"CB1668": {
+"n": 7,
+"core_late": 0
+},
+"CB1673": {
+"n": 4,
+"core_late": 0
+},
+"CB1683": {
+"n": 3,
+"core_late": 0
+},
+"CB1688": {
+"n": 5,
+"core_late": 0
+},
+"CB1697": {
+"n": 3,
+"core_late": 0
+},
+"CB1701": {
+"n": 6,
+"core_late": 0
+},
+"CB1722": {
+"n": 6,
+"core_late": 0
+},
+"CB1727": {
+"n": 2,
+"core_late": 0
+},
+"CB1735": {
+"n": 7,
+"core_late": 0
+},
+"CB1739": {
+"n": 5,
+"core_late": 0
+},
+"CB1745": {
+"n": 3,
+"core_late": 0
+},
+"CB1753": {
+"n": 5,
+"core_late": 0
+},
+"CB1758": {
+"n": 2,
+"core_late": 0
+},
+"CB1764": {
+"n": 4,
+"core_late": 0
+},
+"CB1772": {
+"n": 4,
+"core_late": 0
+},
+"CB1781": {
+"n": 5,
+"core_late": 0
+},
+"CB1787": {
+"n": 2,
+"core_late": 0
+},
+"CB1795": {
+"n": 4,
+"core_late": 0
+},
+"CB1803": {
+"n": 4,
+"core_late": 0
+},
+"CB1811": {
+"n": 4,
+"core_late": 0
+},
+"CB1818": {
+"n": 4,
+"core_late": 0
+},
+"CB1824": {
+"n": 10,
+"core_late": 0
+},
+"CB1843": {
+"n": 6,
+"core_late": 0
+},
+"CB1849": {
+"n": 3,
+"core_late": 0
+},
+"CB1853": {
+"n": 5,
+"core_late": 0
+},
+"CB1861": {
+"n": 8,
+"core_late": 0
+},
+"CB1868": {
+"n": 7,
+"core_late": 0
+},
+"CB1875": {
+"n": 3,
+"core_late": 0
+},
+"CB1879": {
+"n": 2,
+"core_late": 0
+},
+"CB1887": {
+"n": 4,
+"core_late": 0
+},
+"CB1899": {
+"n": 6,
+"core_late": 0
+},
+"CB1909": {
+"n": 6,
+"core_late": 0
+},
+"CB1917": {
+"n": 4,
+"core_late": 0
+},
+"CB1924": {
+"n": 4,
+"core_late": 0
+},
+"CB1928": {
+"n": 5,
+"core_late": 0
+},
+"CB1932": {
+"n": 13,
+"core_late": 0
+},
+"CB1936": {
+"n": 5,
+"core_late": 0
+},
+"CB1944": {
+"n": 4,
+"core_late": 0
+},
+"CB1947": {
+"n": 2,
+"core_late": 0
+},
+"CB1953": {
+"n": 5,
+"core_late": 0
+},
+"CB1962": {
+"n": 2,
+"core_late": 0
+},
+"CB1969": {
+"n": 6,
+"core_late": 0
+},
+"CB1979": {
+"n": 5,
+"core_late": 0
+},
+"CB1987": {
+"n": 2,
+"core_late": 0
+},
+"CB1991": {
+"n": 7,
+"core_late": 0
+},
+"CB2004": {
+"n": 6,
+"core_late": 0
+},
+"CB2011": {
+"n": 4,
+"core_late": 0
+},
+"CB2018": {
+"n": 8,
+"core_late": 0
+},
+"CB2022": {
+"n": 4,
+"core_late": 0
+},
+"CB2029": {
+"n": 2,
+"core_late": 0
+},
+"CB2034": {
+"n": 6,
+"core_late": 0
+},
+"CB2038": {
+"n": 2,
+"core_late": 0
+},
+"CB2046": {
+"n": 2,
+"core_late": 0
+},
+"CB2051": {
+"n": 6,
+"core_late": 0
+},
+"CB2060": {
+"n": 3,
+"core_late": 0
+},
+"CB2066": {
+"n": 7,
+"core_late": 0
+},
+"CB2071": {
+"n": 11,
+"core_late": 0
+},
+"CB2077": {
+"n": 4,
+"core_late": 0
+},
+"CB2082": {
+"n": 4,
+"core_late": 0
+},
+"CB2092": {
+"n": 4,
+"core_late": 0
+},
+"CB2097": {
+"n": 4,
+"core_late": 0
+},
+"CB2107": {
+"n": 4,
+"core_late": 0
+},
+"CB2113": {
+"n": 2,
+"core_late": 0
+},
+"CB2120": {
+"n": 4,
+"core_late": 0
+},
+"CB2123": {
+"n": 3,
+"core_late": 0
+},
+"CB2129": {
+"n": 5,
+"core_late": 0
+},
+"CB2133": {
+"n": 5,
+"core_late": 0
+},
+"CB2141": {
+"n": 3,
+"core_late": 0
+},
+"CB2146": {
+"n": 3,
+"core_late": 0
+},
+"CB2152": {
+"n": 8,
+"core_late": 0
+},
+"CB2159": {
+"n": 3,
+"core_late": 0
+},
+"CB2166": {
+"n": 2,
+"core_late": 0
+},
+"CB2174": {
+"n": 5,
+"core_late": 0
+},
+"CB2180": {
+"n": 5,
+"core_late": 0
+},
+"CB2185": {
+"n": 4,
+"core_late": 0
+},
+"CB2193": {
+"n": 4,
+"core_late": 0
+},
+"CB2199": {
+"n": 6,
+"core_late": 0
+},
+"CB2206": {
+"n": 2,
+"core_late": 0
+},
+"CB2214": {
+"n": 8,
+"core_late": 0
+},
+"CB2224": {
+"n": 3,
+"core_late": 0
+},
+"CB2228": {
+"n": 7,
+"core_late": 0
+},
+"CB2238": {
+"n": 4,
+"core_late": 0
+},
+"CB2243": {
+"n": 3,
+"core_late": 0
+},
+"CB2249": {
+"n": 4,
+"core_late": 0
+},
+"CB2262": {
+"n": 4,
+"core_late": 0
+},
+"CB2267_b": {
+"n": 6,
+"core_late": 0
+},
+"CB2273": {
+"n": 4,
+"core_late": 0
+},
+"CB2279": {
+"n": 4,
+"core_late": 0
+},
+"CB2283": {
+"n": 2,
+"core_late": 0
+},
+"CB2292": {
+"n": 5,
+"core_late": 0
+},
+"CB2297": {
+"n": 5,
+"core_late": 0
+},
+"CB2302": {
+"n": 3,
+"core_late": 0
+},
+"CB2309": {
+"n": 6,
+"core_late": 0
+},
+"CB2315": {
+"n": 2,
+"core_late": 0
+},
+"CB2334": {
+"n": 4,
+"core_late": 0
+},
+"CB2337": {
+"n": 5,
+"core_late": 0
+},
+"CB2342": {
+"n": 10,
+"core_late": 0
+},
+"CB2345": {
+"n": 3,
+"core_late": 0
+},
+"CB2357": {
+"n": 11,
+"core_late": 0
+},
+"CB2376": {
+"n": 10,
+"core_late": 0
+},
+"CB2379": {
+"n": 3,
+"core_late": 0
+},
+"CB2388": {
+"n": 6,
+"core_late": 0
+},
+"CB2399": {
+"n": 9,
+"core_late": 0
+},
+"CB2411": {
+"n": 4,
+"core_late": 0
+},
+"CB2417": {
+"n": 4,
+"core_late": 0
+},
+"CB2424": {
+"n": 3,
+"core_late": 0
+},
+"CB2428": {
+"n": 5,
+"core_late": 0
+},
+"CB2440": {
+"n": 10,
+"core_late": 0
+},
+"CB2448": {
+"n": 5,
+"core_late": 0
+},
+"CB2461": {
+"n": 4,
+"core_late": 0
+},
+"CB2467": {
+"n": 9,
+"core_late": 0
+},
+"CB2475": {
+"n": 2,
+"core_late": 0
+},
+"CB2480": {
+"n": 6,
+"core_late": 0
+},
+"CB2492": {
+"n": 3,
+"core_late": 0
+},
+"CB2495": {
+"n": 2,
+"core_late": 0
+},
+"CB2502": {
+"n": 6,
+"core_late": 0
+},
+"CB2507": {
+"n": 7,
+"core_late": 0
+},
+"CB2512": {
+"n": 4,
+"core_late": 0
+},
+"CB2521": {
+"n": 2,
+"core_late": 0
+},
+"CB2525": {
+"n": 3,
+"core_late": 0
+},
+"CB2531": {
+"n": 5,
+"core_late": 0
+},
+"CB2537": {
+"n": 4,
+"core_late": 0
+},
+"CB2543": {
+"n": 3,
+"core_late": 0
+},
+"CB2550": {
+"n": 5,
+"core_late": 0
+},
+"CB2554": {
+"n": 3,
+"core_late": 0
+},
+"CB2558": {
+"n": 10,
+"core_late": 0
+},
+"CB2561": {
+"n": 3,
+"core_late": 0
+},
+"CB2567": {
+"n": 9,
+"core_late": 0
+},
+"CB2572": {
+"n": 8,
+"core_late": 0
+},
+"CB2580": {
+"n": 7,
+"core_late": 0
+},
+"CB2583": {
+"n": 3,
+"core_late": 0
+},
+"CB2589": {
+"n": 7,
+"core_late": 0
+},
+"CB2594": {
+"n": 2,
+"core_late": 0
+},
+"CB2599": {
+"n": 4,
+"core_late": 0
+},
+"CB2604": {
+"n": 5,
+"core_late": 0
+},
+"CB2612": {
+"n": 2,
+"core_late": 0
+},
+"CB2617": {
+"n": 3,
+"core_late": 0
+},
+"CB2625": {
+"n": 6,
+"core_late": 0
+},
+"CB2637": {
+"n": 2,
+"core_late": 0
+},
+"CB2659": {
+"n": 4,
+"core_late": 0
+},
+"CB2662": {
+"n": 2,
+"core_late": 0
+},
+"CB2673": {
+"n": 2,
+"core_late": 0
+},
+"CB2678": {
+"n": 7,
+"core_late": 0
+},
+"CB2685": {
+"n": 12,
+"core_late": 0
+},
+"CB2689": {
+"n": 3,
+"core_late": 0
+},
+"CB2696": {
+"n": 4,
+"core_late": 0
+},
+"CB2700": {
+"n": 4,
+"core_late": 0
+},
+"CB2707": {
+"n": 6,
+"core_late": 0
+},
+"CB2713": {
+"n": 4,
+"core_late": 0
+},
+"CB2716": {
+"n": 1,
+"core_late": 0
+},
+"CB2725": {
+"n": 2,
+"core_late": 0
+},
+"CB2731": {
+"n": 4,
+"core_late": 0
+},
+"CB2739": {
+"n": 3,
+"core_late": 0
+},
+"CB2745": {
+"n": 4,
+"core_late": 0
+},
+"CB2749": {
+"n": 2,
+"core_late": 0
+},
+"CB2757": {
+"n": 5,
+"core_late": 0
+},
+"CB2761": {
+"n": 3,
+"core_late": 0
+},
+"CB2765": {
+"n": 2,
+"core_late": 0
+},
+"CB2770": {
+"n": 5,
+"core_late": 0
+},
+"CB2773": {
+"n": 2,
+"core_late": 0
+},
+"CB2782": {
+"n": 2,
+"core_late": 0
+},
+"CB2790": {
+"n": 2,
+"core_late": 0
+},
+"CB2796": {
+"n": 2,
+"core_late": 0
+},
+"CB2800": {
+"n": 2,
+"core_late": 0
+},
+"CB2803": {
+"n": 3,
+"core_late": 0
+},
+"CB2810": {
+"n": 4,
+"core_late": 0
+},
+"CB2816": {
+"n": 4,
+"core_late": 0
+},
+"CB2823": {
+"n": 9,
+"core_late": 1
+},
+"CB2829": {
+"n": 4,
+"core_late": 0
+},
+"CB2835": {
+"n": 8,
+"core_late": 0
+},
+"CB2845": {
+"n": 4,
+"core_late": 0
+},
+"CB2853": {
+"n": 4,
+"core_late": 0
+},
+"CB2860": {
+"n": 2,
+"core_late": 0
+},
+"CB2870": {
+"n": 2,
+"core_late": 0
+},
+"CB2881": {
+"n": 12,
+"core_late": 0
+},
+"CB2885": {
+"n": 4,
+"core_late": 0
+},
+"CB2889": {
+"n": 2,
+"core_late": 0
+},
+"CB2899": {
+"n": 4,
+"core_late": 0
+},
+"CB2906": {
+"n": 4,
+"core_late": 0
+},
+"CB2909": {
+"n": 3,
+"core_late": 0
+},
+"CB2914": {
+"n": 5,
+"core_late": 0
+},
+"CB2919": {
+"n": 5,
+"core_late": 0
+},
+"CB2923": {
+"n": 6,
+"core_late": 0
+},
+"CB2928": {
+"n": 10,
+"core_late": 0
+},
+"CB2934": {
+"n": 5,
+"core_late": 0
+},
+"CB2940": {
+"n": 2,
+"core_late": 0
+},
+"CB2955": {
+"n": 7,
+"core_late": 0
+},
+"CB2963": {
+"n": 2,
+"core_late": 0
+},
+"CB2967": {
+"n": 3,
+"core_late": 0
+},
+"CB2976": {
+"n": 4,
+"core_late": 0
+},
+"CB2979": {
+"n": 2,
+"core_late": 0
+},
+"CB2984": {
+"n": 4,
+"core_late": 0
+},
+"CB2991": {
+"n": 4,
+"core_late": 0
+},
+"CB2999": {
+"n": 2,
+"core_late": 0
+},
+"CB3003": {
+"n": 2,
+"core_late": 0
+},
+"CB3007": {
+"n": 7,
+"core_late": 0
+},
+"CB3012": {
+"n": 3,
+"core_late": 0
+},
+"CB3016": {
+"n": 6,
+"core_late": 0
+},
+"CB3020": {
+"n": 2,
+"core_late": 0
+},
+"CB3030": {
+"n": 2,
+"core_late": 0
+},
+"CB3034": {
+"n": 6,
+"core_late": 0
+},
+"CB3040": {
+"n": 4,
+"core_late": 0
+},
+"CB3047": {
+"n": 2,
+"core_late": 0
+},
+"CB3050": {
+"n": 10,
+"core_late": 0
+},
+"CB3060": {
+"n": 3,
+"core_late": 0
+},
+"CB3064": {
+"n": 4,
+"core_late": 0
+},
+"CB3074": {
+"n": 4,
+"core_late": 0
+},
+"CB3079": {
+"n": 2,
+"core_late": 0
+},
+"CB3082": {
+"n": 3,
+"core_late": 0
+},
+"CB3089": {
+"n": 4,
+"core_late": 0
+},
+"CB3094": {
+"n": 2,
+"core_late": 0
+},
+"CB3108": {
+"n": 3,
+"core_late": 0
+},
+"CB3111": {
+"n": 6,
+"core_late": 0
+},
+"CB3120": {
+"n": 2,
+"core_late": 0
+},
+"CB3124": {
+"n": 3,
+"core_late": 0
+},
+"CB3133": {
+"n": 3,
+"core_late": 0
+},
+"CB3136": {
+"n": 4,
+"core_late": 0
+},
+"CB3143": {
+"n": 5,
+"core_late": 0
+},
+"CB3148": {
+"n": 3,
+"core_late": 0
+},
+"CB3155": {
+"n": 2,
+"core_late": 0
+},
+"CB3163": {
+"n": 4,
+"core_late": 0
+},
+"CB3174": {
+"n": 5,
+"core_late": 0
+},
+"CB3180": {
+"n": 2,
+"core_late": 0
+},
+"CB3185": {
+"n": 4,
+"core_late": 0
+},
+"CB3191": {
+"n": 3,
+"core_late": 0
+},
+"CB3196": {
+"n": 2,
+"core_late": 0
+},
+"CB3200": {
+"n": 2,
+"core_late": 0
+},
+"CB3205": {
+"n": 2,
+"core_late": 0
+},
+"CB3210": {
+"n": 2,
+"core_late": 0
+},
+"CB3221": {
+"n": 2,
+"core_late": 0
+},
+"CB3228": {
+"n": 2,
+"core_late": 0
+},
+"CB3235": {
+"n": 2,
+"core_late": 0
+},
+"CB3244": {
+"n": 2,
+"core_late": 0
+},
+"CB3251": {
+"n": 2,
+"core_late": 0
+},
+"CB3261": {
+"n": 6,
+"core_late": 0
+},
+"CB3273": {
+"n": 4,
+"core_late": 0
+},
+"CB3276": {
+"n": 6,
+"core_late": 0
+},
+"CB3280": {
+"n": 2,
+"core_late": 0
+},
+"CB3284": {
+"n": 2,
+"core_late": 0
+},
+"CB3288": {
+"n": 4,
+"core_late": 0
+},
+"CB3293": {
+"n": 6,
+"core_late": 0
+},
+"CB3298": {
+"n": 5,
+"core_late": 0
+},
+"CB3304": {
+"n": 4,
+"core_late": 0
+},
+"CB3310": {
+"n": 2,
+"core_late": 0
+},
+"CB3316": {
+"n": 2,
+"core_late": 0
+},
+"CB3319": {
+"n": 2,
+"core_late": 0
+},
+"CB3331": {
+"n": 4,
+"core_late": 0
+},
+"CB3339": {
+"n": 2,
+"core_late": 0
+},
+"CB3342": {
+"n": 2,
+"core_late": 0
+},
+"CB3351": {
+"n": 2,
+"core_late": 0
+},
+"CB3356": {
+"n": 2,
+"core_late": 0
+},
+"CB3365": {
+"n": 2,
+"core_late": 0
+},
+"CB3374": {
+"n": 4,
+"core_late": 0
+},
+"CB3381": {
+"n": 2,
+"core_late": 0
+},
+"CB3385": {
+"n": 2,
+"core_late": 0
+},
+"CB3391": {
+"n": 6,
+"core_late": 0
+},
+"CB3396": {
+"n": 4,
+"core_late": 0
+},
+"CB3403": {
+"n": 4,
+"core_late": 0
+},
+"CB3408": {
+"n": 2,
+"core_late": 0
+},
+"CB3415": {
+"n": 2,
+"core_late": 0
+},
+"CB3424": {
+"n": 5,
+"core_late": 0
+},
+"CB3437": {
+"n": 3,
+"core_late": 0
+},
+"CB3448": {
+"n": 2,
+"core_late": 0
+},
+"CB3455": {
+"n": 2,
+"core_late": 0
+},
+"CB3462": {
+"n": 3,
+"core_late": 0
+},
+"CB3467": {
+"n": 2,
+"core_late": 0
+},
+"CB3470": {
+"n": 4,
+"core_late": 0
+},
+"CB3477": {
+"n": 2,
+"core_late": 0
+},
+"CB3498": {
+"n": 2,
+"core_late": 0
+},
+"CB3506": {
+"n": 2,
+"core_late": 0
+},
+"CB3510": {
+"n": 2,
+"core_late": 0
+},
+"CB3516": {
+"n": 2,
+"core_late": 0
+},
+"CB3532": {
+"n": 2,
+"core_late": 0
+},
+"CB3539": {
+"n": 6,
+"core_late": 0
+},
+"CB3545": {
+"n": 3,
+"core_late": 0
+},
+"CB3551": {
+"n": 3,
+"core_late": 0
+},
+"CB3555": {
+"n": 4,
+"core_late": 0
+},
+"CB3559": {
+"n": 3,
+"core_late": 0
+},
+"CB3568": {
+"n": 2,
+"core_late": 0
+},
+"CB3575": {
+"n": 2,
+"core_late": 0
+},
+"CB3578": {
+"n": 2,
+"core_late": 0
+},
+"CB3590": {
+"n": 4,
+"core_late": 0
+},
+"CB3605": {
+"n": 2,
+"core_late": 0
+},
+"CB3617": {
+"n": 2,
+"core_late": 0
+},
+"CB3624": {
+"n": 2,
+"core_late": 0
+},
+"CB3633": {
+"n": 3,
+"core_late": 477
+},
+"CB3646": {
+"n": 4,
+"core_late": 0
+},
+"CB3654": {
+"n": 2,
+"core_late": 0
+},
+"CB3660": {
+"n": 4,
+"core_late": 0
+},
+"CB3670": {
+"n": 2,
+"core_late": 0
+},
+"CB3673b": {
+"n": 2,
+"core_late": 0
+},
+"CB3685": {
+"n": 4,
+"core_late": 0
+},
+"CB3696": {
+"n": 4,
+"core_late": 0
+},
+"CB3703": {
+"n": 2,
+"core_late": 0
+},
+"CB3709": {
+"n": 2,
+"core_late": 0
+},
+"CB3717": {
+"n": 2,
+"core_late": 0
+},
+"CB3724": {
+"n": 2,
+"core_late": 0
+},
+"CB3728": {
+"n": 6,
+"core_late": 0
+},
+"CB3732": {
+"n": 2,
+"core_late": 0
+},
+"CB3737": {
+"n": 3,
+"core_late": 0
+},
+"CB3741": {
+"n": 3,
+"core_late": 0
+},
+"CB3751": {
+"n": 2,
+"core_late": 0
+},
+"CB3759": {
+"n": 4,
+"core_late": 0
+},
+"CB3774": {
+"n": 2,
+"core_late": 0
+},
+"CB3777": {
+"n": 4,
+"core_late": 0
+},
+"CB3781": {
+"n": 2,
+"core_late": 0
+},
+"CB3788": {
+"n": 2,
+"core_late": 0
+},
+"CB3791": {
+"n": 2,
+"core_late": 0
+},
+"CB3798": {
+"n": 2,
+"core_late": 0
+},
+"CB3811": {
+"n": 2,
+"core_late": 0
+},
+"CB3869": {
+"n": 3,
+"core_late": 0
+},
+"CB3873": {
+"n": 7,
+"core_late": 0
+},
+"CB3896": {
+"n": 2,
+"core_late": 0
+},
+"CB3900": {
+"n": 4,
+"core_late": 0
+},
+"CB3906": {
+"n": 2,
+"core_late": 0
+},
+"CB3910": {
+"n": 4,
+"core_late": 0
+},
+"CB3922": {
+"n": 3,
+"core_late": 0
+},
+"CB3932": {
+"n": 4,
+"core_late": 0
+},
+"CB3941": {
+"n": 2,
+"core_late": 0
+},
+"CB3977": {
+"n": 3,
+"core_late": 0
+},
+"CB4094": {
+"n": 1,
+"core_late": 0
+},
+"CB4171": {
+"n": 7,
+"core_late": 0
+},
+"CB4187": {
+"n": 6,
+"core_late": 0
+},
+"CB4218": {
+"n": 2,
+"core_late": 0
+},
+"CB4233": {
+"n": 15,
+"core_late": 0
+},
+"CB4247": {
+"n": 1,
+"core_late": 0
+},
+"CL003": {
+"n": 2,
+"core_late": 0
+},
+"CL008": {
+"n": 2,
+"core_late": 0
+},
+"CL011": {
+"n": 2,
+"core_late": 0
+},
+"CL015": {
+"n": 2,
+"core_late": 0
+},
+"CL022": {
+"n": 6,
+"core_late": 0
+},
+"CL024b": {
+"n": 6,
+"core_late": 0
+},
+"CL027": {
+"n": 2,
+"core_late": 0
+},
+"CL029b": {
+"n": 2,
+"core_late": 0
+},
+"CL036": {
+"n": 2,
+"core_late": 0
+},
+"CL053": {
+"n": 2,
+"core_late": 0
+},
+"CL059": {
+"n": 2,
+"core_late": 0
+},
+"CL065": {
+"n": 2,
+"core_late": 0
+},
+"CL069": {
+"n": 2,
+"core_late": 0
+},
+"CL071a": {
+"n": 2,
+"core_late": 0
+},
+"CL073": {
+"n": 2,
+"core_late": 0
+},
+"CL077": {
+"n": 3,
+"core_late": 0
+},
+"CL080": {
+"n": 5,
+"core_late": 0
+},
+"CL085_b": {
+"n": 4,
+"core_late": 0
+},
+"CL086_c": {
+"n": 8,
+"core_late": 0
+},
+"CL089_b": {
+"n": 8,
+"core_late": 0
+},
+"CL090_e": {
+"n": 6,
+"core_late": 0
+},
+"CL094": {
+"n": 2,
+"core_late": 0
+},
+"CL099a": {
+"n": 4,
+"core_late": 0
+},
+"CL100": {
+"n": 3,
+"core_late": 0
+},
+"CL104": {
+"n": 4,
+"core_late": 0
+},
+"CL111": {
+"n": 2,
+"core_late": 0
+},
+"CL114": {
+"n": 2,
+"core_late": 0
+},
+"CL123,CRE061": {
+"n": 12,
+"core_late": 0
+},
+"CL128a": {
+"n": 5,
+"core_late": 0
+},
+"CL129": {
+"n": 2,
+"core_late": 0
+},
+"CL133": {
+"n": 2,
+"core_late": 0
+},
+"CL140": {
+"n": 2,
+"core_late": 0
+},
+"CL150": {
+"n": 2,
+"core_late": 0
+},
+"CL156": {
+"n": 2,
+"core_late": 0
+},
+"CL160": {
+"n": 1,
+"core_late": 0
+},
+"CL166,CL168": {
+"n": 7,
+"core_late": 0
+},
+"CL182": {
+"n": 9,
+"core_late": 0
+},
+"CL196b": {
+"n": 5,
+"core_late": 0
+},
+"CL211": {
+"n": 2,
+"core_late": 0
+},
+"CL231,CL238": {
+"n": 4,
+"core_late": 0
+},
+"CL236": {
+"n": 2,
+"core_late": 0
+},
+"CL246": {
+"n": 2,
+"core_late": 0
+},
+"CL251": {
+"n": 2,
+"core_late": 0
+},
+"CL256": {
+"n": 2,
+"core_late": 0
+},
+"CL264": {
+"n": 2,
+"core_late": 0
+},
+"CL266_b": {
+"n": 4,
+"core_late": 0
+},
+"CL269": {
+"n": 7,
+"core_late": 0
+},
+"CL272_a": {
+"n": 4,
+"core_late": 0
+},
+"CL282": {
+"n": 4,
+"core_late": 0
+},
+"CL287": {
+"n": 2,
+"core_late": 0
+},
+"CL292b": {
+"n": 2,
+"core_late": 0
+},
+"CL303": {
+"n": 2,
+"core_late": 0
+},
+"CL317": {
+"n": 2,
+"core_late": 0
+},
+"CL323a": {
+"n": 2,
+"core_late": 0
+},
+"CL339": {
+"n": 2,
+"core_late": 0
+},
+"CL356": {
+"n": 4,
+"core_late": 0
+},
+"CL361": {
+"n": 2,
+"core_late": 0
+},
+"CRE001": {
+"n": 4,
+"core_late": 0
+},
+"CRE007": {
+"n": 2,
+"core_late": 0
+},
+"CRE011": {
+"n": 2,
+"core_late": 0
+},
+"CRE021": {
+"n": 2,
+"core_late": 0
+},
+"CRE024": {
+"n": 2,
+"core_late": 0
+},
+"CRE040": {
+"n": 2,
+"core_late": 0
+},
+"CRE044": {
+"n": 9,
+"core_late": 0
+},
+"CRE050": {
+"n": 2,
+"core_late": 0
+},
+"CRE062": {
+"n": 2,
+"core_late": 0
+},
+"CRE068": {
+"n": 5,
+"core_late": 0
+},
+"CRE074": {
+"n": 2,
+"core_late": 0
+},
+"CRE077": {
+"n": 2,
+"core_late": 0
+},
+"CRE080b": {
+"n": 2,
+"core_late": 0
+},
+"CRE082": {
+"n": 2,
+"core_late": 0
+},
+"CRE094": {
+"n": 4,
+"core_late": 0
+},
+"CRE100": {
+"n": 2,
+"core_late": 0
+},
+"CRE105": {
+"n": 2,
+"core_late": 0
+},
+"CRZ": {
+"n": 6,
+"core_late": 0
+},
+"DA1_lPN": {
+"n": 15,
+"core_late": 477
+},
+"DA4l_adPN": {
+"n": 2,
+"core_late": 477
+},
+"DC4_vPN": {
+"n": 4,
+"core_late": 0
+},
+"DL2d_vPN": {
+"n": 4,
+"core_late": 0
+},
+"DM2_lPN": {
+"n": 4,
+"core_late": 477
+},
+"DM5_lPN": {
+"n": 5,
+"core_late": 477
+},
+"DN1a": {
+"n": 4,
+"core_late": 0
+},
+"DNae005": {
+"n": 2,
+"core_late": 0
+},
+"DNbe001": {
+"n": 2,
+"core_late": 0
+},
+"DNc01": {
+"n": 2,
+"core_late": 0
+},
+"DNd04": {
+"n": 2,
+"core_late": 0
+},
+"DNg103": {
+"n": 2,
+"core_late": 0
+},
+"DNg15": {
+"n": 2,
+"core_late": 0
+},
+"DNg30": {
+"n": 2,
+"core_late": 0
+},
+"DNg55": {
+"n": 1,
+"core_late": 0
+},
+"DNg82": {
+"n": 4,
+"core_late": 0
+},
+"DNg98": {
+"n": 2,
+"core_late": 0
+},
+"DNge041": {
+"n": 2,
+"core_late": 0
+},
+"DNge053": {
+"n": 2,
+"core_late": 0
+},
+"DNge075": {
+"n": 2,
+"core_late": 0
+},
+"DNge105": {
+"n": 2,
+"core_late": 0
+},
+"DNge122": {
+"n": 2,
+"core_late": 0
+},
+"DNge141": {
+"n": 2,
+"core_late": 0
+},
+"DNp05": {
+"n": 2,
+"core_late": 0
+},
+"DNp10": {
+"n": 2,
+"core_late": 0
+},
+"DNp104": {
+"n": 2,
+"core_late": 0
+},
+"DNp18": {
+"n": 2,
+"core_late": 0
+},
+"DNp29": {
+"n": 2,
+"core_late": 0
+},
+"DNp32": {
+"n": 2,
+"core_late": 0
+},
+"DNp42": {
+"n": 2,
+"core_late": 0
+},
+"DNp46": {
+"n": 2,
+"core_late": 0
+},
+"DNp52": {
+"n": 2,
+"core_late": 0
+},
+"DNp59": {
+"n": 2,
+"core_late": 0
+},
+"DNp68": {
+"n": 2,
+"core_late": 0
+},
+"DNpe003": {
+"n": 4,
+"core_late": 0
+},
+"DNpe026": {
+"n": 2,
+"core_late": 0
+},
+"DNpe029": {
+"n": 4,
+"core_late": 0
+},
+"DNpe037": {
+"n": 2,
+"core_late": 0
+},
+"DNpe043": {
+"n": 2,
+"core_late": 0
+},
+"DNpe049": {
+"n": 2,
+"core_late": 0
+},
+"DP1m_vPN": {
+"n": 4,
+"core_late": 0
+},
+"ENS5": {
+"n": 18,
+"core_late": 0
+},
+"ExR7": {
+"n": 4,
+"core_late": 0
+},
+"FB2H_a,FB2I_b": {
+"n": 4,
+"core_late": 0
+},
+"FB4K": {
+"n": 4,
+"core_late": 0
+},
+"FB4Y": {
+"n": 6,
+"core_late": 0
+},
+"FB6A": {
+"n": 4,
+"core_late": 0
+},
+"FB6D": {
+"n": 2,
+"core_late": 0
+},
+"FB6S": {
+"n": 6,
+"core_late": 0
+},
+"FB7G,FB7I": {
+"n": 12,
+"core_late": 0
+},
+"H01": {
+"n": 2,
+"core_late": 0
+},
+"HRN_VP5": {
+"n": 16,
+"core_late": 477
+},
+"IB015": {
+"n": 2,
+"core_late": 0
+},
+"IB032": {
+"n": 8,
+"core_late": 0
+},
+"IB051": {
+"n": 4,
+"core_late": 0
+},
+"IB065": {
+"n": 2,
+"core_late": 0
+},
+"IB114": {
+"n": 2,
+"core_late": 0
+},
+"IB118": {
+"n": 2,
+"core_late": 0
+},
+"JO-ED1": {
+"n": 27,
+"core_late": 1
+},
+"JO-EV3": {
+"n": 46,
+"core_late": 0
+},
+"KCa'b'-ap1": {
+"n": 1,
+"core_late": 0
+},
+"KCapbp-ap1": {
+"n": 280,
+"core_late": 2
+},
+"KCg-d": {
+"n": 295,
+"core_late": 2
+},
+"KCg-s2": {
+"n": 2,
+"core_late": 0
+},
+"LAL011": {
+"n": 2,
+"core_late": 0
+},
+"LAL030b": {
+"n": 4,
+"core_late": 0
+},
+"LAL037": {
+"n": 6,
+"core_late": 0
+},
+"LAL075": {
+"n": 2,
+"core_late": 0
+},
+"LAL103,LAL109": {
+"n": 4,
+"core_late": 0
+},
+"LAL119": {
+"n": 2,
+"core_late": 0
+},
+"LAL140": {
+"n": 2,
+"core_late": 0
+},
+"LAL144a": {
+"n": 2,
+"core_late": 0
+},
+"LAL150b": {
+"n": 4,
+"core_late": 0
+},
+"LAL155": {
+"n": 4,
+"core_late": 0
+},
+"LAL171,LAL172": {
+"n": 4,
+"core_late": 0
+},
+"LAL182": {
+"n": 2,
+"core_late": 0
+},
+"LAL187": {
+"n": 4,
+"core_late": 0
+},
+"LAL191": {
+"n": 2,
+"core_late": 0
+},
+"LAL198": {
+"n": 2,
+"core_late": 0
+},
+"LB1e": {
+"n": 23,
+"core_late": 0
+},
+"LB3": {
+"n": 3,
+"core_late": 0
+},
+"LB3c": {
+"n": 32,
+"core_late": 0
+},
+"LC15": {
+"n": 106,
+"core_late": 0
+},
+"LC22": {
+"n": 89,
+"core_late": 0
+},
+"LC27": {
+"n": 37,
+"core_late": 0
+},
+"LC29": {
+"n": 45,
+"core_late": 0
+},
+"LC36": {
+"n": 35,
+"core_late": 0
+},
+"LC4": {
+"n": 104,
+"core_late": 0
+},
+"LC43": {
+"n": 12,
+"core_late": 0
+},
+"LC45b": {
+"n": 10,
+"core_late": 0
+},
+"LCe01b": {
+"n": 45,
+"core_late": 0
+},
+"LCe05": {
+"n": 19,
+"core_late": 0
+},
+"LCe09": {
+"n": 16,
+"core_late": 0
+},
+"LHAD1a3,LHAD1f5": {
+"n": 6,
+"core_late": 0
+},
+"LHAD1a4c": {
+"n": 2,
+"core_late": 0
+},
+"LHAD1b3": {
+"n": 6,
+"core_late": 0
+},
+"LHAD1c2a": {
+"n": 2,
+"core_late": 1
+},
+"LHAD1c3": {
+"n": 6,
+"core_late": 1
+},
+"LHAD1f1a": {
+"n": 2,
+"core_late": 0
+},
+"LHAD1f3b": {
+"n": 2,
+"core_late": 0
+},
+"LHAD1f4b": {
+"n": 6,
+"core_late": 0
+},
+"LHAD1h1": {
+"n": 2,
+"core_late": 0
+},
+"LHAD2b1": {
+"n": 2,
+"core_late": 0
+},
+"LHAD2c3a": {
+"n": 2,
+"core_late": 0
+},
+"LHAD2d1": {
+"n": 2,
+"core_late": 0
+},
+"LHAD3a10": {
+"n": 1,
+"core_late": 0
+},
+"LHAD3g1": {
+"n": 5,
+"core_late": 0
+},
+"LHAV1a3": {
+"n": 13,
+"core_late": 0
+},
+"LHAV1b3": {
+"n": 2,
+"core_late": 0
+},
+"LHAV1e1": {
+"n": 2,
+"core_late": 0
+},
+"LHAV2a3c": {
+"n": 4,
+"core_late": 0
+},
+"LHAV2b11": {
+"n": 2,
+"core_late": 0
+},
+"LHAV2b7_a": {
+"n": 4,
+"core_late": 0
+},
+"LHAV2d1": {
+"n": 2,
+"core_late": 0
+},
+"LHAV2g1a": {
+"n": 2,
+"core_late": 0
+},
+"LHAV2g2_b": {
+"n": 4,
+"core_late": 0
+},
+"LHAV2k10": {
+"n": 2,
+"core_late": 0
+},
+"LHAV2k8": {
+"n": 2,
+"core_late": 0
+},
+"LHAV2p1": {
+"n": 2,
+"core_late": 1
+},
+"LHAV3b12": {
+"n": 2,
+"core_late": 0
+},
+"LHAV3e2": {
+"n": 4,
+"core_late": 0
+},
+"LHAV3e6": {
+"n": 2,
+"core_late": 0
+},
+"LHAV3h1": {
+"n": 2,
+"core_late": 0
+},
+"LHAV3k2": {
+"n": 2,
+"core_late": 0
+},
+"LHAV3k5": {
+"n": 2,
+"core_late": 0
+},
+"LHAV3o1": {
+"n": 6,
+"core_late": 1
+},
+"LHAV4a1_b": {
+"n": 8,
+"core_late": 0
+},
+"LHAV4b1": {
+"n": 5,
+"core_late": 0
+},
+"LHAV4c2": {
+"n": 7,
+"core_late": 0
+},
+"LHAV4e4": {
+"n": 2,
+"core_late": 0
+},
+"LHAV4g1b": {
+"n": 3,
+"core_late": 0
+},
+"LHAV4i2": {
+"n": 2,
+"core_late": 0
+},
+"LHAV5a10_b": {
+"n": 3,
+"core_late": 0
+},
+"LHAV5a2_a3": {
+"n": 11,
+"core_late": 0
+},
+"LHAV5a2_d": {
+"n": 2,
+"core_late": 0
+},
+"LHAV6a1": {
+"n": 6,
+"core_late": 1
+},
+"LHAV6c1b": {
+"n": 3,
+"core_late": 0
+},
+"LHAV6h1": {
+"n": 2,
+"core_late": 0
+},
+"LHAV7a1c": {
+"n": 3,
+"core_late": 0
+},
+"LHAV7a4a": {
+"n": 6,
+"core_late": 0
+},
+"LHAV7a6": {
+"n": 2,
+"core_late": 0
+},
+"LHAV9a1_a": {
+"n": 4,
+"core_late": 0
+},
+"LHCENT10": {
+"n": 4,
+"core_late": 0
+},
+"LHCENT12b": {
+"n": 4,
+"core_late": 0
+},
+"LHCENT13_c": {
+"n": 3,
+"core_late": 0
+},
+"LHCENT2": {
+"n": 2,
+"core_late": 0
+},
+"LHCENT6": {
+"n": 2,
+"core_late": 0
+},
+"LHMB1": {
+"n": 2,
+"core_late": 0
+},
+"LHPD2c1": {
+"n": 2,
+"core_late": 0
+},
+"LHPD2d2": {
+"n": 2,
+"core_late": 0
+},
+"LHPD3c1": {
+"n": 2,
+"core_late": 0
+},
+"LHPD4b1b": {
+"n": 4,
+"core_late": 0
+},
+"LHPD5d1": {
+"n": 4,
+"core_late": 0
+},
+"LHPV10d1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV1c2": {
+"n": 2,
+"core_late": 0
+},
+"LHPV2a1_c": {
+"n": 10,
+"core_late": 0
+},
+"LHPV2a5": {
+"n": 5,
+"core_late": 0
+},
+"LHPV2c2b": {
+"n": 6,
+"core_late": 0
+},
+"LHPV2e1_a": {
+"n": 7,
+"core_late": 0
+},
+"LHPV2h1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV2i2a": {
+"n": 2,
+"core_late": 0
+},
+"LHPV3a2": {
+"n": 5,
+"core_late": 0
+},
+"LHPV3c1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV4a10": {
+"n": 10,
+"core_late": 0
+},
+"LHPV4a5, LHPV4k1": {
+"n": 6,
+"core_late": 0
+},
+"LHPV4a8": {
+"n": 5,
+"core_late": 0
+},
+"LHPV4b2": {
+"n": 1,
+"core_late": 0
+},
+"LHPV4c3, LHPV4c4": {
+"n": 4,
+"core_late": 0
+},
+"LHPV4e1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV4i3": {
+"n": 1,
+"core_late": 0
+},
+"LHPV5a1": {
+"n": 15,
+"core_late": 0
+},
+"LHPV5b2": {
+"n": 15,
+"core_late": 0
+},
+"LHPV5b6": {
+"n": 8,
+"core_late": 0
+},
+"LHPV5c3": {
+"n": 10,
+"core_late": 0
+},
+"LHPV5e2": {
+"n": 2,
+"core_late": 0
+},
+"LHPV5g1_b": {
+"n": 8,
+"core_late": 0
+},
+"LHPV5l1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV6a3": {
+"n": 7,
+"core_late": 0
+},
+"LHPV6d1": {
+"n": 9,
+"core_late": 1
+},
+"LHPV6h1": {
+"n": 6,
+"core_late": 0
+},
+"LHPV6k1": {
+"n": 1,
+"core_late": 0
+},
+"LHPV6l2": {
+"n": 2,
+"core_late": 0
+},
+"LHPV6p1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV7a1a": {
+"n": 2,
+"core_late": 0
+},
+"LHPV7c1": {
+"n": 3,
+"core_late": 0
+},
+"LLPC1": {
+"n": 219,
+"core_late": 0
+},
+"LMTe01": {
+"n": 4,
+"core_late": 0
+},
+"LNd_b": {
+"n": 4,
+"core_late": 0
+},
+"LPLC4": {
+"n": 110,
+"core_late": 2
+},
+"LPT47_vCal2": {
+"n": 2,
+"core_late": 0
+},
+"LPT51": {
+"n": 2,
+"core_late": 0
+},
+"LPTe01": {
+"n": 38,
+"core_late": 0
+},
+"LT43": {
+"n": 4,
+"core_late": 0
+},
+"LT52": {
+"n": 31,
+"core_late": 0
+},
+"LT59": {
+"n": 2,
+"core_late": 0
+},
+"LT67": {
+"n": 2,
+"core_late": 0
+},
+"LT73": {
+"n": 4,
+"core_late": 0
+},
+"LT77": {
+"n": 6,
+"core_late": 0
+},
+"LT81": {
+"n": 11,
+"core_late": 0
+},
+"LT86": {
+"n": 2,
+"core_late": 0
+},
+"LTe03": {
+"n": 4,
+"core_late": 0
+},
+"LTe10": {
+"n": 2,
+"core_late": 0
+},
+"LTe14": {
+"n": 2,
+"core_late": 0
+},
+"LTe18": {
+"n": 2,
+"core_late": 0
+},
+"LTe23": {
+"n": 2,
+"core_late": 0
+},
+"LTe31": {
+"n": 2,
+"core_late": 0
+},
+"LTe38a": {
+"n": 8,
+"core_late": 0
+},
+"LTe42a": {
+"n": 2,
+"core_late": 2
+},
+"LTe43a": {
+"n": 2,
+"core_late": 0
+},
+"LTe50": {
+"n": 4,
+"core_late": 0
+},
+"LTe54": {
+"n": 4,
+"core_late": 0
+},
+"LTe57": {
+"n": 2,
+"core_late": 0
+},
+"LTe59b": {
+"n": 2,
+"core_late": 0
+},
+"LTe68a": {
+"n": 4,
+"core_late": 0
+},
+"LTe70": {
+"n": 2,
+"core_late": 0
+},
+"LTe74": {
+"n": 2,
+"core_late": 0
+},
+"LgAG3": {
+"n": 6,
+"core_late": 0
+},
+"LgAG8": {
+"n": 8,
+"core_late": 0
+},
+"Li33": {
+"n": 2,
+"core_late": 0
+},
+"MBON02": {
+"n": 2,
+"core_late": 0
+},
+"MBON05": {
+"n": 2,
+"core_late": 0
+},
+"MBON09": {
+"n": 4,
+"core_late": 0
+},
+"MBON12": {
+"n": 4,
+"core_late": 0
+},
+"MBON15": {
+"n": 4,
+"core_late": 0
+},
+"MBON17": {
+"n": 2,
+"core_late": 0
+},
+"MBON19": {
+"n": 4,
+"core_late": 0
+},
+"MBON22": {
+"n": 2,
+"core_late": 1
+},
+"MBON25,MBON34": {
+"n": 6,
+"core_late": 0
+},
+"MBON28": {
+"n": 2,
+"core_late": 2
+},
+"MBON31": {
+"n": 2,
+"core_late": 0
+},
+"MBON35": {
+"n": 2,
+"core_late": 0
+},
+"MLt7": {
+"n": 50,
+"core_late": 0
+},
+"MTe04": {
+"n": 30,
+"core_late": 0
+},
+"MTe09": {
+"n": 10,
+"core_late": 0
+},
+"MTe14": {
+"n": 4,
+"core_late": 0
+},
+"MTe17b": {
+"n": 2,
+"core_late": 0
+},
+"MTe23": {
+"n": 2,
+"core_late": 0
+},
+"MTe26": {
+"n": 2,
+"core_late": 0
+},
+"MTe30": {
+"n": 2,
+"core_late": 0
+},
+"MTe33": {
+"n": 2,
+"core_late": 0
+},
+"MTe37": {
+"n": 2,
+"core_late": 0
+},
+"MTe42": {
+"n": 2,
+"core_late": 0
+},
+"MTe45": {
+"n": 2,
+"core_late": 0
+},
+"MTe49": {
+"n": 2,
+"core_late": 0
+},
+"MTe52": {
+"n": 42,
+"core_late": 1
+},
+"MZ_lv2PN": {
+"n": 2,
+"core_late": 0
+},
+"M_adPNm5": {
+"n": 8,
+"core_late": 0
+},
+"M_adPNm8": {
+"n": 4,
+"core_late": 0
+},
+"M_l2PNl22": {
+"n": 2,
+"core_late": 0
+},
+"M_l2PNm16": {
+"n": 4,
+"core_late": 477
+},
+"M_lPNm11B": {
+"n": 2,
+"core_late": 0
+},
+"M_lv2PN9t49b": {
+"n": 2,
+"core_late": 0
+},
+"M_lvPNm26": {
+"n": 3,
+"core_late": 0
+},
+"M_lvPNm29": {
+"n": 3,
+"core_late": 0
+},
+"M_lvPNm37": {
+"n": 6,
+"core_late": 0
+},
+"M_lvPNm41": {
+"n": 6,
+"core_late": 0
+},
+"M_lvPNm44": {
+"n": 2,
+"core_late": 0
+},
+"M_lvPNm47": {
+"n": 6,
+"core_late": 0
+},
+"M_smPNm1": {
+"n": 2,
+"core_late": 0
+},
+"M_vPNml50": {
+"n": 4,
+"core_late": 0
+},
+"M_vPNml53": {
+"n": 13,
+"core_late": 0
+},
+"M_vPNml57": {
+"n": 2,
+"core_late": 0
+},
+"M_vPNml64": {
+"n": 2,
+"core_late": 0
+},
+"M_vPNml69": {
+"n": 4,
+"core_late": 0
+},
+"M_vPNml77": {
+"n": 2,
+"core_late": 0
+},
+"M_vPNml83": {
+"n": 8,
+"core_late": 0
+},
+"M_vPNml87": {
+"n": 6,
+"core_late": 0
+},
+"MeMe_e06": {
+"n": 2,
+"core_late": 0
+},
+"OA-AL2i4": {
+"n": 2,
+"core_late": 0
+},
+"OA-ASM3": {
+"n": 2,
+"core_late": 0
+},
+"OA-VUMa1": {
+"n": 2,
+"core_late": 0
+},
+"OA-VUMa6": {
+"n": 2,
+"core_late": 0
+},
+"OCG02b": {
+"n": 2,
+"core_late": 0
+},
+"ORN_DA1": {
+"n": 126,
+"core_late": 477
+},
+"ORN_DA4l": {
+"n": 40,
+"core_late": 477
+},
+"ORN_DC2": {
+"n": 20,
+"core_late": 477
+},
+"ORN_DL1": {
+"n": 69,
+"core_late": 477
+},
+"ORN_DL3": {
+"n": 79,
+"core_late": 477
+},
+"ORN_DM1": {
+"n": 68,
+"core_late": 477
+},
+"ORN_DM4": {
+"n": 40,
+"core_late": 477
+},
+"ORN_DP1l": {
+"n": 24,
+"core_late": 477
+},
+"ORN_VA1d": {
+"n": 97,
+"core_late": 477
+},
+"ORN_VA3": {
+"n": 29,
+"core_late": 477
+},
+"ORN_VA6": {
+"n": 60,
+"core_late": 477
+},
+"ORN_VC1": {
+"n": 26,
+"core_late": 477
+},
+"ORN_VC4": {
+"n": 23,
+"core_late": 477
+},
+"ORN_VL2a": {
+"n": 71,
+"core_late": 477
+},
+"ORN_VM2": {
+"n": 37,
+"core_late": 477
+},
+"ORN_VM5d": {
+"n": 67,
+"core_late": 2
+},
+"ORN_VM6m": {
+"n": 33,
+"core_late": 477
+},
+"ORN_VM7v": {
+"n": 26,
+"core_late": 477
+},
+"PAM02": {
+"n": 16,
+"core_late": 2
+},
+"PAM05": {
+"n": 21,
+"core_late": 0
+},
+"PAM08": {
+"n": 45,
+"core_late": 1
+},
+"PAM11": {
+"n": 16,
+"core_late": 0
+},
+"PAM14": {
+"n": 16,
+"core_late": 0
+},
+"PLP003": {
+"n": 2,
+"core_late": 0
+},
+"PLP006": {
+"n": 2,
+"core_late": 0
+},
+"PLP010": {
+"n": 2,
+"core_late": 0
+},
+"PLP015": {
+"n": 4,
+"core_late": 0
+},
+"PLP019": {
+"n": 2,
+"core_late": 0
+},
+"PLP022": {
+"n": 2,
+"core_late": 0
+},
+"PLP025a": {
+"n": 2,
+"core_late": 0
+},
+"PLP028": {
+"n": 6,
+"core_late": 0
+},
+"PLP034": {
+"n": 2,
+"core_late": 0
+},
+"PLP037b": {
+"n": 8,
+"core_late": 0
+},
+"PLP042a": {
+"n": 2,
+"core_late": 0
+},
+"PLP044": {
+"n": 8,
+"core_late": 0
+},
+"PLP046c": {
+"n": 4,
+"core_late": 0
+},
+"PLP052": {
+"n": 4,
+"core_late": 0
+},
+"PLP054": {
+"n": 4,
+"core_late": 0
+},
+"PLP057b": {
+"n": 4,
+"core_late": 0
+},
+"PLP064_a": {
+"n": 7,
+"core_late": 0
+},
+"PLP065b": {
+"n": 3,
+"core_late": 0
+},
+"PLP068": {
+"n": 2,
+"core_late": 0
+},
+"PLP073": {
+"n": 4,
+"core_late": 0
+},
+"PLP084,PLP085": {
+"n": 5,
+"core_late": 0
+},
+"PLP087a": {
+"n": 2,
+"core_late": 0
+},
+"PLP092": {
+"n": 2,
+"core_late": 0
+},
+"PLP095": {
+"n": 2,
+"core_late": 0
+},
+"PLP099": {
+"n": 5,
+"core_late": 0
+},
+"PLP106": {
+"n": 5,
+"core_late": 0
+},
+"PLP114": {
+"n": 2,
+"core_late": 0
+},
+"PLP119": {
+"n": 2,
+"core_late": 0
+},
+"PLP128": {
+"n": 2,
+"core_late": 0
+},
+"PLP131": {
+"n": 2,
+"core_late": 0
+},
+"PLP141": {
+"n": 2,
+"core_late": 0
+},
+"PLP144": {
+"n": 2,
+"core_late": 0
+},
+"PLP150b": {
+"n": 2,
+"core_late": 0
+},
+"PLP155": {
+"n": 7,
+"core_late": 0
+},
+"PLP159": {
+"n": 6,
+"core_late": 0
+},
+"PLP162": {
+"n": 3,
+"core_late": 0
+},
+"PLP171": {
+"n": 2,
+"core_late": 0
+},
+"PLP175": {
+"n": 2,
+"core_late": 0
+},
+"PLP181": {
+"n": 8,
+"core_late": 0
+},
+"PLP191": {
+"n": 7,
+"core_late": 0
+},
+"PLP198,SLP361": {
+"n": 4,
+"core_late": 0
+},
+"PLP209": {
+"n": 2,
+"core_late": 0
+},
+"PLP215": {
+"n": 2,
+"core_late": 0
+},
+"PLP218": {
+"n": 4,
+"core_late": 0
+},
+"PLP223": {
+"n": 2,
+"core_late": 0
+},
+"PLP232": {
+"n": 2,
+"core_late": 0
+},
+"PLP243": {
+"n": 1,
+"core_late": 0
+},
+"PLP247": {
+"n": 2,
+"core_late": 0
+},
+"PLP250": {
+"n": 2,
+"core_late": 0
+},
+"PLP254": {
+"n": 4,
+"core_late": 0
+},
+"PPL103": {
+"n": 2,
+"core_late": 2
+},
+"PPL106": {
+"n": 2,
+"core_late": 0
+},
+"PPL201": {
+"n": 2,
+"core_late": 0
+},
+"PPL204": {
+"n": 2,
+"core_late": 0
+},
+"PPM1204,PS139": {
+"n": 4,
+"core_late": 0
+},
+"PS005": {
+"n": 20,
+"core_late": 0
+},
+"PS020": {
+"n": 2,
+"core_late": 0
+},
+"PS058": {
+"n": 2,
+"core_late": 2
+},
+"PS065": {
+"n": 2,
+"core_late": 0
+},
+"PS095": {
+"n": 6,
+"core_late": 0
+},
+"PS106": {
+"n": 4,
+"core_late": 0
+},
+"PS117a": {
+"n": 2,
+"core_late": 0
+},
+"PS127": {
+"n": 2,
+"core_late": 0
+},
+"PS146": {
+"n": 4,
+"core_late": 0
+},
+"PS157": {
+"n": 2,
+"core_late": 0
+},
+"PS170": {
+"n": 2,
+"core_late": 0
+},
+"PS184,PS272": {
+"n": 4,
+"core_late": 0
+},
+"PS202": {
+"n": 2,
+"core_late": 0
+},
+"PS230,PLP242": {
+"n": 4,
+"core_late": 0
+},
+"PS249": {
+"n": 2,
+"core_late": 0
+},
+"PS267": {
+"n": 5,
+"core_late": 0
+},
+"PS274": {
+"n": 2,
+"core_late": 0
+},
+"PVLP001": {
+"n": 2,
+"core_late": 0
+},
+"PVLP007": {
+"n": 11,
+"core_late": 0
+},
+"PVLP010": {
+"n": 2,
+"core_late": 0
+},
+"PVLP017": {
+"n": 2,
+"core_late": 0
+},
+"PVLP022": {
+"n": 2,
+"core_late": 0
+},
+"PVLP069": {
+"n": 2,
+"core_late": 0
+},
+"PVLP076": {
+"n": 2,
+"core_late": 0
+},
+"PVLP089": {
+"n": 2,
+"core_late": 0
+},
+"PVLP094": {
+"n": 2,
+"core_late": 0
+},
+"PVLP101b": {
+"n": 4,
+"core_late": 0
+},
+"PVLP103": {
+"n": 4,
+"core_late": 0
+},
+"PVLP108": {
+"n": 6,
+"core_late": 0
+},
+"PVLP118": {
+"n": 4,
+"core_late": 0
+},
+"PVLP130": {
+"n": 2,
+"core_late": 0
+},
+"PVLP148": {
+"n": 4,
+"core_late": 0
+},
+"PVLP151": {
+"n": 4,
+"core_late": 0
+},
+"PhG15": {
+"n": 2,
+"core_late": 0
+},
+"PhG8": {
+"n": 4,
+"core_late": 0
+},
+"SAD009": {
+"n": 4,
+"core_late": 0
+},
+"SAD012": {
+"n": 4,
+"core_late": 0
+},
+"SAD035": {
+"n": 2,
+"core_late": 0
+},
+"SAD044": {
+"n": 4,
+"core_late": 1
+},
+"SAD070": {
+"n": 2,
+"core_late": 0
+},
+"SAD082": {
+"n": 2,
+"core_late": 0
+},
+"SAD094": {
+"n": 2,
+"core_late": 0
+},
+"SIP003_b": {
+"n": 8,
+"core_late": 0
+},
+"SIP014,SIP016": {
+"n": 10,
+"core_late": 0
+},
+"SIP019": {
+"n": 2,
+"core_late": 2
+},
+"SIP027": {
+"n": 8,
+"core_late": 0
+},
+"SIP028b": {
+"n": 2,
+"core_late": 0
+},
+"SIP041": {
+"n": 2,
+"core_late": 0
+},
+"SIP047b": {
+"n": 10,
+"core_late": 0
+},
+"SIP053a": {
+"n": 3,
+"core_late": 0
+},
+"SIP057": {
+"n": 2,
+"core_late": 0
+},
+"SIP067": {
+"n": 2,
+"core_late": 0
+},
+"SIP078,SIP080": {
+"n": 16,
+"core_late": 0
+},
+"SIP088": {
+"n": 2,
+"core_late": 0
+},
+"SLP003": {
+"n": 2,
+"core_late": 0
+},
+"SLP007a": {
+"n": 2,
+"core_late": 0
+},
+"SLP012": {
+"n": 7,
+"core_late": 0
+},
+"SLP017": {
+"n": 2,
+"core_late": 0
+},
+"SLP024d": {
+"n": 5,
+"core_late": 0
+},
+"SLP027": {
+"n": 5,
+"core_late": 0
+},
+"SLP030": {
+"n": 2,
+"core_late": 0
+},
+"SLP033": {
+"n": 2,
+"core_late": 0
+},
+"SLP036": {
+"n": 8,
+"core_late": 0
+},
+"SLP047": {
+"n": 2,
+"core_late": 0
+},
+"SLP057": {
+"n": 2,
+"core_late": 0
+},
+"SLP061": {
+"n": 2,
+"core_late": 0
+},
+"SLP066": {
+"n": 2,
+"core_late": 0
+},
+"SLP069": {
+"n": 2,
+"core_late": 0
+},
+"SLP072": {
+"n": 2,
+"core_late": 0
+},
+"SLP076": {
+"n": 4,
+"core_late": 0
+},
+"SLP080": {
+"n": 2,
+"core_late": 0
+},
+"SLP098,SLP133": {
+"n": 4,
+"core_late": 0
+},
+"SLP103": {
+"n": 6,
+"core_late": 0
+},
+"SLP114,SLP115": {
+"n": 10,
+"core_late": 0
+},
+"SLP120": {
+"n": 2,
+"core_late": 0
+},
+"SLP128": {
+"n": 7,
+"core_late": 0
+},
+"SLP131": {
+"n": 2,
+"core_late": 0
+},
+"SLP137": {
+"n": 4,
+"core_late": 0
+},
+"SLP150": {
+"n": 2,
+"core_late": 0
+},
+"SLP153": {
+"n": 2,
+"core_late": 0
+},
+"SLP158": {
+"n": 6,
+"core_late": 0
+},
+"SLP162b": {
+"n": 5,
+"core_late": 0
+},
+"SLP206": {
+"n": 2,
+"core_late": 0
+},
+"SLP209": {
+"n": 2,
+"core_late": 0
+},
+"SLP212a": {
+"n": 2,
+"core_late": 0
+},
+"SLP213": {
+"n": 2,
+"core_late": 0
+},
+"SLP216": {
+"n": 2,
+"core_late": 0
+},
+"SLP223": {
+"n": 10,
+"core_late": 0
+},
+"SLP227": {
+"n": 8,
+"core_late": 0
+},
+"SLP231": {
+"n": 2,
+"core_late": 0
+},
+"SLP236": {
+"n": 2,
+"core_late": 0
+},
+"SLP239": {
+"n": 2,
+"core_late": 0
+},
+"SLP241": {
+"n": 8,
+"core_late": 0
+},
+"SLP247": {
+"n": 2,
+"core_late": 0
+},
+"SLP256": {
+"n": 2,
+"core_late": 0
+},
+"SLP265a": {
+"n": 2,
+"core_late": 0
+},
+"SLP270": {
+"n": 2,
+"core_late": 0
+},
+"SLP278": {
+"n": 2,
+"core_late": 0
+},
+"SLP285": {
+"n": 11,
+"core_late": 0
+},
+"SLP288a": {
+"n": 5,
+"core_late": 0
+},
+"SLP289": {
+"n": 10,
+"core_late": 0
+},
+"SLP295a": {
+"n": 4,
+"core_late": 0
+},
+"SLP304a": {
+"n": 2,
+"core_late": 0
+},
+"SLP307": {
+"n": 2,
+"core_late": 0
+},
+"SLP312": {
+"n": 6,
+"core_late": 0
+},
+"SLP319": {
+"n": 2,
+"core_late": 0
+},
+"SLP340": {
+"n": 2,
+"core_late": 0
+},
+"SLP356a": {
+"n": 2,
+"core_late": 0
+},
+"SLP365": {
+"n": 2,
+"core_late": 0
+},
+"SLP373": {
+"n": 2,
+"core_late": 0
+},
+"SLP378": {
+"n": 2,
+"core_late": 0
+},
+"SLP381": {
+"n": 2,
+"core_late": 0
+},
+"SLP385": {
+"n": 2,
+"core_late": 1
+},
+"SLP389": {
+"n": 2,
+"core_late": 0
+},
+"SLP392": {
+"n": 2,
+"core_late": 0
+},
+"SLP396": {
+"n": 4,
+"core_late": 0
+},
+"SLP402_b": {
+"n": 2,
+"core_late": 0
+},
+"SLP406": {
+"n": 2,
+"core_late": 0
+},
+"SLP421": {
+"n": 7,
+"core_late": 0
+},
+"SLP437": {
+"n": 2,
+"core_late": 0
+},
+"SLP444": {
+"n": 4,
+"core_late": 0
+},
+"SLP451a": {
+"n": 2,
+"core_late": 0
+},
+"SLP457": {
+"n": 4,
+"core_late": 0
+},
+"SLP467b": {
+"n": 4,
+"core_late": 0
+},
+"SLPpm3_P01": {
+"n": 2,
+"core_late": 0
+},
+"SLPpm3_P04": {
+"n": 2,
+"core_late": 0
+},
+"SMP003,SMP005": {
+"n": 7,
+"core_late": 0
+},
+"SMP011a": {
+"n": 2,
+"core_late": 0
+},
+"SMP015": {
+"n": 2,
+"core_late": 0
+},
+"SMP022b": {
+"n": 4,
+"core_late": 0
+},
+"SMP025c": {
+"n": 2,
+"core_late": 0
+},
+"SMP029": {
+"n": 4,
+"core_late": 0
+},
+"SMP033": {
+"n": 2,
+"core_late": 0
+},
+"SMP037": {
+"n": 2,
+"core_late": 0
+},
+"SMP040": {
+"n": 2,
+"core_late": 0
+},
+"SMP043": {
+"n": 4,
+"core_late": 0
+},
+"SMP049,SMP076": {
+"n": 4,
+"core_late": 0
+},
+"SMP054": {
+"n": 2,
+"core_late": 0
+},
+"SMP058": {
+"n": 2,
+"core_late": 0
+},
+"SMP068": {
+"n": 4,
+"core_late": 0
+},
+"SMP075b": {
+"n": 2,
+"core_late": 0
+},
+"SMP081": {
+"n": 4,
+"core_late": 0
+},
+"SMP089": {
+"n": 4,
+"core_late": 0
+},
+"SMP102": {
+"n": 4,
+"core_late": 0
+},
+"SMP106": {
+"n": 19,
+"core_late": 0
+},
+"SMP109": {
+"n": 2,
+"core_late": 0
+},
+"SMP115": {
+"n": 2,
+"core_late": 0
+},
+"SMP122": {
+"n": 2,
+"core_late": 0
+},
+"SMP124": {
+"n": 3,
+"core_late": 0
+},
+"SMP143,SMP149": {
+"n": 4,
+"core_late": 0
+},
+"SMP147": {
+"n": 2,
+"core_late": 0
+},
+"SMP155": {
+"n": 4,
+"core_late": 0
+},
+"SMP161": {
+"n": 2,
+"core_late": 0
+},
+"SMP165": {
+"n": 2,
+"core_late": 0
+},
+"SMP171": {
+"n": 7,
+"core_late": 0
+},
+"SMP176": {
+"n": 2,
+"core_late": 0
+},
+"SMP179": {
+"n": 2,
+"core_late": 0
+},
+"SMP186": {
+"n": 2,
+"core_late": 0
+},
+"SMP192": {
+"n": 2,
+"core_late": 0
+},
+"SMP198": {
+"n": 2,
+"core_late": 0
+},
+"SMP203": {
+"n": 2,
+"core_late": 0
+},
+"SMP207": {
+"n": 4,
+"core_late": 0
+},
+"SMP213,SMP214": {
+"n": 10,
+"core_late": 0
+},
+"SMP238": {
+"n": 2,
+"core_late": 0
+},
+"SMP245": {
+"n": 2,
+"core_late": 0
+},
+"SMP248b": {
+"n": 6,
+"core_late": 0
+},
+"SMP252": {
+"n": 2,
+"core_late": 0
+},
+"SMP258": {
+"n": 3,
+"core_late": 0
+},
+"SMP273": {
+"n": 2,
+"core_late": 0
+},
+"SMP292,SMP293,SMP584": {
+"n": 6,
+"core_late": 0
+},
+"SMP314a": {
+"n": 2,
+"core_late": 0
+},
+"SMP319": {
+"n": 8,
+"core_late": 0
+},
+"SMP326b": {
+"n": 6,
+"core_late": 0
+},
+"SMP333": {
+"n": 2,
+"core_late": 0
+},
+"SMP341": {
+"n": 2,
+"core_late": 0
+},
+"SMP357": {
+"n": 4,
+"core_late": 0
+},
+"SMP361a": {
+"n": 2,
+"core_late": 0
+},
+"SMP370": {
+"n": 2,
+"core_late": 0
+},
+"SMP385": {
+"n": 2,
+"core_late": 0
+},
+"SMP389a": {
+"n": 2,
+"core_late": 0
+},
+"SMP392": {
+"n": 2,
+"core_late": 0
+},
+"SMP399b": {
+"n": 3,
+"core_late": 0
+},
+"SMP410": {
+"n": 5,
+"core_late": 0
+},
+"SMP419": {
+"n": 2,
+"core_late": 0
+},
+"SMP425": {
+"n": 2,
+"core_late": 0
+},
+"SMP428": {
+"n": 4,
+"core_late": 0
+},
+"SMP446b": {
+"n": 2,
+"core_late": 0
+},
+"SMP451a": {
+"n": 2,
+"core_late": 0
+},
+"SMP455": {
+"n": 2,
+"core_late": 0
+},
+"SMP461": {
+"n": 9,
+"core_late": 0
+},
+"SMP490": {
+"n": 2,
+"core_late": 0
+},
+"SMP494": {
+"n": 2,
+"core_late": 0
+},
+"SMP503": {
+"n": 2,
+"core_late": 0
+},
+"SMP507": {
+"n": 2,
+"core_late": 0
+},
+"SMP510b": {
+"n": 2,
+"core_late": 0
+},
+"SMP527": {
+"n": 2,
+"core_late": 0
+},
+"SMP531": {
+"n": 2,
+"core_late": 0
+},
+"SMP544,LAL134": {
+"n": 4,
+"core_late": 0
+},
+"SMP550": {
+"n": 2,
+"core_late": 0
+},
+"SMP555,SMP556": {
+"n": 6,
+"core_late": 0
+},
+"SMP567": {
+"n": 4,
+"core_late": 0
+},
+"SMP573": {
+"n": 2,
+"core_late": 0
+},
+"SMP579,SMP583": {
+"n": 4,
+"core_late": 0
+},
+"SMP588": {
+"n": 4,
+"core_late": 0
+},
+"SMP592": {
+"n": 8,
+"core_late": 0
+},
+"SMP603": {
+"n": 2,
+"core_late": 0
+},
+"SMPp&v1B_H01": {
+"n": 2,
+"core_late": 0
+},
+"TRN_VP1m": {
+"n": 13,
+"core_late": 477
+},
+"TRN_VP3b": {
+"n": 2,
+"core_late": 477
+},
+"VA1d_vPN": {
+"n": 2,
+"core_late": 0
+},
+"VA3_adPN": {
+"n": 4,
+"core_late": 477
+},
+"VA7m_lPN": {
+"n": 6,
+"core_late": 477
+},
+"VES001": {
+"n": 2,
+"core_late": 0
+},
+"VES004": {
+"n": 2,
+"core_late": 0
+},
+"VES013": {
+"n": 2,
+"core_late": 2
+},
+"VES017": {
+"n": 2,
+"core_late": 0
+},
+"VES021": {
+"n": 4,
+"core_late": 0
+},
+"VES027": {
+"n": 2,
+"core_late": 0
+},
+"VES049": {
+"n": 7,
+"core_late": 0
+},
+"VES054": {
+"n": 2,
+"core_late": 0
+},
+"VES063a": {
+"n": 2,
+"core_late": 0
+},
+"VES070": {
+"n": 2,
+"core_late": 0
+},
+"VES079": {
+"n": 2,
+"core_late": 0
+},
+"VESa2_H04": {
+"n": 2,
+"core_late": 0
+},
+"VL2p_vPN": {
+"n": 2,
+"core_late": 0
+},
+"VM4_lvPN": {
+"n": 5,
+"core_late": 477
+},
+"VM7d_adPN": {
+"n": 5,
+"core_late": 477
+},
+"VP1l+VP3_ilPN": {
+"n": 2,
+"core_late": 477
+},
+"VP1m+VP5_ilPN": {
+"n": 2,
+"core_late": 477
+},
+"VP2+_adPN": {
+"n": 2,
+"core_late": 0
+},
+"VP3+_vPN": {
+"n": 2,
+"core_late": 0
+},
+"VP4_vPN": {
+"n": 2,
+"core_late": 0
+},
+"VP5+_l2PN,VP5+VP2_l2PN": {
+"n": 6,
+"core_late": 477
+},
+"WED006": {
+"n": 2,
+"core_late": 0
+},
+"WED015": {
+"n": 9,
+"core_late": 0
+},
+"WED024": {
+"n": 4,
+"core_late": 0
+},
+"WED039": {
+"n": 6,
+"core_late": 0
+},
+"WED056": {
+"n": 7,
+"core_late": 0
+},
+"WED069": {
+"n": 2,
+"core_late": 0
+},
+"WED076": {
+"n": 2,
+"core_late": 0
+},
+"WED091": {
+"n": 2,
+"core_late": 0
+},
+"WED092d": {
+"n": 2,
+"core_late": 0
+},
+"WED098": {
+"n": 3,
+"core_late": 0
+},
+"WED101": {
+"n": 4,
+"core_late": 0
+},
+"WED121": {
+"n": 2,
+"core_late": 0
+},
+"WED127": {
+"n": 3,
+"core_late": 0
+},
+"WED163c": {
+"n": 5,
+"core_late": 0
+},
+"WED182": {
+"n": 2,
+"core_late": 0
+},
+"WEDPN11": {
+"n": 2,
+"core_late": 0
+},
+"WEDPN1A": {
+"n": 10,
+"core_late": 0
+},
+"WEDPN2B": {
+"n": 4,
+"core_late": 0
+},
+"WEDPN5": {
+"n": 2,
+"core_late": 0
+},
+"WEDPN7B": {
+"n": 6,
+"core_late": 0
+},
+"WEDPN8D": {
+"n": 6,
+"core_late": 0
+},
+"aMe1": {
+"n": 4,
+"core_late": 0
+},
+"aMe15": {
+"n": 2,
+"core_late": 0
+},
+"aMe19a": {
+"n": 2,
+"core_late": 0
+},
+"aMe22": {
+"n": 2,
+"core_late": 0
+},
+"aMe26": {
+"n": 6,
+"core_late": 1
+},
+"aMe6a": {
+"n": 2,
+"core_late": 0
+},
+"aPhM2b": {
+"n": 2,
+"core_late": 0
+},
+"aSP-f4": {
+"n": 11,
+"core_late": 1
+},
+"aSP-g3A": {
+"n": 2,
+"core_late": 0
+},
+"cL01": {
+"n": 17,
+"core_late": 0
+},
+"cL10": {
+"n": 2,
+"core_late": 0
+},
+"cL15": {
+"n": 2,
+"core_late": 0
+},
+"cL19": {
+"n": 2,
+"core_late": 0
+},
+"cLLP02": {
+"n": 4,
+"core_late": 0
+},
+"cLP03c": {
+"n": 9,
+"core_late": 0
+},
+"cM07": {
+"n": 2,
+"core_late": 0
+},
+"cM12": {
+"n": 2,
+"core_late": 0
+},
+"l2LN19": {
+"n": 4,
+"core_late": 0
+},
+"l2LN23": {
+"n": 4,
+"core_late": 0
+},
+"lLN9": {
+"n": 2,
+"core_late": 0
+},
+"mAL4B": {
+"n": 1,
+"core_late": 0
+},
+"mAL5B": {
+"n": 2,
+"core_late": 0
+},
+"mALB2": {
+"n": 2,
+"core_late": 0
+},
+"mALB5": {
+"n": 2,
+"core_late": 0
+},
+"mALD2": {
+"n": 2,
+"core_late": 0
+},
+"mAL_f1": {
+"n": 8,
+"core_late": 0
+},
+"mAL_f4": {
+"n": 10,
+"core_late": 0
+},
+"pC1c": {
+"n": 2,
+"core_late": 0
+},
+"s-LNv_a": {
+"n": 2,
+"core_late": 0
+},
+"v2LN32": {
+"n": 2,
+"core_late": 0
+},
+"v2LN37": {
+"n": 2,
+"core_late": 0
+},
+"v2LN3A1_a": {
+"n": 2,
+"core_late": 1
+},
+"v2LN40_2": {
+"n": 4,
+"core_late": 0
+},
+"v2LN42a": {
+"n": 2,
+"core_late": 0
+},
+"v2LN46b": {
+"n": 6,
+"core_late": 0
+},
+"v2LN5": {
+"n": 4,
+"core_late": 0
+},
+"vLN24": {
+"n": 2,
+"core_late": 0
+},
+"vLN27": {
+"n": 2,
+"core_late": 0
+},
+"5-HTPMPD01": {
+"n": 2,
+"core_late": 0
+},
+"AL-MBDL1": {
+"n": 2,
+"core_late": 477
+},
+"ALIN2": {
+"n": 2,
+"core_late": 0
+},
+"ALIN5": {
+"n": 2,
+"core_late": 0
+},
+"ALIN8": {
+"n": 2,
+"core_late": 477
+},
+"ALON3": {
+"n": 4,
+"core_late": 0
+},
+"AN_AVLP_19": {
+"n": 2,
+"core_late": 0
+},
+"AN_AVLP_4": {
+"n": 2,
+"core_late": 0
+},
+"AN_AVLP_GNG_18": {
+"n": 2,
+"core_late": 0
+},
+"AN_AVLP_GNG_7": {
+"n": 4,
+"core_late": 0
+},
+"AN_AVLP_PVLP_6": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_100": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_141": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_175": {
+"n": 27,
+"core_late": 0
+},
+"AN_GNG_40": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_7": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_96": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_IPS_11": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_PRW_2": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_SAD_18": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_SAD_3": {
+"n": 2,
+"core_late": 0
+},
+"AN_GNG_VES_7": {
+"n": 6,
+"core_late": 0
+},
+"AN_IPS_WED_2": {
+"n": 2,
+"core_late": 0
+},
+"AN_SLP_LH_1": {
+"n": 2,
+"core_late": 0
+},
+"AN_SPS_IPS_3": {
+"n": 2,
+"core_late": 0
+},
+"AN_VES_GNG_7": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_105": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_110": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_114": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_117": {
+"n": 4,
+"core_late": 0
+},
+"AN_multi_12": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_122": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_127": {
+"n": 4,
+"core_late": 0
+},
+"AN_multi_2": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_26": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_29": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_4": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_54": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_65": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_72": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_78": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_80": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_87": {
+"n": 2,
+"core_late": 0
+},
+"AN_multi_95": {
+"n": 2,
+"core_late": 0
+},
+"AOTU007": {
+"n": 11,
+"core_late": 0
+},
+"AOTU022": {
+"n": 2,
+"core_late": 0
+},
+"AOTU052": {
+"n": 7,
+"core_late": 0
+},
+"AOTUv1A_T01": {
+"n": 4,
+"core_late": 0
+},
+"ATL012": {
+"n": 4,
+"core_late": 0
+},
+"ATL034": {
+"n": 2,
+"core_late": 0
+},
+"ATL043": {
+"n": 2,
+"core_late": 0
+},
+"AVLP009": {
+"n": 7,
+"core_late": 0
+},
+"AVLP014": {
+"n": 3,
+"core_late": 0
+},
+"AVLP017": {
+"n": 2,
+"core_late": 0
+},
+"AVLP020": {
+"n": 2,
+"core_late": 0
+},
+"AVLP023": {
+"n": 2,
+"core_late": 0
+},
+"AVLP024c": {
+"n": 2,
+"core_late": 0
+},
+"AVLP027": {
+"n": 4,
+"core_late": 0
+},
+"AVLP030": {
+"n": 2,
+"core_late": 0
+},
+"AVLP035": {
+"n": 2,
+"core_late": 0
+},
+"AVLP039": {
+"n": 6,
+"core_late": 0
+},
+"AVLP042": {
+"n": 4,
+"core_late": 0
+},
+"AVLP044b": {
+"n": 3,
+"core_late": 0
+},
+"AVLP048": {
+"n": 4,
+"core_late": 0
+},
+"AVLP059": {
+"n": 4,
+"core_late": 0
+},
+"AVLP079": {
+"n": 2,
+"core_late": 0
+},
+"AVLP086": {
+"n": 2,
+"core_late": 0
+},
+"AVLP091": {
+"n": 2,
+"core_late": 0
+},
+"AVLP100": {
+"n": 2,
+"core_late": 0
+},
+"AVLP143a": {
+"n": 2,
+"core_late": 0
+},
+"AVLP149": {
+"n": 12,
+"core_late": 0
+},
+"AVLP158": {
+"n": 2,
+"core_late": 0
+},
+"AVLP186": {
+"n": 4,
+"core_late": 0
+},
+"AVLP189_b": {
+"n": 5,
+"core_late": 0
+},
+"AVLP200": {
+"n": 2,
+"core_late": 0
+},
+"AVLP211": {
+"n": 2,
+"core_late": 0
+},
+"AVLP218a": {
+"n": 2,
+"core_late": 0
+},
+"AVLP220": {
+"n": 4,
+"core_late": 0
+},
+"AVLP229": {
+"n": 6,
+"core_late": 0
+},
+"AVLP251": {
+"n": 2,
+"core_late": 0
+},
+"AVLP267": {
+"n": 2,
+"core_late": 0
+},
+"AVLP283": {
+"n": 7,
+"core_late": 0
+},
+"AVLP287": {
+"n": 4,
+"core_late": 0
+},
+"AVLP295": {
+"n": 6,
+"core_late": 0
+},
+"AVLP299_b": {
+"n": 6,
+"core_late": 0
+},
+"AVLP303": {
+"n": 4,
+"core_late": 0
+},
+"AVLP308": {
+"n": 4,
+"core_late": 0
+},
+"AVLP312b": {
+"n": 5,
+"core_late": 1
+},
+"AVLP315": {
+"n": 2,
+"core_late": 0
+},
+"AVLP330": {
+"n": 3,
+"core_late": 0
+},
+"AVLP370b": {
+"n": 2,
+"core_late": 0
+},
+"AVLP381": {
+"n": 2,
+"core_late": 0
+},
+"AVLP397": {
+"n": 2,
+"core_late": 0
+},
+"AVLP417,AVLP438": {
+"n": 4,
+"core_late": 0
+},
+"AVLP433_a": {
+"n": 2,
+"core_late": 0
+},
+"AVLP436": {
+"n": 4,
+"core_late": 0
+},
+"AVLP442": {
+"n": 2,
+"core_late": 0
+},
+"AVLP446": {
+"n": 2,
+"core_late": 0
+},
+"AVLP449": {
+"n": 2,
+"core_late": 0
+},
+"AVLP457": {
+"n": 3,
+"core_late": 0
+},
+"AVLP471": {
+"n": 4,
+"core_late": 0
+},
+"AVLP475b": {
+"n": 2,
+"core_late": 0
+},
+"AVLP487": {
+"n": 3,
+"core_late": 0
+},
+"AVLP490": {
+"n": 4,
+"core_late": 0
+},
+"AVLP496b": {
+"n": 6,
+"core_late": 0
+},
+"AVLP505": {
+"n": 2,
+"core_late": 0
+},
+"AVLP530,AVLP561": {
+"n": 5,
+"core_late": 0
+},
+"AVLP535": {
+"n": 2,
+"core_late": 0
+},
+"AVLP542": {
+"n": 2,
+"core_late": 0
+},
+"AVLP563": {
+"n": 2,
+"core_late": 0
+},
+"AVLP567": {
+"n": 4,
+"core_late": 0
+},
+"AVLP571": {
+"n": 2,
+"core_late": 0
+},
+"AVLP574": {
+"n": 4,
+"core_late": 0
+},
+"AVLP584": {
+"n": 6,
+"core_late": 0
+},
+"AVLP592": {
+"n": 2,
+"core_late": 0
+},
+"AVLP596": {
+"n": 2,
+"core_late": 0
+},
+"CB0005": {
+"n": 2,
+"core_late": 0
+},
+"CB0010": {
+"n": 2,
+"core_late": 0
+},
+"CB0023": {
+"n": 2,
+"core_late": 0
+},
+"CB0029": {
+"n": 2,
+"core_late": 0
+},
+"CB0038": {
+"n": 2,
+"core_late": 0
+},
+"CB0048": {
+"n": 2,
+"core_late": 0
+},
+"CB0059": {
+"n": 2,
+"core_late": 0
+},
+"CB0070": {
+"n": 2,
+"core_late": 0
+},
+"CB0084": {
+"n": 2,
+"core_late": 0
+},
+"CB0102": {
+"n": 2,
+"core_late": 0
+},
+"CB0124": {
+"n": 2,
+"core_late": 0
+},
+"CB0129": {
+"n": 2,
+"core_late": 0
+},
+"CB0136": {
+"n": 2,
+"core_late": 0
+},
+"CB0143": {
+"n": 2,
+"core_late": 0
+},
+"CB0153": {
+"n": 2,
+"core_late": 0
+},
+"CB0161": {
+"n": 2,
+"core_late": 0
+},
+"CB0182": {
+"n": 2,
+"core_late": 0
+},
+"CB0204": {
+"n": 2,
+"core_late": 0
+},
+"CB0223": {
+"n": 2,
+"core_late": 0
+},
+"CB0227": {
+"n": 2,
+"core_late": 0
+},
+"CB0238": {
+"n": 2,
+"core_late": 0
+},
+"CB0254": {
+"n": 2,
+"core_late": 0
+},
+"CB0269": {
+"n": 2,
+"core_late": 0
+},
+"CB0280": {
+"n": 2,
+"core_late": 0
+},
+"CB0297": {
+"n": 2,
+"core_late": 0
+},
+"CB0310": {
+"n": 2,
+"core_late": 0
+},
+"CB0316": {
+"n": 2,
+"core_late": 0
+},
+"CB0339": {
+"n": 2,
+"core_late": 0
+},
+"CB0344": {
+"n": 2,
+"core_late": 0
+},
+"CB0367": {
+"n": 2,
+"core_late": 0
+},
+"CB0379": {
+"n": 2,
+"core_late": 0
+},
+"CB0398": {
+"n": 2,
+"core_late": 0
+},
+"CB0409": {
+"n": 2,
+"core_late": 0
+},
+"CB0420": {
+"n": 2,
+"core_late": 0
+},
+"CB0431": {
+"n": 2,
+"core_late": 0
+},
+"CB0438": {
+"n": 2,
+"core_late": 0
+},
+"CB0448": {
+"n": 2,
+"core_late": 0
+},
+"CB0456": {
+"n": 2,
+"core_late": 0
+},
+"CB0466": {
+"n": 2,
+"core_late": 0
+},
+"CB0478": {
+"n": 2,
+"core_late": 0
+},
+"CB0485": {
+"n": 2,
+"core_late": 0
+},
+"CB0496": {
+"n": 2,
+"core_late": 0
+},
+"CB0502": {
+"n": 2,
+"core_late": 0
+},
+"CB0518": {
+"n": 2,
+"core_late": 0
+},
+"CB0522": {
+"n": 2,
+"core_late": 0
+},
+"CB0527": {
+"n": 2,
+"core_late": 0
+},
+"CB0541": {
+"n": 2,
+"core_late": 0
+},
+"CB0546": {
+"n": 2,
+"core_late": 0
+},
+"CB0567": {
+"n": 2,
+"core_late": 0
+},
+"CB0584": {
+"n": 2,
+"core_late": 0
+},
+"CB0616": {
+"n": 2,
+"core_late": 0
+},
+"CB0624": {
+"n": 4,
+"core_late": 0
+},
+"CB0629": {
+"n": 2,
+"core_late": 0
+},
+"CB0640": {
+"n": 2,
+"core_late": 0
+},
+"CB0643": {
+"n": 4,
+"core_late": 0
+},
+"CB0648": {
+"n": 2,
+"core_late": 0
+},
+"CB0653": {
+"n": 2,
+"core_late": 0
+},
+"CB0661": {
+"n": 2,
+"core_late": 0
+},
+"CB0670": {
+"n": 2,
+"core_late": 0
+},
+"CB0682": {
+"n": 2,
+"core_late": 0
+},
+"CB0687": {
+"n": 2,
+"core_late": 0
+},
+"CB0698": {
+"n": 2,
+"core_late": 0
+},
+"CB0731": {
+"n": 4,
+"core_late": 0
+},
+"CB0743": {
+"n": 9,
+"core_late": 0
+},
+"CB0759": {
+"n": 2,
+"core_late": 0
+},
+"CB0770": {
+"n": 4,
+"core_late": 0
+},
+"CB0786": {
+"n": 2,
+"core_late": 0
+},
+"CB0800": {
+"n": 3,
+"core_late": 0
+},
+"CB0825": {
+"n": 5,
+"core_late": 0
+},
+"CB0854": {
+"n": 4,
+"core_late": 0
+},
+"CB0884": {
+"n": 2,
+"core_late": 0
+},
+"CB0892": {
+"n": 2,
+"core_late": 0
+},
+"CB0934": {
+"n": 4,
+"core_late": 0
+},
+"CB0943": {
+"n": 9,
+"core_late": 0
+},
+"CB0951": {
+"n": 8,
+"core_late": 0
+},
+"CB0956": {
+"n": 7,
+"core_late": 0
+},
+"CB0964": {
+"n": 4,
+"core_late": 0
+},
+"CB0967": {
+"n": 3,
+"core_late": 0
+},
+"CB0971": {
+"n": 2,
+"core_late": 0
+},
+"CB0976": {
+"n": 3,
+"core_late": 0
+},
+"CB0989": {
+"n": 9,
+"core_late": 0
+},
+"CB0996": {
+"n": 4,
+"core_late": 0
+},
+"CB1003": {
+"n": 4,
+"core_late": 0
+},
+"CB1007": {
+"n": 4,
+"core_late": 0
+},
+"CB1013": {
+"n": 7,
+"core_late": 0
+},
+"CB1017": {
+"n": 4,
+"core_late": 0
+},
+"CB1025": {
+"n": 3,
+"core_late": 0
+},
+"CB1032": {
+"n": 6,
+"core_late": 0
+},
+"CB1038b": {
+"n": 2,
+"core_late": 0
+},
+"CB1048": {
+"n": 4,
+"core_late": 0
+},
+"CB1055": {
+"n": 12,
+"core_late": 0
+},
+"CB1058": {
+"n": 8,
+"core_late": 0
+},
+"CB1062": {
+"n": 7,
+"core_late": 0
+},
+"CB1069": {
+"n": 6,
+"core_late": 0
+},
+"CB1076": {
+"n": 8,
+"core_late": 0
+},
+"CB1079": {
+"n": 18,
+"core_late": 0
+},
+"CB1086": {
+"n": 4,
+"core_late": 0
+},
+"CB1091": {
+"n": 2,
+"core_late": 0
+},
+"CB1100": {
+"n": 7,
+"core_late": 0
+},
+"CB1103": {
+"n": 4,
+"core_late": 0
+},
+"CB1106": {
+"n": 5,
+"core_late": 0
+},
+"CB1114": {
+"n": 10,
+"core_late": 1
+},
+"CB1124": {
+"n": 4,
+"core_late": 0
+},
+"CB1129": {
+"n": 5,
+"core_late": 0
+},
+"CB1134": {
+"n": 6,
+"core_late": 0
+},
+"CB1145": {
+"n": 7,
+"core_late": 0
+},
+"CB1150": {
+"n": 6,
+"core_late": 0
+},
+"CB1153": {
+"n": 3,
+"core_late": 0
+},
+"CB1156": {
+"n": 4,
+"core_late": 0
+},
+"CB1163": {
+"n": 6,
+"core_late": 0
+},
+"CB1169": {
+"n": 3,
+"core_late": 0
+},
+"CB1172": {
+"n": 4,
+"core_late": 0
+},
+"CB1181": {
+"n": 10,
+"core_late": 0
+},
+"CB1184": {
+"n": 4,
+"core_late": 0
+},
+"CB1195": {
+"n": 4,
+"core_late": 0
+},
+"CB1202": {
+"n": 4,
+"core_late": 0
+},
+"CB1217": {
+"n": 5,
+"core_late": 0
+},
+"CB1220": {
+"n": 11,
+"core_late": 0
+},
+"CB1235": {
+"n": 4,
+"core_late": 0
+},
+"CB1238": {
+"n": 6,
+"core_late": 0
+},
+"CB1243": {
+"n": 2,
+"core_late": 0
+},
+"CB1246": {
+"n": 6,
+"core_late": 0
+},
+"CB1258": {
+"n": 6,
+"core_late": 0
+},
+"CB1263": {
+"n": 2,
+"core_late": 0
+},
+"CB1272": {
+"n": 4,
+"core_late": 0
+},
+"CB1278": {
+"n": 3,
+"core_late": 0
+},
+"CB1284": {
+"n": 4,
+"core_late": 0
+},
+"CB1289": {
+"n": 5,
+"core_late": 0
+},
+"CB1293": {
+"n": 4,
+"core_late": 0
+},
+"CB1300": {
+"n": 4,
+"core_late": 0
+},
+"CB1305": {
+"n": 8,
+"core_late": 0
+},
+"CB1309": {
+"n": 3,
+"core_late": 0
+},
+"CB1318": {
+"n": 7,
+"core_late": 0
+},
+"CB1325": {
+"n": 2,
+"core_late": 0
+},
+"CB1328": {
+"n": 4,
+"core_late": 0
+},
+"CB1333": {
+"n": 7,
+"core_late": 0
+},
+"CB1341": {
+"n": 9,
+"core_late": 0
+},
+"CB1348": {
+"n": 4,
+"core_late": 0
+},
+"CB1354": {
+"n": 2,
+"core_late": 0
+},
+"CB1363": {
+"n": 8,
+"core_late": 0
+},
+"CB1371": {
+"n": 8,
+"core_late": 0
+},
+"CB1381": {
+"n": 3,
+"core_late": 0
+},
+"CB1389": {
+"n": 5,
+"core_late": 1
+},
+"CB1397": {
+"n": 8,
+"core_late": 0
+},
+"CB1402": {
+"n": 3,
+"core_late": 0
+},
+"CB1412": {
+"n": 4,
+"core_late": 0
+},
+"CB1416": {
+"n": 2,
+"core_late": 0
+},
+"CB1425": {
+"n": 3,
+"core_late": 0
+},
+"CB1433": {
+"n": 2,
+"core_late": 0
+},
+"CB1439": {
+"n": 8,
+"core_late": 0
+},
+"CB1442": {
+"n": 3,
+"core_late": 0
+},
+"CB1447": {
+"n": 6,
+"core_late": 0
+},
+"CB1457": {
+"n": 10,
+"core_late": 0
+},
+"CB1464": {
+"n": 7,
+"core_late": 0
+},
+"CB1471": {
+"n": 5,
+"core_late": 0
+},
+"CB1481": {
+"n": 2,
+"core_late": 0
+},
+"CB1489": {
+"n": 4,
+"core_late": 0
+},
+"CB1494": {
+"n": 2,
+"core_late": 0
+},
+"CB1500": {
+"n": 4,
+"core_late": 0
+},
+"CB1509": {
+"n": 2,
+"core_late": 0
+},
+"CB1512": {
+"n": 4,
+"core_late": 0
+},
+"CB1515": {
+"n": 7,
+"core_late": 0
+},
+"CB1524": {
+"n": 4,
+"core_late": 0
+},
+"CB1531": {
+"n": 2,
+"core_late": 0
+},
+"CB1542": {
+"n": 11,
+"core_late": 0
+},
+"CB1546": {
+"n": 7,
+"core_late": 0
+},
+"CB1553": {
+"n": 2,
+"core_late": 0
+},
+"CB1558": {
+"n": 5,
+"core_late": 0
+},
+"CB1563": {
+"n": 7,
+"core_late": 0
+},
+"CB1570": {
+"n": 9,
+"core_late": 0
+},
+"CB1576": {
+"n": 4,
+"core_late": 0
+},
+"CB1580": {
+"n": 5,
+"core_late": 0
+},
+"CB1589": {
+"n": 6,
+"core_late": 0
+},
+"CB1594": {
+"n": 2,
+"core_late": 0
+},
+"CB1610": {
+"n": 8,
+"core_late": 0
+},
+"CB1627": {
+"n": 3,
+"core_late": 0
+},
+"CB1630": {
+"n": 3,
+"core_late": 0
+},
+"CB1637": {
+"n": 4,
+"core_late": 0
+},
+"CB1646": {
+"n": 4,
+"core_late": 0
+},
+"CB1655": {
+"n": 2,
+"core_late": 1
+},
+"CB1658": {
+"n": 2,
+"core_late": 0
+},
+"CB1662": {
+"n": 4,
+"core_late": 0
+},
+"CB1665": {
+"n": 5,
+"core_late": 0
+},
+"CB1670": {
+"n": 5,
+"core_late": 0
+},
+"CB1675": {
+"n": 4,
+"core_late": 0
+},
+"CB1686": {
+"n": 8,
+"core_late": 0
+},
+"CB1691": {
+"n": 3,
+"core_late": 0
+},
+"CB1698": {
+"n": 7,
+"core_late": 0
+},
+"CB1703": {
+"n": 4,
+"core_late": 0
+},
+"CB1725": {
+"n": 4,
+"core_late": 0
+},
+"CB1729": {
+"n": 3,
+"core_late": 0
+},
+"CB1737": {
+"n": 6,
+"core_late": 0
+},
+"CB1740": {
+"n": 2,
+"core_late": 0
+},
+"CB1747": {
+"n": 4,
+"core_late": 0
+},
+"CB1755": {
+"n": 2,
+"core_late": 0
+},
+"CB1759": {
+"n": 12,
+"core_late": 0
+},
+"CB1770": {
+"n": 4,
+"core_late": 0
+},
+"CB1775": {
+"n": 4,
+"core_late": 0
+},
+"CB1782": {
+"n": 5,
+"core_late": 0
+},
+"CB1793": {
+"n": 2,
+"core_late": 0
+},
+"CB1799": {
+"n": 6,
+"core_late": 0
+},
+"CB1804": {
+"n": 3,
+"core_late": 0
+},
+"CB1812": {
+"n": 5,
+"core_late": 0
+},
+"CB1820": {
+"n": 2,
+"core_late": 0
+},
+"CB1838": {
+"n": 8,
+"core_late": 0
+},
+"CB1844": {
+"n": 6,
+"core_late": 0
+},
+"CB1850": {
+"n": 4,
+"core_late": 0
+},
+"CB1859": {
+"n": 2,
+"core_late": 0
+},
+"CB1864": {
+"n": 2,
+"core_late": 0
+},
+"CB1870": {
+"n": 2,
+"core_late": 0
+},
+"CB1876": {
+"n": 22,
+"core_late": 0
+},
+"CB1880": {
+"n": 1,
+"core_late": 0
+},
+"CB1891": {
+"n": 10,
+"core_late": 0
+},
+"CB1901": {
+"n": 10,
+"core_late": 1
+},
+"CB1912": {
+"n": 3,
+"core_late": 0
+},
+"CB1921": {
+"n": 4,
+"core_late": 0
+},
+"CB1926": {
+"n": 2,
+"core_late": 0
+},
+"CB1929": {
+"n": 4,
+"core_late": 0
+},
+"CB1933": {
+"n": 2,
+"core_late": 0
+},
+"CB1939": {
+"n": 8,
+"core_late": 0
+},
+"CB1945": {
+"n": 4,
+"core_late": 0
+},
+"CB1948": {
+"n": 6,
+"core_late": 0
+},
+"CB1957": {
+"n": 6,
+"core_late": 0
+},
+"CB1964": {
+"n": 21,
+"core_late": 0
+},
+"CB1974": {
+"n": 3,
+"core_late": 0
+},
+"CB1981": {
+"n": 5,
+"core_late": 0
+},
+"CB1988": {
+"n": 4,
+"core_late": 0
+},
+"CB1992": {
+"n": 2,
+"core_late": 0
+},
+"CB2005": {
+"n": 3,
+"core_late": 0
+},
+"CB2013": {
+"n": 2,
+"core_late": 0
+},
+"CB2019": {
+"n": 2,
+"core_late": 0
+},
+"CB2025": {
+"n": 4,
+"core_late": 0
+},
+"CB2031": {
+"n": 3,
+"core_late": 0
+},
+"CB2035": {
+"n": 5,
+"core_late": 0
+},
+"CB2040": {
+"n": 6,
+"core_late": 0
+},
+"CB2047": {
+"n": 9,
+"core_late": 0
+},
+"CB2053": {
+"n": 6,
+"core_late": 0
+},
+"CB2063": {
+"n": 2,
+"core_late": 0
+},
+"CB2068": {
+"n": 3,
+"core_late": 0
+},
+"CB2074": {
+"n": 9,
+"core_late": 0
+},
+"CB2078": {
+"n": 4,
+"core_late": 0
+},
+"CB2087": {
+"n": 6,
+"core_late": 0
+},
+"CB2095": {
+"n": 4,
+"core_late": 0
+},
+"CB2100": {
+"n": 5,
+"core_late": 0
+},
+"CB2111": {
+"n": 2,
+"core_late": 0
+},
+"CB2116": {
+"n": 5,
+"core_late": 0
+},
+"CB2121": {
+"n": 2,
+"core_late": 0
+},
+"CB2124": {
+"n": 2,
+"core_late": 0
+},
+"CB2130": {
+"n": 2,
+"core_late": 0
+},
+"CB2135": {
+"n": 6,
+"core_late": 0
+},
+"CB2143": {
+"n": 6,
+"core_late": 0
+},
+"CB2148": {
+"n": 9,
+"core_late": 0
+},
+"CB2153": {
+"n": 4,
+"core_late": 0
+},
+"CB2161": {
+"n": 2,
+"core_late": 0
+},
+"CB2169": {
+"n": 3,
+"core_late": 0
+},
+"CB2177": {
+"n": 2,
+"core_late": 0
+},
+"CB2183": {
+"n": 5,
+"core_late": 0
+},
+"CB2188": {
+"n": 3,
+"core_late": 0
+},
+"CB2194": {
+"n": 4,
+"core_late": 0
+},
+"CB2201": {
+"n": 2,
+"core_late": 0
+},
+"CB2208": {
+"n": 8,
+"core_late": 0
+},
+"CB2215": {
+"n": 2,
+"core_late": 0
+},
+"CB2225": {
+"n": 3,
+"core_late": 0
+},
+"CB2231": {
+"n": 4,
+"core_late": 0
+},
+"CB2240": {
+"n": 4,
+"core_late": 0
+},
+"CB2244": {
+"n": 4,
+"core_late": 0
+},
+"CB2250": {
+"n": 4,
+"core_late": 0
+},
+"CB2264": {
+"n": 2,
+"core_late": 0
+},
+"CB2267_c": {
+"n": 9,
+"core_late": 0
+},
+"CB2276": {
+"n": 3,
+"core_late": 0
+},
+"CB2280": {
+"n": 2,
+"core_late": 0
+},
+"CB2285": {
+"n": 6,
+"core_late": 0
+},
+"CB2293": {
+"n": 7,
+"core_late": 0
+},
+"CB2298": {
+"n": 7,
+"core_late": 0
+},
+"CB2305": {
+"n": 3,
+"core_late": 0
+},
+"CB2310": {
+"n": 4,
+"core_late": 0
+},
+"CB2320": {
+"n": 5,
+"core_late": 0
+},
+"CB2335": {
+"n": 4,
+"core_late": 0
+},
+"CB2339": {
+"n": 3,
+"core_late": 0
+},
+"CB2343": {
+"n": 8,
+"core_late": 0
+},
+"CB2348": {
+"n": 4,
+"core_late": 0
+},
+"CB2360": {
+"n": 6,
+"core_late": 0
+},
+"CB2377": {
+"n": 3,
+"core_late": 0
+},
+"CB2384": {
+"n": 5,
+"core_late": 0
+},
+"CB2393": {
+"n": 3,
+"core_late": 0
+},
+"CB2403": {
+"n": 2,
+"core_late": 0
+},
+"CB2412": {
+"n": 4,
+"core_late": 0
+},
+"CB2419": {
+"n": 4,
+"core_late": 0
+},
+"CB2425": {
+"n": 2,
+"core_late": 0
+},
+"CB2431": {
+"n": 6,
+"core_late": 0
+},
+"CB2442": {
+"n": 2,
+"core_late": 0
+},
+"CB2451": {
+"n": 2,
+"core_late": 0
+},
+"CB2463": {
+"n": 6,
+"core_late": 0
+},
+"CB2470": {
+"n": 4,
+"core_late": 0
+},
+"CB2476": {
+"n": 6,
+"core_late": 0
+},
+"CB2482": {
+"n": 2,
+"core_late": 0
+},
+"CB2493": {
+"n": 4,
+"core_late": 0
+},
+"CB2500": {
+"n": 2,
+"core_late": 0
+},
+"CB2504": {
+"n": 3,
+"core_late": 0
+},
+"CB2509": {
+"n": 4,
+"core_late": 0
+},
+"CB2514": {
+"n": 8,
+"core_late": 0
+},
+"CB2522": {
+"n": 6,
+"core_late": 0
+},
+"CB2527": {
+"n": 6,
+"core_late": 0
+},
+"CB2532": {
+"n": 6,
+"core_late": 0
+},
+"CB2539": {
+"n": 7,
+"core_late": 0
+},
+"CB2544": {
+"n": 3,
+"core_late": 0
+},
+"CB2552": {
+"n": 4,
+"core_late": 0
+},
+"CB2555": {
+"n": 3,
+"core_late": 0
+},
+"CB2559": {
+"n": 3,
+"core_late": 0
+},
+"CB2564": {
+"n": 2,
+"core_late": 0
+},
+"CB2569": {
+"n": 4,
+"core_late": 477
+},
+"CB2574": {
+"n": 4,
+"core_late": 0
+},
+"CB2581": {
+"n": 4,
+"core_late": 0
+},
+"CB2584": {
+"n": 5,
+"core_late": 0
+},
+"CB2592": {
+"n": 6,
+"core_late": 0
+},
+"CB2596": {
+"n": 4,
+"core_late": 0
+},
+"CB2600": {
+"n": 3,
+"core_late": 0
+},
+"CB2610": {
+"n": 9,
+"core_late": 0
+},
+"CB2615": {
+"n": 3,
+"core_late": 0
+},
+"CB2618": {
+"n": 4,
+"core_late": 0
+},
+"CB2629": {
+"n": 2,
+"core_late": 0
+},
+"CB2650": {
+"n": 2,
+"core_late": 0
+},
+"CB2660": {
+"n": 3,
+"core_late": 0
+},
+"CB2667": {
+"n": 4,
+"core_late": 0
+},
+"CB2674": {
+"n": 5,
+"core_late": 0
+},
+"CB2679": {
+"n": 6,
+"core_late": 0
+},
+"CB2687": {
+"n": 3,
+"core_late": 0
+},
+"CB2692": {
+"n": 3,
+"core_late": 0
+},
+"CB2698": {
+"n": 2,
+"core_late": 0
+},
+"CB2701": {
+"n": 4,
+"core_late": 0
+},
+"CB2710": {
+"n": 7,
+"core_late": 0
+},
+"CB2714": {
+"n": 4,
+"core_late": 0
+},
+"CB2719": {
+"n": 4,
+"core_late": 0
+},
+"CB2726": {
+"n": 4,
+"core_late": 0
+},
+"CB2733": {
+"n": 4,
+"core_late": 0
+},
+"CB2743": {
+"n": 2,
+"core_late": 0
+},
+"CB2746": {
+"n": 2,
+"core_late": 0
+},
+"CB2750": {
+"n": 5,
+"core_late": 0
+},
+"CB2758": {
+"n": 2,
+"core_late": 0
+},
+"CB2762": {
+"n": 2,
+"core_late": 0
+},
+"CB2766": {
+"n": 2,
+"core_late": 0
+},
+"CB2771": {
+"n": 4,
+"core_late": 0
+},
+"CB2776": {
+"n": 4,
+"core_late": 0
+},
+"CB2786": {
+"n": 3,
+"core_late": 0
+},
+"CB2791": {
+"n": 2,
+"core_late": 0
+},
+"CB2797": {
+"n": 6,
+"core_late": 0
+},
+"CB2801": {
+"n": 4,
+"core_late": 0
+},
+"CB2805": {
+"n": 5,
+"core_late": 0
+},
+"CB2812": {
+"n": 4,
+"core_late": 0
+},
+"CB2819": {
+"n": 4,
+"core_late": 0
+},
+"CB2826": {
+"n": 5,
+"core_late": 0
+},
+"CB2831": {
+"n": 4,
+"core_late": 0
+},
+"CB2842": {
+"n": 4,
+"core_late": 0
+},
+"CB2848": {
+"n": 2,
+"core_late": 0
+},
+"CB2854": {
+"n": 6,
+"core_late": 0
+},
+"CB2861": {
+"n": 2,
+"core_late": 0
+},
+"CB2877": {
+"n": 2,
+"core_late": 0
+},
+"CB2883": {
+"n": 2,
+"core_late": 0
+},
+"CB2886": {
+"n": 5,
+"core_late": 0
+},
+"CB2892": {
+"n": 6,
+"core_late": 0
+},
+"CB2901": {
+"n": 15,
+"core_late": 0
+},
+"CB2907": {
+"n": 4,
+"core_late": 0
+},
+"CB2910": {
+"n": 6,
+"core_late": 0
+},
+"CB2915": {
+"n": 3,
+"core_late": 0
+},
+"CB2920": {
+"n": 5,
+"core_late": 0
+},
+"CB2925": {
+"n": 3,
+"core_late": 0
+},
+"CB2929": {
+"n": 3,
+"core_late": 0
+},
+"CB2937": {
+"n": 3,
+"core_late": 0
+},
+"CB2945": {
+"n": 4,
+"core_late": 0
+},
+"CB2958": {
+"n": 2,
+"core_late": 0
+},
+"CB2965": {
+"n": 5,
+"core_late": 0
+},
+"CB2972": {
+"n": 2,
+"core_late": 0
+},
+"CB2977": {
+"n": 2,
+"core_late": 0
+},
+"CB2980": {
+"n": 2,
+"core_late": 0
+},
+"CB2987": {
+"n": 6,
+"core_late": 0
+},
+"CB2995": {
+"n": 7,
+"core_late": 0
+},
+"CB3000": {
+"n": 6,
+"core_late": 0
+},
+"CB3004": {
+"n": 4,
+"core_late": 0
+},
+"CB3008": {
+"n": 2,
+"core_late": 0
+},
+"CB3013": {
+"n": 5,
+"core_late": 0
+},
+"CB3018": {
+"n": 2,
+"core_late": 0
+},
+"CB3021": {
+"n": 3,
+"core_late": 0
+},
+"CB3031": {
+"n": 5,
+"core_late": 0
+},
+"CB3036": {
+"n": 5,
+"core_late": 0
+},
+"CB3043": {
+"n": 6,
+"core_late": 0
+},
+"CB3048": {
+"n": 6,
+"core_late": 0
+},
+"CB3051": {
+"n": 2,
+"core_late": 0
+},
+"CB3061": {
+"n": 4,
+"core_late": 0
+},
+"CB3071": {
+"n": 4,
+"core_late": 0
+},
+"CB3075": {
+"n": 5,
+"core_late": 0
+},
+"CB3080": {
+"n": 4,
+"core_late": 0
+},
+"CB3083": {
+"n": 2,
+"core_late": 0
+},
+"CB3092": {
+"n": 5,
+"core_late": 0
+},
+"CB3105": {
+"n": 4,
+"core_late": 0
+},
+"CB3109": {
+"n": 2,
+"core_late": 0
+},
+"CB3114": {
+"n": 4,
+"core_late": 0
+},
+"CB3121": {
+"n": 4,
+"core_late": 0
+},
+"CB3130": {
+"n": 6,
+"core_late": 0
+},
+"CB3134a": {
+"n": 1,
+"core_late": 0
+},
+"CB3138": {
+"n": 4,
+"core_late": 0
+},
+"CB3145": {
+"n": 2,
+"core_late": 0
+},
+"CB3149": {
+"n": 2,
+"core_late": 0
+},
+"CB3160": {
+"n": 5,
+"core_late": 0
+},
+"CB3168": {
+"n": 2,
+"core_late": 0
+},
+"CB3178": {
+"n": 2,
+"core_late": 0
+},
+"CB3182": {
+"n": 5,
+"core_late": 0
+},
+"CB3187": {
+"n": 2,
+"core_late": 0
+},
+"CB3193": {
+"n": 2,
+"core_late": 0
+},
+"CB3198": {
+"n": 4,
+"core_late": 0
+},
+"CB3202": {
+"n": 4,
+"core_late": 0
+},
+"CB3206": {
+"n": 3,
+"core_late": 477
+},
+"CB3212": {
+"n": 2,
+"core_late": 0
+},
+"CB3226": {
+"n": 2,
+"core_late": 0
+},
+"CB3229": {
+"n": 4,
+"core_late": 0
+},
+"CB3236": {
+"n": 3,
+"core_late": 0
+},
+"CB3245": {
+"n": 6,
+"core_late": 0
+},
+"CB3257": {
+"n": 4,
+"core_late": 0
+},
+"CB3268": {
+"n": 3,
+"core_late": 0
+},
+"CB3274": {
+"n": 3,
+"core_late": 0
+},
+"CB3277": {
+"n": 2,
+"core_late": 0
+},
+"CB3281": {
+"n": 2,
+"core_late": 0
+},
+"CB3285": {
+"n": 3,
+"core_late": 0
+},
+"CB3290": {
+"n": 6,
+"core_late": 0
+},
+"CB3294": {
+"n": 3,
+"core_late": 0
+},
+"CB3299": {
+"n": 2,
+"core_late": 0
+},
+"CB3305": {
+"n": 4,
+"core_late": 0
+},
+"CB3314": {
+"n": 3,
+"core_late": 0
+},
+"CB3317": {
+"n": 2,
+"core_late": 0
+},
+"CB3320": {
+"n": 6,
+"core_late": 0
+},
+"CB3332": {
+"n": 2,
+"core_late": 0
+},
+"CB3340": {
+"n": 4,
+"core_late": 0
+},
+"CB3345": {
+"n": 3,
+"core_late": 0
+},
+"CB3352": {
+"n": 2,
+"core_late": 0
+},
+"CB3357": {
+"n": 3,
+"core_late": 0
+},
+"CB3369": {
+"n": 4,
+"core_late": 1
+},
+"CB3378": {
+"n": 2,
+"core_late": 0
+},
+"CB3382": {
+"n": 4,
+"core_late": 0
+},
+"CB3386": {
+"n": 8,
+"core_late": 0
+},
+"CB3392": {
+"n": 4,
+"core_late": 0
+},
+"CB3398": {
+"n": 2,
+"core_late": 0
+},
+"CB3405": {
+"n": 2,
+"core_late": 0
+},
+"CB3410": {
+"n": 2,
+"core_late": 0
+},
+"CB3416": {
+"n": 4,
+"core_late": 0
+},
+"CB3430": {
+"n": 2,
+"core_late": 0
+},
+"CB3439": {
+"n": 5,
+"core_late": 0
+},
+"CB3450": {
+"n": 3,
+"core_late": 0
+},
+"CB3457": {
+"n": 4,
+"core_late": 0
+},
+"CB3463": {
+"n": 2,
+"core_late": 0
+},
+"CB3468": {
+"n": 2,
+"core_late": 0
+},
+"CB3472": {
+"n": 2,
+"core_late": 0
+},
+"CB3479": {
+"n": 4,
+"core_late": 0
+},
+"CB3500": {
+"n": 4,
+"core_late": 0
+},
+"CB3507": {
+"n": 4,
+"core_late": 0
+},
+"CB3512": {
+"n": 2,
+"core_late": 0
+},
+"CB3523": {
+"n": 2,
+"core_late": 0
+},
+"CB3533": {
+"n": 3,
+"core_late": 0
+},
+"CB3541": {
+"n": 4,
+"core_late": 0
+},
+"CB3546": {
+"n": 3,
+"core_late": 0
+},
+"CB3553": {
+"n": 2,
+"core_late": 0
+},
+"CB3556": {
+"n": 5,
+"core_late": 0
+},
+"CB3564": {
+"n": 2,
+"core_late": 0
+},
+"CB3570": {
+"n": 2,
+"core_late": 0
+},
+"CB3576": {
+"n": 2,
+"core_late": 0
+},
+"CB3579": {
+"n": 3,
+"core_late": 0
+},
+"CB3592": {
+"n": 3,
+"core_late": 0
+},
+"CB3608": {
+"n": 2,
+"core_late": 0
+},
+"CB3619": {
+"n": 2,
+"core_late": 0
+},
+"CB3630": {
+"n": 2,
+"core_late": 0
+},
+"CB3637": {
+"n": 4,
+"core_late": 0
+},
+"CB3648": {
+"n": 4,
+"core_late": 0
+},
+"CB3655": {
+"n": 4,
+"core_late": 0
+},
+"CB3664": {
+"n": 4,
+"core_late": 0
+},
+"CB3672": {
+"n": 2,
+"core_late": 0
+},
+"CB3679": {
+"n": 2,
+"core_late": 477
+},
+"CB3691": {
+"n": 2,
+"core_late": 0
+},
+"CB3697": {
+"n": 3,
+"core_late": 0
+},
+"CB3705": {
+"n": 3,
+"core_late": 0
+},
+"CB3710": {
+"n": 3,
+"core_late": 0
+},
+"CB3720": {
+"n": 2,
+"core_late": 0
+},
+"CB3726": {
+"n": 2,
+"core_late": 0
+},
+"CB3729": {
+"n": 3,
+"core_late": 0
+},
+"CB3733": {
+"n": 3,
+"core_late": 0
+},
+"CB3738": {
+"n": 2,
+"core_late": 0
+},
+"CB3745": {
+"n": 4,
+"core_late": 0
+},
+"CB3753": {
+"n": 5,
+"core_late": 0
+},
+"CB3761": {
+"n": 2,
+"core_late": 0
+},
+"CB3775": {
+"n": 3,
+"core_late": 0
+},
+"CB3778": {
+"n": 2,
+"core_late": 0
+},
+"CB3782": {
+"n": 2,
+"core_late": 0
+},
+"CB3789": {
+"n": 2,
+"core_late": 0
+},
+"CB3793": {
+"n": 3,
+"core_late": 0
+},
+"CB3801": {
+"n": 2,
+"core_late": 0
+},
+"CB3867": {
+"n": 2,
+"core_late": 0
+},
+"CB3870": {
+"n": 4,
+"core_late": 0
+},
+"CB3874": {
+"n": 2,
+"core_late": 0
+},
+"CB3897": {
+"n": 2,
+"core_late": 0
+},
+"CB3904": {
+"n": 1,
+"core_late": 0
+},
+"CB3907": {
+"n": 2,
+"core_late": 0
+},
+"CB3918": {
+"n": 2,
+"core_late": 0
+},
+"CB3924": {
+"n": 1,
+"core_late": 0
+},
+"CB3936": {
+"n": 2,
+"core_late": 0
+},
+"CB3959": {
+"n": 3,
+"core_late": 0
+},
+"CB3978": {
+"n": 10,
+"core_late": 0
+},
+"CB4141": {
+"n": 8,
+"core_late": 0
+},
+"CB4176": {
+"n": 5,
+"core_late": 0
+},
+"CB4193": {
+"n": 2,
+"core_late": 0
+},
+"CB4219": {
+"n": 8,
+"core_late": 0
+},
+"CB4243": {
+"n": 10,
+"core_late": 0
+},
+"CB4248": {
+"n": 6,
+"core_late": 0
+},
+"CL004": {
+"n": 4,
+"core_late": 0
+},
+"CL009": {
+"n": 2,
+"core_late": 0
+},
+"CL012": {
+"n": 2,
+"core_late": 0
+},
+"CL018b": {
+"n": 4,
+"core_late": 0
+},
+"CL023": {
+"n": 6,
+"core_late": 0
+},
+"CL025": {
+"n": 2,
+"core_late": 0
+},
+"CL028": {
+"n": 2,
+"core_late": 0
+},
+"CL031": {
+"n": 2,
+"core_late": 0
+},
+"CL042": {
+"n": 4,
+"core_late": 0
+},
+"CL057,CL106": {
+"n": 4,
+"core_late": 0
+},
+"CL062_a": {
+"n": 9,
+"core_late": 0
+},
+"CL066": {
+"n": 2,
+"core_late": 0
+},
+"CL070a": {
+"n": 2,
+"core_late": 0
+},
+"CL071b": {
+"n": 6,
+"core_late": 0
+},
+"CL074": {
+"n": 4,
+"core_late": 0
+},
+"CL078a": {
+"n": 2,
+"core_late": 0
+},
+"CL081": {
+"n": 2,
+"core_late": 0
+},
+"CL086_a,CL086_d": {
+"n": 10,
+"core_late": 0
+},
+"CL086_e": {
+"n": 8,
+"core_late": 0
+},
+"CL090_a": {
+"n": 5,
+"core_late": 0
+},
+"CL092": {
+"n": 2,
+"core_late": 0
+},
+"CL096": {
+"n": 2,
+"core_late": 0
+},
+"CL099b": {
+"n": 3,
+"core_late": 0
+},
+"CL101": {
+"n": 4,
+"core_late": 0
+},
+"CL109": {
+"n": 2,
+"core_late": 0
+},
+"CL112": {
+"n": 2,
+"core_late": 0
+},
+"CL115": {
+"n": 2,
+"core_late": 0
+},
+"CL126": {
+"n": 2,
+"core_late": 0
+},
+"CL128b": {
+"n": 5,
+"core_late": 0
+},
+"CL130": {
+"n": 2,
+"core_late": 0
+},
+"CL135": {
+"n": 2,
+"core_late": 0
+},
+"CL141": {
+"n": 1,
+"core_late": 0
+},
+"CL151": {
+"n": 2,
+"core_late": 0
+},
+"CL158": {
+"n": 2,
+"core_late": 0
+},
+"CL160a": {
+"n": 2,
+"core_late": 0
+},
+"CL171": {
+"n": 7,
+"core_late": 0
+},
+"CL186": {
+"n": 2,
+"core_late": 0
+},
+"CL199": {
+"n": 2,
+"core_late": 0
+},
+"CL212": {
+"n": 2,
+"core_late": 0
+},
+"CL234": {
+"n": 4,
+"core_late": 0
+},
+"CL239": {
+"n": 4,
+"core_late": 0
+},
+"CL248": {
+"n": 2,
+"core_late": 0
+},
+"CL254": {
+"n": 6,
+"core_late": 0
+},
+"CL258": {
+"n": 4,
+"core_late": 0
+},
+"CL265": {
+"n": 2,
+"core_late": 0
+},
+"CL267": {
+"n": 5,
+"core_late": 0
+},
+"CL270b": {
+"n": 4,
+"core_late": 0
+},
+"CL272_b": {
+"n": 6,
+"core_late": 0
+},
+"CL283b": {
+"n": 4,
+"core_late": 0
+},
+"CL288": {
+"n": 2,
+"core_late": 0
+},
+"CL293": {
+"n": 2,
+"core_late": 0
+},
+"CL312": {
+"n": 1,
+"core_late": 0
+},
+"CL318": {
+"n": 2,
+"core_late": 0
+},
+"CL326": {
+"n": 2,
+"core_late": 0
+},
+"CL340": {
+"n": 4,
+"core_late": 0
+},
+"CL359": {
+"n": 4,
+"core_late": 0
+},
+"CL362": {
+"n": 2,
+"core_late": 0
+},
+"CRE005": {
+"n": 4,
+"core_late": 0
+},
+"CRE008,CRE010": {
+"n": 3,
+"core_late": 0
+},
+"CRE013": {
+"n": 2,
+"core_late": 0
+},
+"CRE022": {
+"n": 2,
+"core_late": 0
+},
+"CRE025": {
+"n": 2,
+"core_late": 0
+},
+"CRE042": {
+"n": 2,
+"core_late": 0
+},
+"CRE048": {
+"n": 2,
+"core_late": 0
+},
+"CRE056": {
+"n": 11,
+"core_late": 0
+},
+"CRE065": {
+"n": 6,
+"core_late": 0
+},
+"CRE069": {
+"n": 2,
+"core_late": 0
+},
+"CRE075": {
+"n": 2,
+"core_late": 0
+},
+"CRE079": {
+"n": 2,
+"core_late": 0
+},
+"CRE080c": {
+"n": 4,
+"core_late": 0
+},
+"CRE087": {
+"n": 2,
+"core_late": 0
+},
+"CRE095b": {
+"n": 4,
+"core_late": 0
+},
+"CRE102": {
+"n": 2,
+"core_late": 0
+},
+"CRE107": {
+"n": 2,
+"core_late": 0
+},
+"CRZ01,CRZ02": {
+"n": 4,
+"core_late": 0
+},
+"DA2_lPN": {
+"n": 11,
+"core_late": 477
+},
+"DC2_adPN": {
+"n": 4,
+"core_late": 477
+},
+"DGI": {
+"n": 2,
+"core_late": 0
+},
+"DL3_lPN": {
+"n": 10,
+"core_late": 477
+},
+"DM3_vPN": {
+"n": 2,
+"core_late": 0
+},
+"DM6_adPN": {
+"n": 6,
+"core_late": 477
+},
+"DNa04": {
+"n": 2,
+"core_late": 0
+},
+"DNb04": {
+"n": 3,
+"core_late": 0
+},
+"DNbe002": {
+"n": 4,
+"core_late": 0
+},
+"DNc02": {
+"n": 2,
+"core_late": 0
+},
+"DNde002": {
+"n": 2,
+"core_late": 0
+},
+"DNg104": {
+"n": 2,
+"core_late": 0
+},
+"DNg24": {
+"n": 2,
+"core_late": 0
+},
+"DNg34": {
+"n": 2,
+"core_late": 0
+},
+"DNg67": {
+"n": 2,
+"core_late": 0
+},
+"DNg86": {
+"n": 2,
+"core_late": 0
+},
+"DNg99": {
+"n": 2,
+"core_late": 0
+},
+"DNge043": {
+"n": 2,
+"core_late": 0
+},
+"DNge054": {
+"n": 2,
+"core_late": 0
+},
+"DNge083": {
+"n": 2,
+"core_late": 0
+},
+"DNge111": {
+"n": 5,
+"core_late": 0
+},
+"DNge135": {
+"n": 2,
+"core_late": 0
+},
+"DNge147": {
+"n": 2,
+"core_late": 0
+},
+"DNp07": {
+"n": 2,
+"core_late": 0
+},
+"DNp101": {
+"n": 2,
+"core_late": 0
+},
+"DNp12": {
+"n": 2,
+"core_late": 0
+},
+"DNp24": {
+"n": 2,
+"core_late": 0
+},
+"DNp30": {
+"n": 2,
+"core_late": 0
+},
+"DNp34": {
+"n": 2,
+"core_late": 0
+},
+"DNp44": {
+"n": 2,
+"core_late": 0
+},
+"DNp47": {
+"n": 2,
+"core_late": 0
+},
+"DNp54": {
+"n": 2,
+"core_late": 0
+},
+"DNp62": {
+"n": 2,
+"core_late": 0
+},
+"DNp71": {
+"n": 2,
+"core_late": 0
+},
+"DNpe006": {
+"n": 2,
+"core_late": 0
+},
+"DNpe027": {
+"n": 2,
+"core_late": 0
+},
+"DNpe030": {
+"n": 2,
+"core_late": 0
+},
+"DNpe038": {
+"n": 2,
+"core_late": 0
+},
+"DNpe045": {
+"n": 2,
+"core_late": 0
+},
+"DNpe053": {
+"n": 2,
+"core_late": 0
+},
+"DPM": {
+"n": 2,
+"core_late": 0
+},
+"ExR1": {
+"n": 4,
+"core_late": 0
+},
+"FB1H": {
+"n": 2,
+"core_late": 0
+},
+"FB2H_b": {
+"n": 2,
+"core_late": 0
+},
+"FB4O": {
+"n": 8,
+"core_late": 0
+},
+"FB5C": {
+"n": 3,
+"core_late": 0
+},
+"FB6A_c": {
+"n": 2,
+"core_late": 0
+},
+"FB6I": {
+"n": 2,
+"core_late": 0
+},
+"FB6T": {
+"n": 4,
+"core_late": 0
+},
+"FB8B": {
+"n": 5,
+"core_late": 0
+},
+"HRN_VP1l": {
+"n": 13,
+"core_late": 477
+},
+"IB008": {
+"n": 2,
+"core_late": 0
+},
+"IB016": {
+"n": 2,
+"core_late": 0
+},
+"IB033,IB039": {
+"n": 4,
+"core_late": 0
+},
+"IB059b": {
+"n": 2,
+"core_late": 0
+},
+"IB092": {
+"n": 2,
+"core_late": 0
+},
+"IB115": {
+"n": 4,
+"core_late": 0
+},
+"JO-B4_b": {
+"n": 25,
+"core_late": 0
+},
+"JO-ED2_b": {
+"n": 21,
+"core_late": 0
+},
+"JO-FD2": {
+"n": 17,
+"core_late": 0
+},
+"KCab": {
+"n": 1643,
+"core_late": 3
+},
+"KCapbp-ap2": {
+"n": 298,
+"core_late": 2
+},
+"KCg-m": {
+"n": 2189,
+"core_late": 2
+},
+"KCg-s3": {
+"n": 1,
+"core_late": 0
+},
+"LAL022": {
+"n": 6,
+"core_late": 0
+},
+"LAL030d": {
+"n": 4,
+"core_late": 0
+},
+"LAL051": {
+"n": 2,
+"core_late": 0
+},
+"LAL100": {
+"n": 2,
+"core_late": 0
+},
+"LAL110": {
+"n": 10,
+"core_late": 0
+},
+"LAL125,LAL108": {
+"n": 4,
+"core_late": 0
+},
+"LAL141": {
+"n": 2,
+"core_late": 0
+},
+"LAL147b": {
+"n": 4,
+"core_late": 0
+},
+"LAL152": {
+"n": 2,
+"core_late": 0
+},
+"LAL156a": {
+"n": 2,
+"core_late": 0
+},
+"LAL173,LAL174": {
+"n": 4,
+"core_late": 0
+},
+"LAL183": {
+"n": 2,
+"core_late": 1
+},
+"LAL188": {
+"n": 8,
+"core_late": 0
+},
+"LAL192": {
+"n": 2,
+"core_late": 0
+},
+"LAL199": {
+"n": 2,
+"core_late": 0
+},
+"LB2b": {
+"n": 4,
+"core_late": 0
+},
+"LB3a": {
+"n": 30,
+"core_late": 0
+},
+"LB3d": {
+"n": 29,
+"core_late": 0
+},
+"LC16": {
+"n": 151,
+"core_late": 0
+},
+"LC24": {
+"n": 75,
+"core_late": 0
+},
+"LC28c": {
+"n": 24,
+"core_late": 0
+},
+"LC34": {
+"n": 14,
+"core_late": 0
+},
+"LC37": {
+"n": 18,
+"core_late": 0
+},
+"LC40": {
+"n": 37,
+"core_late": 0
+},
+"LC44": {
+"n": 4,
+"core_late": 0
+},
+"LC6": {
+"n": 125,
+"core_late": 0
+},
+"LCe02": {
+"n": 53,
+"core_late": 0
+},
+"LCe07": {
+"n": 10,
+"core_late": 0
+},
+"LHAD1a1": {
+"n": 6,
+"core_late": 0
+},
+"LHAD1a4a": {
+"n": 3,
+"core_late": 0
+},
+"LHAD1b1_b": {
+"n": 6,
+"core_late": 0
+},
+"LHAD1b4": {
+"n": 4,
+"core_late": 0
+},
+"LHAD1c2b": {
+"n": 4,
+"core_late": 0
+},
+"LHAD1d1": {
+"n": 12,
+"core_late": 0
+},
+"LHAD1f1b": {
+"n": 4,
+"core_late": 0
+},
+"LHAD1f3c": {
+"n": 4,
+"core_late": 0
+},
+"LHAD1f4c": {
+"n": 2,
+"core_late": 0
+},
+"LHAD1j1": {
+"n": 2,
+"core_late": 0
+},
+"LHAD2c1": {
+"n": 3,
+"core_late": 0
+},
+"LHAD2c3b": {
+"n": 2,
+"core_late": 0
+},
+"LHAD2e1": {
+"n": 2,
+"core_late": 0
+},
+"LHAD3a8": {
+"n": 4,
+"core_late": 0
+},
+"LHAD4a1": {
+"n": 2,
+"core_late": 0
+},
+"LHAV1a4": {
+"n": 1,
+"core_late": 0
+},
+"LHAV1d1": {
+"n": 5,
+"core_late": 0
+},
+"LHAV2a3a": {
+"n": 2,
+"core_late": 0
+},
+"LHAV2b1": {
+"n": 8,
+"core_late": 0
+},
+"LHAV2b2a": {
+"n": 10,
+"core_late": 1
+},
+"LHAV2b7_b": {
+"n": 6,
+"core_late": 0
+},
+"LHAV2f2_a": {
+"n": 2,
+"core_late": 0
+},
+"LHAV2g1b": {
+"n": 3,
+"core_late": 0
+},
+"LHAV2g3": {
+"n": 7,
+"core_late": 0
+},
+"LHAV2k13": {
+"n": 2,
+"core_late": 0
+},
+"LHAV2n1": {
+"n": 2,
+"core_late": 0
+},
+"LHAV3a1": {
+"n": 5,
+"core_late": 0
+},
+"LHAV3c1": {
+"n": 4,
+"core_late": 0
+},
+"LHAV3e3a": {
+"n": 2,
+"core_late": 0
+},
+"LHAV3g1": {
+"n": 4,
+"core_late": 0
+},
+"LHAV3i1": {
+"n": 2,
+"core_late": 0
+},
+"LHAV3k3": {
+"n": 2,
+"core_late": 0
+},
+"LHAV3k6": {
+"n": 2,
+"core_late": 0
+},
+"LHAV3p1": {
+"n": 2,
+"core_late": 0
+},
+"LHAV4a4": {
+"n": 17,
+"core_late": 0
+},
+"LHAV4b2": {
+"n": 10,
+"core_late": 0
+},
+"LHAV4d1": {
+"n": 7,
+"core_late": 0
+},
+"LHAV4g17": {
+"n": 2,
+"core_late": 0
+},
+"LHAV4g1c": {
+"n": 3,
+"core_late": 0
+},
+"LHAV4l1": {
+"n": 2,
+"core_late": 0
+},
+"LHAV5a2_a1": {
+"n": 10,
+"core_late": 0
+},
+"LHAV5a2_a4": {
+"n": 8,
+"core_late": 0
+},
+"LHAV5d1": {
+"n": 2,
+"core_late": 0
+},
+"LHAV6a3": {
+"n": 8,
+"core_late": 0
+},
+"LHAV6e1": {
+"n": 2,
+"core_late": 0
+},
+"LHAV7a1a": {
+"n": 4,
+"core_late": 0
+},
+"LHAV7a2": {
+"n": 1,
+"core_late": 0
+},
+"LHAV7a4b": {
+"n": 2,
+"core_late": 0
+},
+"LHAV7a7": {
+"n": 5,
+"core_late": 0
+},
+"LHAV9a1_b": {
+"n": 4,
+"core_late": 0
+},
+"LHCENT11": {
+"n": 2,
+"core_late": 1
+},
+"LHCENT13_a": {
+"n": 2,
+"core_late": 0
+},
+"LHCENT13_d": {
+"n": 3,
+"core_late": 0
+},
+"LHCENT4": {
+"n": 2,
+"core_late": 0
+},
+"LHCENT8": {
+"n": 4,
+"core_late": 0
+},
+"LHPD1b1": {
+"n": 2,
+"core_late": 0
+},
+"LHPD2c7": {
+"n": 2,
+"core_late": 0
+},
+"LHPD3a2": {
+"n": 5,
+"core_late": 0
+},
+"LHPD4a1": {
+"n": 8,
+"core_late": 0
+},
+"LHPD4c1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV10b1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV11a1": {
+"n": 4,
+"core_late": 0
+},
+"LHPV1d1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV2a1_d": {
+"n": 6,
+"core_late": 0
+},
+"LHPV2b5": {
+"n": 7,
+"core_late": 0
+},
+"LHPV2c4": {
+"n": 2,
+"core_late": 0
+},
+"LHPV2f2": {
+"n": 8,
+"core_late": 0
+},
+"LHPV2i1a": {
+"n": 2,
+"core_late": 1
+},
+"LHPV2i2b": {
+"n": 4,
+"core_late": 0
+},
+"LHPV3a3_c": {
+"n": 1,
+"core_late": 0
+},
+"LHPV4a1": {
+"n": 7,
+"core_late": 0
+},
+"LHPV4a11": {
+"n": 2,
+"core_late": 0
+},
+"LHPV4a7a": {
+"n": 2,
+"core_late": 0
+},
+"LHPV4a9": {
+"n": 4,
+"core_late": 0
+},
+"LHPV4b3": {
+"n": 5,
+"core_late": 0
+},
+"LHPV4c4": {
+"n": 5,
+"core_late": 0
+},
+"LHPV4g1": {
+"n": 11,
+"core_late": 0
+},
+"LHPV4l1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV5a5": {
+"n": 4,
+"core_late": 0
+},
+"LHPV5b3": {
+"n": 20,
+"core_late": 0
+},
+"LHPV5c1": {
+"n": 29,
+"core_late": 0
+},
+"LHPV5d1": {
+"n": 10,
+"core_late": 1
+},
+"LHPV5e3": {
+"n": 2,
+"core_late": 0
+},
+"LHPV5g2": {
+"n": 6,
+"core_late": 0
+},
+"LHPV6a1": {
+"n": 8,
+"core_late": 0
+},
+"LHPV6c1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV6f1": {
+"n": 9,
+"core_late": 0
+},
+"LHPV6h2": {
+"n": 5,
+"core_late": 0
+},
+"LHPV6k2": {
+"n": 4,
+"core_late": 0
+},
+"LHPV6m1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV6q1": {
+"n": 2,
+"core_late": 0
+},
+"LHPV7a1b": {
+"n": 2,
+"core_late": 0
+},
+"LHPV8c1": {
+"n": 2,
+"core_late": 0
+},
+"LLPC2": {
+"n": 235,
+"core_late": 2
+},
+"LN60a": {
+"n": 2,
+"core_late": 0
+},
+"LPC1": {
+"n": 164,
+"core_late": 0
+},
+"LPT27": {
+"n": 2,
+"core_late": 0
+},
+"LPT48_vCal3": {
+"n": 2,
+"core_late": 0
+},
+"LPT52": {
+"n": 2,
+"core_late": 0
+},
+"LPTe02": {
+"n": 11,
+"core_late": 0
+},
+"LT47": {
+"n": 2,
+"core_late": 0
+},
+"LT53,PLP098": {
+"n": 8,
+"core_late": 0
+},
+"LT63": {
+"n": 4,
+"core_late": 0
+},
+"LT69": {
+"n": 2,
+"core_late": 0
+},
+"LT74": {
+"n": 5,
+"core_late": 0
+},
+"LT78": {
+"n": 8,
+"core_late": 0
+},
+"LT84": {
+"n": 2,
+"core_late": 0
+},
+"LT87": {
+"n": 2,
+"core_late": 0
+},
+"LTe04": {
+"n": 2,
+"core_late": 0
+},
+"LTe12": {
+"n": 2,
+"core_late": 0
+},
+"LTe16": {
+"n": 2,
+"core_late": 0
+},
+"LTe20": {
+"n": 2,
+"core_late": 0
+},
+"LTe25": {
+"n": 2,
+"core_late": 1
+},
+"LTe35": {
+"n": 2,
+"core_late": 0
+},
+"LTe38b": {
+"n": 4,
+"core_late": 0
+},
+"LTe42b": {
+"n": 2,
+"core_late": 0
+},
+"LTe43b": {
+"n": 6,
+"core_late": 0
+},
+"LTe51": {
+"n": 2,
+"core_late": 0
+},
+"LTe55": {
+"n": 2,
+"core_late": 0
+},
+"LTe58": {
+"n": 12,
+"core_late": 0
+},
+"LTe60": {
+"n": 2,
+"core_late": 0
+},
+"LTe68b": {
+"n": 6,
+"core_late": 0
+},
+"LTe71": {
+"n": 2,
+"core_late": 0
+},
+"LTe75": {
+"n": 2,
+"core_late": 0
+},
+"LgAG6": {
+"n": 4,
+"core_late": 0
+},
+"LgAG9": {
+"n": 1,
+"core_late": 0
+},
+"MB-C1": {
+"n": 4,
+"core_late": 0
+},
+"MBON03": {
+"n": 2,
+"core_late": 0
+},
+"MBON06": {
+"n": 2,
+"core_late": 0
+},
+"MBON10": {
+"n": 9,
+"core_late": 0
+},
+"MBON13": {
+"n": 2,
+"core_late": 0
+},
+"MBON15-like": {
+"n": 5,
+"core_late": 0
+},
+"MBON17-like": {
+"n": 2,
+"core_late": 0
+},
+"MBON20": {
+"n": 2,
+"core_late": 0
+},
+"MBON23": {
+"n": 2,
+"core_late": 1
+},
+"MBON26": {
+"n": 2,
+"core_late": 0
+},
+"MBON29": {
+"n": 2,
+"core_late": 0
+},
+"MBON32": {
+"n": 2,
+"core_late": 0
+},
+"MC65": {
+"n": 6,
+"core_late": 0
+},
+"MTe02": {
+"n": 75,
+"core_late": 0
+},
+"MTe05": {
+"n": 25,
+"core_late": 0
+},
+"MTe12": {
+"n": 6,
+"core_late": 0
+},
+"MTe15": {
+"n": 4,
+"core_late": 0
+},
+"MTe18": {
+"n": 3,
+"core_late": 0
+},
+"MTe24": {
+"n": 2,
+"core_late": 0
+},
+"MTe27": {
+"n": 2,
+"core_late": 0
+},
+"MTe31": {
+"n": 2,
+"core_late": 0
+},
+"MTe34": {
+"n": 2,
+"core_late": 0
+},
+"MTe38": {
+"n": 2,
+"core_late": 0
+},
+"MTe43": {
+"n": 2,
+"core_late": 0
+},
+"MTe46": {
+"n": 3,
+"core_late": 0
+},
+"MTe50": {
+"n": 54,
+"core_late": 0
+},
+"MTe53": {
+"n": 15,
+"core_late": 0
+},
+"M_VPNml66": {
+"n": 6,
+"core_late": 0
+},
+"M_adPNm6": {
+"n": 2,
+"core_late": 0
+},
+"M_l2PN10t19a": {
+"n": 2,
+"core_late": 0
+},
+"M_l2PNm14": {
+"n": 2,
+"core_late": 0
+},
+"M_l2PNm17": {
+"n": 2,
+"core_late": 0
+},
+"M_lPNm11C": {
+"n": 2,
+"core_late": 477
+},
+"M_lvPNm24": {
+"n": 4,
+"core_late": 0
+},
+"M_lvPNm27": {
+"n": 2,
+"core_late": 477
+},
+"M_lvPNm31": {
+"n": 2,
+"core_late": 0
+},
+"M_lvPNm39": {
+"n": 2,
+"core_late": 0
+},
+"M_lvPNm42": {
+"n": 3,
+"core_late": 0
+},
+"M_lvPNm45": {
+"n": 6,
+"core_late": 0
+},
+"M_lvPNm48": {
+"n": 6,
+"core_late": 477
+},
+"M_spPN4t9": {
+"n": 2,
+"core_late": 477
+},
+"M_vPNml51": {
+"n": 2,
+"core_late": 0
+},
+"M_vPNml54": {
+"n": 2,
+"core_late": 0
+},
+"M_vPNml60": {
+"n": 6,
+"core_late": 0
+},
+"M_vPNml65": {
+"n": 4,
+"core_late": 0
+},
+"M_vPNml72": {
+"n": 6,
+"core_late": 0
+},
+"M_vPNml79": {
+"n": 2,
+"core_late": 0
+},
+"M_vPNml84": {
+"n": 8,
+"core_late": 0
+},
+"MeLp1": {
+"n": 2,
+"core_late": 0
+},
+"NPFL1-I": {
+"n": 2,
+"core_late": 0
+},
+"OA-ASM1": {
+"n": 4,
+"core_late": 0
+},
+"OA-VPM3": {
+"n": 2,
+"core_late": 0
+},
+"OA-VUMa3": {
+"n": 2,
+"core_late": 0
+},
+"OA-VUMa8": {
+"n": 1,
+"core_late": 0
+},
+"OCG02c": {
+"n": 4,
+"core_late": 0
+},
+"ORN_DA2": {
+"n": 39,
+"core_late": 477
+},
+"ORN_DA4m": {
+"n": 40,
+"core_late": 477
+},
+"ORN_DC3": {
+"n": 33,
+"core_late": 477
+},
+"ORN_DL2d": {
+"n": 14,
+"core_late": 477
+},
+"ORN_DL4": {
+"n": 52,
+"core_late": 477
+},
+"ORN_DM2": {
+"n": 54,
+"core_late": 477
+},
+"ORN_DM5": {
+"n": 42,
+"core_late": 477
+},
+"ORN_DP1m": {
+"n": 32,
+"core_late": 477
+},
+"ORN_VA1v": {
+"n": 94,
+"core_late": 477
+},
+"ORN_VA4": {
+"n": 31,
+"core_late": 477
+},
+"ORN_VA7l": {
+"n": 16,
+"core_late": 477
+},
+"ORN_VC2": {
+"n": 29,
+"core_late": 477
+},
+"ORN_VC5": {
+"n": 25,
+"core_late": 477
+},
+"ORN_VL2p": {
+"n": 27,
+"core_late": 477
+},
+"ORN_VM3": {
+"n": 37,
+"core_late": 477
+},
+"ORN_VM5v": {
+"n": 23,
+"core_late": 1
+},
+"ORN_VM6v": {
+"n": 26,
+"core_late": 477
+},
+"PAL02": {
+"n": 2,
+"core_late": 0
+},
+"PAM03": {
+"n": 10,
+"core_late": 0
+},
+"PAM06": {
+"n": 30,
+"core_late": 1
+},
+"PAM09": {
+"n": 9,
+"core_late": 0
+},
+"PAM12": {
+"n": 23,
+"core_late": 0
+},
+"PAM15": {
+"n": 3,
+"core_late": 0
+},
+"PLP004": {
+"n": 2,
+"core_late": 0
+},
+"PLP007": {
+"n": 2,
+"core_late": 0
+},
+"PLP012": {
+"n": 2,
+"core_late": 1
+},
+"PLP016": {
+"n": 2,
+"core_late": 0
+},
+"PLP020": {
+"n": 2,
+"core_late": 0
+},
+"PLP023": {
+"n": 2,
+"core_late": 0
+},
+"PLP025b": {
+"n": 7,
+"core_late": 0
+},
+"PLP029": {
+"n": 2,
+"core_late": 0
+},
+"PLP035": {
+"n": 2,
+"core_late": 0
+},
+"PLP039": {
+"n": 11,
+"core_late": 0
+},
+"PLP042b": {
+"n": 3,
+"core_late": 0
+},
+"PLP046a": {
+"n": 3,
+"core_late": 0
+},
+"PLP048": {
+"n": 11,
+"core_late": 0
+},
+"PLP053a": {
+"n": 1,
+"core_late": 0
+},
+"PLP055": {
+"n": 4,
+"core_late": 0
+},
+"PLP058": {
+"n": 2,
+"core_late": 0
+},
+"PLP064_b": {
+"n": 6,
+"core_late": 0
+},
+"PLP067a": {
+"n": 2,
+"core_late": 0
+},
+"PLP069": {
+"n": 4,
+"core_late": 0
+},
+"PLP075": {
+"n": 2,
+"core_late": 0
+},
+"PLP086a": {
+"n": 3,
+"core_late": 0
+},
+"PLP087b": {
+"n": 2,
+"core_late": 0
+},
+"PLP093": {
+"n": 2,
+"core_late": 0
+},
+"PLP096": {
+"n": 2,
+"core_late": 1
+},
+"PLP103a": {
+"n": 4,
+"core_late": 0
+},
+"PLP108": {
+"n": 8,
+"core_late": 0
+},
+"PLP115_b": {
+"n": 22,
+"core_late": 0
+},
+"PLP120,PLP145": {
+"n": 4,
+"core_late": 0
+},
+"PLP129": {
+"n": 2,
+"core_late": 0
+},
+"PLP132": {
+"n": 2,
+"core_late": 0
+},
+"PLP142": {
+"n": 4,
+"core_late": 0
+},
+"PLP149": {
+"n": 4,
+"core_late": 0
+},
+"PLP150c": {
+"n": 6,
+"core_late": 0
+},
+"PLP156": {
+"n": 4,
+"core_late": 0
+},
+"PLP160": {
+"n": 10,
+"core_late": 0
+},
+"PLP163": {
+"n": 2,
+"core_late": 0
+},
+"PLP172": {
+"n": 9,
+"core_late": 0
+},
+"PLP177": {
+"n": 2,
+"core_late": 0
+},
+"PLP184": {
+"n": 2,
+"core_late": 0
+},
+"PLP196": {
+"n": 2,
+"core_late": 0
+},
+"PLP199": {
+"n": 4,
+"core_late": 0
+},
+"PLP211": {
+"n": 2,
+"core_late": 0
+},
+"PLP216": {
+"n": 2,
+"core_late": 0
+},
+"PLP221": {
+"n": 2,
+"core_late": 0
+},
+"PLP229": {
+"n": 2,
+"core_late": 0
+},
+"PLP237": {
+"n": 6,
+"core_late": 0
+},
+"PLP245": {
+"n": 2,
+"core_late": 0
+},
+"PLP248": {
+"n": 2,
+"core_late": 0
+},
+"PLP251": {
+"n": 2,
+"core_late": 0
+},
+"PPL101": {
+"n": 2,
+"core_late": 2
+},
+"PPL104": {
+"n": 2,
+"core_late": 0
+},
+"PPL107": {
+"n": 2,
+"core_late": 0
+},
+"PPL202": {
+"n": 2,
+"core_late": 477
+},
+"PPM1201": {
+"n": 4,
+"core_late": 0
+},
+"PS001": {
+"n": 2,
+"core_late": 0
+},
+"PS005_a": {
+"n": 9,
+"core_late": 0
+},
+"PS021": {
+"n": 4,
+"core_late": 0
+},
+"PS062": {
+"n": 2,
+"core_late": 0
+},
+"PS088": {
+"n": 2,
+"core_late": 0
+},
+"PS096": {
+"n": 12,
+"core_late": 0
+},
+"PS112": {
+"n": 2,
+"core_late": 0
+},
+"PS117b": {
+"n": 2,
+"core_late": 0
+},
+"PS138": {
+"n": 2,
+"core_late": 0
+},
+"PS150a": {
+"n": 3,
+"core_late": 0
+},
+"PS159": {
+"n": 2,
+"core_late": 0
+},
+"PS180": {
+"n": 2,
+"core_late": 0
+},
+"PS185a": {
+"n": 2,
+"core_late": 0
+},
+"PS214": {
+"n": 2,
+"core_late": 0
+},
+"PS234": {
+"n": 2,
+"core_late": 0
+},
+"PS252": {
+"n": 5,
+"core_late": 0
+},
+"PS268": {
+"n": 7,
+"core_late": 0
+},
+"PS276": {
+"n": 2,
+"core_late": 0
+},
+"PVLP003": {
+"n": 2,
+"core_late": 0
+},
+"PVLP008": {
+"n": 29,
+"core_late": 0
+},
+"PVLP012": {
+"n": 4,
+"core_late": 0
+},
+"PVLP018": {
+"n": 2,
+"core_late": 0
+},
+"PVLP024": {
+"n": 4,
+"core_late": 0
+},
+"PVLP070": {
+"n": 5,
+"core_late": 0
+},
+"PVLP082b": {
+"n": 8,
+"core_late": 0
+},
+"PVLP090": {
+"n": 2,
+"core_late": 0
+},
+"PVLP097": {
+"n": 14,
+"core_late": 0
+},
+"PVLP101c": {
+"n": 4,
+"core_late": 0
+},
+"PVLP104": {
+"n": 4,
+"core_late": 0
+},
+"PVLP109": {
+"n": 4,
+"core_late": 0
+},
+"PVLP121": {
+"n": 2,
+"core_late": 0
+},
+"PVLP133": {
+"n": 25,
+"core_late": 0
+},
+"PVLP149": {
+"n": 4,
+"core_late": 0
+},
+"PhG10": {
+"n": 2,
+"core_late": 0
+},
+"PhG1c": {
+"n": 4,
+"core_late": 0
+},
+"SAD003": {
+"n": 6,
+"core_late": 0
+},
+"SAD010": {
+"n": 2,
+"core_late": 0
+},
+"SAD013": {
+"n": 2,
+"core_late": 0
+},
+"SAD040": {
+"n": 4,
+"core_late": 0
+},
+"SAD045,SAD046": {
+"n": 11,
+"core_late": 0
+},
+"SAD076": {
+"n": 2,
+"core_late": 0
+},
+"SAD084": {
+"n": 2,
+"core_late": 0
+},
+"SA_MDA_2": {
+"n": 5,
+"core_late": 0
+},
+"SIP013a": {
+"n": 3,
+"core_late": 0
+},
+"SIP015": {
+"n": 11,
+"core_late": 0
+},
+"SIP024": {
+"n": 7,
+"core_late": 0
+},
+"SIP028": {
+"n": 1,
+"core_late": 0
+},
+"SIP029": {
+"n": 2,
+"core_late": 0
+},
+"SIP045": {
+"n": 6,
+"core_late": 0
+},
+"SIP048": {
+"n": 4,
+"core_late": 0
+},
+"SIP053b": {
+"n": 7,
+"core_late": 0
+},
+"SIP064": {
+"n": 2,
+"core_late": 0
+},
+"SIP073": {
+"n": 6,
+"core_late": 0
+},
+"SIP081": {
+"n": 4,
+"core_late": 0
+},
+"SIP089": {
+"n": 6,
+"core_late": 0
+},
+"SLP004": {
+"n": 2,
+"core_late": 0
+},
+"SLP008": {
+"n": 6,
+"core_late": 0
+},
+"SLP012b": {
+"n": 1,
+"core_late": 0
+},
+"SLP019": {
+"n": 6,
+"core_late": 0
+},
+"SLP025a": {
+"n": 2,
+"core_late": 0
+},
+"SLP028a": {
+"n": 2,
+"core_late": 0
+},
+"SLP031": {
+"n": 2,
+"core_late": 0
+},
+"SLP034": {
+"n": 2,
+"core_late": 0
+},
+"SLP041": {
+"n": 6,
+"core_late": 0
+},
+"SLP048": {
+"n": 2,
+"core_late": 0
+},
+"SLP059": {
+"n": 2,
+"core_late": 0
+},
+"SLP064": {
+"n": 2,
+"core_late": 0
+},
+"SLP067": {
+"n": 2,
+"core_late": 0
+},
+"SLP070": {
+"n": 2,
+"core_late": 0
+},
+"SLP073": {
+"n": 2,
+"core_late": 0
+},
+"SLP077": {
+"n": 2,
+"core_late": 0
+},
+"SLP082": {
+"n": 7,
+"core_late": 0
+},
+"SLP101": {
+"n": 4,
+"core_late": 0
+},
+"SLP104,SLP205": {
+"n": 6,
+"core_late": 0
+},
+"SLP118": {
+"n": 2,
+"core_late": 0
+},
+"SLP122": {
+"n": 4,
+"core_late": 0
+},
+"SLP129_c": {
+"n": 6,
+"core_late": 0
+},
+"SLP132": {
+"n": 2,
+"core_late": 0
+},
+"SLP141,SLP142": {
+"n": 14,
+"core_late": 0
+},
+"SLP151": {
+"n": 4,
+"core_late": 0
+},
+"SLP155": {
+"n": 2,
+"core_late": 1
+},
+"SLP160": {
+"n": 6,
+"core_late": 0
+},
+"SLP162c": {
+"n": 3,
+"core_late": 0
+},
+"SLP207": {
+"n": 2,
+"core_late": 0
+},
+"SLP210": {
+"n": 2,
+"core_late": 0
+},
+"SLP212b": {
+"n": 2,
+"core_late": 0
+},
+"SLP214": {
+"n": 2,
+"core_late": 0
+},
+"SLP221": {
+"n": 2,
+"core_late": 0
+},
+"SLP224": {
+"n": 4,
+"core_late": 0
+},
+"SLP228": {
+"n": 2,
+"core_late": 0
+},
+"SLP234": {
+"n": 2,
+"core_late": 0
+},
+"SLP237": {
+"n": 4,
+"core_late": 0
+},
+"SLP240_a": {
+"n": 6,
+"core_late": 0
+},
+"SLP242": {
+"n": 5,
+"core_late": 0
+},
+"SLP248": {
+"n": 2,
+"core_late": 0
+},
+"SLP258": {
+"n": 2,
+"core_late": 0
+},
+"SLP265b": {
+"n": 2,
+"core_late": 0
+},
+"SLP274": {
+"n": 4,
+"core_late": 0
+},
+"SLP279": {
+"n": 2,
+"core_late": 0
+},
+"SLP286": {
+"n": 8,
+"core_late": 0
+},
+"SLP288b": {
+"n": 3,
+"core_late": 0
+},
+"SLP290": {
+"n": 5,
+"core_late": 0
+},
+"SLP295b": {
+"n": 6,
+"core_late": 0
+},
+"SLP304b": {
+"n": 2,
+"core_late": 0
+},
+"SLP308a": {
+"n": 2,
+"core_late": 0
+},
+"SLP313": {
+"n": 2,
+"core_late": 0
+},
+"SLP321": {
+"n": 4,
+"core_late": 0
+},
+"SLP345": {
+"n": 5,
+"core_late": 0
+},
+"SLP356b": {
+"n": 3,
+"core_late": 0
+},
+"SLP366": {
+"n": 2,
+"core_late": 0
+},
+"SLP376": {
+"n": 2,
+"core_late": 0
+},
+"SLP379": {
+"n": 2,
+"core_late": 0
+},
+"SLP383": {
+"n": 2,
+"core_late": 0
+},
+"SLP386": {
+"n": 2,
+"core_late": 0
+},
+"SLP390": {
+"n": 2,
+"core_late": 0
+},
+"SLP393": {
+"n": 2,
+"core_late": 0
+},
+"SLP400a": {
+"n": 2,
+"core_late": 0
+},
+"SLP404": {
+"n": 2,
+"core_late": 0
+},
+"SLP411": {
+"n": 2,
+"core_late": 0
+},
+"SLP433": {
+"n": 3,
+"core_late": 0
+},
+"SLP438": {
+"n": 4,
+"core_late": 0
+},
+"SLP447": {
+"n": 2,
+"core_late": 0
+},
+"SLP455": {
+"n": 2,
+"core_late": 0
+},
+"SLP462": {
+"n": 2,
+"core_late": 0
+},
+"SLPpm3_H01": {
+"n": 2,
+"core_late": 0
+},
+"SLPpm3_P02": {
+"n": 2,
+"core_late": 0
+},
+"SLPpm3_S01": {
+"n": 2,
+"core_late": 0
+},
+"SMP008": {
+"n": 7,
+"core_late": 0
+},
+"SMP011b": {
+"n": 2,
+"core_late": 0
+},
+"SMP016_b": {
+"n": 10,
+"core_late": 0
+},
+"SMP025a": {
+"n": 8,
+"core_late": 0
+},
+"SMP026": {
+"n": 2,
+"core_late": 0
+},
+"SMP030": {
+"n": 2,
+"core_late": 0
+},
+"SMP034": {
+"n": 3,
+"core_late": 0
+},
+"SMP038": {
+"n": 2,
+"core_late": 0
+},
+"SMP041": {
+"n": 2,
+"core_late": 0
+},
+"SMP045": {
+"n": 2,
+"core_late": 0
+},
+"SMP050": {
+"n": 2,
+"core_late": 0
+},
+"SMP055": {
+"n": 4,
+"core_late": 0
+},
+"SMP059": {
+"n": 2,
+"core_late": 0
+},
+"SMP074,CL040": {
+"n": 4,
+"core_late": 0
+},
+"SMP077": {
+"n": 2,
+"core_late": 0
+},
+"SMP084": {
+"n": 4,
+"core_late": 0
+},
+"SMP091": {
+"n": 6,
+"core_late": 0
+},
+"SMP105_a": {
+"n": 8,
+"core_late": 0
+},
+"SMP107": {
+"n": 12,
+"core_late": 0
+},
+"SMP112": {
+"n": 6,
+"core_late": 0
+},
+"SMP116": {
+"n": 2,
+"core_late": 0
+},
+"SMP123a": {
+"n": 2,
+"core_late": 0
+},
+"SMP128": {
+"n": 2,
+"core_late": 0
+},
+"SMP144,SMP150": {
+"n": 4,
+"core_late": 0
+},
+"SMP152": {
+"n": 2,
+"core_late": 0
+},
+"SMP157": {
+"n": 2,
+"core_late": 0
+},
+"SMP163": {
+"n": 2,
+"core_late": 0
+},
+"SMP168": {
+"n": 2,
+"core_late": 0
+},
+"SMP173": {
+"n": 8,
+"core_late": 0
+},
+"SMP177": {
+"n": 2,
+"core_late": 0
+},
+"SMP181": {
+"n": 2,
+"core_late": 0
+},
+"SMP190": {
+"n": 2,
+"core_late": 0
+},
+"SMP193a": {
+"n": 2,
+"core_late": 0
+},
+"SMP201": {
+"n": 2,
+"core_late": 0
+},
+"SMP204": {
+"n": 2,
+"core_late": 0
+},
+"SMP208": {
+"n": 7,
+"core_late": 0
+},
+"SMP215b": {
+"n": 2,
+"core_late": 0
+},
+"SMP239": {
+"n": 2,
+"core_late": 0
+},
+"SMP246": {
+"n": 5,
+"core_late": 0
+},
+"SMP248c": {
+"n": 2,
+"core_late": 0
+},
+"SMP254": {
+"n": 2,
+"core_late": 0
+},
+"SMP269": {
+"n": 2,
+"core_late": 0
+},
+"SMP283": {
+"n": 3,
+"core_late": 0
+},
+"SMP311": {
+"n": 2,
+"core_late": 0
+},
+"SMP315": {
+"n": 5,
+"core_late": 0
+},
+"SMP323": {
+"n": 4,
+"core_late": 0
+},
+"SMP329": {
+"n": 4,
+"core_late": 0
+},
+"SMP339": {
+"n": 2,
+"core_late": 0
+},
+"SMP345": {
+"n": 4,
+"core_late": 0
+},
+"SMP359": {
+"n": 2,
+"core_late": 0
+},
+"SMP361b": {
+"n": 2,
+"core_late": 0
+},
+"SMP371": {
+"n": 4,
+"core_late": 0
+},
+"SMP386": {
+"n": 2,
+"core_late": 0
+},
+"SMP389b": {
+"n": 2,
+"core_late": 0
+},
+"SMP397": {
+"n": 3,
+"core_late": 0
+},
+"SMP405": {
+"n": 5,
+"core_late": 0
+},
+"SMP411b": {
+"n": 2,
+"core_late": 0
+},
+"SMP420": {
+"n": 2,
+"core_late": 0
+},
+"SMP426": {
+"n": 4,
+"core_late": 0
+},
+"SMP429": {
+"n": 7,
+"core_late": 0
+},
+"SMP447": {
+"n": 3,
+"core_late": 0
+},
+"SMP451b": {
+"n": 2,
+"core_late": 0
+},
+"SMP456": {
+"n": 2,
+"core_late": 0
+},
+"SMP472,SMP473": {
+"n": 4,
+"core_late": 0
+},
+"SMP492": {
+"n": 2,
+"core_late": 0
+},
+"SMP495a": {
+"n": 2,
+"core_late": 0
+},
+"SMP504": {
+"n": 2,
+"core_late": 0
+},
+"SMP509a": {
+"n": 2,
+"core_late": 0
+},
+"SMP523,SMP524": {
+"n": 8,
+"core_late": 0
+},
+"SMP529": {
+"n": 2,
+"core_late": 0
+},
+"SMP535": {
+"n": 4,
+"core_late": 0
+},
+"SMP546,SMP547": {
+"n": 4,
+"core_late": 0
+},
+"SMP552": {
+"n": 2,
+"core_late": 0
+},
+"SMP558": {
+"n": 4,
+"core_late": 0
+},
+"SMP568": {
+"n": 20,
+"core_late": 0
+},
+"SMP577": {
+"n": 2,
+"core_late": 0
+},
+"SMP580": {
+"n": 2,
+"core_late": 0
+},
+"SMP589": {
+"n": 2,
+"core_late": 0
+},
+"SMP594": {
+"n": 2,
+"core_late": 0
+},
+"SMPp&v1A_P03": {
+"n": 2,
+"core_late": 0
+},
+"SMPp&v1B_M02": {
+"n": 2,
+"core_late": 0
+},
+"TRN_VP2": {
+"n": 7,
+"core_late": 477
+},
+"TuBu08": {
+"n": 22,
+"core_late": 0
+},
+"VA1v_adPN": {
+"n": 9,
+"core_late": 477
+},
+"VA4_lPN": {
+"n": 2,
+"core_late": 477
+},
+"VC3_adPN": {
+"n": 8,
+"core_late": 477
+},
+"VES002": {
+"n": 2,
+"core_late": 0
+},
+"VES005": {
+"n": 2,
+"core_late": 0
+},
+"VES014": {
+"n": 2,
+"core_late": 0
+},
+"VES019": {
+"n": 4,
+"core_late": 0
+},
+"VES022a": {
+"n": 6,
+"core_late": 0
+},
+"VES030": {
+"n": 2,
+"core_late": 0
+},
+"VES050": {
+"n": 3,
+"core_late": 0
+},
+"VES056": {
+"n": 2,
+"core_late": 0
+},
+"VES063b": {
+"n": 2,
+"core_late": 0
+},
+"VES073": {
+"n": 2,
+"core_late": 0
+},
+"VESa1_P02": {
+"n": 2,
+"core_late": 0
+},
+"VESa2_P01": {
+"n": 2,
+"core_late": 0
+},
+"VM2_adPN": {
+"n": 4,
+"core_late": 477
+},
+"VM5d_adPN": {
+"n": 9,
+"core_late": 477
+},
+"VM7v_adPN": {
+"n": 4,
+"core_late": 477
+},
+"VP1l+_lvPN": {
+"n": 9,
+"core_late": 477
+},
+"VP1m+_lvPN": {
+"n": 4,
+"core_late": 0
+},
+"VP2_l2PN": {
+"n": 2,
+"core_late": 477
+},
+"VP4+VL1_l2PN": {
+"n": 2,
+"core_late": 0
+},
+"VP5+VP3_l2PN": {
+"n": 2,
+"core_late": 477
+},
+"V_l2PN": {
+"n": 2,
+"core_late": 1
+},
+"WED008": {
+"n": 2,
+"core_late": 0
+},
+"WED016": {
+"n": 2,
+"core_late": 0
+},
+"WED026": {
+"n": 8,
+"core_late": 0
+},
+"WED044": {
+"n": 2,
+"core_late": 0
+},
+"WED060": {
+"n": 3,
+"core_late": 0
+},
+"WED072": {
+"n": 6,
+"core_late": 0
+},
+"WED081": {
+"n": 2,
+"core_late": 0
+},
+"WED092b": {
+"n": 2,
+"core_late": 0
+},
+"WED092e": {
+"n": 2,
+"core_late": 0
+},
+"WED099": {
+"n": 2,
+"core_late": 0
+},
+"WED104": {
+"n": 2,
+"core_late": 0
+},
+"WED122": {
+"n": 2,
+"core_late": 0
+},
+"WED144": {
+"n": 4,
+"core_late": 0
+},
+"WED166_d": {
+"n": 3,
+"core_late": 0
+},
+"WEDPN10A": {
+"n": 2,
+"core_late": 0
+},
+"WEDPN12": {
+"n": 2,
+"core_late": 0
+},
+"WEDPN1B": {
+"n": 2,
+"core_late": 0
+},
+"WEDPN3": {
+"n": 6,
+"core_late": 0
+},
+"WEDPN6A": {
+"n": 9,
+"core_late": 0
+},
+"WEDPN7C": {
+"n": 2,
+"core_late": 0
+},
+"WEDPN9": {
+"n": 2,
+"core_late": 0
+},
+"aMe10": {
+"n": 3,
+"core_late": 0
+},
+"aMe17a1": {
+"n": 2,
+"core_late": 0
+},
+"aMe19b": {
+"n": 2,
+"core_late": 0
+},
+"aMe24": {
+"n": 2,
+"core_late": 0
+},
+"aMe3": {
+"n": 2,
+"core_late": 1
+},
+"aMe8": {
+"n": 4,
+"core_late": 0
+},
+"aSP-f1A,aSP-f1B,aSP-f2": {
+"n": 13,
+"core_late": 0
+},
+"aSP-g1": {
+"n": 7,
+"core_late": 0
+},
+"aSP-g3B": {
+"n": 4,
+"core_late": 0
+},
+"cL04": {
+"n": 4,
+"core_late": 0
+},
+"cL12": {
+"n": 2,
+"core_late": 0
+},
+"cL16": {
+"n": 3,
+"core_late": 0
+},
+"cL22a": {
+"n": 2,
+"core_late": 0
+},
+"cLLPM02": {
+"n": 2,
+"core_late": 0
+},
+"cLP04": {
+"n": 2,
+"core_late": 0
+},
+"cM08b": {
+"n": 4,
+"core_late": 0
+},
+"cML01": {
+"n": 2,
+"core_late": 0
+},
+"l2LN20": {
+"n": 4,
+"core_late": 0
+},
+"lLN13": {
+"n": 5,
+"core_late": 0
+},
+"lLN9,lLN17a": {
+"n": 5,
+"core_late": 0
+},
+"mAL4I": {
+"n": 2,
+"core_late": 0
+},
+"mAL6": {
+"n": 4,
+"core_late": 0
+},
+"mALB3": {
+"n": 4,
+"core_late": 0
+},
+"mALC6": {
+"n": 4,
+"core_late": 0
+},
+"mALD3": {
+"n": 2,
+"core_late": 0
+},
+"mAL_f2": {
+"n": 6,
+"core_late": 0
+},
+"oviIN": {
+"n": 2,
+"core_late": 0
+},
+"pC1d": {
+"n": 2,
+"core_late": 0
+},
+"uncertain": {
+"n": 5,
+"core_late": 0
+},
+"v2LN33": {
+"n": 4,
+"core_late": 0
+},
+"v2LN38": {
+"n": 4,
+"core_late": 0
+},
+"v2LN3A1_b": {
+"n": 8,
+"core_late": 477
+},
+"v2LN41a": {
+"n": 2,
+"core_late": 0
+},
+"v2LN42b": {
+"n": 2,
+"core_late": 0
+},
+"v2LN47": {
+"n": 5,
+"core_late": 0
+},
+"v2LNX01": {
+"n": 2,
+"core_late": 0
+},
+"vLN25": {
+"n": 4,
+"core_late": 0
+},
+"vLN28,vLN29": {
+"n": 4,
+"core_late": 0
+}
+}
