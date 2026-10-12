@@ -245,6 +245,50 @@ pub fn threshold(rate_hz: u64, dt_us: u64) -> u64 {
     ((rate_hz * dt_us * (1u64 << 32)) / 1_000_000) << 32
 }
 
+/// Slices of the neuron range the dense pass is split into.
+const PARTS: usize = 64;
+
+/// One neuron's step: Shiu's update, then whether it spiked and whether it is
+/// now at a fixed point. The one implementation the serial walk, the list
+/// walk and the parallel slices all call, so they cannot drift apart.
+#[inline(always)]
+fn neuron<const TM: i64, const TS: i64>(
+    c: &Connectome,
+    bias: i64,
+    v: &mut i64,
+    g: &mut i64,
+    r: &mut u16,
+    count: &mut u32,
+    nore: bool,
+) -> (bool, bool) {
+    let dm = |x: i64| if TM != 0 { x / TM } else { x / c.tau_m };
+    let ds = |x: i64| if TS != 0 { x / TS } else { x / c.tau_syn };
+    let mut spiked = false;
+    if *r > 0 {
+        // Shiu's model.py marks both equations `(unless refractory)`: v is
+        // held and g does not decay.
+        *r -= 1;
+        *v = c.vreset;
+    } else {
+        *v += dm(c.v0 - *v + *g + bias);
+        *g -= ds(*g);
+        if *v > c.vth {
+            *v = c.vreset;
+            *g = 0;
+            *r = if nore { 0 } else { c.refr };
+            *count = count.wrapping_add(1);
+            spiked = true;
+        }
+    }
+    // A fixed point: the dense loop would leave this neuron exactly as it is
+    // until input lands, so skipping it is exact. "Would this step change
+    // anything" and not "is g zero" -- truncating decay leaves a residue under
+    // tau_syn that never reaches zero, and the first version kept 125,772 fly
+    // neurons awake forever on it.
+    let inert = *r == 0 && ds(*g) == 0 && dm(c.v0 - *v + *g + bias) == 0 && *v <= c.vth;
+    (spiked, inert)
+}
+
 pub struct Sim {
     pub v: Vec<i64>,
     pub g: Vec<i64>,
@@ -280,6 +324,8 @@ pub struct Sim {
     pub scattered: u64,
     pub rng: Rng,
     pub counts: Vec<u32>,
+    /// The parallel dense pass's per-slice fired lists, kept between steps.
+    parts: Vec<Vec<u32>>,
 }
 
 impl Sim {
@@ -304,6 +350,7 @@ impl Sim {
             scattered: 0,
             rng: Rng::new(seed),
             counts: vec![0; c.n],
+            parts: Vec::new(),
         }
     }
 
@@ -400,45 +447,28 @@ impl Sim {
     /// switch changes no spike, which `diag brain` checks by digest.
     #[inline(always)]
     fn integrate<const TM: i64, const TS: i64>(&mut self, c: &Connectome, fired: &mut Vec<u32>) {
-        let dm = |x: i64| if TM != 0 { x / TM } else { x / c.tau_m };
-        let ds = |x: i64| if TS != 0 { x / TS } else { x / c.tau_syn };
         let bias = self.bias;
-        // One neuron's update; answers whether it is now at a fixed point.
-        let mut one = |i: usize, sim: &mut Sim| -> bool {
-            let mut v = sim.v[i];
-            let mut g = sim.g[i];
-            let mut r = sim.refr[i];
-            if r > 0 {
-                // Shiu's model.py marks both equations `(unless refractory)`:
-                // v is held and g does not decay.
-                r -= 1;
-                v = c.vreset;
-            } else {
-                v += dm(c.v0 - v + g + bias);
-                g -= ds(g);
-                if v > c.vth {
-                    v = c.vreset;
-                    g = 0;
-                    r = if sim.nore[i] { 0 } else { c.refr };
-                    sim.counts[i] = sim.counts[i].wrapping_add(1);
-                    fired.push(i as u32);
-                }
-            }
-            sim.v[i] = v;
-            sim.g[i] = g;
-            sim.refr[i] = r;
-            // A fixed point: the dense loop would leave this neuron exactly as
-            // it is until input lands, so skipping it is exact. "Would this
-            // step change anything" and not "is g zero" -- truncating decay
-            // leaves a residue under tau_syn that never reaches zero, and the
-            // first version kept 125,772 fly neurons awake forever on it.
-            r == 0 && ds(g) == 0 && dm(c.v0 - v + g + bias) == 0 && v <= c.vth
-        };
         if self.dense {
-            for i in 0..c.n {
-                if self.on[i] && one(i, self) {
-                    self.on[i] = false;
-                    self.awake -= 1;
+            if !self.integrate_parallel::<TM, TS>(c, fired) {
+                for i in 0..c.n {
+                    if self.on[i] {
+                        let (spiked, inert) = neuron::<TM, TS>(
+                            c,
+                            bias,
+                            &mut self.v[i],
+                            &mut self.g[i],
+                            &mut self.refr[i],
+                            &mut self.counts[i],
+                            self.nore[i],
+                        );
+                        if spiked {
+                            fired.push(i as u32);
+                        }
+                        if inert {
+                            self.on[i] = false;
+                            self.awake -= 1;
+                        }
+                    }
                 }
             }
             // Back to the list once the brain has quietened, rebuilt in order.
@@ -455,7 +485,19 @@ impl Sim {
             let mut k = 0;
             while k < self.active.len() {
                 let i = self.active[k] as usize;
-                if one(i, self) {
+                let (spiked, inert) = neuron::<TM, TS>(
+                    c,
+                    bias,
+                    &mut self.v[i],
+                    &mut self.g[i],
+                    &mut self.refr[i],
+                    &mut self.counts[i],
+                    self.nore[i],
+                );
+                if spiked {
+                    fired.push(i as u32);
+                }
+                if inert {
                     self.on[i] = false;
                     self.awake -= 1;
                     self.active.swap_remove(k);
@@ -468,6 +510,103 @@ impl Sim {
                 self.active.clear();
             }
         }
+    }
+
+    /// The dense pass across every core `smp::parallel_split` can lend, in
+    /// `PARTS` fixed slices of the neuron range, each with its own fired list
+    /// and retire count, merged in slice order afterwards.
+    ///
+    /// Exact, which is the only reason it is allowed: a neuron's update reads
+    /// and writes its own state and nothing else, and everything done with the
+    /// fired list afterwards is a sum, which order cannot change -- the
+    /// oracle digests in `diag brain` say so on every run. This was the
+    /// bottleneck: 1,950 us of a 2,134 us step on the fly once a poke had
+    /// woken most of it, one core walking 138,639 neurons every 0.1 ms.
+    ///
+    /// Answers false having done nothing when there is no help to be had --
+    /// no other core, another job in flight -- and the caller walks serially.
+    fn integrate_parallel<const TM: i64, const TS: i64>(&mut self, c: &Connectome, fired: &mut Vec<u32>) -> bool {
+        if self.parts.len() != PARTS {
+            self.parts = (0..PARTS).map(|_| Vec::new()).collect();
+        }
+        for p in self.parts.iter_mut() {
+            p.clear();
+        }
+        let mut retired = [0usize; PARTS];
+        struct Job {
+            c: *const Connectome,
+            bias: i64,
+            len: usize,
+            n: usize,
+            v: *mut i64,
+            g: *mut i64,
+            refr: *mut u16,
+            counts: *mut u32,
+            on: *mut bool,
+            nore: *const bool,
+            parts: *mut Vec<u32>,
+            retired: *mut usize,
+        }
+        unsafe fn run<const TM: i64, const TS: i64>(ctx: usize, lo: usize, hi: usize) {
+            let j = unsafe { &*(ctx as *const Job) };
+            let c = unsafe { &*j.c };
+            for p in lo..hi {
+                // Slices never overlap, so no two cores touch one neuron.
+                let (a, b) = (p * j.len, ((p + 1) * j.len).min(j.n));
+                let out = unsafe { &mut *j.parts.add(p) };
+                let mut gone = 0;
+                for i in a..b {
+                    unsafe {
+                        if !*j.on.add(i) {
+                            continue;
+                        }
+                        let (spiked, inert) = neuron::<TM, TS>(
+                            c,
+                            j.bias,
+                            &mut *j.v.add(i),
+                            &mut *j.g.add(i),
+                            &mut *j.refr.add(i),
+                            &mut *j.counts.add(i),
+                            *j.nore.add(i),
+                        );
+                        if spiked {
+                            out.push(i as u32);
+                        }
+                        if inert {
+                            *j.on.add(i) = false;
+                            gone += 1;
+                        }
+                    }
+                }
+                unsafe { *j.retired.add(p) = gone };
+            }
+        }
+        let job = Job {
+            c: c as *const Connectome,
+            bias: self.bias,
+            len: c.n.div_ceil(PARTS),
+            n: c.n,
+            v: self.v.as_mut_ptr(),
+            g: self.g.as_mut_ptr(),
+            refr: self.refr.as_mut_ptr(),
+            counts: self.counts.as_mut_ptr(),
+            on: self.on.as_mut_ptr(),
+            nore: self.nore.as_ptr(),
+            parts: self.parts.as_mut_ptr(),
+            retired: retired.as_mut_ptr(),
+        };
+        // `width` is a cost hint, not a count: about sixteen operations a
+        // neuron, so the fly's 138,639 clear the fabric's floor and the
+        // worm's 300 stay on one core where the handshake would cost more.
+        let width = job.len * 16;
+        if !crate::smp::parallel_split(&job as *const Job as usize, run::<TM, TS>, PARTS, width) {
+            return false;
+        }
+        for (p, out) in self.parts.iter().enumerate() {
+            fired.extend_from_slice(out);
+            self.awake -= retired[p];
+        }
+        true
     }
 
     /// Change the resting drive. Every neuron's fixed point moves with it, so
