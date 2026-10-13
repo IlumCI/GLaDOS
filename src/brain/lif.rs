@@ -248,6 +248,17 @@ pub fn threshold(rate_hz: u64, dt_us: u64) -> u64 {
 /// Slices of the neuron range the dense pass is split into.
 const PARTS: usize = 64;
 
+/// Short-term synaptic depression (Tsodyks & Markram 1997), in
+/// `tools/connectome.py` as STD_U and STD_TAU_MS and identical there. Shiu's
+/// model has none, and without it the fly has a self-sustaining state: a
+/// heat or odour input ignites about 10,000 neurons that fire for good,
+/// anchored in a 477-neuron antennal-lobe core (design/attractor.md). With
+/// U = 0.1 and 1 s recovery, the state ends within 100 ms of its input and
+/// sugar still drives MN9 at 50 Hz (70 without).
+pub const STD_U: i64 = 100_000;
+pub const STD_TAU_MS: i64 = 1000;
+pub const PPM: i64 = 1_000_000;
+
 /// One neuron's step: Shiu's update, then whether it spiked and whether it is
 /// now at a fixed point. The one implementation the serial walk, the list
 /// walk and the parallel slices all call, so they cannot drift apart.
@@ -326,6 +337,13 @@ pub struct Sim {
     pub counts: Vec<u32>,
     /// The parallel dense pass's per-slice fired lists, kept between steps.
     parts: Vec<Vec<u32>>,
+    /// Short-term depression: resources available per presynaptic neuron,
+    /// in parts per million, and the step they were last brought up to date
+    /// (`resources`). Sensor neurons are exempt.
+    xr: Vec<i64>,
+    xr_t: Vec<u64>,
+    exempt: Vec<bool>,
+    tau_rec: i64,
 }
 
 impl Sim {
@@ -351,7 +369,37 @@ impl Sim {
             rng: Rng::new(seed),
             counts: vec![0; c.n],
             parts: Vec::new(),
+            xr: vec![PPM; c.n],
+            xr_t: vec![0; c.n],
+            exempt: {
+                let mut e = vec![false; c.n];
+                for g in c.sensors.iter() {
+                    for &i in g.ids.iter() {
+                        e[i as usize] = true;
+                    }
+                }
+                e
+            },
+            tau_rec: (STD_TAU_MS * 1000 / c.dt_us as i64).max(1),
         }
+    }
+
+    /// Neuron `i`'s resources at this step, with every recovery since its
+    /// last spike applied. The oracle recovers every neuron at the end of
+    /// every step, `x += (1e6 - x) / tau_rec`; this replays exactly that
+    /// recurrence for the steps that passed, stopping where it stops moving,
+    /// so nothing is touched for a neuron that is not firing.
+    #[inline]
+    fn resources(&mut self, i: usize) -> i64 {
+        let mut x = self.xr[i];
+        let mut k = self.t - self.xr_t[i];
+        while k > 0 && PPM - x >= self.tau_rec {
+            x += (PPM - x) / self.tau_rec;
+            k -= 1;
+        }
+        self.xr[i] = x;
+        self.xr_t[i] = self.t;
+        x
     }
 
     #[inline]
@@ -422,13 +470,19 @@ impl Sim {
             let os = (self.t as usize + c.delay) % self.slots;
             let out = os * n;
             for &i in fired.iter() {
-                let (a, b) = (c.rows[i as usize] as usize, c.rows[i as usize + 1] as usize);
+                let iu = i as usize;
+                let x = self.resources(iu);
+                let (a, b) = (c.rows[iu] as usize, c.rows[iu + 1] as usize);
                 for k in a..b {
                     let j = c.col[k] as usize;
                     if self.ring[out + j] == 0 {
                         self.touched[os].push(j as u32);
                     }
-                    self.ring[out + j] += c.w[k] as i64 * c.w_syn * self.gain / 1000;
+                    let base = c.w[k] as i64 * c.w_syn * self.gain / 1000;
+                    self.ring[out + j] += if x == PPM { base } else { base * x / PPM };
+                }
+                if !self.exempt[iu] {
+                    self.xr[iu] -= x * STD_U / PPM;
                 }
                 self.scattered += (b - a) as u64;
             }

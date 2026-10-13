@@ -250,6 +250,26 @@ class Brain:
 
 # --- the simulation ---------------------------------------------------------
 
+# Short-term synaptic depression (Tsodyks & Markram 1997), added to Shiu's
+# model because without it the whole fly brain has a self-sustaining state:
+# a heat or odour input ignites ~10,000 neurons that then fire forever
+# (design/attractor.md). Per presynaptic neuron, `xr` is the fraction of
+# resources available in parts per million. A spike delivers its weights
+# scaled by xr, then uses STD_U of what is left; every step xr recovers by
+# (1e6 - xr) / STD_TAU. At rest xr is 1, so an isolated spike has exactly its
+# published weight. Sensor neurons are exempt: their spikes come from the
+# periphery, and the canary (sugar drives MN9) depends on them. Chosen on
+# the host against two checks: the heat state ends within 100 ms of its
+# input, and sugar still drives MN9 (50 Hz, from 70 without).
+STD_U = 100_000
+STD_TAU_MS = 1000
+PPM = 1_000_000
+
+
+def std_tau_steps(b) -> int:
+    return STD_TAU_MS * 1000 // b.dt_us
+
+
 def tdiv(a: int, b: int) -> int:
     """Integer division truncating toward zero, which is what Rust's `/` on
     i64 does. Python's `//` floors, and the two differ on every negative
@@ -309,6 +329,9 @@ def simulate(b: Brain, steps: int, drive: dict, seed: int = 1):
         for i in b.sensors[name]:
             driven.append((i, thr))
     nore = {i for i, _ in driven}
+    xr = [PPM] * n
+    exempt = set(i for ids in b.sensors.values() for i in ids)
+    tau_rec = std_tau_steps(b)
     for t in range(steps):
         slot = ring[t % slots]
         for i in range(n):
@@ -336,7 +359,11 @@ def simulate(b: Brain, steps: int, drive: dict, seed: int = 1):
             out = ring[(t + b.delay) % slots]
             for i in fired:
                 for k in range(b.rows[i], b.rows[i + 1]):
-                    out[b.col[k]] += b.w[k] * b.w_syn
+                    out[b.col[k]] += tdiv(b.w[k] * b.w_syn * xr[i], PPM)
+                if i not in exempt:
+                    xr[i] -= xr[i] * STD_U // PPM
+        for i in range(n):
+            xr[i] += (PPM - xr[i]) // tau_rec
     return counts
 
 
@@ -369,6 +396,11 @@ def simulate_np(b: Brain, steps: int, drive: dict, seed: int = 1):
     def tdiv_np(a, d):
         return np.sign(a) * (np.abs(a) // d)
 
+    xr = np.full(n, PPM, dtype=np.int64)
+    exempt = np.zeros(n, dtype=bool)
+    for ids in b.sensors.values():
+        exempt[ids] = True
+    tau_rec = std_tau_steps(b)
     for t in range(steps):
         s = t % slots
         g += ring[s]
@@ -391,7 +423,10 @@ def simulate_np(b: Brain, steps: int, drive: dict, seed: int = 1):
             out = ring[(t + b.delay) % slots]
             for i in fired:
                 a, z = rows[i], rows[i + 1]
-                np.add.at(out, col[a:z], w[a:z])
+                np.add.at(out, col[a:z], tdiv_np(w[a:z] * xr[i], PPM))
+            dep = fired[~exempt[fired]]
+            xr[dep] -= xr[dep] * STD_U // PPM
+        xr += (PPM - xr) // tau_rec
     return [int(c) for c in counts]
 
 

@@ -313,3 +313,28 @@ readout window now takes up to 10 s of wall time). No quantity in section 1
 changes. The kernel under test is the commit carrying this amendment, with
 any performance work after it. That work changes no spike; `diag brain`'s
 oracle digests are the check.
+
+**2026-10-13, amendment 3 (the model changes: applies to sections 1 and 2).**
+The brain now has short-term synaptic depression (Tsodyks & Markram 1997):
+U = 0.1, recovery 1 s, per presynaptic neuron, sensor neurons exempt
+(`lif::STD_*`, `connectome.py` STD_*). The reason is `design/attractor.md`.
+Without it, a heat or odour input ignites a self-sustaining state of about
+10,000 neurons, anchored in a 477-neuron antennal-lobe core, which no
+amount of time ends. The second run of section 1 found that state as a
+brain that never returned to rest between trials. With it, the state ends
+within 100 ms of its input. The kernel matches the new oracle digests
+exactly, and the MN9 canary holds at 50 Hz (70 without depression; the
+claim is now >= 40 Hz, because Shiu's result is that sugar activates MN9,
+not the rate).
+
+Consequences, fixed before any further run:
+- **Section 1** runs on this brain. Nothing in its protocol changes.
+- **Section 2:** the worm PCI result already recorded (intact 0.728, severed
+  0.719, shuffled 0.837; p = 0.50 and 0.88) was measured on the model
+  without depression. It stands as a result about that model. The section 2
+  protocol is rerun in full on the new model, worm and fly. `tools/pci.py`
+  defaults to the new model, and `std_u=0` reproduces the old one.
+- **New, from the attractor work:** a *bounded* ignition is now what a
+  strong antennal-lobe input produces. The tests of global-workspace
+  predictions (threshold, access, blocking) are to be preregistered as a
+  new section before they run.

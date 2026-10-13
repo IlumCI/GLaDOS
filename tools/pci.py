@@ -51,7 +51,8 @@ class Graph:
                      np.asarray(b.w, dtype=np.int64))
 
 
-def simulate(b: cx.Brain, g: Graph, steps: int, pulses, record, bin_steps: int, seed: int, gain: int = 1000, bias: int = 0):
+def simulate(b: cx.Brain, g: Graph, steps: int, pulses, record, bin_steps: int, seed: int, gain: int = 1000, bias: int = 0,
+             a_inc: int = 0, tau_a: int = 2000, std_u: int = None, tau_rec: int = None, std_exempt=None):
     """Step the brain `steps` times; `pulses` is a list of (sensor, rate_hz,
     first_step, last_step_exclusive). Returns spike counts per (bin, recorded
     neuron) and total counts per neuron.
@@ -66,6 +67,26 @@ def simulate(b: cx.Brain, g: Graph, steps: int, pulses, record, bin_steps: int, 
     w = np.sign(wq) * (np.abs(wq) // 1000)
     v = np.full(n, b.v0, dtype=np.int64)
     gg = np.zeros(n, dtype=np.int64)
+    # Spike-frequency adaptation: a current each spike raises by `a_inc` nV
+    # and every step decays by a / tau_a, subtracted from the drive. Zero
+    # increment is the unadapted model exactly.
+    aa = np.zeros(n, dtype=np.int64)
+    # Short-term depression (Tsodyks-Markram, per presynaptic neuron):
+    # `xr` is the fraction of resources available, in parts per million. A
+    # spike delivers its weights scaled by xr and then uses std_u of what is
+    # left; xr recovers toward 1 with tau_rec. At rest xr is 1, so an isolated
+    # spike has exactly its published weight; std_u = 0 is the model unchanged.
+    xr = np.full(n, 1_000_000, dtype=np.int64)
+    # Defaults are the model's own (connectome.py's STD_*); std_u = 0 is the
+    # model without depression, which is how every run before 2026-10-13 ran.
+    if std_u is None:
+        std_u = cx.STD_U
+    if tau_rec is None:
+        tau_rec = cx.std_tau_steps(b)
+    if std_exempt is None:
+        std_exempt = np.zeros(n, dtype=bool)
+        for ids in b.sensors.values():
+            std_exempt[ids] = True
     refr = np.zeros(n, dtype=np.int64)
     slots = b.delay + 1
     ring = np.zeros((slots, n), dtype=np.int64)
@@ -100,7 +121,7 @@ def simulate(b: cx.Brain, g: Graph, steps: int, pulses, record, bin_steps: int, 
         refr[r] -= 1
         v[r] = b.vreset
         live = ~r
-        v[live] += tdiv(b.v0 - v[live] + gg[live] + bias, b.tau_m)
+        v[live] += tdiv(b.v0 - v[live] + gg[live] + bias - aa[live], b.tau_m)
         gg[live] -= tdiv(gg[live], b.tau_syn)
         fired = np.nonzero(live & (v > b.vth))[0]
         if fired.size:
@@ -108,6 +129,7 @@ def simulate(b: cx.Brain, g: Graph, steps: int, pulses, record, bin_steps: int, 
             gg[fired] = 0
             refr[fired] = np.where(nore[fired], 0, b.refr)
             counts[fired] += 1
+            aa[fired] += a_inc
             k = rec_slot[fired]
             k = k[k >= 0]
             if k.size:
@@ -118,7 +140,21 @@ def simulate(b: cx.Brain, g: Graph, steps: int, pulses, record, bin_steps: int, 
             lens = rows[fired + 1] - a
             if lens.sum():
                 idx = np.repeat(a - np.cumsum(lens) + lens, lens) + np.arange(lens.sum())
-                ring[(t + b.delay) % slots] += np.bincount(col[idx], weights=w[idx], minlength=n).astype(np.int64)
+                if std_u:
+                    sc = np.repeat(xr[fired], lens)
+                    ww = np.sign(w[idx]) * (np.abs(w[idx]) * sc // 1_000_000)
+                else:
+                    ww = w[idx]
+                ring[(t + b.delay) % slots] += np.bincount(col[idx], weights=ww, minlength=n).astype(np.int64)
+            if std_u:
+                use = xr[fired] * std_u // 1_000_000
+                if std_exempt is not None:
+                    use = np.where(std_exempt[fired], 0, use)
+                xr[fired] -= use
+        if a_inc:
+            aa -= tdiv(aa, tau_a)
+        if std_u:
+            xr += (1_000_000 - xr) // tau_rec
     return raster, counts
 
 

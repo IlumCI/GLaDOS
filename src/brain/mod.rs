@@ -735,15 +735,15 @@ pub fn report() -> Vec<String> {
 
 // connectome.py sim assets/brain/worm.bin --poke noxious --rate 150 --ms 500 --seed 1 --emit
 const ORACLE_STEPS: u64 = 5000;
-const ORACLE_TOTAL: u64 = 435;
-const ORACLE_DIGEST: u64 = 0xb197_051d_ba8d_951c;
+const ORACLE_TOTAL: u64 = 423;
+const ORACLE_DIGEST: u64 = 0x1a70_c0cc_c00c_b1a8;
 
 // connectome.py sim out/fly.bin --poke food --rate 150 --ms 100 --seed 1 --emit
 // (fly.bin sha256 30ab9e27..., FlyWire v783 via Shiu's Connectivity_783.parquet)
 const FLY_DIGEST: [u8; 8] = [0xc6, 0xd0, 0x49, 0x90, 0xc3, 0x16, 0xcb, 0x1b];
 const FLY_STEPS: u64 = 1000;
-const FLY_TOTAL: u64 = 1396;
-const FLY_DIGEST_COUNTS: u64 = 0xc96c_5844_e215_9d53;
+const FLY_TOTAL: u64 = 1197;
+const FLY_DIGEST_COUNTS: u64 = 0x04f4_8588_d735_4494;
 
 fn readout_hz(c: &Connectome, sim: &Sim, name: &str) -> u64 {
     let Some(r) = c.readouts.iter().find(|r| r.name == name) else { return 0 };
@@ -827,7 +827,10 @@ pub fn selftest() -> bool {
                 // Shiu et al. 2024's headline result, reproduced: the labellar
                 // sugar neurons drive MN9, the motor neuron of proboscis
                 // extension.
-                claim("fly canary: sugar drives MN9, the feeding motor neuron (Shiu 2024)", readout_hz(fc, &s, "feeding") > 50);
+                // Shiu's result is that sugar activates MN9; the rate is the model's.
+                // 70 Hz before short-term depression, 50 Hz with it (lif::STD_U),
+                // and a silent MN9 is what this claim exists to catch.
+                claim("fly canary: sugar drives MN9, the feeding motor neuron (Shiu 2024)", readout_hz(fc, &s, "feeding") >= 40);
                 crate::kprintln!("    (100 ms of fly brain took {} ms here)", us / 1000);
             }
             Some(fc) if fc.n > 10_000 => claim("a large brain is loaded with no oracle constants for it -- unchecked", false),
