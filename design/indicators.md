@@ -284,7 +284,7 @@ same parts wired at random". It cannot support "the system is conscious".
 ## Amendments to section 1
 
 **2026-10-12, amendment 1 (implementation, no change to the protocol).**
-The first run (`cba3e52`) recomputed the calibration exactly (0.125 /
+The first run (`3f28b75`) recomputed the calibration exactly (0.125 /
 0.0625) and then stopped on trial 1, with no trial scored. The cause was the
 harness, not the brain. Its waits gave up after a fixed wall time (10 s for a
 window, 20 s for the inter-trial interval). After a poke the fly woke 91,371
