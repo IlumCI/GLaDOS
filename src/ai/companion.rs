@@ -399,7 +399,9 @@ pub fn turn(message: &str, opts: &super::GenOpts) -> usize {
     // window showing an answer with nothing above it is the worse failure.
     log_push(true, message);
     super::echo_begin();
+    super::set_plain(true);
     super::generate(&prompt, &framed);
+    super::set_plain(false);
     if let Some(said) = super::echo_end() {
         log_push(false, &said);
         crate::voice::speak_reply(&said);

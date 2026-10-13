@@ -1479,6 +1479,212 @@ fn echo(s: &str) {
     }
 }
 
+/// Markdown in conversation (`set_plain`), rendered rather than printed.
+///
+/// The model writes markdown out of habit, and on this console a marker is
+/// not formatting, it is asterisks. So the markers are consumed and become
+/// what they mean: bold and headings in yellow, inline code in cyan, a list
+/// item's `-`, `*` or `+` a real bullet. The transcript (`echo`), which the
+/// windows and the voice read, gets the clean text with no markers in it.
+///
+/// It runs on the token stream, so a marker can arrive split across two
+/// tokens: a trailing `*`, `_`, `#` or `` ` `` is held back until the next
+/// piece says what it was. Off for `gen` and code, where those characters
+/// are content.
+struct Plain {
+    on: bool,
+    /// At the start of a line, where `#`, `>` and `- ` mean structure.
+    line_start: bool,
+    bold: bool,
+    code: bool,
+    heading: bool,
+    /// Held over from the last piece, undecided.
+    carry: alloc::string::String,
+}
+
+static PLAIN: Racy<Plain> = Racy::new(Plain {
+    on: false,
+    line_start: true,
+    bold: false,
+    code: false,
+    heading: false,
+    carry: alloc::string::String::new(),
+});
+
+/// Rendered markdown on or off, for the conversation's turns.
+pub fn set_plain(on: bool) {
+    let p = unsafe { &mut *PLAIN.get() };
+    *p = Plain { on, line_start: true, bold: false, code: false, heading: false, carry: alloc::string::String::new() };
+}
+
+const MD_BASE: u8 = console::WHITE;
+const MD_STRONG: u8 = console::YELLOW;
+const MD_CODE: u8 = console::LTCYAN;
+
+/// One piece in, coloured runs out. `flush` decides a held tail as text.
+fn plain_text(s: &str, flush: bool) -> Vec<(alloc::string::String, u8)> {
+    let p = unsafe { &mut *PLAIN.get() };
+    if !p.on {
+        return alloc::vec![(alloc::string::String::from(s), 0xff)];
+    }
+    let mut text = core::mem::take(&mut p.carry);
+    text.push_str(s);
+    let b: Vec<char> = text.chars().collect();
+    let mut runs: Vec<(alloc::string::String, u8)> = Vec::new();
+    let colour = |p: &Plain| if p.code { MD_CODE } else if p.bold || p.heading { MD_STRONG } else { MD_BASE };
+    let push = |runs: &mut Vec<(alloc::string::String, u8)>, c: char, col: u8| match runs.last_mut() {
+        Some((t, k)) if *k == col => t.push(c),
+        _ => runs.push((alloc::string::String::from(c), col)),
+    };
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        // At a line's start `-`, `+` and `>` are as undecided as the rest:
+        // a model sends a list's `-` as one token and ` item` as the next.
+        if i + 1 == b.len() && (matches!(c, '*' | '_' | '#' | '`') || (p.line_start && matches!(c, '-' | '+' | '>'))) {
+            if !flush {
+                p.carry.push(c);
+                break;
+            }
+            // The end of the reply, and nothing ever followed it: it was text.
+            push(&mut runs, c, colour(p));
+            break;
+        }
+        if p.code {
+            if c == '`' {
+                p.code = false;
+            } else {
+                push(&mut runs, c, MD_CODE);
+                p.line_start = c == '\n';
+            }
+            i += 1;
+            continue;
+        }
+        if p.line_start {
+            if c == '#' {
+                let n = b[i..].iter().take_while(|&&x| x == '#').count();
+                if b.get(i + n).is_some_and(|x| *x == ' ') {
+                    p.heading = true;
+                    p.line_start = false;
+                    i += n + 1;
+                    continue;
+                }
+            }
+            if c == '>' && b.get(i + 1) == Some(&' ') {
+                i += 2;
+                continue;
+            }
+            if matches!(c, '*' | '+' | '-') && b.get(i + 1) == Some(&' ') {
+                let col = colour(p);
+                push(&mut runs, '\u{2022}', col);
+                push(&mut runs, ' ', col);
+                p.line_start = false;
+                i += 2;
+                continue;
+            }
+            if c == ' ' || c == '\t' {
+                push(&mut runs, c, colour(p));
+                i += 1;
+                continue;
+            }
+        }
+        match c {
+            '*' => {
+                let n = b[i..].iter().take_while(|&&x| x == '*').count();
+                p.bold = !p.bold;
+                i += n;
+                continue;
+            }
+            '_' if b.get(i + 1) == Some(&'_') => {
+                p.bold = !p.bold;
+                i += 2;
+                continue;
+            }
+            '`' => {
+                let n = b[i..].iter().take_while(|&&x| x == '`').count();
+                p.code = true;
+                i += n;
+                continue;
+            }
+            '\n' => {
+                // A heading, an unclosed bold or a fence's language word
+                // never runs past the line that started it.
+                p.heading = false;
+                p.bold = false;
+                p.line_start = true;
+                push(&mut runs, c, MD_BASE);
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        push(&mut runs, c, colour(p));
+        p.line_start = false;
+        i += 1;
+    }
+    runs
+}
+
+/// `diag markdown`: the renderer, fed the way the decoder feeds it.
+pub fn markdown_selftest() -> bool {
+    use crate::gfx::console::{LTGRAY as G, LTGREEN as OK, LTRED as BAD};
+    let run = |pieces: &[&str]| {
+        set_plain(true);
+        let mut out: Vec<(alloc::string::String, u8)> = Vec::new();
+        for p in pieces {
+            out.extend(plain_text(p, false));
+        }
+        out.extend(plain_text("", true));
+        set_plain(false);
+        // Adjacent runs of one colour are one run on screen.
+        let mut merged: Vec<(alloc::string::String, u8)> = Vec::new();
+        for (t, c) in out {
+            match merged.last_mut() {
+                Some((mt, mc)) if *mc == c => mt.push_str(&t),
+                _ => merged.push((t, c)),
+            }
+        }
+        merged
+    };
+    let text = |r: &[(alloc::string::String, u8)]| r.iter().map(|x| x.0.as_str()).collect::<alloc::string::String>();
+    let col_of = |r: &[(alloc::string::String, u8)], w: &str| r.iter().find(|x| x.0.contains(w)).map(|x| x.1);
+    let bold = run(&["it is **ve", "ry** good"]);
+    let head = run(&["# Ti", "tle\nbody"]);
+    let list = run(&["- one\n* two"]);
+    let split = run(&["-", " sysbox\n", "-", " ls"]);
+    let code = run(&["run `ls /ai` now"]);
+    let snake = run(&["a snake_case name"]);
+    let tail = run(&["five *"]);
+    let rows = [
+        ("a bold marker split across two tokens is consumed and the word is strong", text(&bold) == "it is very good" && col_of(&bold, "very") == Some(MD_STRONG)),
+        ("a heading loses its hashes and only its own line is strong", text(&head) == "Title\nbody" && col_of(&head, "Title") == Some(MD_STRONG) && col_of(&head, "body") == Some(MD_BASE)),
+        ("list markers become bullets", text(&list) == "\u{2022} one\n\u{2022} two"),
+        ("a bullet's dash arriving as its own token still becomes a bullet", text(&split) == "\u{2022} sysbox\n\u{2022} ls"),
+        ("inline code loses its backticks and is coloured as code", text(&code) == "run ls /ai now" && col_of(&code, "ls /ai") == Some(MD_CODE)),
+        ("a single underscore inside a word is not markdown", text(&snake) == "a snake_case name"),
+        ("an asterisk nothing followed is printed as itself", text(&tail) == "five *"),
+    ];
+    let mut ok = true;
+    for (what, good) in rows {
+        console::set_color(if good { OK } else { BAD });
+        kprintln!("  {}  {}", if good { "ok  " } else { "FAIL" }, what);
+        console::set_color(G);
+        ok &= good;
+    }
+    ok
+}
+
+/// Print rendered runs and keep their clean text for the transcript.
+fn show(runs: Vec<(alloc::string::String, u8)>) {
+    for (t, col) in runs {
+        if col != 0xff {
+            console::set_color(col);
+        }
+        kprint!("{}", t);
+        echo(&t);
+    }
+}
+
 fn emit(pending: &mut Vec<u8>) {
     loop {
         if pending.is_empty() {
@@ -1486,8 +1692,7 @@ fn emit(pending: &mut Vec<u8>) {
         }
         match core::str::from_utf8(pending) {
             Ok(s) => {
-                kprint!("{}", s);
-                echo(s);
+                show(plain_text(s, false));
                 pending.clear();
                 return;
             }
@@ -1495,8 +1700,7 @@ fn emit(pending: &mut Vec<u8>) {
                 let good = e.valid_up_to();
                 if good > 0 {
                     if let Ok(s) = core::str::from_utf8(&pending[..good]) {
-                        kprint!("{}", s);
-                        echo(s);
+                        show(plain_text(s, false));
                     }
                     pending.drain(..good);
                     continue;
@@ -1699,6 +1903,8 @@ pub fn generate(prompt: &str, opts: &GenOpts) {
         e.last_token = token;
 
         emit(&mut pending);
+        // A marker held for the next token that never came is text.
+        show(plain_text("", true));
         let elapsed = crate::time::rdtsc() - t0;
         console::set_color(LTGRAY);
         kprintln!();
@@ -1940,7 +2146,9 @@ pub fn mind_task() {
         let opts =
             GenOpts { steps: 48, temperature: 0.9, topp: 0.9, resume: true, yielding: true,
                       bos: false, echo_prompt: false, ..Default::default() };
+        set_plain(true);
         generate(&framed, &opts);
+        set_plain(false);
         companion::interjected();
 
         console::set_color(YELLOW);
