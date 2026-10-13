@@ -40,6 +40,7 @@ pub mod problem;
 pub mod lex;
 pub mod recall;
 pub mod redqueen;
+pub mod research;
 pub mod route;
 pub mod sample;
 pub mod skill;

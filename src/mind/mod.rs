@@ -63,10 +63,14 @@ pub fn introspect(n: usize, ms: u64, seed: u64, out: &mut Vec<String>) {
         out.push(String::from("  the brain is asleep, and asleep its senses are gated -- 'brain wake' first"));
         return;
     }
-    if crate::ai::initiative::status().4 {
-        out.push(String::from("  'initiative off' first: the resident mind speaks, and being spoken to is a sense"));
+    // Held for the whole run: the resident mind shares this context, and
+    // being spoken to is a sense, so nothing else may decode until it ends.
+    // A claim rather than "initiative off" first, so the research loop can
+    // run this itself.
+    let Some(_claim) = crate::ai::claim_engine() else {
+        out.push(alloc::format!("  {}", crate::ai::engine_refusal()));
         return;
-    }
+    };
     let mut cal = Vec::new();
     let Some(primary) = calibrate(&mut cal) else {
         out.extend(cal);

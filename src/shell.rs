@@ -6418,6 +6418,87 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 },
             }
         }
+        "research" => {
+            // The research loop's operator surface (src/ai/research.rs).
+            use crate::ai::research as rs;
+            let args: Vec<&str> = rest.split_whitespace().collect();
+            match args.as_slice() {
+                [] => {
+                    kprintln!("  unattended research: {}", if rs::granted() { "granted" } else { "not granted ('research trust')" });
+                    let l = rs::ledger();
+                    let lines: Vec<&str> = l.lines().collect();
+                    kprintln!("  ledger: {} line(s){}", lines.len(), if lines.is_empty() { "" } else { ", newest last:" });
+                    for x in lines.iter().skip(lines.len().saturating_sub(12)) {
+                        kprintln!("    {}", x);
+                    }
+                }
+                ["exp"] => {
+                    for e in rs::EXPERIMENTS {
+                        kprintln!("  {:12} {:20} {}", e.name, e.shape, e.about);
+                    }
+                }
+                ["trust"] => kprintln!("  {}", if rs::set_grant(true) { "the research job may run unattended" } else { "could not write the grant" }),
+                ["untrust"] => kprintln!("  {}", if rs::set_grant(false) { "unattended research revoked" } else { "could not write the grant" }),
+                ["show", id] => match rs::load(id) {
+                    Some(h) => {
+                        for l in h.render().lines() {
+                            kprintln!("  {}", l);
+                        }
+                    }
+                    None => kprintln!("  no hypothesis {}", id),
+                },
+                ["run", exp, ..] => {
+                    // research run <exp> [args...] -- <pred>, <pred> ...
+                    let (head, preds) = rest.split_once("--").unwrap_or((rest, ""));
+                    let head: Vec<String> = head.split_whitespace().skip(2).map(String::from).collect();
+                    let predicates: Option<Vec<rs::Pred>> =
+                        preds.split(',').map(str::trim).filter(|p| !p.is_empty()).map(rs::Pred::parse).collect();
+                    let (Some(e), Some(predicates)) = (rs::find(exp), predicates) else {
+                        kprintln!("  usage: research run <experiment> [args] -- <metric> <op> <value>, ...  ('research exp' lists them)");
+                        return;
+                    };
+                    let Some(cmd) = (e.line)(&head) else {
+                        kprintln!("  {} takes: {}", e.name, e.shape);
+                        return;
+                    };
+                    let h = rs::Hypothesis {
+                        family: alloc::format!("operator.{}", e.name),
+                        claim: alloc::format!("operator: {}", rest.trim()),
+                        experiment: String::from(e.name),
+                        args: head,
+                        seed: crate::time::rdtsc() & 0xffff_ffff,
+                        predicates,
+                        parent: None,
+                    };
+                    let id = match rs::preregister(&h) {
+                        Ok(id) => id,
+                        Err(why) => {
+                            kprintln!("  not preregistered: {}", why);
+                            return;
+                        }
+                    };
+                    kprintln!("  preregistered {}, running: {}", id, cmd.join(" ; "));
+                    crate::gfx::console::begin_capture();
+                    for c in cmd.iter() {
+                        execute(c, boot, acpi, interp);
+                    }
+                    let out = crate::gfx::console::end_capture().unwrap_or_default();
+                    for l in out.lines() {
+                        kprintln!("{}", l);
+                    }
+                    let metrics = (e.parse)(&out);
+                    let v = rs::judge(&h.predicates, &metrics);
+                    match rs::record(&id, &v, &metrics) {
+                        Ok(()) => kprintln!("  {} -- {} ({} metric(s) measured)", id, v.word(), metrics.len()),
+                        Err(why) => kprintln!("  result not recorded: {}", why),
+                    }
+                    if let Some(n) = rs::narrow(&h, &v) {
+                        kprintln!("  next, by narrowing: research run {} {} -- ...", n.experiment, n.args.join(" "));
+                    }
+                }
+                _ => kprintln!("  usage: research [exp|trust|untrust|show <id>|run <experiment> [args] -- <predicates>]"),
+            }
+        }
         "mind" if rest.trim_start().starts_with("introspect") => {
             // The preregistered introspection test (design/indicators.md).
             // `calibrate` alone picks the strengths and touches no brain.

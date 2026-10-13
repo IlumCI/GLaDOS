@@ -90,13 +90,14 @@ pub const BASE_EXAMPLES: usize = 24;
 /// one.
 pub const BASE_MS: u64 = 5_000;
 
-/// How far the doubling may go. Level 3 is 192 examples and 40 s.
+/// How far the doubling may go. Level 5 is 768 examples and 160 s; it was 3
+/// (192 and 40 s), which capped the evidence a hard axis could ever buy.
 ///
 /// A cap rather than a limit the arithmetic needs: the guarantee above holds
 /// for any `L`. What it bounds is the engine being held on a night when
 /// somebody might come back, which `godbits::felt()` checks for at the start
 /// and cannot re-check in the middle of a prepare.
-pub const MAX_LEVEL: usize = 3;
+pub const MAX_LEVEL: usize = 5;
 
 /// Which half of the schedule a night is on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -381,7 +382,7 @@ pub fn selftest() -> bool {
     claim(
         other != a0
             && level_for(&cross, a0, 6, None) == 0
-            && level_for(&cross, other, 6, None) == MAX_LEVEL,
+            && level_for(&cross, other, 6, None) == 3, // starved at 96, level 2, so 3
         "one axis starving does not raise another's budget",
     );
 
@@ -390,7 +391,7 @@ pub fn selftest() -> bool {
     // grew enough that the base would do.
     let older = [starved_at(96)];
     claim(
-        level_for(&older, a0, 6, Some("aaaa1111")) == MAX_LEVEL
+        level_for(&older, a0, 6, Some("aaaa1111")) == 3
             && level_for(&older, a0, 6, Some("bbbb2222")) == 0,
         "a record paid for out of another corpus does not bind this one",
     );

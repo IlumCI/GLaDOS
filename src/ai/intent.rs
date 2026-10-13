@@ -54,7 +54,7 @@ pub const VERBS: &[&str] = &[
     "mixbench", "model", "mouse", "net", "netman", "network", "nvme", "open",
     "oracle", "outcome", "pagemap", "paint", "pci", "perf", "ping", "pkg", "plan", "port",
     "power", "poweroff", "probe", "racy", "reboot", "recall", "recovery", "redqueen", "refresh",
-    "render", "repair", "repeat", "rng", "route", "sandbox", "search", "serial",
+    "render", "repair", "repeat", "research", "rng", "route", "sandbox", "search", "serial",
     "shutdown", "simd", "skill", "smp", "sound", "splash", "store", "study", "sysinfo",
     "tasks", "tcp", "teach", "tensor", "think", "todo", "train", "trust", "typewriter", "uname",
     "update", "uptime", "usb", "vars", "version", "vi", "video", "voice", "wifi", "win",

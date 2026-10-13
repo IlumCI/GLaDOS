@@ -155,7 +155,12 @@ const WORKS: &[(&str, &str)] = &[
 
 /// Journal length cap. Old lines fall off the top; the namespace keeps the
 /// snapshots either way.
-const JOURNAL_MAX: usize = 48;
+///
+/// It was 48, which is a screen, and the journal is now read as a record:
+/// `progress.rs` predicts it and the research loop will draw its history from
+/// it. Not unbounded, because every line rewrites the whole file -- 2,048
+/// lines is about 200 KB a rewrite, every fifteen seconds at most.
+const JOURNAL_MAX: usize = 2048;
 
 static LAST_TOUCH: Racy<u64> = Racy::new(0);
 static LOOP_SEEN: AtomicU64 = AtomicU64::new(0);
