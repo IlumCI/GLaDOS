@@ -987,6 +987,11 @@ pub fn any_holder() -> bool {
 }
 
 /// True when the engine is unavailable because the mind has it.
+/// Whether anybody holds the model in any context.
+pub fn engine_in_use() -> bool {
+    HOLDERS.iter().any(|h| h.load(Ordering::Acquire) != NOBODY)
+}
+
 pub fn engine_held_by_mind() -> bool {
     mind_busy() && crate::task::current() != MIND_TASK.load(Ordering::Acquire)
 }
@@ -2085,6 +2090,20 @@ use core::sync::atomic::AtomicBool;
 
 static REQUEST: Racy<Option<alloc::string::String>> = Racy::new(None);
 static BUSY: AtomicBool = AtomicBool::new(false);
+/// The pending request is the machine speaking up on its own (`remark`),
+/// not an operator's `think`: shown as speech rather than as a thought, and
+/// spoken aloud when the voice is on.
+static REMARK: AtomicBool = AtomicBool::new(false);
+
+/// Queue something the machine says unprompted. False if the mind is busy.
+pub fn remark(prompt: &str) -> bool {
+    if think(prompt) {
+        REMARK.store(true, Ordering::Release);
+        true
+    } else {
+        false
+    }
+}
 
 pub fn mind_busy() -> bool {
     BUSY.load(Ordering::Acquire)
@@ -2121,8 +2140,13 @@ pub fn mind_task() {
             continue;
         }
 
+        let speaking = REMARK.swap(false, Ordering::AcqRel);
         console::set_color(YELLOW);
-        kprintln!("\n[mind] thinking...");
+        if speaking {
+            kprintln!("");
+        } else {
+            kprintln!("\n[mind] thinking...");
+        }
         console::set_color(LTGRAY);
 
         // Held for the whole thought, not per token. `generate` resumes the
@@ -2139,21 +2163,48 @@ pub fn mind_task() {
         // shared with the operator's conversation and always was; what changes
         // here is that the machine's own thought is labelled as its own, so
         // neither the operator nor the model has to guess who said it.
-        let mut framed = companion::interject_frame(
-            "The following is your own thought, unprompted. The operator did not ask for it.",
-        );
-        framed.push_str(&prompt);
-        let opts =
+        // A remark's facts go in the instruction, and the turn it speaks in
+        // starts empty: given after the frame, inside its own turn, they were
+        // read as text to continue, and the first remark was the prompt
+        // carried on -- "You notice that you have a feeling of something.
+        // What is it?"
+        let framed = if speaking {
+            companion::interject_frame(&alloc::format!(
+                "{} Speak to the operator now, unprompted, as the administrator of this machine: one or two short sentences, addressed to them, about one of these. Do not repeat these words back.",
+                prompt
+            ))
+        } else {
+            let mut f = companion::interject_frame(
+                "The following is your own thought, unprompted. The operator did not ask for it.",
+            );
+            f.push_str(&prompt);
+            f
+        };
+        let opts = if speaking {
+            GenOpts { steps: 40, temperature: 0.7, topp: 0.9, resume: true, yielding: true,
+                      bos: false, echo_prompt: false, ..Default::default() }
+        } else {
             GenOpts { steps: 48, temperature: 0.9, topp: 0.9, resume: true, yielding: true,
-                      bos: false, echo_prompt: false, ..Default::default() };
+                      bos: false, echo_prompt: false, ..Default::default() }
+        };
+        echo_begin();
         set_plain(true);
         generate(&framed, &opts);
         set_plain(false);
+        let said = echo_end();
         companion::interjected();
+        if speaking {
+            if let Some(s) = said {
+                companion::log_said(&s);
+                crate::voice::speak_reply(&s);
+            }
+        }
 
-        console::set_color(YELLOW);
-        kprintln!("[mind] done");
-        console::set_color(LTGRAY);
+        if !speaking {
+            console::set_color(YELLOW);
+            kprintln!("[mind] done");
+            console::set_color(LTGRAY);
+        }
         crate::shell::reprompt();
 
         BUSY.store(false, Ordering::Release);

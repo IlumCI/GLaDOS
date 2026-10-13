@@ -322,7 +322,7 @@ pub fn conversational(line: &str) -> bool {
 const ACTION_VERBS: &[&str] = &[
     "create", "make", "delete", "remove", "rename", "move", "copy", "write", "save", "list", "show",
     "open", "find", "search", "read", "print", "count", "hash", "run", "install", "mkdir", "edit",
-    "erase", "touch", "snapshot", "snap", "compare", "check", "display", "tell", "put", "add",
+    "erase", "touch", "snapshot", "snap", "compare", "check", "display", "tell", "put", "add", "take",
 ];
 
 /// Whether a line asks for an action: its first word after any politeness
@@ -383,9 +383,15 @@ pub fn command_for(line: &str) -> Option<String> {
         if w.is_empty() { None } else { Some(w) }
     };
     match verb {
-        "create" | "make" | "add" | "mkdir" | "write" | "new" => {
+        "create" | "make" | "add" | "mkdir" | "write" | "new" | "take" | "save" => {
             skip(&mut j, ARTICLES);
             let kind = lower.get(j).map(|s| s.as_str()).unwrap_or("");
+            if matches!(kind, "snapshot" | "snap" | "checkpoint") {
+                return Some(String::from("snap"));
+            }
+            if matches!(verb, "take" | "save") {
+                return None;
+            }
             let folder = matches!(kind, "folder" | "directory" | "dir");
             let file = matches!(kind, "file" | "note" | "textfile");
             if verb == "mkdir" {
@@ -451,11 +457,165 @@ pub fn command_for(line: &str) -> Option<String> {
     }
 }
 
+/// `write` followed by prose rather than a path: "write a haiku about
+/// kernels", "write me a poem". A path has a slash or a dot in it, and a
+/// sentence has a function word.
+pub fn write_is_prose(rest: &str) -> bool {
+    let words: alloc::vec::Vec<&str> = rest.split_whitespace().collect();
+    let Some(first) = words.first() else { return false };
+    if first.contains('/') || first.contains('.') || words.len() < 2 {
+        return false;
+    }
+    words.iter().any(|w| FUNCTION_WORDS.contains(&w.to_lowercase().as_str()) || matches!(w.to_lowercase().as_str(), "poem" | "haiku" | "story" | "song" | "letter" | "about"))
+}
+
+/// The word a sentence-shaped search is for: "files that mention godel" is
+/// `godel`, "anything called notes" is `notes`, "the word cathedral" is
+/// `cathedral`. `None` when the argument is already a plain search term.
+pub fn find_keyword(rest: &str) -> Option<String> {
+    const FRAME: &[&str] = &[
+        "for", "a", "an", "the", "all", "any", "files", "file", "anything", "everything", "something",
+        "that", "which", "mention", "mentions", "mentioning", "contain", "contains", "containing", "with",
+        "named", "called", "about", "word", "text", "string", "me", "in", "where", "has", "have", "say", "says",
+    ];
+    let words: alloc::vec::Vec<&str> = rest.split_whitespace().collect();
+    if words.len() < 2 || !words.iter().any(|w| FRAME.contains(&w.to_lowercase().as_str())) {
+        return None;
+    }
+    let kept: alloc::vec::Vec<&str> = words
+        .iter()
+        .copied()
+        .filter(|w| !FRAME.contains(&w.to_lowercase().as_str()))
+        .map(|w| w.trim_matches(|c: char| c == '"' || c == '\'' || c == '?' || c == '.' || c == ','))
+        .filter(|w| !w.is_empty())
+        .collect();
+    (!kept.is_empty()).then(|| kept.join(" "))
+}
+
+/// A request for words rather than for an action: "write a haiku", "explain
+/// how a kernel works", "tell me a story". The chat model's job, and the one
+/// thing it is good at.
+fn creative(line: &str) -> bool {
+    const ASKS: &[&str] = &["write", "compose", "explain", "describe", "summarize", "summarise", "translate", "tell"];
+    let first = line.split_whitespace().map(|w| w.to_lowercase()).find(|w| !matches!(w.as_str(), "please" | "can" | "could" | "would" | "you"));
+    first.map_or(false, |w| ASKS.contains(&w.as_str())) && command_for(line).is_none() && !line.contains('/')
+}
+
+/// A question, rather than a request: wh- or yes/no shaped, or a question mark.
+fn question(line: &str) -> bool {
+    const Q: &[&str] = &["what", "who", "when", "where", "why", "how", "which", "is", "are", "do", "does", "did", "was", "were", "whats", "what's"];
+    let first = line.split_whitespace().next().map(|w| w.to_lowercase()).unwrap_or_default();
+    line.trim_end().ends_with('?') || Q.contains(&first.as_str())
+}
+
+/// Words that make a question about the file tree, which the applets answer
+/// and the chat model would only invent.
+const TREE_WORDS: &[&str] = &["file", "files", "folder", "folders", "directory", "directories", "dir", "snapshot", "snapshots", "disk", "stored", "tree"];
+
+/// "my name is Lummy", "call me Ana", "my favourite colour is green": a fact
+/// about the operator, kept with `remember`.
+pub fn fact_about_me(line: &str) -> Option<String> {
+    let l = line.trim().trim_end_matches(|c: char| c == '.' || c == '!');
+    let lower = l.to_lowercase();
+    if let Some(rest) = lower.strip_prefix("call me ") {
+        let name = &l[l.len() - rest.len()..];
+        return Some(format!("my name is {}", name.trim()));
+    }
+    if lower.starts_with("my ") && (lower.contains(" is ") || lower.contains(" are ")) && !lower.ends_with('?') && !l.contains('/') {
+        return Some(String::from(l));
+    }
+    None
+}
+
+/// The paths a line names, cleaned of a sentence's punctuation.
+fn paths_in(line: &str) -> alloc::vec::Vec<String> {
+    line.split_whitespace()
+        .filter(|w| w.starts_with('/'))
+        .map(|w| String::from(w.trim_end_matches(|c: char| c == '.' || c == ',' || c == '?' || c == '!')))
+        .collect()
+}
+
+/// A plain listing asked for in words: "go to /lib and list it", "show me
+/// what is in /lib", "what's inside /ai". `ls` of the one path named, or `cd`
+/// for "go to /x" alone. The agent was handed "go to /lib and list it",
+/// ran `cd /` and declared the goal met.
+pub fn listing_for(line: &str) -> Option<String> {
+    let paths = paths_in(line);
+    let [p] = paths.as_slice() else { return None };
+    if changing_verb(line) {
+        return None;
+    }
+    let lower = line.to_lowercase();
+    let words: alloc::vec::Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let lists = words.iter().any(|w| matches!(*w, "list" | "contents" | "inside" | "show" | "ls"));
+    if lists && crate::sysbox::is_dir(p) {
+        return Some(format!("ls {}", p));
+    }
+    let goes = matches!(words.first().copied(), Some("go" | "cd" | "enter")) && words.len() <= 4;
+    (goes && crate::sysbox::is_dir(p)).then(|| format!("cd {}", p))
+}
+
+/// A question about a thing the machine can show: the command that shows it.
+/// "which file in /lib is the biggest" was handed to the chat model, which
+/// cannot see a file and said so -- the machine could, with one `ls`.
+pub fn grounding_for(line: &str) -> Option<String> {
+    let paths = paths_in(line);
+    let [p] = paths.as_slice() else { return None };
+    let lower = line.to_lowercase();
+    let asks = question(line)
+        || ["biggest", "largest", "smallest", "newest", "oldest", "how many", "count", "summarise", "summarize", "explain"]
+            .iter()
+            .any(|w| lower.contains(w));
+    if !asks || changing_verb(line) {
+        return None;
+    }
+    if crate::sysbox::is_dir(p) {
+        Some(format!("ls {}", p))
+    } else if crate::sysbox::read_blob(p).is_some() {
+        Some(format!("cat {}", p))
+    } else {
+        None
+    }
+}
+
+/// A question about something the operator said about themselves, answered
+/// from what they said. "what is my name", "who am i", "what is my favourite
+/// colour". Looked up rather than generated: the 0.6B, given "their name is
+/// Lummy" beside the question, answered "My name is Lummy", and once "I am
+/// Lummy" -- the fact right, the person wrong, every time.
+pub fn recall_about(line: &str, about: &str) -> Option<String> {
+    let q = line.trim().trim_end_matches(|c: char| c == '?' || c == '.' || c == '!').to_lowercase();
+    let subject = if matches!(q.as_str(), "who am i" | "do you know who i am" | "do you know my name") {
+        String::from("name")
+    } else {
+        let rest = q
+            .strip_prefix("what is my ")
+            .or_else(|| q.strip_prefix("what's my "))
+            .or_else(|| q.strip_prefix("whats my "))
+            .or_else(|| q.strip_prefix("what are my "))?;
+        String::from(rest.trim())
+    };
+    for l in about.lines().rev() {
+        let t = l.trim();
+        let lower = t.to_lowercase();
+        let Some(after) = lower.strip_prefix("my ") else { continue };
+        for verb in [" is ", " are "] {
+            if let Some(at) = after.find(verb) {
+                if after[..at].trim() == subject {
+                    let value = &t[3 + at + verb.len()..];
+                    return Some(format!("Your {}{}{}.", subject, verb, value.trim_end_matches('.')));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Whether the action a line asks for changes the machine.
 pub fn changing_verb(line: &str) -> bool {
     const CHANGES: &[&str] = &[
         "create", "make", "delete", "remove", "rename", "move", "copy", "write", "save", "mkdir", "edit",
-        "erase", "touch", "put", "add", "install", "snapshot", "snap",
+        "erase", "touch", "put", "add", "install", "snapshot", "snap", "take",
     ];
     asks_for_action(line)
         && line
@@ -470,6 +630,9 @@ pub enum Decision {
     Run(String, String),
     /// A turn of the conversation: the operator's own words, and why.
     Chat(String, String),
+    /// A question about something the machine can show: run the read-only
+    /// command, then answer the question from what it printed.
+    Grounded(String, String, String),
     /// Forget the conversation and start a new one.
     Forget,
     /// Nothing runs; say this.
@@ -522,8 +685,37 @@ pub fn decide(line: &str) -> Decision {
     if super::wargame::invited(line) {
         return Decision::Run(String::from("wargame"), String::from("an invitation to play"));
     }
+    if let Some(answer) = crate::sysbox::read_blob(super::companion::ABOUT)
+        .and_then(|b| recall_about(line, &String::from_utf8_lossy(&b)))
+    {
+        return Decision::Say(answer);
+    }
+    if let Some(fact) = fact_about_me(line) {
+        return Decision::Run(format!("remember {}", fact), String::from("something about you, so it is kept"));
+    }
+    if creative(line) {
+        return chat(String::from("a request for words, so it is a conversation"));
+    }
     if conversational(line) {
         return chat(String::from("addressed to me, so it is a conversation"));
+    }
+    // A question that names no file and no path is for the conversation, which
+    // is given the machine's own readings when the question is about them. The
+    // router answers every line with *some* applet: "what is my name" went to
+    // `pwd` with all three cores agreeing, and "how much memory is free" to
+    // `du`, which measures the disk.
+    let lower = line.to_lowercase();
+    let about_tree = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| TREE_WORDS.contains(&w) || crate::sysbox::APPLETS.iter().any(|a| a.name == w));
+    if question(line) && !line.contains('/') && !about_tree && !asks_for_action(line) {
+        return chat(String::from("a question, so it is a conversation"));
+    }
+    if let Some(cmd) = listing_for(line) {
+        return Decision::Run(cmd.clone(), format!("'{}', read off what you said", cmd));
+    }
+    if let Some(cmd) = grounding_for(line) {
+        return Decision::Grounded(String::from(line), cmd.clone(), format!("'{}', then an answer from what it shows", cmd));
     }
     if !harness::ensure_router() {
         return chat(String::from("no router yet, so it is a question"));
@@ -609,7 +801,7 @@ pub fn selftest() -> bool {
     unsafe { *PENDING.get() = Some(String::from("remove /tmp/x")) };
     let no = matches!(answer("no"), Some(Decision::Say(_))) && !matches!(answer("y"), Some(Decision::Run(..)));
     let unrelated = answer("ls").is_none();
-    let rows: [(&str, bool); 46] = [
+    let rows: [(&str, bool); 61] = [
         ("'help me find the big files' is a sentence, not the help command", verb_first_language("help", "me find the big files")),
         ("'ls /ai' is a command", !verb_first_language("ls", "/ai")),
         ("'cat the readme please' is a sentence", verb_first_language("cat", "the readme please")),
@@ -659,6 +851,23 @@ pub fn selftest() -> bool {
             unsafe { *PENDING.get() = Some(format!("{}rm /tmp/x", EXACT_MARK)) };
             matches!(answer("y"), Some(Decision::Run(ref c, _)) if c == "rm /tmp/x")
         }),
+        ("'my name is Lummy' is kept", fact_about_me("my name is Lummy").as_deref() == Some("my name is Lummy")),
+        ("'call me Ana' is kept as a name", fact_about_me("call me Ana").as_deref() == Some("my name is Ana")),
+        ("'my files are gone?' is not a fact", fact_about_me("my files are gone?").is_none()),
+        ("'write a haiku about kernels' is prose, not the write applet", write_is_prose("a haiku about kernels")),
+        ("'write notes.txt hello' is the applet", !write_is_prose("notes.txt hello")),
+        ("'files that mention godel' searches for godel", find_keyword("files that mention godel").as_deref() == Some("godel")),
+        ("and a plain search term is left alone", find_keyword("godel").is_none()),
+        ("'what is my name' is a question for the conversation", question("what is my name") && creative("write a haiku about kernels")),
+        ("'what is my name' is answered from what was kept",
+            recall_about("what is my name?", "my name is Lummy\nmy favourite colour is green").as_deref() == Some("Your name is Lummy.")),
+        ("'who am i' too", recall_about("who am i", "my name is Lummy").as_deref() == Some("Your name is Lummy.")),
+        ("and an unknown subject falls through to the conversation", recall_about("what is my age", "my name is Lummy").is_none()),
+        ("'take a snapshot' is snap", command_for("take a snapshot").as_deref() == Some("snap")),
+        ("'go to /lib and list it' is ls /lib", listing_for("go to /lib and list it").as_deref() == Some("ls /lib")),
+        ("'which file in /lib is the biggest' is answered from ls /lib",
+            grounding_for("which file in /lib is the biggest").as_deref() == Some("ls /lib")),
+        ("a question naming no path is not grounded", grounding_for("which file is the biggest").is_none()),
         ("a yes with nothing asked is answered, not handed to the model", {
             unsafe { *PENDING.get() = None };
             matches!(answer("y"), Some(Decision::Say(_))) && answer("ls").is_none()

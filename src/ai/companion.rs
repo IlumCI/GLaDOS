@@ -72,6 +72,12 @@ pub fn log_snapshot() -> Vec<(bool, String)> {
     LOG.lock_irq().clone()
 }
 
+/// Something the machine said unprompted, into the same transcript the Ask
+/// window shows, so its own words sit beside the operator's.
+pub fn log_said(text: &str) {
+    log_push(false, text);
+}
+
 fn log_push(mine: bool, text: &str) {
     let text = text.trim();
     if text.is_empty() {
@@ -142,7 +148,7 @@ fn system_turn() -> String {
         let text = text.trim();
         if !text.is_empty() {
             s.push_str("\nAbout the person you are talking to:\n");
-            s.push_str(text);
+            s.push_str(&third_person(text));
             s.push('\n');
         }
     }
@@ -368,6 +374,20 @@ pub fn turn(message: &str, opts: &super::GenOpts) -> usize {
         prompt.push_str(&alloc::format!("(Your nervous system reads: {}. {})\n", words, PERSONA[who]));
         unsafe { *TOLD.get() = Some((words, who)) };
     }
+    // Facts the model cannot know and the machine can. Asked the time, the
+    // 0.6B said "12:00"; asked how long it had been running, "12 hours" --
+    // fluent, confident, invented. Given only when the line is about them,
+    // so a turn about anything else costs nothing.
+    if let Some(f) = facts_for(message) {
+        prompt.push_str(&f);
+    }
+    // What the operator asked to be remembered since the system turn was
+    // built. That turn is pinned, so a fact kept mid-conversation reached the
+    // file and never the model: told "my name is Lummy", it answered "what is
+    // my name" with `pwd` and its favourite number with the name.
+    if let Some(new) = about_since_opening(opening) {
+        prompt.push_str(&alloc::format!("(About the person you are talking to: {})\n", new));
+    }
     prompt.push_str(message);
     prompt.push_str("<|im_end|>\n<|im_start|>assistant\n");
 
@@ -411,6 +431,95 @@ pub fn turn(message: &str, opts: &super::GenOpts) -> usize {
     super::with_engine(|e| e.pos).unwrap_or(0)
 }
 
+/// How much of `/ai/about` the open conversation has already been told.
+static ABOUT_SEEN: crate::sync::Racy<usize> = crate::sync::Racy::new(0);
+
+fn about_since_opening(opening: bool) -> Option<String> {
+    let about = crate::sysbox::read_blob(ABOUT).unwrap_or_default();
+    let seen = unsafe { &mut *ABOUT_SEEN.get() };
+    if opening || *seen > about.len() {
+        // The system turn just read all of it.
+        *seen = about.len();
+        return None;
+    }
+    let new = third_person(String::from_utf8_lossy(&about[*seen..]).trim()).replace('\n', "; ");
+    *seen = about.len();
+    (!new.is_empty()).then_some(new)
+}
+
+/// "my name is Lummy" as the operator said it, told to the model as "their
+/// name is Lummy". Given in the first person, the 0.6B answered "what is my
+/// name" with "My name is Lummy" -- the fact right and the speaker wrong.
+pub fn third_person(text: &str) -> String {
+    text.lines()
+        .map(|l| {
+            let t = l.trim();
+            let lower = t.to_lowercase();
+            if let Some(rest) = lower.strip_prefix("my name is ") {
+                let name = &t[t.len() - rest.len()..];
+                alloc::format!("the person's name is {}", name)
+            } else if let Some(rest) = lower.strip_prefix("my ") {
+                alloc::format!("their {}", &t[t.len() - rest.len()..])
+            } else if let Some(rest) = lower.strip_prefix("i am ") {
+                alloc::format!("they are {}", &t[t.len() - rest.len()..])
+            } else if let Some(rest) = lower.strip_prefix("i ") {
+                alloc::format!("they {}", &t[t.len() - rest.len()..])
+            } else {
+                String::from(t)
+            }
+        })
+        .collect::<alloc::vec::Vec<_>>()
+        .join("\n")
+}
+
+/// The machine's own readings, for a line that asks about them.
+pub fn facts_for(message: &str) -> Option<String> {
+    let words: alloc::vec::Vec<String> = message
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .collect();
+    let has = |set: &[&str]| words.iter().any(|w| set.contains(&w.as_str()));
+    let mut parts: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+    if has(&["time", "date", "day", "today", "clock", "hour", "year", "month", "tonight", "morning", "evening"]) {
+        if let Some(t) = crate::dev::rtc::now() {
+            parts.push(alloc::format!(
+                "the clock reads {:04}-{:02}-{:02} {:02}:{:02}",
+                t.year, t.month, t.day, t.hour, t.minute
+            ));
+        }
+    }
+    if has(&["running", "uptime", "awake", "booted", "boot", "long", "since"]) {
+        let s = crate::dev::lapic::ticks() / crate::TIMER_HZ as u64;
+        parts.push(alloc::format!("you have been running {} min {} s since this boot", s / 60, s % 60));
+    }
+    if has(&["memory", "ram", "heap"]) {
+        let (used, total) = crate::mem::heap::HEAP.stats();
+        parts.push(alloc::format!(
+            "the kernel heap has {} MiB used of {} MiB, {} MiB free",
+            used / (1 << 20),
+            total / (1 << 20),
+            (total - used) / (1 << 20)
+        ));
+    }
+    // A question about the asker ("what is my name", "where do I live") gets
+    // what they asked to be remembered right beside it. Pinned at the top of
+    // the conversation, the 0.6B read "their name is Lummy" and answered
+    // "I am Lummy"; next to the question it reads as an answer to give.
+    if has(&["my", "me", "i", "am"]) {
+        if let Some(about) = crate::sysbox::read_blob(ABOUT) {
+            let t = third_person(String::from_utf8_lossy(&about).trim());
+            if !t.is_empty() {
+                parts.push(alloc::format!("what the person asking has told you about themselves: {}", t.replace('\n', "; ")));
+            }
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(alloc::format!("(Facts from the machine: {}.)\n", parts.join("; ")))
+}
+
 /// How far a parked conversation will actually reach.
 pub enum Parked {
     /// Written, and it will survive a reboot once the tree is snapshotted.
@@ -451,6 +560,11 @@ pub fn interject_frame(kind: &str) -> String {
     s.push_str("<|im_end|>
 <|im_start|>assistant
 ");
+    // Closed, as a chat turn closes it: left open, the first remark was a
+    // Qwen3 reasoning block about the instruction instead of a remark.
+    if super::has_think_token() {
+        s.push_str("<think>\n\n</think>\n\n");
+    }
     s
 }
 

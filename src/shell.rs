@@ -2372,7 +2372,41 @@ fn store_cmd(rest: &str) {
     }
 }
 
+/// Uptime in seconds when the operator last entered a line, for the mind to
+/// tell an operator who is busy from one who has gone quiet.
+static LAST_LINE_AT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Seconds since the operator last entered a line at the prompt.
+pub fn seconds_since_line() -> u64 {
+    let now = lapic::ticks() / crate::TIMER_HZ as u64;
+    now.saturating_sub(LAST_LINE_AT.load(core::sync::atomic::Ordering::Relaxed))
+}
+
+/// Commands in flight on the shell. A counter because `execute` calls itself.
+static IN_COMMAND: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Whether the shell is in the middle of a command -- a chat answer that
+/// takes a minute is the operator waiting, not the operator gone quiet.
+pub fn in_command() -> bool {
+    IN_COMMAND.load(core::sync::atomic::Ordering::Relaxed) > 0
+}
+
+struct Running;
+impl Drop for Running {
+    fn drop(&mut self) {
+        IN_COMMAND.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+        // Quiet is measured from when the answer ended, not from when the
+        // question was typed.
+        LAST_LINE_AT.store(lapic::ticks() / crate::TIMER_HZ as u64, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi::Interp) {
+    if !line.trim().is_empty() {
+        LAST_LINE_AT.store(lapic::ticks() / crate::TIMER_HZ as u64, core::sync::atomic::Ordering::Relaxed);
+    }
+    IN_COMMAND.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let _running = Running;
     // A miner image asking for its payout address takes a typed `0x...` line
     // before anything else can. See `mine::boot::answer`.
     if let Some(msg) = crate::mine::boot::answer(line) {
@@ -2395,7 +2429,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
     // verb was typed and not about whether it worked: an operator correcting
     // the machine with a command that then fails has still said which applet
     // they meant.
-    match crate::ai::learn::operator_ran(cmd) {
+    // Only what the operator typed. A command the router composed out of a
+    // sentence is the machine's own choice wearing a command's shape, and
+    // learning from it is learning from the model's argmax -- measured: the
+    // line "what files are in /lib", routed to `stat`, was filed as the
+    // operator correcting "how much memory is free" with `stat`.
+    let typed = !FROM_INTENT.load(core::sync::atomic::Ordering::Relaxed);
+    match if typed { crate::ai::learn::operator_ran(cmd) } else { crate::ai::learn::Verdict::NoGoal } {
         crate::ai::learn::Verdict::Learn(applet, task) => {
             // Being corrected stings, a little: a short noxious drive.
             crate::brain::stimulate(crate::brain::Sense::Noxious, 200);
@@ -2418,6 +2458,24 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
     // the editor window, because an editor is what "write" with nothing to
     // write means. Decided here, before sysbox, or the applet's usage error
     // would claim the bare form.
+    // "write a haiku about kernels" is a request for a haiku, and was the
+    // `write` applet making `/a` with "haiku about kernels" in it. A first
+    // argument that is not shaped like a path, followed by prose, is language.
+    if typed && cmd == "write" && crate::ai::intent::write_is_prose(rest) {
+        run_decision(crate::ai::intent::decide(line), boot, acpi, interp);
+        return;
+    }
+    // "find files that mention godel" searched for that whole phrase and found
+    // nothing. The word being looked for is what follows the sentence around it.
+    if typed && cmd == "find" {
+        if let Some(k) = crate::ai::intent::find_keyword(rest) {
+            console::set_color(LTGRAY);
+            kprintln!("  (searching for '{}')", k);
+            console::set_color(WHITE);
+            execute(&alloc::format!("find {}", k), boot, acpi, interp);
+            return;
+        }
+    }
     if cmd == "write" && rest.splitn(2, char::is_whitespace).nth(1).is_none() {
         crate::gfx::desk::open_write(rest);
         return;
@@ -6629,11 +6687,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("[mind]");
             console::set_color(LTGRAY);
             kprintln!(
-                "  initiative {} -- {} ticks: {} acted, {} episodes queued, {} stood down",
+                "  initiative {} -- {} ticks: {} acted, {} episodes queued, {} remark(s), {} stood down",
                 if enabled { "on" } else { "off" },
                 ticks,
                 acts,
                 episodes,
+                crate::ai::initiative::remarks(),
                 suppressed
             );
             kprintln!(
@@ -8873,6 +8932,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
     }
 }
 
+/// Set while a command `ai::intent` composed is running, so `learn` does not
+/// take it for the operator's own hand.
+static FROM_INTENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// Carry out what `ai::intent` decided about a line of language, saying so.
 fn run_decision(d: crate::ai::intent::Decision, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi::Interp) {
     match d {
@@ -8880,13 +8943,41 @@ fn run_decision(d: crate::ai::intent::Decision, boot: &BootInfo, acpi: &Option<A
             console::set_color(LTGRAY);
             kprintln!("  ({})", why);
             console::set_color(WHITE);
+            FROM_INTENT.store(true, core::sync::atomic::Ordering::Relaxed);
             execute(&cmd, boot, acpi, interp);
+            FROM_INTENT.store(false, core::sync::atomic::Ordering::Relaxed);
         }
         crate::ai::intent::Decision::Chat(text, why) => {
             console::set_color(LTGRAY);
             kprintln!("  ({})", why);
             console::set_color(WHITE);
             chat(&text);
+        }
+        crate::ai::intent::Decision::Grounded(question, cmd, why) => {
+            console::set_color(LTGRAY);
+            kprintln!("  ({})", why);
+            console::set_color(WHITE);
+            console::begin_capture();
+            FROM_INTENT.store(true, core::sync::atomic::Ordering::Relaxed);
+            execute(&cmd, boot, acpi, interp);
+            FROM_INTENT.store(false, core::sync::atomic::Ordering::Relaxed);
+            let shown = console::end_capture().unwrap_or_default();
+            // Shown to the operator as well: the answer is only as good as
+            // what it was read from, and that should be on screen beside it.
+            kprint!("{}", shown);
+            // Bounded, because it goes into the prompt: a long listing would
+            // spend the context the question needs.
+            // A listing reshaped for reading: `ls` prints an address, a size
+            // and a name, and asked which file in /lib was biggest the 0.6B
+            // answered with an address. So the address goes, the size is
+            // labelled, and the biggest comes first.
+            let shown_for_model = readable_listing(&shown).unwrap_or_else(|| shown.clone());
+            let mut seen: alloc::string::String = shown_for_model.chars().take(1500).collect();
+            if seen.len() < shown_for_model.len() {
+                seen.push_str("\n...");
+            }
+            let framed = alloc::format!("(The machine shows, from `{}`:\n{})\n{}", cmd, seen.trim_end(), question);
+            chat(&framed);
         }
         crate::ai::intent::Decision::Forget => {
             crate::ai::companion::reset();
@@ -10543,4 +10634,33 @@ fn volume_verb(arg: &str) {
         },
     }
     kprintln!("  volume {}", crate::voice::volume());
+}
+
+/// `ls` output as a model can read it: `name (N bytes)`, biggest first, with
+/// directories marked. `None` when the text is not an `ls` listing.
+fn readable_listing(text: &str) -> Option<alloc::string::String> {
+    let mut rows: alloc::vec::Vec<(u64, alloc::string::String)> = alloc::vec::Vec::new();
+    for line in text.lines() {
+        let w: alloc::vec::Vec<&str> = line.split_whitespace().collect();
+        if w.len() != 3 || w[0].len() != 12 || !w[0].chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let n: u64 = w[1].parse().ok()?;
+        let name = if w[2].ends_with('/') {
+            alloc::format!("{} (a directory of {} entries)", w[2], n)
+        } else {
+            alloc::format!("{} ({} bytes)", w[2], n)
+        };
+        rows.push((if w[2].ends_with('/') { 0 } else { n }, name));
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut out = alloc::format!("{} entries, largest first:\n", rows.len());
+    for (_, r) in rows {
+        out.push_str(&r);
+        out.push('\n');
+    }
+    Some(out)
 }

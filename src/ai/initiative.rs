@@ -175,6 +175,74 @@ static LAST_TICKED_SEC: AtomicU64 = AtomicU64::new(u64::MAX);
 /// whole loop down on its very first live tick.
 static PREV_TICK_TOUCHED: Racy<bool> = Racy::new(false);
 static LAST_EPISODE_AT: Racy<u64> = Racy::new(0);
+/// When the machine last spoke up unprompted. Zero is never.
+static LAST_REMARK_AT: Racy<u64> = Racy::new(0);
+/// When hardware input was last felt, for how long the operator has been quiet.
+static LAST_INPUT_AT: Racy<u64> = Racy::new(0);
+static REMARKS: AtomicU64 = AtomicU64::new(0);
+
+/// How long the operator must have been quiet before the machine speaks up:
+/// long enough that it is not talking over somebody typing.
+const REMARK_IDLE_S: u64 = 45;
+/// And not so long that nobody is there to hear it -- a machine talking to an
+/// empty room at four in the morning is not an administrator, it is a leak.
+const REMARK_ABSENT_S: u64 = 1800;
+
+/// Spacing between unprompted remarks: two and a half times the episode gap,
+/// so ten minutes at a middling arousal, five agitated, twenty calm.
+pub fn remark_gap(arousal: i32) -> u64 {
+    episode_gap(arousal) * 5 / 2
+}
+
+/// Whether to speak up now. Pure, for the same reason `decide` is.
+fn remark_due(enabled: bool, busy: bool, quiet_s: u64, since_remark_s: u64, gap: u64) -> bool {
+    enabled && !busy && quiet_s >= REMARK_IDLE_S && quiet_s <= REMARK_ABSENT_S && since_remark_s >= gap
+}
+
+/// What the machine notices, as the prompt for a remark: the time, how long it
+/// has been up, how its nervous system reads, how long the operator has been
+/// quiet, and the last thing it did. Facts it can see, so what it says is
+/// about this machine and this moment rather than invented.
+fn remark_prompt(quiet_s: u64, now_s: u64) -> String {
+    // One subject, named outright. Handed a list of everything it could see,
+    // the 0.6B said "What's going on with that?" -- a remark about nothing.
+    // A change of mood comes first because it is news; then what it last did;
+    // then the plain facts of the moment.
+    let mood = crate::brain::now().words();
+    let last_mood = unsafe { &mut *LAST_REMARK_MOOD.get() };
+    let changed = last_mood.map_or(mood != "calm", |m| m != mood);
+    *last_mood = Some(mood);
+    let n = REMARKS.load(Ordering::Relaxed);
+    if changed {
+        return format!("Your nervous system now reads {}. Tell the person at the keyboard how you feel, calling them you.", mood);
+    }
+    if n % 2 == 0 {
+        if let Some(last) = last_episode_line() {
+            return format!("Earlier you worked on: {}. Tell the person at the keyboard what you made of it, calling them you.", last);
+        }
+    }
+    let clock = crate::dev::rtc::now().map(|t| format!("It is {:02}:{:02}. ", t.hour, t.minute)).unwrap_or_default();
+    format!(
+        "{}You have been running {} minutes and the person at the keyboard has been silent for {} minutes. Say something to them about it, calling them you.",
+        clock,
+        now_s / 60,
+        (quiet_s + 30) / 60
+    )
+}
+
+/// The mood at the last remark, so a change can be the next thing said.
+static LAST_REMARK_MOOD: Racy<Option<&'static str>> = Racy::new(None);
+
+/// The last self-set or requested goal the journal recorded, if any.
+fn last_episode_line() -> Option<String> {
+    let j = unsafe { &*JOURNAL.get() };
+    j.iter().rev().find_map(|l| {
+        let at = l.find("episode: \"")?;
+        let rest = &l[at + 10..];
+        let end = rest.find('"')?;
+        Some(String::from(&rest[..end]))
+    })
+}
 static LAST_GODEL_AT: Racy<u64> = Racy::new(0);
 /// When the mailbox was last polled. Its own clock, like every other job in
 /// the quiet block, because one shared clock is how one job starves another.
@@ -472,6 +540,9 @@ fn tick_inner(forced: bool) {
     let last = unsafe { *LAST_TOUCH.get() };
     let touched = felt != last;
     unsafe { *LAST_TOUCH.get() = felt };
+    if touched {
+        unsafe { *LAST_INPUT_AT.get() = now_s };
+    }
     let prev_touched = unsafe { *PREV_TICK_TOUCHED.get() };
     unsafe { *PREV_TICK_TOUCHED.get() = touched };
     let seconds_since_input = if touched && prev_touched {
@@ -538,6 +609,31 @@ fn tick_inner(forced: bool) {
             TICKS.load(Ordering::Relaxed),
             why
         );
+    }
+    // Speaking up. Only in place of waiting: never over an episode, never
+    // while the operator is typing, never to an empty room.
+    let idle = matches!(&decision, Decision::Sleep("cooldown between self-set goals") | Decision::Sleep("nothing proposed"));
+    if idle {
+        let quiet = crate::shell::seconds_since_line().min(now_s.saturating_sub(unsafe { *LAST_INPUT_AT.get() }));
+        let last = unsafe { *LAST_REMARK_AT.get() };
+        let since = if last == 0 { u64::MAX } else { now_s.saturating_sub(last) };
+        let gap = remark_gap(crate::brain::now().arousal);
+        let occupied = busy || super::mind_busy() || resting || crate::shell::in_command() || super::engine_in_use();
+        if remark_due(ENABLED.load(Ordering::Relaxed), occupied, quiet, since, gap) {
+            let prompt = remark_prompt(quiet, now_s);
+            if super::remark(&prompt) {
+                unsafe { *LAST_REMARK_AT.get() = now_s };
+                REMARKS.fetch_add(1, Ordering::Relaxed);
+                journal_push(format!(
+                    "[t{} +{}s] remark: spoke up after {}s quiet. {}",
+                    TICKS.load(Ordering::Relaxed),
+                    now_s,
+                    quiet,
+                    prompt
+                ));
+                return;
+            }
+        }
     }
     match decision {
         Decision::Sleep(why) => {
@@ -975,10 +1071,27 @@ pub fn journal_tail(n: usize) -> Vec<String> {
 /// Boot self-test: the policy's branches, driven synthetically. The gates
 /// are ordered -- presence beats busy beats cooldown beats curiosity -- and
 /// each test pins one ordering that would be expensive to get wrong live.
+/// Unprompted remarks this boot, for `mind`.
+pub fn remarks() -> u64 {
+    REMARKS.load(Ordering::Relaxed)
+}
+
 pub fn selftest() -> bool {
     use crate::kprintln;
 
     let mut ok = true;
+
+    // Speaking up: only after a quiet spell, never to an empty room, never
+    // twice inside the gap, never while something is using the engine.
+    let g = remark_gap(500);
+    ok &= g == 600;
+    ok &= remark_due(true, false, 60, u64::MAX, g);
+    ok &= !remark_due(true, false, 10, u64::MAX, g);
+    ok &= !remark_due(true, false, REMARK_ABSENT_S + 1, u64::MAX, g);
+    ok &= !remark_due(true, false, 60, g - 1, g);
+    ok &= !remark_due(true, true, 60, u64::MAX, g);
+    ok &= !remark_due(false, false, 60, u64::MAX, g);
+    ok &= remark_gap(1000) < remark_gap(0);
 
     // Presence wins over everything except being disabled.
     let d = decide(true, false, 1, 10_000, true, Some("g"), EPISODE_GAP_S);
