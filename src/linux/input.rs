@@ -189,7 +189,10 @@ pub fn pointer(dx: i32, dy: i32, wheel: i32, left: bool, right: bool, was_left: 
         any = true;
     }
     if wheel != 0 {
-        POINTER.push(EV_REL, REL_WHEEL, wheel, us);
+        // Flipped too, for the same reason as `REL_Y` the other way round:
+        // `apply`'s notch counts positive downward and `REL_WHEEL` counts
+        // positive away from the user.
+        POINTER.push(EV_REL, REL_WHEEL, -wheel, us);
         any = true;
     }
     if left != was_left {

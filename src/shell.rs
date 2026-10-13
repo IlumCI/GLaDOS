@@ -7438,6 +7438,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         "  ps/2    {} interrupt(s), {} packet(s), {} byte(s) dropped to resync, {} half-packet(s) abandoned, {} byte(s) rescued",
                         irqs, packets, resyncs, stale, rescued
                     );
+                    let (ps2_wheel, down, up) = crate::dev::mouse::wheel_stats();
+                    kprintln!(
+                        "  wheel   ps/2 {}, {} notch(es) down and {} up seen",
+                        if ps2_wheel { "enabled" } else { "not offered" },
+                        down,
+                        up
+                    );
                     crate::dev::usbhid::report();
                 }
                 Some("move") => {

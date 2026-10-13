@@ -4580,8 +4580,12 @@ fn wheel_at(x: i32, y: i32, notches: i32) {
             a.wheel(notches)
         }
         // Up is back, which is the direction every terminal has agreed on.
-        // Three rows a notch, matching the log windows.
-        Content::Terminal(ch) => super::console::scroll_view(*ch, (notches * 3) as isize),
+        // Three rows a notch, matching the log windows. Negated: a notch
+        // counts positive *downward* and `scroll_view` counts positive
+        // *back*, and passing it through turned the wheel round -- a notch
+        // toward you climbed into history, where every other window here
+        // moved down.
+        Content::Terminal(ch) => super::console::scroll_view(*ch, -(notches * 3) as isize),
         _ => false,
     })
     .unwrap_or(false);
