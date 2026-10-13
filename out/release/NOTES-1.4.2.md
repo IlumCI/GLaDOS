@@ -136,6 +136,12 @@ claims is the list above, each with the command that checks it.
   generic spiking network), and Lindsey 2025 (introspection by concept
   injection).
 
+## What it needs
+
+The Qwen3-0.6B image -- model, voice and fly together, at 8K context -- wants
+8 GB of memory to be comfortable: about 750 MB of the kernel heap at boot,
+and nearly 1.9 GB once every self-test has run.
+
 ## Not yet verified on hardware
 
 Everything in this release was verified under QEMU. The voice's speed, the
