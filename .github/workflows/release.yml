@@ -241,7 +241,10 @@ jobs:
           - name: qwen3-0.6b
             payload: payload-qwen3-0.6b-v1
             manifest: qwen3-0.6b
-            seq: 0
+            # 8K, stamped (tools/ctxstamp.py). The payload is canonical at 512,
+            # which a few turns of conversation fill; at 8192 the int8 KV cache
+            # is about 470 MB a context and a full boot uses 750 MB of heap.
+            seq: 8192
             label: GLADOS
             # The neural voice (payload/voice.txt, 180 MB) rides on this
             # image only: the 2B images are 1.90 GB against GitHub's 2 GB

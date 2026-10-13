@@ -1367,12 +1367,12 @@ fn tape_inner(e: &mut super::Engine) -> bool {
     let toks: alloc::vec::Vec<usize> = alloc::vec![1usize, 5, 9, 2];
     let cfg = e.model.cfg.clone();
 
-    let mut plain = State::new(&cfg);
+    let mut plain = State::scratch(&cfg, toks.len() + 1);
     for (i, &t) in toks.iter().enumerate() {
         e.model.forward(&mut plain, t, i);
     }
 
-    let mut taped = State::new(&cfg);
+    let mut taped = State::scratch(&cfg, toks.len() + 1);
     let mut tape = Tape::new(&cfg, toks.len());
     for (i, &t) in toks.iter().enumerate() {
         if !e.model.forward_taped(&mut taped, t, i, &mut tape) {
@@ -1555,7 +1555,7 @@ pub fn selftest() -> bool {
         }
         let toks = [9707usize, 1576, 29817, 3303];
         fn run(e: &mut super::Engine, toks: &[usize]) -> Vec<f32> {
-            let mut st = State::new(&e.model.cfg);
+            let mut st = State::scratch(&e.model.cfg, toks.len() + 1);
             for (i, &t) in toks.iter().enumerate() {
                 e.model.forward(&mut st, t, i);
             }

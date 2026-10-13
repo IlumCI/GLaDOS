@@ -3549,7 +3549,7 @@ pub fn capture_stack(prompt: &str) -> bool {
 
         let cfg = e.model.cfg.clone();
         let mut tape = super::model::Tape::new(&cfg, take);
-        let mut st = super::model::State::new(&cfg);
+        let mut st = super::model::State::scratch(&cfg, take + 1);
         for (t, id) in ids.iter().enumerate() {
             if !e.model.forward_taped(&mut st, *id, t, &mut tape) {
                 return false;

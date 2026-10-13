@@ -361,6 +361,16 @@ fn brain_task() {
         obs_slot[i as usize] = k as u32;
     }
     let mut obs = alloc::vec![0u32; watched.len() + nr];
+    // Which sensory line each neuron belongs to (u8::MAX for none), for the
+    // labelled-line half of valence (`line_valence`).
+    let mut line_of = alloc::vec![u8::MAX; c.n];
+    for (g, sg) in c.sensors.iter().enumerate() {
+        for &i in sg.ids.iter() {
+            line_of[i as usize] = g as u8;
+        }
+    }
+    let mut line_window = alloc::vec![0u32; c.sensors.len()];
+    let mut line_mhz = alloc::vec![0i64; c.sensors.len()];
     let mut drive: Vec<(usize, u64)> = Vec::new();
     let mut window = alloc::vec![0u32; nr];
     let mut window_start = 0u64;
@@ -491,9 +501,13 @@ fn brain_task() {
                 if k != u32::MAX {
                     obs[k as usize] = obs[k as usize].wrapping_add(1);
                 }
+                let g = line_of[i as usize];
+                if g != u8::MAX {
+                    line_window[g as usize] += 1;
+                }
             }
             if sim.t - window_start >= WINDOW {
-                fold(c, &mut window, &mut rate_mhz, sim.t - window_start);
+                fold(c, &mut window, &mut rate_mhz, &mut line_window, &mut line_mhz, sim.t - window_start);
                 // Neuromodulation: gain from octopamine (arousal) against
                 // serotonin, and a resting drive that sleep pulls down. Bias
                 // is quantised to a quarter of a millivolt so it changes
@@ -552,8 +566,34 @@ fn brain_task() {
 
 /// Close a readout window: rates per neuron, smoothed over about two
 /// seconds of brain time, then valence and arousal.
-fn fold(c: &Connectome, window: &mut [u32], rate_mhz: &mut [i64], steps: u64) {
+/// How much a labelled sensory line's own rate counts toward valence,
+/// against the readouts: a third, so a sense firing at 150 Hz weighs like a
+/// readout population at 50.
+const LINE_WEIGHT: i64 = 3;
+
+/// Which senses carry innate valence, and which way. In the fly, sugar and
+/// bitter receptors are labelled lines -- appetitive and aversive by wiring,
+/// not by learning (Wang et al. 2004; Marella et al. 2006) -- and hot
+/// thermosensors drive avoidance. Counting them is needed because the fly's
+/// bitter pathway works by *suppressing* feeding, which is already zero at
+/// rest: without the lines, nothing the machine suffers ever moved the fly's
+/// valence below neutral.
+fn line_valence(name: &str) -> i64 {
+    match name {
+        "food" => 1,
+        "noxious" | "thermal" => -1,
+        _ => 0,
+    }
+}
+
+fn fold(c: &Connectome, window: &mut [u32], rate_mhz: &mut [i64], lines: &mut [u32], line_mhz: &mut [i64], steps: u64) {
     let ms = (steps * c.dt_us / 1000).max(1) as i64;
+    for (g, sg) in c.sensors.iter().enumerate() {
+        let n = sg.ids.len().max(1) as i64;
+        let hz_m = lines[g] as i64 * 1_000_000 / (n * ms);
+        line_mhz[g] += (hz_m - line_mhz[g]) / 20;
+        lines[g] = 0;
+    }
     for (r, ro) in c.readouts.iter().enumerate() {
         let n = ro.ids.len().max(1) as i64;
         let hz_m = window[r] as i64 * 1_000_000 / (n * ms);
@@ -582,6 +622,13 @@ fn fold(c: &Connectome, window: &mut [u32], rate_mhz: &mut [i64], steps: u64) {
     SEROTONIN.store(level(mods[2]), Ordering::Release);
     // Dopamine is the reward signal, so it counts toward approach.
     approach += mods[0] / 2;
+    for (g, sg) in c.sensors.iter().enumerate() {
+        match line_valence(&sg.name) {
+            1 => approach += line_mhz[g] / LINE_WEIGHT,
+            -1 => avoid += line_mhz[g] / LINE_WEIGHT,
+            _ => {}
+        }
+    }
     // A floor of 5 Hz under the denominator, so two silent populations read
     // as neutral rather than as whichever is a millihertz ahead.
     let v = (approach - avoid) * 1000 / (approach + avoid + 5_000);

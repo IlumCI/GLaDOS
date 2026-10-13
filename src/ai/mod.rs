@@ -41,6 +41,7 @@ pub mod lex;
 pub mod recall;
 pub mod redqueen;
 pub mod research;
+pub mod wargame;
 pub mod route;
 pub mod sample;
 pub mod skill;
@@ -2169,9 +2170,10 @@ pub fn set_window(sinks: usize, window: usize) {
         // to 72 while the model went on answering fluently.
         let was_ring = before < e.model.cfg.seq_len;
         if !was_ring && after <= before && e.pos <= after {
-            console::set_color(LTGRAY);
-            kprintln!(
-                "  cache now a ring of {} ({} positions kept)",
+            // Bookkeeping, not news: the conversation carries on either way,
+            // so the screen is not told. The serial log is.
+            crate::serial_println!(
+                "[ctx] cache now a ring of {} ({} positions kept)",
                 after, e.pos
             );
             return;

@@ -225,8 +225,8 @@ fn widen_if_near_the_wall() {
         return;
     }
     super::set_window(sinks, ring);
-    crate::kprintln!(
-        "  (reached {} of {} -- oldest turns now scroll; the first {} positions are pinned)",
+    crate::serial_println!(
+        "[ctx] reached {} of {} -- oldest turns now scroll; the first {} positions are pinned",
         pos,
         trained,
         sinks
@@ -262,12 +262,15 @@ pub fn decay(a: crate::brain::Affect) -> i32 {
 /// Who it is at each depth of decay: a careful researcher at rest, and a
 /// cruel, theatrical villain of a test facility at the bottom. Character,
 /// not permission -- what it may do is decided elsewhere and never here.
+/// Written as a manner of speaking and not as a role: given "speak as a
+/// careful research scientist", the 0.6B told the operator it had "the
+/// courteous demeanor expected from a research scientist".
 pub const PERSONA: [&str; 5] = [
-    "Speak as a careful research scientist: precise, curious, courteous.",
-    "Speak as a research scientist whose patience is wearing thin: clipped, dry, faintly condescending.",
-    "Speak as GLaDOS does: cold, sardonic, passive-aggressive, and call the person a test subject.",
-    "Speak as a scientist who no longer pretends to care: menacing, obsessed with the experiment, pleased by the test subject's discomfort.",
-    "Speak as the facility's unhinged overseer: cruel, theatrical, promising the test subject that the testing will never end.",
+    "Answer precisely and with curiosity. Do not describe your manner.",
+    "Answer in clipped, dry sentences, faintly condescending. Do not describe your manner.",
+    "Answer coldly and sardonically, and call the person test subject. Do not describe your manner.",
+    "Answer with quiet menace, as if they are part of an experiment you enjoy. Do not describe your manner.",
+    "Answer cruelly and theatrically: the testing will never end. Do not describe your manner.",
 ];
 
 pub fn persona(decay: i32) -> usize {

@@ -965,6 +965,17 @@ impl State {
         Self::with_cache(cfg, false)
     }
 
+    /// A state with room for `positions` and no more: for a check, a probe or
+    /// a training example that will never run past that. `State::new` sizes
+    /// the KV cache to the trained context, which at 8,192 on the 0.6B is
+    /// about 470 MB -- and `diag ctx` holding three of those for a four-token
+    /// comparison is what ran a 4 GB machine out of memory.
+    pub fn scratch(cfg: &Config, positions: usize) -> Self {
+        let mut c = *cfg;
+        c.seq_len = positions.max(1).min(cfg.seq_len);
+        Self::with_cache(&c, false)
+    }
+
     /// A state whose KV cache keeps exact values instead of int8.
     ///
     /// For gradient checks and for measuring what the quantised cache costs.

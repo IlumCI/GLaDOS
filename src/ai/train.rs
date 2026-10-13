@@ -888,7 +888,7 @@ pub fn train_full(
     // overwritten before it could be read. `Tape::reset` is needed because
     // `filled` is the one piece of state that would otherwise carry over.
     let longest = set.iter().map(|(t, _)| t.len()).max().unwrap_or(1);
-    let mut st = super::model::State::new(&cfg);
+    let mut st = super::model::State::scratch(&cfg, longest + 1);
     let mut tape = super::model::Tape::new(&cfg, longest);
 
     for epoch in 0..b.epochs {

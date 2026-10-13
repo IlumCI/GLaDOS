@@ -6418,6 +6418,102 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 },
             }
         }
+        "wargame" => {
+            // Global Thermonuclear War (src/ai/wargame.rs): the board here, and
+            // a line from the model in its present character after each turn.
+            use crate::ai::wargame::{self as wg, End, Game, Side};
+            use crate::gfx::console::{self, LTGRAY, LTGREEN, WHITE};
+            let game = unsafe { &mut *wg::GAME.get() };
+            // The board (`Game`, `End`, `Side`) is pure; this arm is the screen.
+            let say = |lines: &[&str]| {
+                console::set_color(LTGREEN);
+                for l in lines {
+                    kprintln!("{}", l);
+                }
+                console::set_color(WHITE);
+            };
+            let board = |g: &Game| {
+                console::set_color(LTGREEN);
+                for l in g.board() {
+                    kprintln!("{}", l);
+                }
+                console::set_color(WHITE);
+            };
+            // The machine's line for the turn, on screen and in its voice.
+            let speak = |g: &Game, t: &wg::Turn| {
+                let dark = crate::ai::companion::decay(crate::brain::now()) >= 250;
+                let l = wg::line(g, t, dark);
+                console::set_color(console::LTRED);
+                kprintln!("  {}", l);
+                console::set_color(WHITE);
+                crate::voice::say(&l);
+            };
+            let words: Vec<&str> = rest.split_whitespace().collect();
+            match words.as_slice() {
+                [] if game.is_none() => {
+                    say(&wg::GREETING);
+                    console::set_color(LTGRAY);
+                    kprintln!("  ('wargame 1' or 'wargame 2' to choose a side)");
+                    console::set_color(WHITE);
+                }
+                [] => board(game.as_ref().unwrap()),
+                ["1"] | ["2"] | ["us"] | ["ussr"] => {
+                    let side = if matches!(words[0], "1" | "us") { Side::UnitedStates } else { Side::SovietUnion };
+                    let g = Game::new(side);
+                    say(&[&alloc::format!("YOU ARE THE {}. I AM THE {}.", side.name(), g.machine().name()), ""]);
+                    board(&g);
+                    console::set_color(LTGRAY);
+                    kprintln!("  ('wargame strike <1-{}>' or 'wargame hold')", wg::MAX_STRIKE);
+                    console::set_color(WHITE);
+                    *game = Some(g);
+                }
+                ["strike", n] if game.is_some() => {
+                    let g = game.as_mut().unwrap();
+                    let t = g.play(n.parse().unwrap_or(0));
+                    if t.fired > 0 {
+                        say(&[&alloc::format!("LAUNCH DETECTED: {} WARHEADS.", t.fired), &alloc::format!("RETALIATION: {} WARHEADS.", t.answered)]);
+                    } else {
+                        say(&["NO LAUNCH DETECTED. HOLDING."]);
+                    }
+                    board(g);
+                    match t.end {
+                        Some(End::OnlyWinningMove) => {
+                            say(&[""]);
+                            say(&wg::STRANGE);
+                        }
+                        Some(End::NoWinner) => say(&["", "WINNER: NONE"]),
+                        None => {}
+                    }
+                    speak(g, &t);
+                    if t.end.is_some() {
+                        *game = None;
+                    }
+                }
+                ["hold"] if game.is_some() => {
+                    let g = game.as_mut().unwrap();
+                    let t = g.play(0);
+                    say(&["NO LAUNCH DETECTED. HOLDING."]);
+                    board(g);
+                    match t.end {
+                        Some(End::OnlyWinningMove) => {
+                            say(&[""]);
+                            say(&wg::STRANGE);
+                        }
+                        Some(End::NoWinner) => say(&["", "WINNER: NONE"]),
+                        None => {}
+                    }
+                    speak(g, &t);
+                    if t.end.is_some() {
+                        *game = None;
+                    }
+                }
+                ["quit"] => {
+                    *game = None;
+                    say(&["GAME ABANDONED."]);
+                }
+                _ => kprintln!("  usage: wargame [1|2|strike <1-{}>|hold|quit]", wg::MAX_STRIKE),
+            }
+        }
         "research" => {
             // The research loop's operator surface (src/ai/research.rs).
             use crate::ai::research as rs;

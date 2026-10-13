@@ -35,9 +35,18 @@ that writes its predictions down before it tests them.
 - **It sleeps.** Pressure builds over hours awake; once it is high and nobody
   has touched the machine for a while, it rests, and only touch or speech
   wakes it.
-- **You can see it without a window.** The wallpaper's sun follows it: higher
-  when it is aroused, gold when it is drawn toward something, washed out when
-  it is avoiding something, set behind the hills while it sleeps.
+- **You can see it without a window.** The whole desktop follows its mood.
+  Content, and the room lights up into a white test chamber with a blue
+  Aperture sun. Upset, and the colour drains out of the world: monochrome,
+  darker, scored with scanlines, the sun gone to ash. Asleep, an eclipse --
+  a black aperture in a pale corona. Aroused, the sun climbs.
+- **And it changes who you are talking to.** The deeper its mood sinks, the
+  further the machine's manner goes: from a precise, curious researcher,
+  through clipped impatience and cold sarcasm, to a facility overseer who
+  promises you the testing will never end. The same goes for what it says
+  unprompted -- it speaks on its own, not only when spoken to. It is
+  character only: what it may *do* is decided elsewhere, and never by its
+  mood.
 - **It modulates and never grants.** Nothing read from the brain decides
   whether an action is allowed, and every judge the machine uses on itself
   reads it as neutral, so no verdict depends on its mood.
@@ -73,12 +82,24 @@ run:
   As the brain's mood drops, the mask slips into a human voice. No recording
   of any performer was used for any of it.
 
+## Shall we play a game?
+
+Say "let's play global thermonuclear war". The machine is the other side:
+pick the United States or the Soviet Union, strike or hold, and it answers
+every launch harder than the last, out loud, in its own voice. Every war
+ends the same way. Hold your fire long enough and you might find out how the
+film ends.
+
 ## Talking to it
 
 - **Just type.** Plain language at the prompt is acted on: a confident,
   read-only request runs, anything that changes something asks first, and
   anything else becomes a conversation. `ask` and `agent` are no longer
   needed in front of a sentence.
+- **It remembers more of the conversation.** The 0.6B image now holds 8,192
+  tokens of context, sixteen times what it had. Past that, the oldest turns
+  scroll away quietly while its instructions stay pinned -- the conversation
+  never stops.
 - **It talks while it works.** The model has separate working memories for
   the conversation, the agent and the judges, sharing one set of weights, so
   a question asked in the middle of a long task is answered in the middle of
@@ -109,7 +130,7 @@ claims is the list above, each with the command that checks it.
 - The brain's busiest step now runs across every core, exactly: the same
   spikes, the step about three times faster on four cores when most of the
   fly is active.
-- `diag all` is 99 suites.
+- `diag all` is 100 suites.
 - Prior art, named: Eon Systems (a fly connectome in a simulated body, 2026),
   Anima OS (a language model in a kernel), EMBER (a language model with a
   generic spiking network), and Lindsey 2025 (introspection by concept

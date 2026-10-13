@@ -57,7 +57,7 @@ pub const VERBS: &[&str] = &[
     "render", "repair", "repeat", "research", "rng", "route", "sandbox", "search", "serial",
     "shutdown", "simd", "skill", "smp", "sound", "splash", "store", "study", "sysinfo",
     "tasks", "tcp", "teach", "tensor", "think", "todo", "train", "trust", "typewriter", "uname",
-    "update", "uptime", "usb", "vars", "version", "vi", "video", "voice", "wifi", "win",
+    "update", "uptime", "usb", "vars", "version", "vi", "video", "voice", "wargame", "wifi", "win",
     "window", "wlan", "words", "work", "wpa2", "zeroshot",
 ];
 
@@ -342,6 +342,9 @@ pub fn decide(line: &str) -> Decision {
     let chat = |why: String| Decision::Chat(String::from(line), why);
     if starts_over(line) {
         return Decision::Forget;
+    }
+    if super::wargame::invited(line) {
+        return Decision::Run(String::from("wargame"), String::from("an invitation to play"));
     }
     if conversational(line) {
         return chat(String::from("addressed to me, so it is a conversation"));

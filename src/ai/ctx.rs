@@ -246,7 +246,7 @@ pub fn selftest() -> bool {
         // context reading the other's cache.
         let toks = [9707usize, 1576, 29817, 3303];
         fn run(e: &mut Engine, toks: &[usize]) -> Vec<f32> {
-            let mut st = super::model::State::new(&e.model.cfg);
+            let mut st = super::model::State::scratch(&e.model.cfg, toks.len() + 1);
             for (i, &t) in toks.iter().enumerate() {
                 e.model.forward(&mut st, t, i);
             }
