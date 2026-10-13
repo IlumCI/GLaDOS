@@ -6140,6 +6140,57 @@ split one level up); `voice verify` reads 5.2 s for 2.67 s of audio at
 carries its own `sincos` and tables the twiddles rather than recurring
 them; the first boot's own claim caught a transform that did not invert.
 
+### The brain (`src/brain/`), and the research loop (`src/ai/research.rs`)
+
+A real connectome runs as integer LIF neurons in its own task: the worm
+compiled in (`assets/brain/worm.bin`), the adult fly staged as
+`\GLADOS\brain.bin` (`tools/connectome.py build fly`, byte for byte
+reproducible from the pinned sources; `payload/brain.txt`).
+`tools/connectome.py` is the oracle, and **the kernel must match it spike
+for spike**: `diag brain` compares every neuron's count by digest. Any
+change to the dynamics changes the oracle first, then regenerates the
+digests with `connectome.py sim ... --emit`.
+
+Four things that are silent when wrong:
+
+- **Shiu's published model has a self-sustaining state.** A heat or odour
+  input ignites about 10,000 fly neurons that fire forever, held up by a
+  477-neuron antennal-lobe core (`design/attractor.md`,
+  `research/attractor/`). Short-term synaptic depression (`lif::STD_*`,
+  U 0.1, 1 s, sensors exempt) is what ends it. Spike-frequency adaptation
+  cannot: the core fires near 285 Hz. Remove depression and a hot afternoon
+  pins the brain at a few per cent of real time, holding a core for good.
+- **Neuromodulation updates per second of brain time**, in the readout fold.
+  Per wall second it re-woke every neuron while the brain was slow, and the
+  brain never caught up.
+- **Depression is applied lazily in the kernel**: a neuron's recovery is
+  replayed at its next spike, with the oracle's per-step recurrence, stopping
+  where it stops moving. Exact, and free for a silent neuron.
+- **The dense step is split across cores** (`integrate_parallel`, 64 slices).
+  It is exact because a neuron's update touches only its own state. It needs
+  other cores to help: at `-smp 2` the brain's task holds the only helper.
+
+The brain modulates and never grants. `brain::now()` is neutral in the
+judge context and under `pin_neutral`, so no verdict depends on a mood.
+
+`tools/pci.py` is the host-side instrument for perturbational complexity
+and the place the attractor work was done. `simulate()` defaults to the
+current model (`std_u=0` is the old one) and agrees with `simulate_np`
+spike for spike.
+
+**The research loop** preregisters before it measures. A `Hypothesis`
+(claim, experiment row, args, seed, predicates `metric op value`) is
+content-addressed under `/ai/research/h/`, and its id is written to
+`/ai/research/ledger.txt` before the run. `record` refuses a result with no
+earlier preregistration, or a second result for one hypothesis. Outcomes are
+supported, refuted, not-comparable (an unmeasured metric is never a pass),
+gave-up, and shown-impossible with evidence. The job writes only under
+`/ai/research/`, and `research trust` records the operator's grant in `/etc`,
+outside the area the job can write. `EXPERIMENTS` is a closed table, and
+each row is the shell lines it runs plus a parser to metrics. Today it is
+driven by hand (`research run <exp> [args] -- <predicates>`); the scheduler,
+the generator's later stages and the dense judges are the 1.4.x list.
+
 ### Text, and the font
 
 `src/gfx/font.rs` draws 325 glyphs at 8x8 and `src/gfx/console.rs` decodes
