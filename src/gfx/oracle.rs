@@ -580,8 +580,12 @@ impl Oracle {
         fb.rect(x.saturating_sub(4), y.saturating_sub(4), 9, 9, theme::APERTURE);
         theme::text_over(fb, plane.x + 4, plane.y + 2, "aroused", theme::SHADOW);
         theme::text_over(fb, plane.x + 4, plane.y + plane.h.saturating_sub(lh * 2 + 4), "calm", theme::SHADOW);
-        theme::text_over(fb, plane.x + 4, plane.y + plane.h.saturating_sub(lh + 2), "unpleasant", theme::SHADOW);
-        theme::text_over(fb, plane.x + plane.w.saturating_sub(theme::text_w(8) + 4), plane.y + plane.h.saturating_sub(lh + 2), "pleasant", theme::SHADOW);
+        // The words when they fit side by side, the signs when the window is
+        // narrow -- "unpleasant" and "pleasant" ran into each other at half
+        // width.
+        let (neg, pos) = if plane.w >= theme::text_w(20) { ("unpleasant", "pleasant") } else { ("-", "+") };
+        theme::text_over(fb, plane.x + 4, plane.y + plane.h.saturating_sub(lh + 2), neg, theme::SHADOW);
+        theme::text_over(fb, plane.x + plane.w.saturating_sub(theme::text_w(pos.len()) + 4), plane.y + plane.h.saturating_sub(lh + 2), pos, theme::SHADOW);
 
         // Middle: the raster. Rows are the watched neurons grouped by the
         // sense that reaches them, columns are readout windows, oldest left.
@@ -636,7 +640,18 @@ impl Oracle {
         let bx = (r.x + r.w).saturating_sub(bars_w + 8);
         let mut y = top;
         let bar = |fb: &Framebuffer, y: u32, label: &str, frac: f32, c: Color| {
-            theme::text_over(fb, bx, y, &clip(label, fits(bars_w)), theme::SCREEN_TEXT);
+            // Name and rate when both fit, the rate alone when not: a clipped
+            // "forward ." said neither.
+            let room = fits(bars_w);
+            let shown = if label.chars().count() <= room {
+                String::from(label)
+            } else {
+                String::from(label.rsplitn(3, ' ').collect::<Vec<_>>().into_iter().rev().skip(1).collect::<Vec<_>>().join(" ").as_str())
+                    .chars()
+                    .take(room)
+                    .collect::<String>()
+            };
+            theme::text_over(fb, bx, y, &shown, theme::SCREEN_TEXT);
             let w = (frac.clamp(0.0, 1.0) * bars_w as f32) as u32;
             fb.rect(bx, y + lh + 1, bars_w, 4, Color::new(0x1C, 0x22, 0x2A));
             fb.rect(bx, y + lh + 1, w.max(1), 4, c);

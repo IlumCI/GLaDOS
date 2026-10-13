@@ -87,8 +87,9 @@ run:
 - **The mask.** Composed, it speaks as a machine: one held note, no breath.
   As the brain's mood drops, the mask slips into a human voice. No recording
   of any performer was used for any of it.
-- **Volume.** `volume 0-100`, `volume up|down|mute`, or the laptop's own
-  volume keys. It starts at 40 and remembers where you left it.
+- **Volume.** `volume 0-100`, `volume up|down|mute`, the laptop's own
+  volume keys, or the new Sound page in Settings, which also turns spoken
+  replies on and off. It starts at 40 and remembers where you left it.
 
 ## Shall we play a game?
 

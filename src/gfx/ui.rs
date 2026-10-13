@@ -1337,6 +1337,7 @@ pub fn settings(page: &str) -> Panel {
             (String::from("Power"), Action::Browse(String::from("set:power"))),
             (String::from("Updates"), Action::Browse(String::from("set:updates"))),
             (String::from("Desktop"), Action::Browse(String::from("set:desk"))),
+            (String::from("Sound"), Action::Browse(String::from("set:sound"))),
             (String::from("Programs"), Action::Browse(String::from("programs:"))),
         ],
         sel,
@@ -1368,6 +1369,8 @@ pub fn settings(page: &str) -> Panel {
                 v
             },
         ),
+        // Seven, after Desktop; Programs is a link and moves down one.
+        "sound" => (7usize, sound_rows()),
         "model" => (
             2usize,
             alloc::vec![
@@ -1864,6 +1867,44 @@ pub fn program_manager() -> Panel {
 /// meeting, and the battery joining them, because an operator asking "why is
 /// this machine slow" wants the temperature, the clock and the charge on one
 /// page rather than three commands.
+/// Volume and the voice: the `volume` and `voice` verbs with buttons on.
+fn sound_rows() -> Vec<Widget> {
+    let v = crate::voice::volume();
+    let levels: [(&str, usize); 7] = [("Mute", 0), ("10", 10), ("25", 25), ("40", 40), ("60", 60), ("80", 80), ("100", 100)];
+    let sel = levels.iter().enumerate().min_by_key(|(_, (_, l))| (*l as isize - v as isize).unsigned_abs()).map(|(i, _)| i).unwrap_or(3);
+    let mut ws = alloc::vec![Widget::Heading(String::from("Volume"))];
+    ws.push(stat("Volume", if v == 0 { String::from("muted") } else { alloc::format!("{}%", v) }, if v == 0 { Tone::Warn } else { Tone::Ok }));
+    ws.push(Widget::Choices {
+        name: String::from("Level"),
+        options: levels.iter().map(|(l, n)| (String::from(*l), Action::Run(alloc::format!("volume {}", n)))).collect(),
+        sel,
+    });
+    ws.push(Widget::Button { label: String::from("Quieter"), action: Action::Run(String::from("volume down")) });
+    ws.push(Widget::Button { label: String::from("Louder"), action: Action::Run(String::from("volume up")) });
+    ws.push(note("The laptop's own volume keys set the same level, and it is kept for the next boot."));
+    ws.push(Widget::Sep);
+    ws.push(Widget::Heading(String::from("Voice")));
+    let on = crate::voice::on();
+    ws.push(stat("Replies", String::from(if on { "spoken aloud" } else { "silent" }), if on { Tone::Ok } else { Tone::Plain }));
+    ws.push(stat(
+        "Voice",
+        String::from(if crate::voice::neural::model().is_some() { "Kokoro-82M, in the kernel" } else { "formant synthesiser (no voice.bin staged)" }),
+        Tone::Plain,
+    ));
+    ws.push(Widget::Choices {
+        name: String::from("Speak replies"),
+        options: alloc::vec![
+            (String::from("On"), Action::Run(String::from("voice on"))),
+            (String::from("Off"), Action::Run(String::from("voice off"))),
+        ],
+        sel: if on { 0 } else { 1 },
+    });
+    ws.push(Widget::Button { label: String::from("Say something"), action: Action::Run(String::from("voice say The volume is set. This is how loud I am.")) });
+    ws.push(Widget::Button { label: String::from("Stop talking"), action: Action::Run(String::from("voice stop")) });
+    ws.push(note("The voice's mask follows the brain's mood: composed it is a machine, upset it slips toward a human voice."));
+    ws
+}
+
 fn power_rows() -> Vec<Widget> {
     let mut ws = alloc::vec![Widget::Heading(String::from("Battery"))];
 
