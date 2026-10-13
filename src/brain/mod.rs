@@ -161,6 +161,161 @@ static OBS: Spin<(u64, Vec<u32>)> = Spin::new((0, Vec::new()));
 
 static SNAP: Spin<Snapshot> = Spin::new(Snapshot { t: 0, rate_mhz: Vec::new(), driving: Vec::new(), awake: 0, pace: 0, per_step: [0; 4] });
 
+/// What the Oracle's brain tab draws over time: the watched neurons' spikes
+/// per readout window, and affect once per second of brain time. Kept by the
+/// brain task and copied out by `view`, so a frame never waits on the
+/// simulation.
+struct History {
+    raster: Vec<Vec<u8>>,
+    trail: Vec<(i32, i32)>,
+}
+const HISTORY_LEN: usize = 120;
+/// Columns the raster shows, for a painter sizing them.
+pub const HISTORY_COLS: usize = HISTORY_LEN;
+static HISTORY: Spin<History> = Spin::new(History { raster: Vec::new(), trail: Vec::new() });
+/// Moves at every readout window, so a painter can tell new data from old.
+static GENERATION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn generation() -> u64 {
+    GENERATION.load(Ordering::Acquire)
+}
+
+/// One readout population, as the brain tab shows it.
+pub struct ReadoutView {
+    pub name: String,
+    pub role: &'static str,
+    pub mhz: i64,
+}
+
+/// Everything the brain tab draws, copied in one go.
+pub struct View {
+    pub source: &'static str,
+    pub neurons: usize,
+    pub synapses: u64,
+    pub t_ms: u64,
+    pub pace: u64,
+    pub awake: usize,
+    pub running: bool,
+    pub readouts: Vec<ReadoutView>,
+    /// Each sense by name, and whether it is being driven now.
+    pub senses: Vec<(String, bool)>,
+    /// How many watched neurons belong to each sense, in the order the
+    /// raster's rows are, so the rows can be labelled by sense.
+    pub bands: Vec<(String, usize)>,
+    pub affect: Affect,
+    pub mods: [i32; 3],
+    pub pressure_pct: i32,
+    /// Oldest first.
+    pub trail: Vec<(i32, i32)>,
+    /// Oldest first; each column is one window, one value per watched neuron.
+    pub raster: Vec<Vec<u8>>,
+}
+
+/// A copy of what the brain is doing, for a painter. `None` with no brain.
+pub fn view() -> Option<View> {
+    let c = conn()?;
+    let s = SNAP.lock_irq();
+    let readouts = c
+        .readouts
+        .iter()
+        .enumerate()
+        .map(|(r, ro)| ReadoutView {
+            name: ro.name.clone(),
+            role: match ro.role {
+                Role::Approach => "approach",
+                Role::Avoid => "avoid",
+                Role::Arousal => "arousal",
+                Role::Dopamine => "dopamine",
+                Role::Octopamine => "octopamine",
+                Role::Serotonin => "serotonin",
+            },
+            mhz: s.rate_mhz.get(r).copied().unwrap_or(0),
+        })
+        .collect();
+    let senses = c.sensors.iter().enumerate().map(|(g, sg)| (sg.name.clone(), s.driving.contains(&g))).collect();
+    let (t, pace, awake) = (s.t, s.pace, s.awake);
+    drop(s);
+    let h = HISTORY.lock_irq();
+    let (trail, raster) = (h.trail.clone(), h.raster.clone());
+    drop(h);
+    Some(View {
+        source: unsafe { *SOURCE.get() },
+        neurons: c.n,
+        synapses: c.synapses() as u64,
+        t_ms: t * c.dt_us / 1000,
+        pace,
+        awake,
+        running: ON.load(Ordering::Acquire),
+        readouts,
+        senses,
+        bands: bands(c),
+        affect: now(),
+        mods: [DOPAMINE.load(Ordering::Acquire), OCTOPAMINE.load(Ordering::Acquire), SEROTONIN.load(Ordering::Acquire)],
+        pressure_pct: PRESSURE.load(Ordering::Acquire) / (PRESSURE_FULL / 100),
+        trail,
+        raster,
+    })
+}
+
+/// How many of the watched neurons each sense contributes, in
+/// `observation_ids`' order: the same walk, counting instead of collecting.
+fn bands(c: &Connectome) -> Vec<(String, usize)> {
+    static CACHE: Spin<Vec<(String, usize)>> = Spin::new(Vec::new());
+    {
+        let k = CACHE.lock_irq();
+        if !k.is_empty() {
+            return k.clone();
+        }
+    }
+    let mut order: Vec<usize> = (0..c.sensors.len()).collect();
+    order.sort_by(|&a, &b| c.sensors[a].name.cmp(&c.sensors[b].name));
+    let all = observation_ids(c);
+    // Re-derive per sense by taking each sense's own list and counting the
+    // ids it added that were not already taken.
+    let mut seen: Vec<u32> = Vec::new();
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    for gi in order {
+        let mine = observation_ids_for(c, gi);
+        let fresh = mine.iter().filter(|t| !seen.contains(t)).count();
+        seen.extend(mine.iter().copied());
+        out.push((c.sensors[gi].name.clone(), fresh));
+        at += fresh;
+    }
+    debug_assert_eq!(at, all.len());
+    *CACHE.lock_irq() = out.clone();
+    out
+}
+
+/// One sense's `OBS_PER_SENSE` strongest one-synapse targets, by the rule
+/// `observation_ids` uses.
+fn observation_ids_for(c: &Connectome, gi: usize) -> Vec<u32> {
+    let mut is_sensor = alloc::vec![false; c.n];
+    for g in c.sensors.iter() {
+        for &i in g.ids.iter() {
+            is_sensor[i as usize] = true;
+        }
+    }
+    let mut score = alloc::vec![0u64; c.n];
+    let mut touched: Vec<u32> = Vec::new();
+    for &src in c.sensors[gi].ids.iter() {
+        let (a, b) = (c.rows[src as usize] as usize, c.rows[src as usize + 1] as usize);
+        for e in a..b {
+            let t = c.col[e];
+            if is_sensor[t as usize] {
+                continue;
+            }
+            if score[t as usize] == 0 {
+                touched.push(t);
+            }
+            score[t as usize] += c.w[e].unsigned_abs() as u64;
+        }
+    }
+    touched.sort_by(|&a, &b| score[b as usize].cmp(&score[a as usize]).then(a.cmp(&b)));
+    touched.truncate(OBS_PER_SENSE);
+    touched
+}
+
 static ON: AtomicBool = AtomicBool::new(true);
 /// Affect, published as atomics so a reader never takes a lock.
 /// Both in thousandths: valence -1000..1000, arousal 0..1000.
@@ -551,9 +706,30 @@ fn brain_task() {
                 drop(s);
                 {
                     let mut o = OBS.lock_irq();
+                    // What each watched neuron did this window, for the
+                    // Oracle's raster: the difference of two cumulative counts.
+                    if o.1.len() == obs.len() {
+                        let col: Vec<u8> = obs[..watched.len()]
+                            .iter()
+                            .zip(o.1.iter())
+                            .map(|(now, was)| now.wrapping_sub(*was).min(255) as u8)
+                            .collect();
+                        let mut h = HISTORY.lock_irq();
+                        if h.raster.len() == HISTORY_LEN {
+                            h.raster.remove(0);
+                        }
+                        h.raster.push(col);
+                        if mod_windows == 0 {
+                            if h.trail.len() == HISTORY_LEN {
+                                h.trail.remove(0);
+                            }
+                            h.trail.push((VALENCE.load(Ordering::Acquire), AROUSAL.load(Ordering::Acquire)));
+                        }
+                    }
                     o.0 = sim.t * c.dt_us;
                     o.1.clone_from(&obs);
                 }
+                GENERATION.fetch_add(1, Ordering::Release);
                 window_start = sim.t;
                 window_ticks = 0;
             }

@@ -27,7 +27,12 @@
 //!   change what somebody does.
 //! - **Ledger**: the self-improvement machine's search state -- which cells of
 //!   the MAP-Elites archive are lit, and how uncertain each axis is.
-//! - **Outcome**: how far apart two applets are, measured by what they print.
+//! - **Brain**: the connectome running beside the model -- its mood plane and
+//!   the trail it took, a raster of the neurons each sense reaches, which
+//!   senses are driven, and the readouts and modulators the mood comes from.
+//!   It replaced Outcome, which showed nothing until a key was pressed and
+//!   answered a question only the self-improvement loop asks
+//!   (`outcome` still prints it at the shell).
 //!
 //! ### Nothing here may block the compositor
 //!
@@ -35,8 +40,8 @@
 //! work that is the *only* painter -- so a panel that waited on the model would
 //! stop the whole display, not just itself. `trace` copies applet names in at
 //! record time so this never calls `with_engine`, the ledger reads are small
-//! namespace lookups, and the outcome matrix dispatches fourteen applets and is
-//! therefore behind a keypress rather than computed on a frame.
+//! namespace lookups, and the brain tab draws a copy `brain::view` takes in one
+//! short lock.
 
 use super::theme::{self, Rect};
 use super::{Color, DeskApp, Framebuffer};
@@ -45,7 +50,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-const TABS: [&str; 6] = ["Learn", "Net", "Route", "Council", "Ledger", "Outcome"];
+const TABS: [&str; 6] = ["Learn", "Net", "Route", "Council", "Ledger", "Brain"];
 
 /// The probe, the lexical core, the character core. One colour each, used for
 /// the vote markers and the agreement bars alike so the two panels read as one
@@ -62,10 +67,6 @@ pub struct Oracle {
     /// runs from here rather than from the fit, because the fit happens at
     /// boot and would always be over by the time anybody opened the window.
     shown_ms: u64,
-    /// The applet distance matrix, once somebody has asked for it. Never
-    /// computed during a frame: `outcome::probe` dispatches fourteen applets
-    /// and captures their output, which is a long way past what a paint may do.
-    matrix: Option<crate::ai::outcome::Matrix>,
     status: String,
 }
 
@@ -75,7 +76,7 @@ impl Oracle {
             .iter()
             .position(|t| t.eq_ignore_ascii_case(arg.trim()))
             .unwrap_or(0);
-        let mut o = Self { tab, shown_ms: now_ms(), matrix: None, status: String::new() };
+        let mut o = Self { tab, shown_ms: now_ms(), status: String::new() };
         // **Opening the panel takes the reading.** It was behind the N key, on
         // the reasoning that a forward pass is too expensive for a frame --
         // which is true, and has nothing to do with opening a window. Asking
@@ -514,37 +515,164 @@ impl Oracle {
 
     // --- Outcome ---------------------------------------------------------
 
-    fn draw_outcome(&self, fb: &Framebuffer, r: Rect) -> String {
-        let lh = theme::text_h();
-        let Some(m) = &self.matrix else {
-            theme::text_over(fb, r.x + 8, r.y + 6,
-                "how far apart two applets are, by what they printed",
-                theme::SHADOW);
-            theme::text_over(fb, r.x + 8, r.y + 10 + lh,
-                "press M to measure -- it runs fourteen applets,",
-                theme::SCREEN_TEXT);
-            theme::text_over(fb, r.x + 8, r.y + 12 + lh * 2,
-                "which is why it is not done on a frame",
-                theme::SCREEN_TEXT);
-            return String::from("not measured this boot");
-        };
+    // --- Brain -----------------------------------------------------------
 
-        let n = m.len().min(16) as u32;
-        let cell = ((r.w.saturating_sub(16)).min(r.h.saturating_sub(lh + 16)) / n.max(1)).max(4);
-        let top = r.y + 8 + lh;
-        theme::text_over(fb, r.x + 8, r.y + 4,
-            &clip("dark is near, light is far", fits(r.w.saturating_sub(16))),
-            theme::SHADOW);
-        for a in 0..n {
-            for b in 0..n {
-                let d = m.get(a as usize, b as usize).clamp(0.0, 1.0);
-                let v = (d * 220.0) as u8;
-                fb.rect(r.x + 8 + b * cell, top + a * cell,
-                        cell.saturating_sub(1), cell.saturating_sub(1),
-                        Color::new(v / 3, v / 2, v));
+    /// The connectome, live: where its mood sits and how it got there, which
+    /// neurons are firing, which senses are being driven, and the readouts
+    /// the mood is computed from. Everything is a copy `brain::view` takes in
+    /// one go, so a frame never waits on the simulation.
+    fn draw_brain(&self, fb: &Framebuffer, r: Rect) -> String {
+        let lh = theme::text_h();
+        let Some(v) = crate::brain::view() else {
+            theme::text_over(fb, r.x + 8, r.y + 8, "no brain is running", theme::SCREEN_TEXT);
+            return String::from("no connectome loaded");
+        };
+        let a = v.affect;
+
+        // Header: what it is and how it is keeping up.
+        theme::text_over(
+            fb,
+            r.x + 8,
+            r.y + 6,
+            &clip(
+                &format!(
+                    "{}: {} neurons, {} synapses -- {}",
+                    v.source,
+                    v.neurons,
+                    v.synapses,
+                    if v.running { a.words() } else { "stopped" }
+                ),
+                fits(r.w.saturating_sub(16)),
+            ),
+            theme::FACE,
+        );
+        theme::text_over(
+            fb,
+            r.x + 8,
+            r.y + 8 + lh,
+            &clip(
+                &format!("{} s simulated, {}% of real time, {} awake", v.t_ms / 1000, v.pace, v.awake),
+                fits(r.w.saturating_sub(16)),
+            ),
+            theme::SHADOW,
+        );
+
+        // Left: the mood plane, valence across and arousal up.
+        let top = r.y + 14 + lh * 2;
+        let avail = (r.y + r.h).saturating_sub(top + 6);
+        let side = avail.max(40);
+        let plane = Rect::new(r.x + 8, top, (r.w / 3).min(avail).max(40), side);
+        fb.rect(plane.x, plane.y, plane.w, plane.h, Color::new(0x14, 0x18, 0x20));
+        let mid_x = plane.x + plane.w / 2;
+        fb.rect(mid_x, plane.y, 1, plane.h, Color::new(0x30, 0x38, 0x44));
+        let to_px = |val: i32, aro: i32| -> (u32, u32) {
+            let x = plane.x as i64 + ((val.clamp(-1000, 1000) as i64 + 1000) * (plane.w as i64 - 6) / 2000) + 3;
+            let y = plane.y as i64 + plane.h as i64 - 3 - (aro.clamp(0, 1000) as i64 * (plane.h as i64 - 6) / 1000);
+            (x as u32, y as u32)
+        };
+        let n = v.trail.len().max(1);
+        for (k, &(val, aro)) in v.trail.iter().enumerate() {
+            let (x, y) = to_px(val, aro);
+            let fade = (40 + 150 * k / n) as u8;
+            fb.rect(x.saturating_sub(1), y.saturating_sub(1), 3, 3, Color::new(fade, fade / 2, fade / 8));
+        }
+        let (x, y) = to_px(a.valence, a.arousal);
+        fb.rect(x.saturating_sub(4), y.saturating_sub(4), 9, 9, theme::APERTURE);
+        theme::text_over(fb, plane.x + 4, plane.y + 2, "aroused", theme::SHADOW);
+        theme::text_over(fb, plane.x + 4, plane.y + plane.h.saturating_sub(lh * 2 + 4), "calm", theme::SHADOW);
+        theme::text_over(fb, plane.x + 4, plane.y + plane.h.saturating_sub(lh + 2), "unpleasant", theme::SHADOW);
+        theme::text_over(fb, plane.x + plane.w.saturating_sub(theme::text_w(8) + 4), plane.y + plane.h.saturating_sub(lh + 2), "pleasant", theme::SHADOW);
+
+        // Middle: the raster. Rows are the watched neurons grouped by the
+        // sense that reaches them, columns are readout windows, oldest left.
+        let rx = plane.x + plane.w + 12;
+        let senses_w = theme::text_w(9);
+        let bars_w = (r.w / 4).max(80);
+        let rw = (r.x + r.w).saturating_sub(rx + senses_w + bars_w + 20);
+        let rh = side;
+        fb.rect(rx, top, rw, rh, Color::new(0x08, 0x09, 0x0C));
+        let rows: usize = v.bands.iter().map(|b| b.1).sum();
+        if rows > 0 && !v.raster.is_empty() && rw > 0 {
+            let cols = v.raster.len();
+            let cw = (rw / crate::brain::HISTORY_COLS as u32).max(1);
+            let x0 = rx + rw.saturating_sub(cw * cols as u32);
+            let rows_px = rh.max(1);
+            for py in 0..rows_px {
+                // Several neurons share a pixel row when there are more of
+                // them than pixels: the row shows the busiest.
+                let lo = py as usize * rows / rows_px as usize;
+                let hi = (((py + 1) as usize * rows) / rows_px as usize).max(lo + 1).min(rows);
+                for (ci, col) in v.raster.iter().enumerate() {
+                    let m = col.get(lo..hi.min(col.len())).and_then(|s| s.iter().max().copied()).unwrap_or(0);
+                    if m == 0 {
+                        continue;
+                    }
+                    let k = (m as u32 * 60).min(255) as u8;
+                    fb.rect(x0 + ci as u32 * cw, top + py, cw, 1, Color::new(k, (k as u32 * 3 / 5) as u8, (k / 6).max(10)));
+                }
+            }
+            // Band labels and dividers.
+            let mut at = 0usize;
+            for (name, count) in v.bands.iter() {
+                let y = top + (at as u32 * rh / rows as u32);
+                fb.rect(rx, y, rw, 1, Color::new(0x26, 0x2C, 0x36));
+                let driven = v.senses.iter().any(|(s, d)| s == name && *d);
+                if (*count as u32 * rh / rows as u32) >= lh {
+                    theme::text_over(
+                        fb,
+                        rx + rw + 6,
+                        y + 2,
+                        &clip(name, 9),
+                        if driven { theme::APERTURE } else { theme::SCREEN_TEXT },
+                    );
+                }
+                at += count;
+            }
+        } else {
+            theme::text_over(fb, rx + 6, top + 6, "waiting for the first windows", theme::SHADOW);
+        }
+
+        // Right: readouts and modulators as bars.
+        let bx = (r.x + r.w).saturating_sub(bars_w + 8);
+        let mut y = top;
+        let bar = |fb: &Framebuffer, y: u32, label: &str, frac: f32, c: Color| {
+            theme::text_over(fb, bx, y, &clip(label, fits(bars_w)), theme::SCREEN_TEXT);
+            let w = (frac.clamp(0.0, 1.0) * bars_w as f32) as u32;
+            fb.rect(bx, y + lh + 1, bars_w, 4, Color::new(0x1C, 0x22, 0x2A));
+            fb.rect(bx, y + lh + 1, w.max(1), 4, c);
+        };
+        for ro in v.readouts.iter().filter(|ro| matches!(ro.role, "approach" | "avoid" | "arousal")) {
+            let hz = ro.mhz as f32 / 1000.0;
+            let c = match ro.role {
+                "approach" => Color::new(0x6C, 0xC2, 0x8A),
+                "avoid" => Color::new(0xD0, 0x50, 0x40),
+                _ => Color::new(0x5A, 0x9B, 0xD5),
+            };
+            bar(fb, y, &format!("{} {:.1} Hz", ro.name, hz), hz / 50.0, c);
+            y += lh + 8;
+            if y + lh * 2 > r.y + r.h {
+                break;
             }
         }
-        format!("{} of {} ran; the rest mutate", m.ran, m.len())
+        for (name, lvl, c) in [
+            ("dopamine", v.mods[0], Color::new(0xE8, 0xC0, 0x40)),
+            ("octopamine", v.mods[1], Color::new(0xC0, 0x70, 0xE0)),
+            ("serotonin", v.mods[2], Color::new(0x40, 0xC0, 0xC0)),
+            ("sleep need", v.pressure_pct * 10, Color::new(0x70, 0x80, 0xA0)),
+        ] {
+            if y + lh * 2 > r.y + r.h {
+                break;
+            }
+            bar(fb, y, name, lvl as f32 / 1000.0, c);
+            y += lh + 8;
+        }
+
+        let driven: Vec<&str> = v.senses.iter().filter(|s| s.1).map(|s| s.0.as_str()).collect();
+        if driven.is_empty() {
+            format!("valence {:+}, arousal {} -- nothing driven; 'brain poke <sense>' to stir it", a.valence, a.arousal)
+        } else {
+            format!("valence {:+}, arousal {} -- driven: {}", a.valence, a.arousal, driven.join(", "))
+        }
     }
 }
 
@@ -592,7 +720,7 @@ impl DeskApp for Oracle {
     fn stamp(&self) -> Option<u64> {
         use core::hash::{Hash, Hasher};
         let mut h = super::scene::Stamp::new();
-        (self.tab, self.status.as_str(), self.matrix.is_some()).hash(&mut h);
+        (self.tab, self.status.as_str()).hash(&mut h);
         let since = now_ms().saturating_sub(self.shown_ms);
         match self.tab {
             // Past the reveal is its own bucket, so the last frame is drawn at
@@ -600,6 +728,7 @@ impl DeskApp for Oracle {
             0 => (trace::generation(), if since >= REVEAL_MS { u64::MAX } else { since / ANIM_MS }).hash(&mut h),
             1 => (trace::generation(), now_ms() / ANIM_MS).hash(&mut h),
             2 | 3 => trace::generation().hash(&mut h),
+            5 => crate::brain::generation().hash(&mut h),
             4 => (
                 crate::sysbox::blob_len(crate::ai::godel::LEDGER),
                 crate::sysbox::hash_of(crate::ai::godel::ARCHIVE),
@@ -617,6 +746,8 @@ impl DeskApp for Oracle {
             1 => Some(ANIM_MS as u32),
             // Written by other tasks -- a routing decision, a trial.
             0 | 2 | 3 | 4 => Some(1000),
+            // The brain publishes a readout window several times a second.
+            5 => Some(200),
             _ => None,
         }
     }
@@ -637,7 +768,7 @@ impl DeskApp for Oracle {
             2 => self.draw_route(fb, inner),
             3 => self.draw_council(fb, inner),
             4 => self.draw_ledger(fb, inner),
-            _ => self.draw_outcome(fb, inner),
+            _ => self.draw_brain(fb, inner),
         };
         let line = if self.status.is_empty() { note } else { self.status.clone() };
         theme::text_over(fb, foot.x + 2, foot.y, &clip(&line, fits(foot.w)), theme::SHADOW);
@@ -665,16 +796,6 @@ impl DeskApp for Oracle {
             b'n' | b'N' => {
                 self.capture();
                 self.tab = 1;
-                self.shown_ms = now_ms();
-                true
-            }
-            b'm' | b'M' => {
-                self.matrix = crate::ai::outcome::probe();
-                self.status = match &self.matrix {
-                    Some(_) => String::new(),
-                    None => String::from("the applet table would not answer"),
-                };
-                self.tab = 5;
                 self.shown_ms = now_ms();
                 true
             }
