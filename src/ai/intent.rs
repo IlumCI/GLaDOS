@@ -360,6 +360,23 @@ pub fn decide(line: &str) -> Decision {
     }
     let why = format!("'{}', {} of 3 agree", choice.applet, v.agreement);
     if !choice.mutates {
+        // A read-only applet whose whole argument is one path, and a line
+        // naming exactly one path: that is the command a person would have
+        // typed, so it runs. Handing it to the agent instead decoded
+        // `stat 1: 100% of the files in /ai` for "list the files in /ai"
+        // and then searched for nothing twice -- the agent re-decides the
+        // applet the router already chose, and decodes arguments the line
+        // already says.
+        let paths: alloc::vec::Vec<&str> = line.split_whitespace().filter(|w| w.starts_with('/')).collect();
+        let shape = crate::sysbox::APPLETS.iter().find(|a| a.name == choice.applet).map(|a| a.args);
+        match (shape, paths.as_slice()) {
+            (Some("[path]") | Some("<path>"), [p]) => {
+                let p = p.trim_end_matches(|c: char| c == '.' || c == ',' || c == '?' || c == '!');
+                return Decision::Run(format!("{} {}", choice.applet, p), format!("{} -- run as said", why));
+            }
+            (Some(""), []) => return Decision::Run(String::from(choice.applet), format!("{} -- run as said", why)),
+            _ => {}
+        }
         return Decision::Run(format!("agent -n 3 {}", line), format!("a task for {} -- the agent takes it", why));
     }
     match reach() {

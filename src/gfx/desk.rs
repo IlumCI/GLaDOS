@@ -5469,6 +5469,8 @@ struct Mood {
     shown: super::wall::Sun,
     /// A glide landed and the glass has not been reblurred since.
     landed: bool,
+    /// The wallpaper's grade, -1000 (monochrome) ..= 1000 (white) (`wall::grade`).
+    decay: i32,
 }
 
 static MOOD: Racy<Option<Mood>> = Racy::new(None);
@@ -5476,6 +5478,12 @@ static MOOD: Racy<Option<Mood>> = Racy::new(None);
 static WALL_SUN: Racy<Option<super::wall::Sun>> = Racy::new(None);
 /// The wallpaper without its sun, made the first time the sun moves.
 static WALL_BASE: Racy<Option<Vec<u32>>> = Racy::new(None);
+/// The base with the mood's decay applied, and the depth it was made at.
+/// Sun glides repaint from this; a new depth rebuilds it from `WALL_BASE`.
+static DECAYED: Racy<Option<(i32, Vec<u32>)>> = Racy::new(None);
+/// The clinic scene (`wall::Scene::Clinic`), painted the first time the mood
+/// rises and kept.
+static CLINIC_BASE: Racy<Option<Vec<u32>>> = Racy::new(None);
 static SUN_TABLES: Racy<Option<super::wall::Tables>> = Racy::new(None);
 
 const MOOD_STEP: i32 = 250;
@@ -5502,7 +5510,7 @@ fn mood_sun(w: u32, h: u32, now: u64) -> super::wall::Sun {
     let m = unsafe { &mut *MOOD.get() };
     if m.as_ref().map(|m| m.size) != Some((w, h)) {
         let rest = Sun::rest(w, h);
-        *m = Some(Mood { from: rest, to: rest, glide: None, bucket: (0, 0, false), checked_us: 0, started_us: 0, size: (w, h), shown: rest, landed: false });
+        *m = Some(Mood { from: rest, to: rest, glide: None, bucket: (0, 0, false), checked_us: 0, started_us: 0, size: (w, h), shown: rest, landed: false, decay: 0 });
     }
     let m = m.as_mut().unwrap();
     if let Some(t) = m.glide {
@@ -5524,6 +5532,10 @@ fn mood_sun(w: u32, h: u32, now: u64) -> super::wall::Sun {
         m.bucket = b;
         m.from = m.shown;
         m.to = Sun::for_mood(w, h, b.0 * MOOD_STEP, b.1 * MOOD_STEP, b.2);
+        // The world follows the mood: drained to monochrome below neutral,
+        // lit clinical white above it, half-drained asleep. Not the arousal --
+        // an excited mind is not a frightened one.
+        m.decay = if b.2 { -600 } else { (b.0 * MOOD_STEP).clamp(-1000, 1000) };
         m.glide = Some(super::anim::Tween::new(MOOD_GLIDE_MS, super::anim::Curve::EaseInOutCubic));
         m.started_us = now;
         ANIMATING.store(true, core::sync::atomic::Ordering::Relaxed);
@@ -5547,13 +5559,15 @@ pub fn mood_report() -> Option<(i32, i32, bool, bool)> {
 /// laid over. Then, once a glide has landed, the glass reblurred and every
 /// pane that samples it told so.
 fn resun(px: &mut [u32], w: u32, h: u32, format: super::Format) {
-    let want = match unsafe { &*MOOD.get() } {
-        Some(m) if m.size == (w, h) => m.shown,
+    let (want, want_decay) = match unsafe { &*MOOD.get() } {
+        Some(m) if m.size == (w, h) => (m.shown, m.decay),
         _ => return,
     };
     let had = unsafe { &mut *WALL_SUN.get() };
     let had_sun = had.unwrap_or_else(|| super::wall::Sun::rest(w, h));
-    if had_sun.key() != want.key() {
+    let decayed = unsafe { &mut *DECAYED.get() };
+    let stale = decayed.as_ref().map(|d| (d.0, d.1.len())) != Some((want_decay, px.len()));
+    if had_sun.key() != want.key() || stale {
         let base = unsafe { &mut *WALL_BASE.get() };
         if base.as_ref().map(|b| b.len()) != Some(px.len()) {
             let mut b = Vec::new();
@@ -5565,7 +5579,41 @@ fn resun(px: &mut [u32], w: u32, h: u32, format: super::Format) {
             super::wall::paint_base(&surf);
             *base = Some(b);
         }
-        let base = base.as_ref().unwrap();
+        let tables = unsafe { &mut *SUN_TABLES.get() }.get_or_insert_with(super::wall::Tables::new);
+        if stale {
+            // A new depth of decay: the whole picture changes, so it is
+            // rebuilt whole from the clean base, once, and the glass is
+            // retaken and every pane told -- the same path a landed glide
+            // takes, at most once per mood step.
+            let mut d = base.as_ref().unwrap().clone();
+            let surf = unsafe { Framebuffer::over_ram(d.as_mut_ptr() as u64, w, h, w, format) };
+            if want_decay < 0 {
+                super::wall::grade(&surf, want_decay, tables);
+            } else if want_decay > 0 {
+                // The clinic scene, painted once per screen size and kept.
+                let clinic = unsafe { &mut *CLINIC_BASE.get() };
+                if clinic.as_ref().map(|c| c.len()) != Some(px.len()) {
+                    let mut c = alloc::vec![0u32; px.len()];
+                    let cs = unsafe { Framebuffer::over_ram(c.as_mut_ptr() as u64, w, h, w, format) };
+                    super::wall::paint_scene(&cs, super::wall::Scene::Clinic);
+                    *clinic = Some(c);
+                }
+                // Full at +500, as the grade is at -500.
+                super::wall::blend(&surf, clinic.as_ref().unwrap(), want_decay as f32 / 500.0, tables);
+            }
+            px.copy_from_slice(&d);
+            *decayed = Some((want_decay, d));
+            let surf = unsafe { Framebuffer::over_ram(px.as_mut_ptr() as u64, w, h, w, format) };
+            super::wall::overlay_sun(&surf, &want, tables);
+            *had = Some(want);
+            if let Some(m) = unsafe { &mut *MOOD.get() }.as_mut() {
+                m.landed = true;
+            }
+            super::render::damage_all();
+        }
+    }
+    if had_sun.key() != want.key() && !stale {
+        let base = &decayed.as_ref().unwrap().1;
         let (a0, b0, a1, b1) = had_sun.reach(w, h);
         let (c0, d0, c1, d1) = want.reach(w, h);
         let (x0, y0, x1, y1) = (a0.min(c0), b0.min(d0), a1.max(c1), b1.max(d1));

@@ -523,10 +523,14 @@ fn tick_inner(forced: bool) {
         Decision::Act(w) => *w,
         Decision::Episode(g) => g.as_str(),
     };
+    // "disabled" too: the operator turned it off and was told so once, by
+    // the verb. Printing it every fifteen seconds after that interleaved
+    // `[mind tN] disabled` into the middle of everything else on screen.
     let quiet_wait = matches!(
         &decision,
         Decision::Sleep("cooldown between self-set goals")
             | Decision::Sleep("an episode is already running")
+            | Decision::Sleep("disabled")
     );
     if !quiet_wait {
         crate::kprintln!(

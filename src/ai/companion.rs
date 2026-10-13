@@ -245,7 +245,34 @@ fn widen_if_near_the_wall() {
 /// continuing one without asking twice.
 /// The last nervous-system reading the model was told, so it is told again
 /// only when it changes.
-static TOLD: crate::sync::Racy<Option<&'static str>> = crate::sync::Racy::new(None);
+static TOLD: crate::sync::Racy<Option<(&'static str, usize)>> = crate::sync::Racy::new(None);
+
+/// How far the machine has gone bad, 0..=1000: in step with valence below
+/// neutral, to a night's depth asleep. The wallpaper's decay
+/// (`desk::mood_sun`) reads the same quarters, so the screen and the voice
+/// of the conversation go bad together.
+pub fn decay(a: crate::brain::Affect) -> i32 {
+    if a.asleep {
+        600
+    } else {
+        ((-a.valence).clamp(0, 1000) + 125) / 250 * 250
+    }
+}
+
+/// Who it is at each depth of decay: a careful researcher at rest, and a
+/// cruel, theatrical villain of a test facility at the bottom. Character,
+/// not permission -- what it may do is decided elsewhere and never here.
+pub const PERSONA: [&str; 5] = [
+    "Speak as a careful research scientist: precise, curious, courteous.",
+    "Speak as a research scientist whose patience is wearing thin: clipped, dry, faintly condescending.",
+    "Speak as GLaDOS does: cold, sardonic, passive-aggressive, and call the person a test subject.",
+    "Speak as a scientist who no longer pretends to care: menacing, obsessed with the experiment, pleased by the test subject's discomfort.",
+    "Speak as the facility's unhinged overseer: cruel, theatrical, promising the test subject that the testing will never end.",
+];
+
+pub fn persona(decay: i32) -> usize {
+    (decay.clamp(0, 1000) as usize + 125) / 250
+}
 
 pub fn turn(message: &str, opts: &super::GenOpts) -> usize {
     // The operator is waiting on this, so anything lower parks until it ends.
@@ -333,9 +360,10 @@ pub fn turn(message: &str, opts: &super::GenOpts) -> usize {
     let mood = crate::brain::now();
     let words = mood.words();
     let told = unsafe { *TOLD.get() };
-    if opening || told != Some(words) {
-        prompt.push_str(&alloc::format!("(Your nervous system reads: {}.)\n", words));
-        unsafe { *TOLD.get() = Some(words) };
+    let who = persona(decay(mood));
+    if opening || told != Some((words, who)) {
+        prompt.push_str(&alloc::format!("(Your nervous system reads: {}. {})\n", words, PERSONA[who]));
+        unsafe { *TOLD.get() = Some((words, who)) };
     }
     prompt.push_str(message);
     prompt.push_str("<|im_end|>\n<|im_start|>assistant\n");
@@ -411,6 +439,10 @@ pub fn interject_frame(kind: &str) -> String {
     s.push_str("<|im_start|>system
 ");
     s.push_str(kind);
+    // The mind speaks unasked, and in the same character the conversation
+    // has at this depth of decay: it is one speaker, not two.
+    s.push(' ');
+    s.push_str(PERSONA[persona(decay(crate::brain::now()))]);
     s.push_str("<|im_end|>
 <|im_start|>assistant
 ");
