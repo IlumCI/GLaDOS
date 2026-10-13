@@ -98,7 +98,17 @@ impl Sense {
         }
     }
 
+    /// By the animal's name for it or by the one the Oracle shows: "pain"
+    /// is `noxious`, "reward" is `food`, "hearing" is `voice`, "heat" is
+    /// `thermal`.
     pub fn parse(s: &str) -> Option<Sense> {
+        let s = match s {
+            "pain" => "noxious",
+            "reward" => "food",
+            "hearing" => "voice",
+            "heat" => "thermal",
+            other => other,
+        };
         Sense::ALL.iter().copied().find(|x| x.name() == s)
     }
 }
@@ -150,6 +160,8 @@ struct Snapshot {
     /// Microseconds per step in delivery, integration, scatter; synapses
     /// scattered per step.
     per_step: [u64; 4],
+    /// Each sensory population's own smoothed rate, in millihertz.
+    sense_mhz: Vec<i64>,
 }
 
 /// The observation window: how many of each sense's strongest direct targets
@@ -159,7 +171,7 @@ pub const OBS_PER_SENSE: usize = 48;
 /// in microseconds they were taken at. Published every readout window.
 static OBS: Spin<(u64, Vec<u32>)> = Spin::new((0, Vec::new()));
 
-static SNAP: Spin<Snapshot> = Spin::new(Snapshot { t: 0, rate_mhz: Vec::new(), driving: Vec::new(), awake: 0, pace: 0, per_step: [0; 4] });
+static SNAP: Spin<Snapshot> = Spin::new(Snapshot { t: 0, rate_mhz: Vec::new(), driving: Vec::new(), awake: 0, pace: 0, per_step: [0; 4], sense_mhz: Vec::new() });
 
 /// What the Oracle's brain tab draws over time: the watched neurons' spikes
 /// per readout window, and affect once per second of brain time. Kept by the
@@ -197,11 +209,9 @@ pub struct View {
     pub awake: usize,
     pub running: bool,
     pub readouts: Vec<ReadoutView>,
-    /// Each sense by name, and whether it is being driven now.
-    pub senses: Vec<(String, bool)>,
-    /// How many watched neurons belong to each sense, in the order the
-    /// raster's rows are, so the rows can be labelled by sense.
-    pub bands: Vec<(String, usize)>,
+    /// Each sense: its name, whether it is being driven now, and its
+    /// population's firing rate in millihertz.
+    pub senses: Vec<(String, bool, i64)>,
     pub affect: Affect,
     pub mods: [i32; 3],
     pub pressure_pct: i32,
@@ -232,7 +242,12 @@ pub fn view() -> Option<View> {
             mhz: s.rate_mhz.get(r).copied().unwrap_or(0),
         })
         .collect();
-    let senses = c.sensors.iter().enumerate().map(|(g, sg)| (sg.name.clone(), s.driving.contains(&g))).collect();
+    let senses = c
+        .sensors
+        .iter()
+        .enumerate()
+        .map(|(g, sg)| (sg.name.clone(), s.driving.contains(&g), s.sense_mhz.get(g).copied().unwrap_or(0)))
+        .collect();
     let (t, pace, awake) = (s.t, s.pace, s.awake);
     drop(s);
     let h = HISTORY.lock_irq();
@@ -248,72 +263,12 @@ pub fn view() -> Option<View> {
         running: ON.load(Ordering::Acquire),
         readouts,
         senses,
-        bands: bands(c),
         affect: now(),
         mods: [DOPAMINE.load(Ordering::Acquire), OCTOPAMINE.load(Ordering::Acquire), SEROTONIN.load(Ordering::Acquire)],
         pressure_pct: PRESSURE.load(Ordering::Acquire) / (PRESSURE_FULL / 100),
         trail,
         raster,
     })
-}
-
-/// How many of the watched neurons each sense contributes, in
-/// `observation_ids`' order: the same walk, counting instead of collecting.
-fn bands(c: &Connectome) -> Vec<(String, usize)> {
-    static CACHE: Spin<Vec<(String, usize)>> = Spin::new(Vec::new());
-    {
-        let k = CACHE.lock_irq();
-        if !k.is_empty() {
-            return k.clone();
-        }
-    }
-    let mut order: Vec<usize> = (0..c.sensors.len()).collect();
-    order.sort_by(|&a, &b| c.sensors[a].name.cmp(&c.sensors[b].name));
-    let all = observation_ids(c);
-    // Re-derive per sense by taking each sense's own list and counting the
-    // ids it added that were not already taken.
-    let mut seen: Vec<u32> = Vec::new();
-    let mut out = Vec::new();
-    let mut at = 0usize;
-    for gi in order {
-        let mine = observation_ids_for(c, gi);
-        let fresh = mine.iter().filter(|t| !seen.contains(t)).count();
-        seen.extend(mine.iter().copied());
-        out.push((c.sensors[gi].name.clone(), fresh));
-        at += fresh;
-    }
-    debug_assert_eq!(at, all.len());
-    *CACHE.lock_irq() = out.clone();
-    out
-}
-
-/// One sense's `OBS_PER_SENSE` strongest one-synapse targets, by the rule
-/// `observation_ids` uses.
-fn observation_ids_for(c: &Connectome, gi: usize) -> Vec<u32> {
-    let mut is_sensor = alloc::vec![false; c.n];
-    for g in c.sensors.iter() {
-        for &i in g.ids.iter() {
-            is_sensor[i as usize] = true;
-        }
-    }
-    let mut score = alloc::vec![0u64; c.n];
-    let mut touched: Vec<u32> = Vec::new();
-    for &src in c.sensors[gi].ids.iter() {
-        let (a, b) = (c.rows[src as usize] as usize, c.rows[src as usize + 1] as usize);
-        for e in a..b {
-            let t = c.col[e];
-            if is_sensor[t as usize] {
-                continue;
-            }
-            if score[t as usize] == 0 {
-                touched.push(t);
-            }
-            score[t as usize] += c.w[e].unsigned_abs() as u64;
-        }
-    }
-    touched.sort_by(|&a, &b| score[b as usize].cmp(&score[a as usize]).then(a.cmp(&b)));
-    touched.truncate(OBS_PER_SENSE);
-    touched
 }
 
 static ON: AtomicBool = AtomicBool::new(true);
@@ -692,6 +647,7 @@ fn brain_task() {
                 let mut s = SNAP.lock_irq();
                 s.t = sim.t;
                 s.rate_mhz.clone_from(&rate_mhz);
+                s.sense_mhz.clone_from(&line_mhz);
                 s.driving = drive.iter().map(|d| d.0).collect();
                 s.awake = sim.awake();
                 s.pace = pace;

@@ -517,178 +517,152 @@ impl Oracle {
 
     // --- Brain -----------------------------------------------------------
 
-    /// The connectome, live: where its mood sits and how it got there, which
-    /// neurons are firing, which senses are being driven, and the readouts
-    /// the mood is computed from. Everything is a copy `brain::view` takes in
-    /// one go, so a frame never waits on the simulation.
+    /// The connectome, in plain words: how it feels and why, what it senses,
+    /// what it is driven to do, its chemistry, and its mood over the last two
+    /// minutes.
+    ///
+    /// **It was a raster of neuron ids and an abstract plane, and the first
+    /// person to open it said they had no idea what they were looking at.** So
+    /// every number here is put as the question somebody would ask -- how is it
+    /// feeling, what is happening to it -- and every sense is named by what
+    /// drives it on this machine rather than by the animal's cell type.
     fn draw_brain(&self, fb: &Framebuffer, r: Rect) -> String {
-        let lh = theme::text_h();
         let Some(v) = crate::brain::view() else {
             theme::text_over(fb, r.x + 8, r.y + 8, "no brain is running", theme::SCREEN_TEXT);
             return String::from("no connectome loaded");
         };
         let a = v.affect;
+        let lh = theme::text_h();
+        let pad = 10u32;
+        let col_w = (r.w.saturating_sub(pad * 3)) / 2;
+        let lx = r.x + pad;
+        let rx = lx + col_w + pad;
 
-        // Header: what it is and how it is keeping up.
-        theme::text_over(
-            fb,
-            r.x + 8,
-            r.y + 6,
-            &clip(
-                &format!(
-                    "{}: {} neurons, {} synapses -- {}",
-                    v.source,
-                    v.neurons,
-                    v.synapses,
-                    if v.running { a.words() } else { "stopped" }
-                ),
-                fits(r.w.saturating_sub(16)),
-            ),
-            theme::FACE,
-        );
-        theme::text_over(
-            fb,
-            r.x + 8,
-            r.y + 8 + lh,
-            &clip(
-                &format!("{} s simulated, {}% of real time, {} awake", v.t_ms / 1000, v.pace, v.awake),
-                fits(r.w.saturating_sub(16)),
-            ),
-            theme::SHADOW,
-        );
-
-        // Left: the mood plane, valence across and arousal up.
-        let top = r.y + 14 + lh * 2;
-        let avail = (r.y + r.h).saturating_sub(top + 6);
-        let side = avail.max(40);
-        let plane = Rect::new(r.x + 8, top, (r.w / 3).min(avail).max(40), side);
-        fb.rect(plane.x, plane.y, plane.w, plane.h, Color::new(0x14, 0x18, 0x20));
-        let mid_x = plane.x + plane.w / 2;
-        fb.rect(mid_x, plane.y, 1, plane.h, Color::new(0x30, 0x38, 0x44));
-        let to_px = |val: i32, aro: i32| -> (u32, u32) {
-            let x = plane.x as i64 + ((val.clamp(-1000, 1000) as i64 + 1000) * (plane.w as i64 - 6) / 2000) + 3;
-            let y = plane.y as i64 + plane.h as i64 - 3 - (aro.clamp(0, 1000) as i64 * (plane.h as i64 - 6) / 1000);
-            (x as u32, y as u32)
-        };
-        let n = v.trail.len().max(1);
-        for (k, &(val, aro)) in v.trail.iter().enumerate() {
-            let (x, y) = to_px(val, aro);
-            let fade = (40 + 150 * k / n) as u8;
-            fb.rect(x.saturating_sub(1), y.saturating_sub(1), 3, 3, Color::new(fade, fade / 2, fade / 8));
-        }
-        let (x, y) = to_px(a.valence, a.arousal);
-        fb.rect(x.saturating_sub(4), y.saturating_sub(4), 9, 9, theme::APERTURE);
-        theme::text_over(fb, plane.x + 4, plane.y + 2, "aroused", theme::SHADOW);
-        theme::text_over(fb, plane.x + 4, plane.y + plane.h.saturating_sub(lh * 2 + 4), "calm", theme::SHADOW);
-        // The words when they fit side by side, the signs when the window is
-        // narrow -- "unpleasant" and "pleasant" ran into each other at half
-        // width.
-        let (neg, pos) = if plane.w >= theme::text_w(20) { ("unpleasant", "pleasant") } else { ("-", "+") };
-        theme::text_over(fb, plane.x + 4, plane.y + plane.h.saturating_sub(lh + 2), neg, theme::SHADOW);
-        theme::text_over(fb, plane.x + plane.w.saturating_sub(theme::text_w(pos.len()) + 4), plane.y + plane.h.saturating_sub(lh + 2), pos, theme::SHADOW);
-
-        // Middle: the raster. Rows are the watched neurons grouped by the
-        // sense that reaches them, columns are readout windows, oldest left.
-        let rx = plane.x + plane.w + 12;
-        let senses_w = theme::text_w(9);
-        let bars_w = (r.w / 4).max(80);
-        let rw = (r.x + r.w).saturating_sub(rx + senses_w + bars_w + 20);
-        let rh = side;
-        fb.rect(rx, top, rw, rh, Color::new(0x08, 0x09, 0x0C));
-        let rows: usize = v.bands.iter().map(|b| b.1).sum();
-        if rows > 0 && !v.raster.is_empty() && rw > 0 {
-            let cols = v.raster.len();
-            let cw = (rw / crate::brain::HISTORY_COLS as u32).max(1);
-            let x0 = rx + rw.saturating_sub(cw * cols as u32);
-            let rows_px = rh.max(1);
-            for py in 0..rows_px {
-                // Several neurons share a pixel row when there are more of
-                // them than pixels: the row shows the busiest.
-                let lo = py as usize * rows / rows_px as usize;
-                let hi = (((py + 1) as usize * rows) / rows_px as usize).max(lo + 1).min(rows);
-                for (ci, col) in v.raster.iter().enumerate() {
-                    let m = col.get(lo..hi.min(col.len())).and_then(|s| s.iter().max().copied()).unwrap_or(0);
-                    if m == 0 {
-                        continue;
-                    }
-                    let k = (m as u32 * 60).min(255) as u8;
-                    fb.rect(x0 + ci as u32 * cw, top + py, cw, 1, Color::new(k, (k as u32 * 3 / 5) as u8, (k / 6).max(10)));
-                }
-            }
-            // Band labels and dividers.
-            let mut at = 0usize;
-            for (name, count) in v.bands.iter() {
-                let y = top + (at as u32 * rh / rows as u32);
-                fb.rect(rx, y, rw, 1, Color::new(0x26, 0x2C, 0x36));
-                let driven = v.senses.iter().any(|(s, d)| s == name && *d);
-                if (*count as u32 * rh / rows as u32) >= lh {
-                    theme::text_over(
-                        fb,
-                        rx + rw + 6,
-                        y + 2,
-                        &clip(name, 9),
-                        if driven { theme::APERTURE } else { theme::SCREEN_TEXT },
-                    );
-                }
-                at += count;
-            }
-        } else {
-            theme::text_over(fb, rx + 6, top + 6, "waiting for the first windows", theme::SHADOW);
-        }
-
-        // Right: readouts and modulators as bars.
-        let bx = (r.x + r.w).saturating_sub(bars_w + 8);
-        let mut y = top;
-        let bar = |fb: &Framebuffer, y: u32, label: &str, frac: f32, c: Color| {
-            // Name and rate when both fit, the rate alone when not: a clipped
-            // "forward ." said neither.
-            let room = fits(bars_w);
-            let shown = if label.chars().count() <= room {
-                String::from(label)
-            } else {
-                String::from(label.rsplitn(3, ' ').collect::<Vec<_>>().into_iter().rev().skip(1).collect::<Vec<_>>().join(" ").as_str())
-                    .chars()
-                    .take(room)
-                    .collect::<String>()
-            };
-            theme::text_over(fb, bx, y, &shown, theme::SCREEN_TEXT);
-            let w = (frac.clamp(0.0, 1.0) * bars_w as f32) as u32;
-            fb.rect(bx, y + lh + 1, bars_w, 4, Color::new(0x1C, 0x22, 0x2A));
-            fb.rect(bx, y + lh + 1, w.max(1), 4, c);
-        };
-        for ro in v.readouts.iter().filter(|ro| matches!(ro.role, "approach" | "avoid" | "arousal")) {
-            let hz = ro.mhz as f32 / 1000.0;
-            let c = match ro.role {
-                "approach" => Color::new(0x6C, 0xC2, 0x8A),
-                "avoid" => Color::new(0xD0, 0x50, 0x40),
-                _ => Color::new(0x5A, 0x9B, 0xD5),
-            };
-            bar(fb, y, &format!("{} {:.1} Hz", ro.name, hz), hz / 50.0, c);
-            y += lh + 8;
-            if y + lh * 2 > r.y + r.h {
-                break;
-            }
-        }
-        for (name, lvl, c) in [
-            ("dopamine", v.mods[0], Color::new(0xE8, 0xC0, 0x40)),
-            ("octopamine", v.mods[1], Color::new(0xC0, 0x70, 0xE0)),
-            ("serotonin", v.mods[2], Color::new(0x40, 0xC0, 0xC0)),
-            ("sleep need", v.pressure_pct * 10, Color::new(0x70, 0x80, 0xA0)),
-        ] {
-            if y + lh * 2 > r.y + r.h {
-                break;
-            }
-            bar(fb, y, name, lvl as f32 / 1000.0, c);
-            y += lh + 8;
-        }
-
+        // --- How it feels, and why.
+        let (word, tone) = feeling(a.words());
+        theme::text_over(fb, lx, r.y + 6, "It feels", theme::SHADOW);
+        let big = 4u32;
+        theme::text_over_at(fb, lx, r.y + 8 + lh, word, tone, big);
+        let mut y = r.y + 14 + lh + theme::text_h_at(big);
         let driven: Vec<&str> = v.senses.iter().filter(|s| s.1).map(|s| s.0.as_str()).collect();
-        if driven.is_empty() {
-            format!("valence {:+}, arousal {} -- nothing driven; 'brain poke <sense>' to stir it", a.valence, a.arousal)
+        let why = if !v.running {
+            String::from("Its simulation is switched off.")
+        } else if a.asleep {
+            String::from("It is asleep. Touch or speech will wake it.")
+        } else if driven.is_empty() && matches!(a.words(), "calm" | "content") {
+            String::from("Nothing is happening to it right now.")
+        } else if driven.is_empty() {
+            // A mood outlasts what caused it: the readouts settle over about
+            // two seconds of brain time and the chemistry over longer.
+            String::from("Nothing is happening to it now; it is still settling from earlier.")
         } else {
-            format!("valence {:+}, arousal {} -- driven: {}", a.valence, a.arousal, driven.join(", "))
+            let parts: Vec<&str> = driven.iter().map(|d| sense_cause(d)).collect();
+            format!("Because {}.", parts.join(", and "))
+        };
+        for line in wrap(&why, col_w) {
+            theme::text_over(fb, lx, y, &line, theme::SCREEN_TEXT);
+            y += lh + 2;
         }
+        y += 4;
+        for line in wrap("Its mood sets the desktop's colours, the voice, and how it talks to you.", col_w) {
+            theme::text_over(fb, lx, y, &line, theme::SHADOW);
+            y += lh + 2;
+        }
+
+        // --- Mood over time: two lines, labelled.
+        y += 10;
+        theme::text_over(fb, lx, y, "Mood over the last two minutes", theme::FACE);
+        y += lh + 4;
+        let foot_room = lh * 4 + 20;
+        let ch = (r.y + r.h).saturating_sub(y + foot_room).max(40);
+        let chart = Rect::new(lx, y, col_w, ch);
+        fb.rect(chart.x, chart.y, chart.w, chart.h, Color::new(0x12, 0x16, 0x1C));
+        fb.rect(chart.x, chart.y + chart.h / 2, chart.w, 1, Color::new(0x2A, 0x32, 0x3C));
+        const GOOD: Color = Color::new(0x6C, 0xD0, 0x8A);
+        const BAD: Color = Color::new(0xE0, 0x5A, 0x48);
+        const AROUSE: Color = Color::new(0x6A, 0xA8, 0xE8);
+        let n = v.trail.len();
+        if n >= 2 {
+            let x_of = |i: usize| chart.x + 2 + (i as u32 * (chart.w - 4)) / (crate::brain::HISTORY_COLS as u32 - 1).max(1);
+            let off = crate::brain::HISTORY_COLS.saturating_sub(n);
+            let yv = |val: i32| chart.y + 2 + ((1000 - val.clamp(-1000, 1000)) as u32 * (chart.h - 4)) / 2000;
+            let ya = |aro: i32| chart.y + 2 + ((1000 - aro.clamp(0, 1000)) as u32 * (chart.h - 4)) / 1000;
+            for i in 1..n {
+                let (x0, x1) = (x_of(off + i - 1), x_of(off + i));
+                let (v0, v1) = (v.trail[i - 1].0, v.trail[i].0);
+                seg(fb, x0, yv(v0), x1, yv(v1), if v1 >= 0 { GOOD } else { BAD });
+                seg(fb, x0, ya(v.trail[i - 1].1), x1, ya(v.trail[i].1), AROUSE);
+            }
+        } else {
+            theme::text_over(fb, chart.x + 8, chart.y + 8, "collecting...", theme::SHADOW);
+        }
+        theme::text_over(fb, chart.x + 4, chart.y + 2, "good", GOOD);
+        theme::text_over(fb, chart.x + 4, chart.y + chart.h.saturating_sub(lh + 2), "bad", BAD);
+        let ty = chart.y + chart.h + 2;
+        theme::text_over(fb, chart.x, ty, "2 min ago", theme::SHADOW);
+        theme::text_over(fb, (chart.x + chart.w).saturating_sub(theme::text_w_of("now")), ty, "now", theme::SHADOW);
+        let ly = ty + lh + 4;
+        fb.rect(lx, ly + lh / 2, 14, 3, GOOD);
+        theme::text_over(fb, lx + 18, ly, "mood", theme::SCREEN_TEXT);
+        let mx = lx + 18 + theme::text_w_of("mood") + 16;
+        fb.rect(mx, ly + lh / 2, 14, 3, AROUSE);
+        theme::text_over(fb, mx + 18, ly, "excitement", theme::SCREEN_TEXT);
+
+        // --- Right: what it senses, what it is driven to do, its chemistry.
+        let mut y = r.y + 6;
+        let bar_w = col_w;
+        let row = |fb: &Framebuffer, y: &mut u32, name: &str, sub: &str, frac: f32, lit: bool, c: Color| {
+            let label = if sub.is_empty() { String::from(name) } else { format!("{} -- {}", name, sub) };
+            theme::text_over(fb, rx, *y, &fit_label(&label, bar_w), if lit { theme::APERTURE } else { theme::SCREEN_TEXT });
+            *y += lh + 2;
+            fb.rect(rx, *y, bar_w, 6, Color::new(0x1C, 0x22, 0x2A));
+            let w = (frac.clamp(0.0, 1.0) * bar_w as f32) as u32;
+            if w > 0 {
+                fb.rect(rx, *y, w, 6, if lit { theme::APERTURE } else { c });
+            }
+            *y += 12;
+        };
+        theme::text_over(fb, rx, y, "What it senses", theme::FACE);
+        y += lh + 6;
+        for (name, lit, mhz) in v.senses.iter() {
+            let (label, sub) = sense_label(name);
+            row(fb, &mut y, label, sub, *mhz as f32 / 1000.0 / 100.0, *lit, Color::new(0x7A, 0x86, 0x94));
+        }
+        y += 6;
+        theme::text_over(fb, rx, y, "What it is driven to do", theme::FACE);
+        y += lh + 6;
+        let mut by_role = [0i64; 3];
+        for ro in v.readouts.iter() {
+            match ro.role {
+                "approach" => by_role[0] += ro.mhz,
+                "avoid" => by_role[1] += ro.mhz,
+                "arousal" => by_role[2] += ro.mhz,
+                _ => {}
+            }
+        }
+        row(fb, &mut y, "Move toward", "seek what is good", by_role[0] as f32 / 1000.0 / 40.0, false, GOOD);
+        row(fb, &mut y, "Back away", "escape what hurts", by_role[1] as f32 / 1000.0 / 40.0, false, BAD);
+        row(fb, &mut y, "Be alert", "ready to act", by_role[2] as f32 / 1000.0 / 40.0, false, AROUSE);
+        y += 6;
+        if y + (lh + 14) * 2 < r.y + r.h {
+            theme::text_over(fb, rx, y, "Its chemistry", theme::FACE);
+            y += lh + 6;
+            for (name, sub, lvl, c) in [
+                ("Dopamine", "reward", v.mods[0], Color::new(0xE8, 0xC0, 0x40)),
+                ("Octopamine", "excitement", v.mods[1], Color::new(0xC0, 0x70, 0xE0)),
+                ("Serotonin", "calm", v.mods[2], Color::new(0x40, 0xC0, 0xC0)),
+                ("Sleep need", "", v.pressure_pct * 10, Color::new(0x70, 0x80, 0xA0)),
+            ] {
+                if y + lh + 14 > r.y + r.h {
+                    break;
+                }
+                row(fb, &mut y, name, sub, lvl as f32 / 1000.0, false, c);
+            }
+        }
+
+        format!("{}, {} neurons, running live", animal(v.source), v.neurons)
     }
+
 }
 
 /// `gfx::now_ms`: the frame's time while a frame is drawn, so a moving tab's
@@ -786,7 +760,7 @@ impl DeskApp for Oracle {
             _ => self.draw_brain(fb, inner),
         };
         let line = if self.status.is_empty() { note } else { self.status.clone() };
-        theme::text_over(fb, foot.x + 2, foot.y, &clip(&line, fits(foot.w)), theme::SHADOW);
+        theme::text_over(fb, foot.x + 2, foot.y, &fit_label(&line, foot.w.saturating_sub(4)), theme::SHADOW);
     }
 
     fn key(&mut self, k: u8) -> bool {
@@ -843,5 +817,108 @@ impl DeskApp for Oracle {
         self.tab = (((self.tab as i32 + notches.signum()) % n + n) % n) as usize;
         self.shown_ms = now_ms();
         true
+    }
+}
+
+/// The mood word, and its colour: green when good, red when bad.
+fn feeling(words: &str) -> (&'static str, Color) {
+    match words {
+        "agitated" => ("Upset", Color::new(0xE0, 0x5A, 0x48)),
+        "uneasy" => ("Uneasy", Color::new(0xD8, 0x8A, 0x50)),
+        "eager" => ("Excited", Color::new(0x6C, 0xD0, 0x8A)),
+        "content" => ("Content", Color::new(0x6C, 0xD0, 0x8A)),
+        "alert" => ("Alert", Color::new(0x6A, 0xA8, 0xE8)),
+        "asleep" => ("Asleep", Color::new(0x90, 0x98, 0xB0)),
+        _ => ("Calm", Color::new(0xC8, 0xC8, 0xC8)),
+    }
+}
+
+/// What a sense is called here, and what drives it on this machine.
+fn sense_label(name: &str) -> (&str, &'static str) {
+    match name {
+        "touch" => ("Touch", "keyboard and mouse"),
+        "voice" => ("Hearing", "being spoken to"),
+        "food" => ("Reward", "something went well"),
+        "noxious" => ("Pain", "faults and failures"),
+        "thermal" => ("Heat", "the processor running hot"),
+        other => (other, ""),
+    }
+}
+
+/// Why a driven sense is driven, as the end of "It feels upset because ...".
+fn sense_cause(name: &str) -> &'static str {
+    match name {
+        "touch" => "someone is touching the keyboard or mouse",
+        "voice" => "it is being spoken to",
+        "food" => "something went well",
+        "noxious" => "something went wrong -- a fault, or a refused action",
+        "thermal" => "the processor is running hot",
+        _ => "one of its senses is being driven",
+    }
+}
+
+/// The animal, in words.
+fn animal(source: &str) -> &'static str {
+    if source.contains("worm") {
+        "A worm's brain (C. elegans)"
+    } else if source.contains("fly") || source.contains("FlyWire") {
+        "A fruit fly's brain"
+    } else {
+        "An animal's brain"
+    }
+}
+
+/// Words onto lines no wider than `w` pixels, measured in the face they are
+/// drawn in -- counting characters wrapped this proportional text at half
+/// the width it had.
+fn wrap(text: &str, w: u32) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_whitespace() {
+        let trial = if cur.is_empty() { String::from(word) } else { format!("{} {}", cur, word) };
+        if !cur.is_empty() && theme::text_w_of(&trial) > w {
+            out.push(core::mem::take(&mut cur));
+        }
+        let w = word;
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(w);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// A label that fits `w` pixels: whole if it fits, the part before " -- "
+/// if that does, cut with a full stop if neither.
+fn fit_label(label: &str, w: u32) -> String {
+    if theme::text_w_of(label) <= w {
+        return String::from(label);
+    }
+    let head = label.split(" -- ").next().unwrap_or(label);
+    if theme::text_w_of(head) <= w {
+        return String::from(head);
+    }
+    let mut out = String::new();
+    for c in head.chars() {
+        out.push(c);
+        if theme::text_w_of(&out) > w {
+            out.pop();
+            break;
+        }
+    }
+    out
+}
+
+/// A line segment two pixels thick, stepped along its longer axis.
+fn seg(fb: &Framebuffer, x0: u32, y0: u32, x1: u32, y1: u32, c: Color) {
+    let (dx, dy) = (x1 as i64 - x0 as i64, y1 as i64 - y0 as i64);
+    let steps = dx.abs().max(dy.abs()).max(1);
+    for k in 0..=steps {
+        let x = x0 as i64 + dx * k / steps;
+        let y = y0 as i64 + dy * k / steps;
+        fb.rect(x.max(0) as u32, y.max(0) as u32, 2, 2, c);
     }
 }

@@ -4951,7 +4951,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         crate::brain::stimulate(s, ms);
                         kprintln!("  driving {} for {} ms of brain time", s.name(), ms);
                     }
-                    None => kprintln!("  senses: touch voice food noxious thermal"),
+                    None => kprintln!("  senses: touch, hearing (voice), reward (food), pain (noxious), heat (thermal)"),
                 },
                 _ => kprintln!("  usage: brain [on|off|sleep|wake|pace <percent>|poke <sense> [ms]]"),
             }
