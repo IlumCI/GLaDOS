@@ -624,6 +624,16 @@ fn decode(scancode: u8) {
         if released {
             return;
         }
+        // The volume keys, which on this laptop are Fn with a function key
+        // and arrive as ordinary extended make codes. Acted on here rather
+        // than queued, because they mean the same thing whatever has focus,
+        // and `set_volume` is two atomics -- safe in this handler.
+        match scancode {
+            0x2E => return crate::voice::nudge_volume(-10),
+            0x30 => return crate::voice::nudge_volume(10),
+            0x20 => return crate::voice::toggle_mute(),
+            _ => {}
+        }
         let key = match scancode {
             0x48 => KEY_UP,
             0x50 => KEY_DOWN,

@@ -4829,6 +4829,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 kprintln!("  a request is already pending");
             }
         }
+        "volume" | "vol" => volume_verb(rest.trim()),
         "voice" => match rest.trim() {
             "on" => {
                 crate::voice::set_on(true);
@@ -4839,6 +4840,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 kprintln!("  quiet");
             }
             "stop" | "hush" => crate::voice::hush(),
+            r if r == "volume" || r.starts_with("volume ") => volume_verb(r[6..].trim()),
             "" => kprintln!("  {}", crate::voice::status()),
             "model" => kprintln!("  {}", crate::voice::neural::status()),
             r if r.starts_with("say ") => {
@@ -4855,7 +4857,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     kprintln!("  {}", line);
                 }
             }
-            _ => kprintln!("  usage: voice [on|off|stop|model|say <text>|verify <dump>]"),
+            _ => kprintln!("  usage: voice [on|off|stop|volume [0-100|up|down|mute]|model|say <text>|verify <dump>]"),
         },
         "brain" => {
             // The connectome: what it is, what it reads, and a way to drive
@@ -10519,4 +10521,26 @@ fn virtual_caveat() {
         kprintln!("           as much as about this machine. The real one comes off the GF63.");
         console::set_color(LTGRAY);
     }
+}
+
+/// `volume [0-100|up|down|mute]`: how loud the voice is. Also on the laptop's
+/// own volume keys, which go through the same setter.
+fn volume_verb(arg: &str) {
+    match arg {
+        "" => {}
+        "up" | "+" => crate::voice::nudge_volume(10),
+        "down" | "-" => crate::voice::nudge_volume(-10),
+        "mute" | "off" => {
+            crate::voice::set_volume(0);
+            crate::voice::hush();
+        }
+        n => match n.trim_end_matches('%').parse::<usize>() {
+            Ok(v) if v <= 100 => crate::voice::set_volume(v),
+            _ => {
+                kprintln!("  usage: volume [0-100|up|down|mute]");
+                return;
+            }
+        },
+    }
+    kprintln!("  volume {}", crate::voice::volume());
 }

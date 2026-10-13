@@ -59,6 +59,7 @@ pub const VERBS: &[&str] = &[
     "tasks", "tcp", "teach", "tensor", "think", "todo", "train", "trust", "typewriter", "uname",
     "update", "uptime", "usb", "vars", "version", "vi", "video", "voice", "wargame", "wifi", "win",
     "window", "wlan", "words", "work", "wpa2", "zeroshot",
+    "vol", "volume",
 ];
 
 /// How far plain language may reach on its own.
@@ -74,7 +75,13 @@ pub enum Reach {
     Full = 2,
 }
 
-static REACH: AtomicU8 = AtomicU8::new(Reach::ReadOnly as u8);
+/// `Ask` by default. It was `ReadOnly`, and a sentence asking for a folder
+/// was refused with a line about `intent trust` -- correct, and of no use to
+/// the person who asked: plain language that cannot do anything plain
+/// language asks for is a paraphraser. Asking costs one `y`, and still never
+/// runs a change nobody approved.
+const DEFAULT_REACH: Reach = Reach::Ask;
+static REACH: AtomicU8 = AtomicU8::new(DEFAULT_REACH as u8);
 const REACH_PATH: &str = "/etc/intent";
 
 pub fn reach() -> Reach {
@@ -99,9 +106,9 @@ pub fn set_reach(r: Reach) {
 pub fn load() {
     if let Some(b) = crate::sysbox::read_blob(REACH_PATH) {
         let r = match core::str::from_utf8(&b).unwrap_or("").trim() {
-            "ask" => Reach::Ask,
+            "readonly" => Reach::ReadOnly,
             "full" => Reach::Full,
-            _ => Reach::ReadOnly,
+            _ => Reach::Ask,
         };
         REACH.store(r as u8, Ordering::Release);
     }
@@ -289,6 +296,16 @@ pub fn conversational(line: &str) -> bool {
     if line.contains('/') {
         return false;
     }
+    // An action verb outranks politeness. "please make a file", "can you
+    // create a folder" carry "please" and "you", and were sent to the chat
+    // model, which cannot touch a file and so said the request back in its
+    // own words -- the operator's first afternoon with the machine, measured:
+    // `please make a file named hello.txt that says hi` answered "hello.txt /
+    // Hi!" and made nothing. A line asking for a thing to be done is a task,
+    // whoever it is addressed to.
+    if asks_for_action(line) {
+        return false;
+    }
     const TO_YOU: &[&str] = &["you", "your", "you're", "youre", "yourself", "glados"];
     const GREETING: &[&str] = &["hi", "hello", "hey", "thanks", "thank", "morning", "evening", "goodnight", "bye", "goodbye", "sorry", "please"];
     const OPINION: &[&str] = &["think", "feel", "feeling", "favourite", "favorite", "joke", "story", "opinion", "believe", "dream", "remember", "alive", "conscious"];
@@ -299,6 +316,152 @@ pub fn conversational(line: &str) -> bool {
         .collect();
     let has = |set: &[&str]| words.iter().any(|w| set.contains(&w.as_str()));
     has(TO_YOU) || has(GREETING) || has(OPINION)
+}
+
+/// Verbs that ask for something to be done to the machine, rather than said.
+const ACTION_VERBS: &[&str] = &[
+    "create", "make", "delete", "remove", "rename", "move", "copy", "write", "save", "list", "show",
+    "open", "find", "search", "read", "print", "count", "hash", "run", "install", "mkdir", "edit",
+    "erase", "touch", "snapshot", "snap", "compare", "check", "display", "tell", "put", "add",
+];
+
+/// Whether a line asks for an action: its first word after any politeness
+/// ("please", "can you", "could you", "would you", "i want you to") is an
+/// action verb. "tell me a joke" is the one shape this misfiles as a task,
+/// so `tell` is an action only when the line names something to tell about
+/// a file or the machine -- which is what the router then decides.
+pub fn asks_for_action(line: &str) -> bool {
+    const LEAD: &[&str] = &["please", "can", "could", "would", "will", "you", "kindly", "i", "want", "need", "to", "go", "ahead", "and", "now", "just", "glados", "hey"];
+    let words: alloc::vec::Vec<String> = line
+        .split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .collect();
+    let Some(first) = words.iter().find(|w| !LEAD.contains(&w.as_str())) else { return false };
+    if first == "tell" {
+        return words.iter().any(|w| matches!(w.as_str(), "file" | "files" | "folder" | "directory" | "memory" | "disk" | "time" | "date" | "uptime"));
+    }
+    ACTION_VERBS.contains(&first.as_str())
+}
+
+/// The exact command a plain request is asking for, when it is one of the
+/// everyday shapes: make a folder, make a file (with what it says), delete,
+/// rename or move, copy. `None` for anything else, which the agent takes.
+///
+/// Read off the sentence rather than decoded, because the measurement said
+/// so: handed "please make a file named hello.txt that says hi", the agent on
+/// the 0.6B re-decided the applet and ran `find 1`, twice, and "can you delete
+/// hello.txt" dispatched nothing at all. The router had already said `write`
+/// and the sentence had already said the name and the text. What is parsed
+/// here is shown to the operator verbatim before it runs, so a misreading is
+/// visible and costs one `n`.
+pub fn command_for(line: &str) -> Option<String> {
+    const LEAD: &[&str] = &["please", "can", "could", "would", "will", "you", "kindly", "i", "want", "need", "to", "go", "ahead", "and", "now", "just", "glados", "hey"];
+    const ARTICLES: &[&str] = &["a", "an", "the", "new", "empty", "my"];
+    let clean = |w: &str| -> String {
+        String::from(
+            w.trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == ',' || c == '?' || c == '!')
+                .trim_end_matches('.'),
+        )
+    };
+    let words: alloc::vec::Vec<&str> = line.split_whitespace().collect();
+    let mut i = 0;
+    while i < words.len() && LEAD.contains(&words[i].to_lowercase().trim_matches(|c: char| !c.is_alphanumeric())) {
+        i += 1;
+    }
+    let lower: alloc::vec::Vec<String> = words.iter().map(|w| w.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '/' && c != '_' && c != '-').into()).collect();
+    let verb = lower.get(i)?.as_str();
+    let mut j = i + 1;
+    let skip = |j: &mut usize, set: &[&str]| {
+        while *j < lower.len() && set.contains(&lower[*j].as_str()) {
+            *j += 1;
+        }
+    };
+    // A name: one word, cleaned of quotes and a sentence's last full stop.
+    let name_at = |k: usize| -> Option<String> {
+        let w = clean(words.get(k)?);
+        if w.is_empty() { None } else { Some(w) }
+    };
+    match verb {
+        "create" | "make" | "add" | "mkdir" | "write" | "new" => {
+            skip(&mut j, ARTICLES);
+            let kind = lower.get(j).map(|s| s.as_str()).unwrap_or("");
+            let folder = matches!(kind, "folder" | "directory" | "dir");
+            let file = matches!(kind, "file" | "note" | "textfile");
+            if verb == "mkdir" {
+                return Some(format!("mkdir {}", name_at(i + 1)?));
+            }
+            if !folder && !file {
+                // "write hello to notes.txt"
+                if verb == "write" {
+                    let to = lower.iter().rposition(|w| w == "to" || w == "into")?;
+                    if to <= i + 1 || to + 2 != words.len() {
+                        return None;
+                    }
+                    let text: alloc::vec::Vec<&str> = words[i + 1..to].to_vec();
+                    return Some(format!("write {} {}", name_at(to + 1)?, text.join(" ").trim_matches('"')));
+                }
+                return None;
+            }
+            j += 1;
+            skip(&mut j, &["called", "named", "titled"]);
+            let name = name_at(j)?;
+            if folder {
+                return (j + 1 == words.len()).then(|| format!("mkdir {}", name));
+            }
+            // What the file says: "that says hi", "saying hi", "containing
+            // hi", "with the text hi", "with hi".
+            let mut k = j + 1;
+            skip(&mut k, &["that", "which", "and", "it"]);
+            if k >= words.len() {
+                return Some(format!("write {}", name));
+            }
+            if !matches!(lower[k].as_str(), "says" | "saying" | "say" | "containing" | "contains" | "with") {
+                return None;
+            }
+            k += 1;
+            skip(&mut k, &["the", "text", "words", "contents", "content"]);
+            if k >= words.len() {
+                return None;
+            }
+            let text = words[k..].join(" ");
+            Some(format!("write {} {}", name, text.trim_matches(|c: char| c == '"' || c == '\'')))
+        }
+        "delete" | "remove" | "erase" | "rm" | "trash" => {
+            skip(&mut j, ARTICLES);
+            skip(&mut j, &["file", "folder", "directory", "dir", "called", "named"]);
+            (j + 1 == words.len()).then(|| ()).and_then(|_| name_at(j)).map(|n| format!("rm {}", n))
+        }
+        "rename" | "move" | "mv" | "copy" | "cp" | "duplicate" => {
+            skip(&mut j, ARTICLES);
+            skip(&mut j, &["file", "folder", "directory", "dir", "called", "named"]);
+            let a = name_at(j)?;
+            let to = j + 1;
+            if lower.get(to).map(|s| s.as_str()) != Some("to") && lower.get(to).map(|s| s.as_str()) != Some("as") {
+                return None;
+            }
+            if to + 2 != words.len() {
+                return None;
+            }
+            let b = name_at(to + 1)?;
+            let applet = if matches!(verb, "copy" | "cp" | "duplicate") { "cp" } else { "mv" };
+            Some(format!("{} {} {}", applet, a, b))
+        }
+        _ => None,
+    }
+}
+
+/// Whether the action a line asks for changes the machine.
+pub fn changing_verb(line: &str) -> bool {
+    const CHANGES: &[&str] = &[
+        "create", "make", "delete", "remove", "rename", "move", "copy", "write", "save", "mkdir", "edit",
+        "erase", "touch", "put", "add", "install", "snapshot", "snap",
+    ];
+    asks_for_action(line)
+        && line
+            .split(|c: char| !c.is_alphanumeric())
+            .map(|w| w.to_lowercase())
+            .any(|w| CHANGES.contains(&w.as_str()))
 }
 
 /// What the shell runs, decided from a line of language.
@@ -313,16 +476,29 @@ pub enum Decision {
     Say(String),
 }
 
+/// A pending offer that is an exact command rather than a goal for the agent.
+const EXACT_MARK: &str = "\u{1}exact ";
+
 /// A task waiting for `y`, under `Reach::Ask`.
 static PENDING: Racy<Option<String>> = Racy::new(None);
 
 /// The answer to a pending offer, if this line is one.
 pub fn answer(line: &str) -> Option<Decision> {
     let pending = unsafe { PENDING.get() };
-    pending.as_ref()?;
+    if pending.is_none() {
+        // A yes or no with nothing asked. Handed to the model it was a chat
+        // turn, and the model answered "n" by saying "n" back.
+        return match line.trim() {
+            "y" | "yes" | "n" | "no" => Some(Decision::Say(String::from("nothing is waiting for a yes or no"))),
+            _ => None,
+        };
+    }
     match line.trim() {
         "y" | "yes" => {
             let goal = pending.take()?;
+            if let Some(cmd) = goal.strip_prefix(EXACT_MARK) {
+                return Some(Decision::Run(String::from(cmd), String::from("as you said")));
+            }
             Some(Decision::Run(format!("agent --trust full {}", goal), String::from("as you said")))
         }
         "n" | "no" => {
@@ -357,12 +533,20 @@ pub fn decide(line: &str) -> Decision {
     };
     let names_target = line.contains('/')
         || line.split_whitespace().any(|w| crate::sysbox::APPLETS.iter().any(|a| a.name == w));
-    let task = v.agreement == 3 || (v.agreement == 2 && names_target);
+    // A line that asks for something to be done is a task whatever the
+    // router's confidence: the agent decides the applet again for itself, and
+    // a task sent to the chat model is answered by a paraphrase of it.
+    let action = asks_for_action(line);
+    let task = v.agreement == 3 || (v.agreement == 2 && names_target) || action;
     if !task {
         return chat(format!("{} of 3 agree on '{}' -- a conversation, not a task", v.agreement, choice.applet));
     }
     let why = format!("'{}', {} of 3 agree", choice.applet, v.agreement);
-    if !choice.mutates {
+    // Whether it changes things is the verb's to say as much as the router's:
+    // the router sent "delete hello.txt" to `write` and "remove" to `cd`, and
+    // a request that is plainly a change must not run as a read-only one.
+    let changes = choice.mutates || changing_verb(line);
+    if !changes {
         // A read-only applet whose whole argument is one path, and a line
         // naming exactly one path: that is the command a person would have
         // typed, so it runs. Handing it to the agent instead decoded
@@ -382,14 +566,28 @@ pub fn decide(line: &str) -> Decision {
         }
         return Decision::Run(format!("agent -n 3 {}", line), format!("a task for {} -- the agent takes it", why));
     }
+    let exact = command_for(line);
     match reach() {
+        Reach::Ask if exact.is_some() => {
+            let cmd = exact.unwrap_or_default();
+            unsafe { *PENDING.get() = Some(format!("{}{}", EXACT_MARK, cmd)) };
+            Decision::Say(format!("that would run '{}' -- go ahead? y/n", cmd))
+        }
+        Reach::Full if exact.is_some() => {
+            let cmd = exact.unwrap_or_default();
+            Decision::Run(cmd.clone(), format!("'{}', read off what you said", cmd))
+        }
         Reach::ReadOnly => Decision::Say(format!(
             "that would change things ({}). 'intent trust ask' lets me offer, or say it as 'agent --trust full ...'",
             why
         )),
         Reach::Ask => {
             unsafe { *PENDING.get() = Some(String::from(line)) };
-            Decision::Say(format!("that would change things ({}) -- run it? y/n", why))
+            if choice.mutates {
+                Decision::Say(format!("that would change things ({}) -- run it? y/n", why))
+            } else {
+                Decision::Say(String::from("that would change things -- run it? y/n"))
+            }
         }
         Reach::Full => Decision::Run(format!("agent --trust full -n 3 {}", line), format!("a task for {}", why)),
     }
@@ -407,11 +605,11 @@ pub fn selftest() -> bool {
     // reaches this path, and a path nothing reaches is a path nothing checks.
     unsafe { *PENDING.get() = Some(String::from("remove /tmp/x")) };
     let yes = matches!(answer("y"), Some(Decision::Run(ref c, _)) if c == "agent --trust full remove /tmp/x");
-    let spent = answer("y").is_none();
+    let spent = !matches!(answer("y"), Some(Decision::Run(..)));
     unsafe { *PENDING.get() = Some(String::from("remove /tmp/x")) };
-    let no = matches!(answer("no"), Some(Decision::Say(_))) && answer("y").is_none();
+    let no = matches!(answer("no"), Some(Decision::Say(_))) && !matches!(answer("y"), Some(Decision::Run(..)));
     let unrelated = answer("ls").is_none();
-    let rows: [(&str, bool); 30] = [
+    let rows: [(&str, bool); 46] = [
         ("'help me find the big files' is a sentence, not the help command", verb_first_language("help", "me find the big files")),
         ("'ls /ai' is a command", !verb_first_language("ls", "/ai")),
         ("'cat the readme please' is a sentence", verb_first_language("cat", "the readme please")),
@@ -440,7 +638,31 @@ pub fn selftest() -> bool {
         ("a greeting is conversation", conversational("hello there")),
         ("a task is not conversation", !conversational("list the files in ai")),
         ("a path makes it a task whatever else it says", !conversational("could you list /ai for me")),
-        ("the default reach runs nothing that mutates", Reach::ReadOnly as u8 == 0),
+        ("the default reach asks before anything that mutates, and never just runs it",
+            DEFAULT_REACH == Reach::Ask),
+        ("'please make a file' is a task, not small talk", !conversational("please make a file named hello.txt that says hi")),
+        ("'can you create a folder' is a task", !conversational("can you create a folder called notes")),
+        ("'thank you' is still conversation", conversational("thank you")),
+        ("'tell me a joke' is still conversation", conversational("tell me a joke")),
+        ("'tell me what files are here' is a task", asks_for_action("tell me what files are here")),
+        ("'delete hello.txt' changes things whatever the router guessed", changing_verb("can you delete hello.txt")),
+        ("'list the files' changes nothing", !changing_verb("list the files in ai")),
+        ("'please make a file named hello.txt that says hi' is write hello.txt hi",
+            command_for("please make a file named hello.txt that says hi").as_deref() == Some("write hello.txt hi")),
+        ("'create a folder called notes' is mkdir notes", command_for("create a folder called notes").as_deref() == Some("mkdir notes")),
+        ("'can you delete hello.txt' is rm hello.txt", command_for("can you delete hello.txt").as_deref() == Some("rm hello.txt")),
+        ("'rename a.txt to b.txt' is mv", command_for("rename a.txt to b.txt").as_deref() == Some("mv a.txt b.txt")),
+        ("'copy /a to /b' is cp", command_for("copy /a to /b").as_deref() == Some("cp /a /b")),
+        ("'write hello world to note.txt' is write", command_for("write hello world to note.txt").as_deref() == Some("write note.txt hello world")),
+        ("anything else is the agent's", command_for("make the machine faster").is_none() && command_for("delete everything older than a week").is_none()),
+        ("an exact offer runs exactly that on y", {
+            unsafe { *PENDING.get() = Some(format!("{}rm /tmp/x", EXACT_MARK)) };
+            matches!(answer("y"), Some(Decision::Run(ref c, _)) if c == "rm /tmp/x")
+        }),
+        ("a yes with nothing asked is answered, not handed to the model", {
+            unsafe { *PENDING.get() = None };
+            matches!(answer("y"), Some(Decision::Say(_))) && answer("ls").is_none()
+        }),
         ("no operator-only verb is an applet the grammar could spell", ["unlock", "trust", "update", "store", "skill", "work"]
             .iter()
             .all(|v| crate::sysbox::APPLETS.iter().all(|a| a.name != *v))),

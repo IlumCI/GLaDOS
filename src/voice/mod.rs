@@ -44,6 +44,55 @@ static SPEAKING: AtomicBool = AtomicBool::new(false);
 /// The mask the last sentence was rendered with, in thousandths, for the
 /// status line: what was heard, not what the brain reads now.
 static LAST_MASK: AtomicUsize = AtomicUsize::new(1000);
+/// How loud, 0 to 100. Forty by default rather than full scale: the first
+/// sentence this machine ever spoke through the GF63's speakers was at 0 dB on
+/// the codec and full scale in the samples, and the person in front of it
+/// asked for volume control before anything else. Applied to the samples, so
+/// it is the same on every codec and needs nothing the HDA path may lack.
+static VOLUME: AtomicUsize = AtomicUsize::new(40);
+/// Set from the keyboard's interrupt, written to `/etc/volume` by the voice
+/// task: an interrupt handler may not write the namespace.
+static VOLUME_DIRTY: AtomicBool = AtomicBool::new(false);
+
+pub fn volume() -> usize {
+    VOLUME.load(Ordering::Acquire)
+}
+
+/// Safe from an interrupt handler: two atomics, nothing else.
+pub fn set_volume(v: usize) {
+    VOLUME.store(v.min(100), Ordering::Release);
+    VOLUME_DIRTY.store(true, Ordering::Release);
+}
+
+/// What mute put down, so pressing it again brings it back.
+static BEFORE_MUTE: AtomicUsize = AtomicUsize::new(0);
+
+/// The mute key: to silence, and back to where it was. Interrupt-safe.
+pub fn toggle_mute() {
+    let v = volume();
+    if v > 0 {
+        BEFORE_MUTE.store(v, Ordering::Release);
+        set_volume(0);
+    } else {
+        let back = BEFORE_MUTE.load(Ordering::Acquire);
+        set_volume(if back > 0 { back } else { 40 });
+    }
+}
+
+/// Up or down by `step`, clamped, for the volume keys.
+pub fn nudge_volume(step: isize) {
+    let v = (volume() as isize + step).clamp(0, 100) as usize;
+    set_volume(v);
+}
+
+/// The sample gain for a volume: squared, because loudness is heard on
+/// something close to a log scale and a linear knob spends its top half on
+/// differences nobody hears. 40 is 0.16, about -16 dB.
+pub fn gain_of(v: usize) -> f32 {
+    let x = v.min(100) as f32 / 100.0;
+    x * x
+}
+
 /// Sentences waiting, at most. A reply longer than this is cut rather than
 /// queued for minutes of speech nobody can stop.
 const QUEUE_MAX: usize = 24;
@@ -52,6 +101,11 @@ pub fn init(ecam: Option<u64>, staged: Option<&'static [u8]>) {
     neural::init(staged);
     if let Some(b) = crate::sysbox::read_blob("/etc/voice") {
         ON.store(b.as_slice() != b"off", Ordering::Release);
+    }
+    if let Some(v) = crate::sysbox::read_blob("/etc/volume")
+        .and_then(|b| core::str::from_utf8(&b).ok().and_then(|t| t.trim().parse::<usize>().ok()))
+    {
+        VOLUME.store(v.min(100), Ordering::Release);
     }
     if let Some(e) = ecam {
         ECAM.store(e, Ordering::Release);
@@ -101,8 +155,9 @@ pub fn hush() {
 pub fn status() -> String {
     let d = dial(crate::brain::now());
     alloc::format!(
-        "voice {}, {} sentence(s) waiting, {} spoken this boot{}; {}, mask {:.2} (valence {:+.2}, arousal {:.2})",
+        "voice {}, volume {}, {} sentence(s) waiting, {} spoken this boot{}; {}, mask {:.2} (valence {:+.2}, arousal {:.2})",
         if on() { "on -- replies are spoken" } else { "off" },
+        volume(),
         QUEUE.lock_irq().len(),
         SPOKEN.load(Ordering::Acquire),
         if SPEAKING.load(Ordering::Acquire) { ", speaking now" } else { "" },
@@ -136,7 +191,8 @@ pub fn render(sentence: &str) -> Vec<u8> {
     };
     let tail = (synth::RATE / 4) as usize;
     let mut pcm = Vec::with_capacity((mono.len() + tail) * 4);
-    for s in mono.iter().copied().chain(core::iter::repeat(0i16).take(tail)) {
+    let g = gain_of(volume());
+    for s in mono.iter().map(|&s| (s as f32 * g) as i16).chain(core::iter::repeat(0i16).take(tail)) {
         pcm.extend_from_slice(&s.to_le_bytes());
         pcm.extend_from_slice(&s.to_le_bytes());
     }
@@ -176,6 +232,9 @@ fn to_48k(y: &[f32]) -> Vec<i16> {
 
 fn voice_task() {
     loop {
+        if VOLUME_DIRTY.swap(false, Ordering::AcqRel) {
+            crate::sysbox::write_blob("/etc/volume", alloc::format!("{}", volume()).into_bytes());
+        }
         let next = QUEUE.lock_irq().pop_front();
         let Some(s) = next else {
             crate::task::sleep_until(crate::dev::lapic::ticks() + 5);
@@ -197,8 +256,12 @@ fn voice_task() {
             SPEAKING.store(true, Ordering::Release);
             // Stop a little before the loop would come round: the tail is a
             // quarter second of silence, so stopping inside it is clean.
+            // In slices, so muting cuts the sentence that is playing rather
+            // than waiting out what is left of it.
             let until = crate::dev::lapic::ticks() + (ms.saturating_sub(100)) / 10;
-            crate::task::sleep_until(until);
+            while crate::dev::lapic::ticks() < until && volume() > 0 {
+                crate::task::sleep_until((crate::dev::lapic::ticks() + 5).min(until));
+            }
             let _ = crate::dev::hda::with(|h| h.stop());
             SPEAKING.store(false, Ordering::Release);
             SPOKEN.fetch_add(1, Ordering::AcqRel);
