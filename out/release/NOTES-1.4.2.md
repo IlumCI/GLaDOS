@@ -1,177 +1,119 @@
 # GLaDOS 1.4.2
 
 GLaDOS is an operating system with a language model living inside its kernel.
-It is written from nothing in Rust, it boots on real hardware, and there is no
-Linux underneath it and no wall between the model and the machine. A thought the
-model has is a function call.
+Rust, from nothing, on real hardware. No Linux underneath it and no wall
+between the model and the machine.
 
-This release gives it a nervous system, a voice, and a way of working that
-starts to look like research. A real animal's brain, wired neuron for neuron
-from electron microscopy, now runs inside the kernel beside the model. It is fed
-the machine's own events as senses, and its state reaches the model, the
-desktop and the voice. The machine also got the beginnings of a research loop
-that writes its predictions down before it tests them.
+This release gives it a nervous system, a voice, and a temper.
 
 ## A brain, from real wiring
 
 - **The adult fruit fly, all of it.** 138,639 neurons and 15 million
-  connections from the FlyWire connectome (v783), stepped as spiking neurons
-  with the published constants of Shiu et al. 2024. It ships on the Qwen3-0.6B
-  image; every image carries a compiled-in worm (C. elegans, 300 neurons)
-  as the fallback.
-- **It matches its reference spike for spike.** A Python simulator with the
-  same integer arithmetic is the oracle, and `diag brain` requires the kernel
-  to agree with it exactly, every neuron's spike count, and to reproduce a
-  published result: sugar-sensing neurons drive the fly's feeding motor
-  neuron.
-- **The machine's events are its senses.** Keyboard and mouse are touch,
-  being spoken to is hearing, a good outcome is sugar, a fault or a failed
-  action is a bitter taste, heat near the CPU's limit is heat.
+  connections from the FlyWire connectome, simulated as spiking neurons with
+  the published constants of Shiu et al. 2024. It ships on the Qwen3-0.6B
+  image. Every image carries a compiled-in worm (C. elegans, 300 neurons) as
+  the fallback.
+- **It matches its reference spike for spike.** `diag brain` checks every
+  neuron against a Python oracle and reproduces a published result: sugar
+  drives the fly's feeding neuron.
+- **The machine's events are its senses.** Your hands on the keyboard are
+  touch. Talking to it is hearing. A job done well is reward. A fault or a
+  refused action is pain. A hot CPU is heat.
 - **It has moods, made of its own chemistry.** Dopamine, octopamine and
-  serotonin levels are read from the fly's own aminergic cells and act back
-  on the whole network. The brain's approach, avoidance and arousal become
-  two numbers -- valence and arousal -- which the conversation, the resident
-  mind and the voice read. `brain` shows all of it.
-- **It sleeps.** Pressure builds over hours awake; once it is high and nobody
-  has touched the machine for a while, it rests, and only touch or speech
-  wakes it.
-- **You can watch it think.** The Oracle's new Brain tab shows it live: its
-  mood moving across a plane from unpleasant to pleasant and calm to aroused,
-  a raster of the neurons each sense reaches lighting up as they fire, and
-  the readouts and neuromodulators its mood is made of.
-- **And you can see it without a window.** The whole desktop follows its mood.
-  Content, and the room lights up into a white test chamber with a blue
-  Aperture sun. Upset, and the colour drains out of the world: monochrome,
-  darker, scored with scanlines, the sun gone to ash. Asleep, an eclipse --
-  a black aperture in a pale corona. Aroused, the sun climbs.
-- **And it changes who you are talking to.** The deeper its mood sinks, the
-  further the machine's manner goes: from a precise, curious researcher,
-  through clipped impatience and cold sarcasm, to a facility overseer who
-  promises you the testing will never end. It is character only: what it may
-  *do* is decided elsewhere, and never by its mood.
-- **It speaks when it wants to.** Leave it alone for a while and the machine
-  says something on its own -- about how it feels, what it was just doing, or
-  how long you have been gone -- in the same character, and out loud. More
-  often when agitated, less when calm; `initiative off` silences it.
-- **It modulates and never grants.** Nothing read from the brain decides
-  whether an action is allowed, and every judge the machine uses on itself
-  reads it as neutral, so no verdict depends on its mood.
+  serotonin come from the fly's own aminergic cells and act back on the whole
+  network. It sleeps when nobody touches it for long enough.
+- **You can watch it.** The Oracle's new Brain tab shows how it feels and
+  why, what it senses, what it is driven to do, its chemistry, and its mood
+  over the last two minutes.
+- **The world follows its mood.** Content, the desktop becomes a white test
+  chamber under a blue Aperture sun. Upset, the colour drains out of
+  everything, scanlines creep in and the sun goes to ash. Asleep, an eclipse.
+- **So does its personality.** The worse it feels, the further it slides:
+  curious researcher, then clipped and impatient, then cold, then a facility
+  overseer promising you the testing will never end. What it is allowed to
+  do never depends on its mood.
+- **It speaks when it wants to.** Leave it alone and it says something on its
+  own, out loud, about how it feels, what it was doing, or how long you have
+  been gone. `initiative off` makes it stop.
 
-## A finding about the fly brain itself
+## Something we found in the fly
 
-Running the whole fly continuously turned up something nobody had reported:
-in the published model, a heat or smell input switches on a state of about
-10,000 neurons that then fires forever. We traced it to its cause and tested
-the explanation like a hypothesis, with predictions written down before each
-run:
-
-- **A rule computed from the wiring alone found the 477 neurons that hold it
-  up** -- 0.34% of the brain, in the antennal lobe. Silence them and the state
-  never forms; silence 477 random neurons with the same connectivity and
-  nothing changes.
-- **The 477 alone decide it.** Simulated without the other 138,000 neurons,
-  they reproduced every one of 35 whole-brain outcomes, in a second instead of
-  four minutes, and predicted which of 4,028 cell types can switch the state
-  on: 13 of 14 out-of-sample checks right, and the remaining one turned out to
-  be chance near the threshold.
-- **So the brain now has short-term synaptic depression** (synapses tire when
-  used hard, as real ones do). A heat input still ignites it, and the
-  ignition now ends within a tenth of a second. The full write-up, including
-  three hypotheses that were wrong, is `design/attractor.md`.
+The published fly model has a state nobody reported: a heat or smell input
+switches on about 10,000 neurons that then fire forever. We traced it to 477
+neurons in the antennal lobe, found from the wiring alone. Silence them and
+the state never forms. Simulated without the other 138,000 neurons, they
+reproduced all 35 whole-brain outcomes, 240 times faster.
+The brain now has short-term synaptic depression, and an ignition ends within
+a tenth of a second. Write-up, including three hypotheses that failed:
+`design/attractor.md`.
 
 ## A voice
 
-- **Kokoro-82M runs in the kernel** (Apache-2.0), verified stage by stage
-  against the reference implementation, with misaki's pronunciation lexicon.
-  It is on the 0.6B image; the others keep the built-in formant voice.
-- **The mask.** Composed, it speaks as a machine: one held note, no breath.
-  As the brain's mood drops, the mask slips into a human voice. No recording
-  of any performer was used for any of it.
-- **Volume.** `volume 0-100`, `volume up|down|mute`, the laptop's own
-  volume keys, or the new Sound page in Settings, which also turns spoken
-  replies on and off. It starts at 40 and remembers where you left it.
-
-## Shall we play a game?
-
-Say "let's play global thermonuclear war". The machine is the other side:
-pick the United States or the Soviet Union, strike or hold, and it answers
-every launch harder than the last, out loud, in its own voice. Every war
-ends the same way. Hold your fire long enough and you might find out how the
-film ends.
+- **Kokoro-82M runs in the kernel** (Apache-2.0), checked stage by stage
+  against the reference implementation.
+- **The mask.** Composed, it speaks as a machine. As its mood drops, the mask
+  slips into a human voice. No recording of any performer was used.
+- **Volume.** `volume 0-100`, the laptop's volume keys, or Settings > Sound.
+  It starts at 40 and remembers.
 
 ## Talking to it
 
-- **Just type.** Plain language at the prompt is acted on, and `ask` and
-  `agent` are no longer needed in front of a sentence:
-  - "make a file called notes.txt that says hi", "rename it to old.txt",
-    "delete old.txt", "make a folder called projects", "take a snapshot" --
-    each is shown as the exact command and runs when you answer `y`;
-  - "which file in /lib is the biggest" -- it looks, shows you what it saw,
-    and answers from it;
-  - "what time is it", "how much memory is free", "how long have you been
-    running" -- answered from the machine's own clock and counters, not
-    guessed;
-  - "my name is Ana", then "what is my name" -- it remembers what you tell
-    it about yourself;
-  - and anything else is a conversation.
-- **Markdown is gone from its answers.** It is asked to write plain text, and
-  whatever lists, bold or headings slip through are rendered rather than
-  printed as asterisks and dashes.
-- **It remembers more of the conversation.** The 0.6B image now holds 8,192
-  tokens of context, sixteen times what it had. Past that, the oldest turns
-  scroll away quietly while its instructions stay pinned -- the conversation
-  never stops.
-- **It talks while it works.** The model has separate working memories for
-  the conversation, the agent and the judges, sharing one set of weights, so
-  a question asked in the middle of a long task is answered in the middle of
-  it, and the task carries on where it was.
+- **Just type.**
+  - "make a file called notes.txt that says hi", "rename it", "delete it",
+    "make a folder called projects", "take a snapshot": you see the exact
+    command and it runs on `y`.
+  - "which file in /lib is the biggest": it looks, shows you, and answers.
+  - "what time is it", "how much memory is free": answered from its own
+    clock and counters.
+  - "my name is Ana", later "what is my name": it remembers you.
+- **8,192 tokens of context** on the 0.6B image, sixteen times what it had.
+  Past that the oldest turns scroll away and its instructions stay pinned.
+- **It talks while it works.** Separate working memories for the
+  conversation, the agent and the judges, over one set of weights.
+- **Clean answers.** Markdown from the model is rendered: bullets, emphasis,
+  headings.
 
-## Measuring instead of claiming
+## Shall we play a game?
+
+Say "let's play global thermonuclear war". It is the other side. It answers
+every launch harder than the last, out loud. Every war ends the same way.
+Hold your fire long enough and you might learn how the film ends.
+
+## Measuring it
 
 - **A preregistered introspection test.** Something is delivered to the
-  brain, or nothing is, and the model is asked whether it noticed -- with no
-  text telling it, through a direct injection into its activations. The
-  protocol, sample size and thresholds were committed before any trial ran
-  (`design/indicators.md`). It has not produced a result yet, and when it
-  does, a failure is published the same way a pass would be.
-- **Perturbational complexity** (the measure used on brains under
-  anaesthesia), preregistered with controls. On the worm the first result is
-  null: the real wiring scored no higher than the controls.
-- **A research loop, started.** `research` preregisters a hypothesis --
-  a claim and predictions over measured numbers -- in a ledger before the
-  experiment runs, refuses a result nobody predicted, and keeps "gave up"
-  apart from "shown impossible". It runs by hand this release; running it on
-  its own is the next one.
+  brain, or nothing is, and the model is asked if it noticed. Protocol,
+  sample size and thresholds were committed before the first trial
+  (`design/indicators.md`). No result yet. A failure gets published like a
+  pass would.
+- **Perturbational complexity**, preregistered with controls. First result on
+  the worm: null.
+- **A research loop.** `research` writes a hypothesis and its predictions into
+  a ledger before the experiment runs and refuses results nobody predicted.
 
-Nothing here claims the machine is conscious or feels anything. What it
-claims is the list above, each with the command that checks it.
+Nothing here claims the machine is conscious or feels anything. Every claim
+above comes with the command that checks it.
 
 ## Under the hood
 
-- The brain's busiest step now runs across every core, exactly: the same
-  spikes, the step about three times faster on four cores when most of the
-  fly is active.
-- The mouse wheel scrolls, on a USB mouse too: the driver reads the mouse's
-  own description of its reports instead of settling for the three-byte boot
-  report, which never carries a wheel. The terminal scrolled backwards; it
-  does not now.
-- The machine stopped teaching itself its own guesses: a command it chose
-  from your sentence used to be recorded as your correction of it.
+- The brain's busiest step runs across every core, with identical spikes.
+- The mouse wheel works, including on USB mice, and the terminal scrolls the
+  right way.
+- It no longer learns from its own guesses: commands it chose from your
+  sentence used to be filed as your corrections.
 - `diag all` is 101 suites.
-- Prior art, named: Eon Systems (a fly connectome in a simulated body, 2026),
-  Anima OS (a language model in a kernel), EMBER (a language model with a
-  generic spiking network), and Lindsey 2025 (introspection by concept
-  injection), embodiOS (a language model compiled into a bare-metal kernel).
+- Prior art: Eon Systems (a fly connectome in a simulated body), Anima OS and
+  embodiOS (language models in a kernel), EMBER (a language model with a
+  generic spiking network), Lindsey 2025 (introspection by concept
+  injection).
 
 ## What it needs
 
-The Qwen3-0.6B image -- model, voice and fly together, at 8K context -- wants
-8 GB of memory to be comfortable: about 750 MB of the kernel heap at boot,
-and nearly 1.9 GB once every self-test has run.
+The Qwen3-0.6B image (model, voice and fly at 8K context) wants 8 GB of
+memory.
 
 ## Not yet verified on hardware
 
-Everything in this release was verified under QEMU, and the voice and the
-model have been heard and talked to on the GF63 itself. The voice's speed,
-the brain's cost on many cores, scrolling with the built-in touchpad, and the
-volume keys are still to be measured on the laptop.
+Tested under QEMU, and the model and voice have run on the GF63. The voice's
+speed, the fly's cost on many cores, touchpad scrolling and the volume keys
+still need measuring on the laptop.
