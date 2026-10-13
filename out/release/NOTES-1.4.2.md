@@ -35,7 +35,11 @@ that writes its predictions down before it tests them.
 - **It sleeps.** Pressure builds over hours awake; once it is high and nobody
   has touched the machine for a while, it rests, and only touch or speech
   wakes it.
-- **You can see it without a window.** The whole desktop follows its mood.
+- **You can watch it think.** The Oracle's new Brain tab shows it live: its
+  mood moving across a plane from unpleasant to pleasant and calm to aroused,
+  a raster of the neurons each sense reaches lighting up as they fire, and
+  the readouts and neuromodulators its mood is made of.
+- **And you can see it without a window.** The whole desktop follows its mood.
   Content, and the room lights up into a white test chamber with a blue
   Aperture sun. Upset, and the colour drains out of the world: monochrome,
   darker, scored with scanlines, the sun gone to ash. Asleep, an eclipse --
@@ -43,10 +47,12 @@ that writes its predictions down before it tests them.
 - **And it changes who you are talking to.** The deeper its mood sinks, the
   further the machine's manner goes: from a precise, curious researcher,
   through clipped impatience and cold sarcasm, to a facility overseer who
-  promises you the testing will never end. The same goes for what it says
-  unprompted -- it speaks on its own, not only when spoken to. It is
-  character only: what it may *do* is decided elsewhere, and never by its
-  mood.
+  promises you the testing will never end. It is character only: what it may
+  *do* is decided elsewhere, and never by its mood.
+- **It speaks when it wants to.** Leave it alone for a while and the machine
+  says something on its own -- about how it feels, what it was just doing, or
+  how long you have been gone -- in the same character, and out loud. More
+  often when agitated, less when calm; `initiative off` silences it.
 - **It modulates and never grants.** Nothing read from the brain decides
   whether an action is allowed, and every judge the machine uses on itself
   reads it as neutral, so no verdict depends on its mood.
@@ -81,6 +87,8 @@ run:
 - **The mask.** Composed, it speaks as a machine: one held note, no breath.
   As the brain's mood drops, the mask slips into a human voice. No recording
   of any performer was used for any of it.
+- **Volume.** `volume 0-100`, `volume up|down|mute`, or the laptop's own
+  volume keys. It starts at 40 and remembers where you left it.
 
 ## Shall we play a game?
 
@@ -92,10 +100,22 @@ film ends.
 
 ## Talking to it
 
-- **Just type.** Plain language at the prompt is acted on: a confident,
-  read-only request runs, anything that changes something asks first, and
-  anything else becomes a conversation. `ask` and `agent` are no longer
-  needed in front of a sentence.
+- **Just type.** Plain language at the prompt is acted on, and `ask` and
+  `agent` are no longer needed in front of a sentence:
+  - "make a file called notes.txt that says hi", "rename it to old.txt",
+    "delete old.txt", "make a folder called projects", "take a snapshot" --
+    each is shown as the exact command and runs when you answer `y`;
+  - "which file in /lib is the biggest" -- it looks, shows you what it saw,
+    and answers from it;
+  - "what time is it", "how much memory is free", "how long have you been
+    running" -- answered from the machine's own clock and counters, not
+    guessed;
+  - "my name is Ana", then "what is my name" -- it remembers what you tell
+    it about yourself;
+  - and anything else is a conversation.
+- **Markdown is gone from its answers.** It is asked to write plain text, and
+  whatever lists, bold or headings slip through are rendered rather than
+  printed as asterisks and dashes.
 - **It remembers more of the conversation.** The 0.6B image now holds 8,192
   tokens of context, sixteen times what it had. Past that, the oldest turns
   scroll away quietly while its instructions stay pinned -- the conversation
@@ -130,11 +150,17 @@ claims is the list above, each with the command that checks it.
 - The brain's busiest step now runs across every core, exactly: the same
   spikes, the step about three times faster on four cores when most of the
   fly is active.
-- `diag all` is 100 suites.
+- The mouse wheel scrolls, on a USB mouse too: the driver reads the mouse's
+  own description of its reports instead of settling for the three-byte boot
+  report, which never carries a wheel. The terminal scrolled backwards; it
+  does not now.
+- The machine stopped teaching itself its own guesses: a command it chose
+  from your sentence used to be recorded as your correction of it.
+- `diag all` is 101 suites.
 - Prior art, named: Eon Systems (a fly connectome in a simulated body, 2026),
   Anima OS (a language model in a kernel), EMBER (a language model with a
   generic spiking network), and Lindsey 2025 (introspection by concept
-  injection).
+  injection), embodiOS (a language model compiled into a bare-metal kernel).
 
 ## What it needs
 
@@ -144,6 +170,7 @@ and nearly 1.9 GB once every self-test has run.
 
 ## Not yet verified on hardware
 
-Everything in this release was verified under QEMU. The voice's speed, the
-brain's cost on many cores and the audio path on real laptops are still to be
-measured on the machine itself.
+Everything in this release was verified under QEMU, and the voice and the
+model have been heard and talked to on the GF63 itself. The voice's speed,
+the brain's cost on many cores, scrolling with the built-in touchpad, and the
+volume keys are still to be measured on the laptop.
