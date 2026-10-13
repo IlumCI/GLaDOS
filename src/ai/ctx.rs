@@ -306,7 +306,24 @@ pub fn selftest() -> bool {
             })
             .unwrap_or(false)
         };
-        claim("an adapter on trial in one context never reaches another", leak_free);
+        // A hybrid refuses an adapter outright (`attach_adapters`), so there is
+        // no trial adapter to leak, and saying it "never reached" chat would
+        // be a claim about nothing. On a hybrid -- CI's fixture is one -- the
+        // claim is the refusal.
+        let hybrid = super::with_engine(|e| e.model.cfg.hybrid()).unwrap_or(false);
+        if hybrid {
+            let refused = {
+                let _j = scoped(Ctx::Judge);
+                super::with_engine(|e| {
+                    let cfg = e.model.cfg;
+                    e.model.attach_adapters(super::adapter::Adapters::full(&cfg, 8, 16.0)).is_err()
+                })
+                .unwrap_or(false)
+            };
+            claim("a hybrid refuses a trial adapter, so there is nothing to leak", refused);
+        } else {
+            claim("an adapter on trial in one context never reaches another", leak_free);
+        }
         // And the conversation reads what it read before the trial, once the
         // trial's own restore has been published.
         let after = super::with_engine(|e| run(e, &toks));

@@ -182,7 +182,13 @@ pub fn selftest() -> bool {
     // decoded a token at a time, and steering moves it by far more than the
     // two paths differ. The prefill-and-forward gotcha, on the new field.
     if let Some((agree, moved)) = crate::ai::with_engine(|e| {
-        let ids = e.tok.encode("The quiet library opens at nine.", true, false);
+        // Inside the model's own window. Prefill stops at `seq_len` and a
+        // token loop does not, so on CI's hybrid fixture -- a 256-token byte
+        // vocabulary with a short window -- the sentence ran past the end and
+        // the two paths answered about different positions: 9.1 apart with no
+        // steering at all, which read as a prefill bug and was the test.
+        let mut ids = e.tok.encode("The quiet library opens at nine.", true, false);
+        ids.truncate(e.model.cfg.seq_len.saturating_sub(1).max(2));
         let mut cfg = e.model.cfg;
         cfg.seq_len = ids.len() + 1;
         let dir = introspect::calibration_direction(cfg.dim);
