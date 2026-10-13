@@ -175,6 +175,33 @@ outside the core, so it drops inhibition the rest of the brain feeds back
 onto the core. A core-plus-inhibitory-neighbours model should get PPL202
 right without breaking the other 34.
 
+**10. Near threshold, ignition is a probability, not a verdict.** Adding the
+core's inhibitory loop (`reduced2.py`: 2,919 neurons that take input from
+the core or the stimulus and inhibit it back) reproduced all 35 cases,
+PPL202 included. That fix came after seeing the miss, so it was tested out
+of sample (`predictions-loop.json`): the two new types where the models
+disagree, and three both call igniting. Four of five were right.
+DA2_lPN, predicted not to ignite, did.
+
+Every run until then used one random seed. The borderline types were run
+again on more seeds:
+
+| type | full brain, seeds 7/8/9 | core-only model, 20 seeds | core + loop, 20 seeds |
+|---|---|---|---|
+| DA2_lPN | yes / yes / no | 15/20 | 13/20 |
+| M_lvPNm48 | no / no / yes | 16/20 | 7/20 |
+| PPL202 | no / yes / yes | 7/20 | 6/20 |
+
+All three are **stochastic**: one input ignites the brain on one draw of
+the Poisson input and not on another. PPL202's "miss" was a single unlucky
+seed, and so were the disagreements the loop model was meant to fix. So the
+honest form of the result is a **probability of ignition per cell type**,
+which the reduced models give in seconds, and the binary scoring above is
+right only away from the boundary. Every type that is clearly on one side
+(all but these three) agreed with the full brain at every seed tested. The
+next measurement is calibration: reduced-model probability against
+full-brain frequency over enough seeds to estimate both.
+
 Scripts and frozen predictions are tracked in `research/attractor/`.
 
 **7. One state, whatever ignites it.** Every trigger produced the same
