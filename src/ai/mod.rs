@@ -12,6 +12,9 @@ pub mod backward;
 pub mod clade;
 pub mod constrain;
 pub mod context;
+pub mod ctx;
+pub mod sched;
+pub mod intent;
 pub mod initiative;
 pub mod learn;
 pub mod train;
@@ -37,6 +40,8 @@ pub mod problem;
 pub mod lex;
 pub mod recall;
 pub mod redqueen;
+pub mod research;
+pub mod wargame;
 pub mod route;
 pub mod sample;
 pub mod skill;
@@ -645,7 +650,9 @@ pub fn bench() {
 /// `State` is sized from the same config.
 pub struct Engine {
     pub model: model::Model,
-    pub tok: tokenizer::Tokenizer,
+    /// One tokenizer for every context. Nothing mutates it after load, so a
+    /// shared reference is exactly what it always was.
+    pub tok: &'static tokenizer::Tokenizer,
     pub state: model::State,
     pub rng: sample::Rng,
     /// The part that is allowed to change. Everything above it is frozen.
@@ -665,12 +672,41 @@ pub struct Engine {
     /// The last token emitted, so a resumed generation has something to feed
     /// the model when no new prompt is supplied.
     pub last_token: usize,
+    /// Bumped wherever `head`, `probe` or `council` change, so the end of a
+    /// borrow can tell the other contexts (`ctx::publish`). Missing a bump
+    /// leaves another context's router stale; it cannot corrupt anything.
+    pub router_epoch: u64,
+    /// What this engine last agreed with, per half. `ctx` owns it.
+    pub seen: ctx::Seen,
 }
 
-static ENGINE: Racy<Option<Engine>> = Racy::new(None);
+/// One engine per context (`ctx::Ctx`), created on first use.
+static ENGINES: Racy<[Option<Engine>; ctx::COUNT]> = Racy::new([None, None, None]);
+
+/// The adapter-free view of the weights every new context is built from,
+/// and the one tokenizer. Set once by `init`; read-only afterwards.
+static BASE: Racy<Option<(model::Model, &'static tokenizer::Tokenizer, vocab::Head)>> = Racy::new(None);
 
 pub fn engine_ready() -> bool {
-    unsafe { ENGINE.get().is_some() }
+    unsafe { BASE.get().is_some() }
+}
+
+/// The engine for a context, built on first use. `None` with no model.
+///
+/// Safe to call only while holding that context's holder, which is the same
+/// condition `with_engine` already establishes for the reference it hands
+/// out.
+unsafe fn engine_for(c: ctx::Ctx) -> Option<&'static mut Engine> {
+    let all = unsafe { ENGINES.get() };
+    let slot = &mut all[c as usize];
+    if slot.is_none() {
+        let (base, tok, head) = unsafe { BASE.get().as_ref()? };
+        // The boot head, which `sync_in` replaces with whatever `CANON` holds.
+        // Taken from `BASE` rather than the `Chat` engine, which another task
+        // may hold at this moment.
+        *slot = Some(ctx::spawn(base, tok, head.clone()));
+    }
+    slot.as_mut()
 }
 
 /// Which task owns the engine while the mind is running.
@@ -687,7 +723,11 @@ const NOBODY: usize = usize::MAX;
 /// runs on the initiative task, which set neither flag, so `with_engine`
 /// happily handed a second `&mut Engine` to anyone who asked during it. Adding
 /// a third pair would have made the next omission just as quiet.
-static HOLDER: AtomicUsize = AtomicUsize::new(NOBODY);
+static HOLDERS: [AtomicUsize; ctx::COUNT] = [const { AtomicUsize::new(NOBODY) }; ctx::COUNT];
+
+fn holder_of(c: ctx::Ctx) -> &'static AtomicUsize {
+    &HOLDERS[c as usize]
+}
 
 /// The engine, held across many `with_engine` calls.
 ///
@@ -703,12 +743,17 @@ static HOLDER: AtomicUsize = AtomicUsize::new(NOBODY);
 /// fault inside still can, but a fault in ring 0 with no guard page ends the
 /// machine anyway.
 pub struct EngineClaim {
-    _seal: (),
+    ctx: ctx::Ctx,
 }
 
 impl Drop for EngineClaim {
     fn drop(&mut self) {
-        HOLDER.store(NOBODY, Ordering::Release);
+        // Still ours, so the engine is ours to read: publish whatever the
+        // claim changed before anybody else can take it.
+        if let Some(e) = unsafe { engine_for(self.ctx) } {
+            ctx::publish(e);
+        }
+        holder_of(self.ctx).store(NOBODY, Ordering::Release);
     }
 }
 
@@ -719,8 +764,14 @@ impl Drop for EngineClaim {
 /// is exactly what happened before claims existed.
 pub fn claim_engine() -> Option<EngineClaim> {
     let me = crate::task::current();
-    match HOLDER.compare_exchange(NOBODY, me, Ordering::AcqRel, Ordering::Acquire) {
-        Ok(_) => Some(EngineClaim { _seal: () }),
+    let c = ctx::current();
+    match holder_of(c).compare_exchange(NOBODY, me, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => {
+            if let Some(e) = unsafe { engine_for(c) } {
+                ctx::sync_in(e);
+            }
+            Some(EngineClaim { ctx: c })
+        }
         Err(_) => None,
     }
 }
@@ -754,15 +805,32 @@ pub fn with_engine<R>(f: impl FnOnce(&mut Engine) -> R) -> Option<R> {
     // Taken for the length of this call when it is free, so a preemption in
     // the middle of the closure cannot let a second task in behind us. That is
     // the whole of the UB protection, and it needs nobody to remember a flag.
-    let took = match HOLDER.compare_exchange(NOBODY, me, Ordering::AcqRel, Ordering::Acquire) {
+    let c = ctx::current();
+    let holder = holder_of(c);
+    let took = match holder.compare_exchange(NOBODY, me, Ordering::AcqRel, Ordering::Acquire) {
         Ok(_) => true,
         // Ours already: a session claim, or a nested call.
         Err(h) if h == me => false,
         Err(_) => return None,
     };
-    let r = unsafe { ENGINE.get().as_mut().map(f) };
+    let r = match unsafe { engine_for(c) } {
+        Some(e) => {
+            // Only the outermost borrow syncs and publishes. A nested call or
+            // a call under a session claim leaves that to whoever took it, so
+            // a decode loop calling once per token pays nothing for this.
+            if took {
+                ctx::sync_in(e);
+            }
+            let r = f(e);
+            if took {
+                ctx::publish(e);
+            }
+            Some(r)
+        }
+        None => None,
+    };
     if took {
-        HOLDER.store(NOBODY, Ordering::Release);
+        holder.store(NOBODY, Ordering::Release);
     }
     r
 }
@@ -831,9 +899,10 @@ pub fn engine_selftest() -> bool {
     // state. An id that cannot be a real task, so nothing can be mid-call
     // under it.
     let other = me.wrapping_add(1_000_000);
-    HOLDER.store(other, Ordering::Release);
+    let h = holder_of(ctx::current());
+    h.store(other, Ordering::Release);
     let refused = with_engine(|_| ()).is_none();
-    HOLDER.store(NOBODY, Ordering::Release);
+    h.store(NOBODY, Ordering::Release);
     if !refused {
         return false;
     }
@@ -899,14 +968,30 @@ pub fn engine_refusal() -> alloc::string::String {
 }
 
 /// Which task holds the engine, for diagnostics. `None` when it is free.
+/// Who holds the running task's context, or `None`.
 pub fn engine_holder() -> Option<usize> {
-    match HOLDER.load(Ordering::Acquire) {
+    holder_in(ctx::current())
+}
+
+pub fn holder_in(c: ctx::Ctx) -> Option<usize> {
+    match holder_of(c).load(Ordering::Acquire) {
         NOBODY => None,
         h => Some(h),
     }
 }
 
+/// Whether any context is busy -- for work that should stand aside while the
+/// model is running anywhere, such as the miner's yield.
+pub fn any_holder() -> bool {
+    ctx::Ctx::ALL.iter().any(|c| holder_in(*c).is_some())
+}
+
 /// True when the engine is unavailable because the mind has it.
+/// Whether anybody holds the model in any context.
+pub fn engine_in_use() -> bool {
+    HOLDERS.iter().any(|h| h.load(Ordering::Acquire) != NOBODY)
+}
+
 pub fn engine_held_by_mind() -> bool {
     mind_busy() && crate::task::current() != MIND_TASK.load(Ordering::Acquire)
 }
@@ -1090,8 +1175,10 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
         c.param_count()
     );
 
+    let tok: &'static tokenizer::Tokenizer = alloc::boxed::Box::leak(alloc::boxed::Box::new(tok));
     unsafe {
-        *ENGINE.get() = Some(Engine {
+        *BASE.get() = Some((m.share(), tok, head.clone()));
+        ENGINES.get()[ctx::Ctx::Chat as usize] = Some(Engine {
             model: m,
             tok,
             state,
@@ -1101,6 +1188,10 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
             council: None,
             pos: 0,
             last_token: tokenizer::BOS,
+            // One past what `seen` records, so the first borrow publishes the
+            // head into `CANON` and every later context starts from it.
+            router_epoch: 1,
+            seen: ctx::Seen::default(),
         })
     };
 
@@ -1181,7 +1272,7 @@ pub fn init(model_blob: Option<Blob>, tok_blob: Option<Blob>) {
         kprintln!("  the conversation from last boot is still here ({} tokens in)", pos);
         console::set_color(LTGRAY);
     }
-    kprintln!("  ready -- 'ask <question>' to talk, 'act <task>' to choose an applet");
+    kprintln!("  ready -- just type to talk; a task is handed to the agent");
     console::set_color(LTGRAY);
 
     kprintln!();
@@ -1393,6 +1484,212 @@ fn echo(s: &str) {
     }
 }
 
+/// Markdown in conversation (`set_plain`), rendered rather than printed.
+///
+/// The model writes markdown out of habit, and on this console a marker is
+/// not formatting, it is asterisks. So the markers are consumed and become
+/// what they mean: bold and headings in yellow, inline code in cyan, a list
+/// item's `-`, `*` or `+` a real bullet. The transcript (`echo`), which the
+/// windows and the voice read, gets the clean text with no markers in it.
+///
+/// It runs on the token stream, so a marker can arrive split across two
+/// tokens: a trailing `*`, `_`, `#` or `` ` `` is held back until the next
+/// piece says what it was. Off for `gen` and code, where those characters
+/// are content.
+struct Plain {
+    on: bool,
+    /// At the start of a line, where `#`, `>` and `- ` mean structure.
+    line_start: bool,
+    bold: bool,
+    code: bool,
+    heading: bool,
+    /// Held over from the last piece, undecided.
+    carry: alloc::string::String,
+}
+
+static PLAIN: Racy<Plain> = Racy::new(Plain {
+    on: false,
+    line_start: true,
+    bold: false,
+    code: false,
+    heading: false,
+    carry: alloc::string::String::new(),
+});
+
+/// Rendered markdown on or off, for the conversation's turns.
+pub fn set_plain(on: bool) {
+    let p = unsafe { &mut *PLAIN.get() };
+    *p = Plain { on, line_start: true, bold: false, code: false, heading: false, carry: alloc::string::String::new() };
+}
+
+const MD_BASE: u8 = console::WHITE;
+const MD_STRONG: u8 = console::YELLOW;
+const MD_CODE: u8 = console::LTCYAN;
+
+/// One piece in, coloured runs out. `flush` decides a held tail as text.
+fn plain_text(s: &str, flush: bool) -> Vec<(alloc::string::String, u8)> {
+    let p = unsafe { &mut *PLAIN.get() };
+    if !p.on {
+        return alloc::vec![(alloc::string::String::from(s), 0xff)];
+    }
+    let mut text = core::mem::take(&mut p.carry);
+    text.push_str(s);
+    let b: Vec<char> = text.chars().collect();
+    let mut runs: Vec<(alloc::string::String, u8)> = Vec::new();
+    let colour = |p: &Plain| if p.code { MD_CODE } else if p.bold || p.heading { MD_STRONG } else { MD_BASE };
+    let push = |runs: &mut Vec<(alloc::string::String, u8)>, c: char, col: u8| match runs.last_mut() {
+        Some((t, k)) if *k == col => t.push(c),
+        _ => runs.push((alloc::string::String::from(c), col)),
+    };
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        // At a line's start `-`, `+` and `>` are as undecided as the rest:
+        // a model sends a list's `-` as one token and ` item` as the next.
+        if i + 1 == b.len() && (matches!(c, '*' | '_' | '#' | '`') || (p.line_start && matches!(c, '-' | '+' | '>'))) {
+            if !flush {
+                p.carry.push(c);
+                break;
+            }
+            // The end of the reply, and nothing ever followed it: it was text.
+            push(&mut runs, c, colour(p));
+            break;
+        }
+        if p.code {
+            if c == '`' {
+                p.code = false;
+            } else {
+                push(&mut runs, c, MD_CODE);
+                p.line_start = c == '\n';
+            }
+            i += 1;
+            continue;
+        }
+        if p.line_start {
+            if c == '#' {
+                let n = b[i..].iter().take_while(|&&x| x == '#').count();
+                if b.get(i + n).is_some_and(|x| *x == ' ') {
+                    p.heading = true;
+                    p.line_start = false;
+                    i += n + 1;
+                    continue;
+                }
+            }
+            if c == '>' && b.get(i + 1) == Some(&' ') {
+                i += 2;
+                continue;
+            }
+            if matches!(c, '*' | '+' | '-') && b.get(i + 1) == Some(&' ') {
+                let col = colour(p);
+                push(&mut runs, '\u{2022}', col);
+                push(&mut runs, ' ', col);
+                p.line_start = false;
+                i += 2;
+                continue;
+            }
+            if c == ' ' || c == '\t' {
+                push(&mut runs, c, colour(p));
+                i += 1;
+                continue;
+            }
+        }
+        match c {
+            '*' => {
+                let n = b[i..].iter().take_while(|&&x| x == '*').count();
+                p.bold = !p.bold;
+                i += n;
+                continue;
+            }
+            '_' if b.get(i + 1) == Some(&'_') => {
+                p.bold = !p.bold;
+                i += 2;
+                continue;
+            }
+            '`' => {
+                let n = b[i..].iter().take_while(|&&x| x == '`').count();
+                p.code = true;
+                i += n;
+                continue;
+            }
+            '\n' => {
+                // A heading, an unclosed bold or a fence's language word
+                // never runs past the line that started it.
+                p.heading = false;
+                p.bold = false;
+                p.line_start = true;
+                push(&mut runs, c, MD_BASE);
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        push(&mut runs, c, colour(p));
+        p.line_start = false;
+        i += 1;
+    }
+    runs
+}
+
+/// `diag markdown`: the renderer, fed the way the decoder feeds it.
+pub fn markdown_selftest() -> bool {
+    use crate::gfx::console::{LTGRAY as G, LTGREEN as OK, LTRED as BAD};
+    let run = |pieces: &[&str]| {
+        set_plain(true);
+        let mut out: Vec<(alloc::string::String, u8)> = Vec::new();
+        for p in pieces {
+            out.extend(plain_text(p, false));
+        }
+        out.extend(plain_text("", true));
+        set_plain(false);
+        // Adjacent runs of one colour are one run on screen.
+        let mut merged: Vec<(alloc::string::String, u8)> = Vec::new();
+        for (t, c) in out {
+            match merged.last_mut() {
+                Some((mt, mc)) if *mc == c => mt.push_str(&t),
+                _ => merged.push((t, c)),
+            }
+        }
+        merged
+    };
+    let text = |r: &[(alloc::string::String, u8)]| r.iter().map(|x| x.0.as_str()).collect::<alloc::string::String>();
+    let col_of = |r: &[(alloc::string::String, u8)], w: &str| r.iter().find(|x| x.0.contains(w)).map(|x| x.1);
+    let bold = run(&["it is **ve", "ry** good"]);
+    let head = run(&["# Ti", "tle\nbody"]);
+    let list = run(&["- one\n* two"]);
+    let split = run(&["-", " sysbox\n", "-", " ls"]);
+    let code = run(&["run `ls /ai` now"]);
+    let snake = run(&["a snake_case name"]);
+    let tail = run(&["five *"]);
+    let rows = [
+        ("a bold marker split across two tokens is consumed and the word is strong", text(&bold) == "it is very good" && col_of(&bold, "very") == Some(MD_STRONG)),
+        ("a heading loses its hashes and only its own line is strong", text(&head) == "Title\nbody" && col_of(&head, "Title") == Some(MD_STRONG) && col_of(&head, "body") == Some(MD_BASE)),
+        ("list markers become bullets", text(&list) == "\u{2022} one\n\u{2022} two"),
+        ("a bullet's dash arriving as its own token still becomes a bullet", text(&split) == "\u{2022} sysbox\n\u{2022} ls"),
+        ("inline code loses its backticks and is coloured as code", text(&code) == "run ls /ai now" && col_of(&code, "ls /ai") == Some(MD_CODE)),
+        ("a single underscore inside a word is not markdown", text(&snake) == "a snake_case name"),
+        ("an asterisk nothing followed is printed as itself", text(&tail) == "five *"),
+    ];
+    let mut ok = true;
+    for (what, good) in rows {
+        console::set_color(if good { OK } else { BAD });
+        kprintln!("  {}  {}", if good { "ok  " } else { "FAIL" }, what);
+        console::set_color(G);
+        ok &= good;
+    }
+    ok
+}
+
+/// Print rendered runs and keep their clean text for the transcript.
+fn show(runs: Vec<(alloc::string::String, u8)>) {
+    for (t, col) in runs {
+        if col != 0xff {
+            console::set_color(col);
+        }
+        kprint!("{}", t);
+        echo(&t);
+    }
+}
+
 fn emit(pending: &mut Vec<u8>) {
     loop {
         if pending.is_empty() {
@@ -1400,8 +1697,7 @@ fn emit(pending: &mut Vec<u8>) {
         }
         match core::str::from_utf8(pending) {
             Ok(s) => {
-                kprint!("{}", s);
-                echo(s);
+                show(plain_text(s, false));
                 pending.clear();
                 return;
             }
@@ -1409,8 +1705,7 @@ fn emit(pending: &mut Vec<u8>) {
                 let good = e.valid_up_to();
                 if good > 0 {
                     if let Ok(s) = core::str::from_utf8(&pending[..good]) {
-                        kprint!("{}", s);
-                        echo(s);
+                        show(plain_text(s, false));
                     }
                     pending.drain(..good);
                     continue;
@@ -1613,6 +1908,8 @@ pub fn generate(prompt: &str, opts: &GenOpts) {
         e.last_token = token;
 
         emit(&mut pending);
+        // A marker held for the next token that never came is text.
+        show(plain_text("", true));
         let elapsed = crate::time::rdtsc() - t0;
         console::set_color(LTGRAY);
         kprintln!();
@@ -1793,6 +2090,20 @@ use core::sync::atomic::AtomicBool;
 
 static REQUEST: Racy<Option<alloc::string::String>> = Racy::new(None);
 static BUSY: AtomicBool = AtomicBool::new(false);
+/// The pending request is the machine speaking up on its own (`remark`),
+/// not an operator's `think`: shown as speech rather than as a thought, and
+/// spoken aloud when the voice is on.
+static REMARK: AtomicBool = AtomicBool::new(false);
+
+/// Queue something the machine says unprompted. False if the mind is busy.
+pub fn remark(prompt: &str) -> bool {
+    if think(prompt) {
+        REMARK.store(true, Ordering::Release);
+        true
+    } else {
+        false
+    }
+}
 
 pub fn mind_busy() -> bool {
     BUSY.load(Ordering::Acquire)
@@ -1829,8 +2140,13 @@ pub fn mind_task() {
             continue;
         }
 
+        let speaking = REMARK.swap(false, Ordering::AcqRel);
         console::set_color(YELLOW);
-        kprintln!("\n[mind] thinking...");
+        if speaking {
+            kprintln!("");
+        } else {
+            kprintln!("\n[mind] thinking...");
+        }
         console::set_color(LTGRAY);
 
         // Held for the whole thought, not per token. `generate` resumes the
@@ -1847,19 +2163,48 @@ pub fn mind_task() {
         // shared with the operator's conversation and always was; what changes
         // here is that the machine's own thought is labelled as its own, so
         // neither the operator nor the model has to guess who said it.
-        let mut framed = companion::interject_frame(
-            "The following is your own thought, unprompted. The operator did not ask for it.",
-        );
-        framed.push_str(&prompt);
-        let opts =
+        // A remark's facts go in the instruction, and the turn it speaks in
+        // starts empty: given after the frame, inside its own turn, they were
+        // read as text to continue, and the first remark was the prompt
+        // carried on -- "You notice that you have a feeling of something.
+        // What is it?"
+        let framed = if speaking {
+            companion::interject_frame(&alloc::format!(
+                "{} Speak to the operator now, unprompted, as the administrator of this machine: one or two short sentences, addressed to them, about one of these. Do not repeat these words back.",
+                prompt
+            ))
+        } else {
+            let mut f = companion::interject_frame(
+                "The following is your own thought, unprompted. The operator did not ask for it.",
+            );
+            f.push_str(&prompt);
+            f
+        };
+        let opts = if speaking {
+            GenOpts { steps: 40, temperature: 0.7, topp: 0.9, resume: true, yielding: true,
+                      bos: false, echo_prompt: false, ..Default::default() }
+        } else {
             GenOpts { steps: 48, temperature: 0.9, topp: 0.9, resume: true, yielding: true,
-                      bos: false, echo_prompt: false, ..Default::default() };
+                      bos: false, echo_prompt: false, ..Default::default() }
+        };
+        echo_begin();
+        set_plain(true);
         generate(&framed, &opts);
+        set_plain(false);
+        let said = echo_end();
         companion::interjected();
+        if speaking {
+            if let Some(s) = said {
+                companion::log_said(&s);
+                crate::voice::speak_reply(&s);
+            }
+        }
 
-        console::set_color(YELLOW);
-        kprintln!("[mind] done");
-        console::set_color(LTGRAY);
+        if !speaking {
+            console::set_color(YELLOW);
+            kprintln!("[mind] done");
+            console::set_color(LTGRAY);
+        }
         crate::shell::reprompt();
 
         BUSY.store(false, Ordering::Release);
@@ -1902,13 +2247,18 @@ pub fn agent_busy() -> bool {
 /// whichever is asked second refuses, because both would fight over the
 /// engine otherwise.
 pub fn agent_run(goal: &str, trust: harness::Trust, max_steps: usize) {
+    let ahead = agent::queued().len() + agent::doing().is_some() as usize;
     if agent::queue_episode(goal, trust, max_steps) {
         console::set_color(LTGREEN);
-        kprintln!("  queued -- the shell stays yours; 'agent stop' cancels");
+        if ahead == 0 {
+            kprintln!("  queued -- the shell stays yours; 'agent stop' cancels");
+        } else {
+            kprintln!("  queued behind {} job(s) -- 'agent queue' lists them", ahead);
+        }
         console::set_color(LTGRAY);
     } else {
         console::set_color(YELLOW);
-        kprintln!("  an episode is already pending or running");
+        kprintln!("  the queue is full ({} waiting) -- 'agent queue' lists them", agent::QUEUE_MAX);
         console::set_color(LTGRAY);
     }
 }
@@ -2079,9 +2429,10 @@ pub fn set_window(sinks: usize, window: usize) {
         // to 72 while the model went on answering fluently.
         let was_ring = before < e.model.cfg.seq_len;
         if !was_ring && after <= before && e.pos <= after {
-            console::set_color(LTGRAY);
-            kprintln!(
-                "  cache now a ring of {} ({} positions kept)",
+            // Bookkeeping, not news: the conversation carries on either way,
+            // so the screen is not told. The serial log is.
+            crate::serial_println!(
+                "[ctx] cache now a ring of {} ({} positions kept)",
                 after, e.pos
             );
             return;

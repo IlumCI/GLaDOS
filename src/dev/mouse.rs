@@ -170,6 +170,8 @@ fn apply_with(dx: i32, dy: i32, left: bool, right: bool, wheel: i32, hand: bool)
     if wheel != 0 {
         s.wheel += wheel;
         s.moved = true;
+        let n = wheel.unsigned_abs() as u64;
+        if wheel > 0 { NOTCHES_DOWN.fetch_add(n, Relaxed) } else { NOTCHES_UP.fetch_add(n, Relaxed) };
     }
     if left != s.left || right != s.right {
         s.moved = true;
@@ -383,6 +385,18 @@ static PACKETS: AtomicU64 = AtomicU64::new(0);
 static RESYNCS: AtomicU64 = AtomicU64::new(0);
 static STALE: AtomicU64 = AtomicU64::new(0);
 static RESCUED: AtomicU64 = AtomicU64::new(0);
+/// Wheel notches that reached `apply`, from any driver. Whether a wheel turned
+/// anything is two questions -- did a notch arrive, and did a window take it
+/// -- and on the GF63 the first one is the unknown: a touchpad in PS/2
+/// emulation may simply never send one.
+static NOTCHES_DOWN: AtomicU64 = AtomicU64::new(0);
+static NOTCHES_UP: AtomicU64 = AtomicU64::new(0);
+
+/// `(PS/2 wheel enabled, notches down, notches up)`, for `mouse`.
+pub fn wheel_stats() -> (bool, u64, u64) {
+    (unsafe { *WHEEL.get() }, NOTCHES_DOWN.load(Relaxed), NOTCHES_UP.load(Relaxed))
+}
+
 /// TSC of the last byte, so a half-packet left lying can be recognised.
 static LAST_BYTE: AtomicU64 = AtomicU64::new(0);
 

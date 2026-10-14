@@ -1,0 +1,71 @@
+{
+ "written": "2026-10-12T20:50:24",
+ "rule": "reduced core model, core_late > 100",
+ "cases": {
+  "ORN_DM3": {
+   "predict_ignites": true,
+   "n": 61
+  },
+  "VC3_adPN": {
+   "predict_ignites": true,
+   "n": 8
+  },
+  "ORN_VC4": {
+   "predict_ignites": true,
+   "n": 23
+  },
+  "ORN_DL2v": {
+   "predict_ignites": true,
+   "n": 18
+  },
+  "ORN_DL2d": {
+   "predict_ignites": true,
+   "n": 14
+  },
+  "CL099c": {
+   "predict_ignites": false,
+   "n": 3,
+   "core_synapses": 24
+  },
+  "CB2180": {
+   "predict_ignites": false,
+   "n": 5,
+   "core_synapses": 68
+  },
+  "LHAV3b12": {
+   "predict_ignites": false,
+   "n": 2,
+   "core_synapses": 97
+  },
+  "SLP047": {
+   "predict_ignites": false,
+   "n": 2,
+   "core_synapses": 28
+  },
+  "CB1566": {
+   "predict_ignites": false,
+   "n": 2,
+   "core_synapses": 37
+  },
+  "AN_LH_AVLP_1": {
+   "predict_ignites": true,
+   "n": 4,
+   "class": "AN"
+  },
+  "CSD": {
+   "predict_ignites": true,
+   "n": 2,
+   "class": "central"
+  },
+  "LB3b": {
+   "predict_ignites": true,
+   "n": 25,
+   "class": "gustatory"
+  },
+  "PPL202": {
+   "predict_ignites": true,
+   "n": 2,
+   "class": "DAN"
+  }
+ }
+}

@@ -2372,7 +2372,41 @@ fn store_cmd(rest: &str) {
     }
 }
 
+/// Uptime in seconds when the operator last entered a line, for the mind to
+/// tell an operator who is busy from one who has gone quiet.
+static LAST_LINE_AT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Seconds since the operator last entered a line at the prompt.
+pub fn seconds_since_line() -> u64 {
+    let now = lapic::ticks() / crate::TIMER_HZ as u64;
+    now.saturating_sub(LAST_LINE_AT.load(core::sync::atomic::Ordering::Relaxed))
+}
+
+/// Commands in flight on the shell. A counter because `execute` calls itself.
+static IN_COMMAND: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Whether the shell is in the middle of a command -- a chat answer that
+/// takes a minute is the operator waiting, not the operator gone quiet.
+pub fn in_command() -> bool {
+    IN_COMMAND.load(core::sync::atomic::Ordering::Relaxed) > 0
+}
+
+struct Running;
+impl Drop for Running {
+    fn drop(&mut self) {
+        IN_COMMAND.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+        // Quiet is measured from when the answer ended, not from when the
+        // question was typed.
+        LAST_LINE_AT.store(lapic::ticks() / crate::TIMER_HZ as u64, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi::Interp) {
+    if !line.trim().is_empty() {
+        LAST_LINE_AT.store(lapic::ticks() / crate::TIMER_HZ as u64, core::sync::atomic::Ordering::Relaxed);
+    }
+    IN_COMMAND.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let _running = Running;
     // A miner image asking for its payout address takes a typed `0x...` line
     // before anything else can. See `mine::boot::answer`.
     if let Some(msg) = crate::mine::boot::answer(line) {
@@ -2395,8 +2429,16 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
     // verb was typed and not about whether it worked: an operator correcting
     // the machine with a command that then fails has still said which applet
     // they meant.
-    match crate::ai::learn::operator_ran(cmd) {
+    // Only what the operator typed. A command the router composed out of a
+    // sentence is the machine's own choice wearing a command's shape, and
+    // learning from it is learning from the model's argmax -- measured: the
+    // line "what files are in /lib", routed to `stat`, was filed as the
+    // operator correcting "how much memory is free" with `stat`.
+    let typed = !FROM_INTENT.load(core::sync::atomic::Ordering::Relaxed);
+    match if typed { crate::ai::learn::operator_ran(cmd) } else { crate::ai::learn::Verdict::NoGoal } {
         crate::ai::learn::Verdict::Learn(applet, task) => {
+            // Being corrected stings, a little: a short noxious drive.
+            crate::brain::stimulate(crate::brain::Sense::Noxious, 200);
             console::set_color(LTGREEN);
             kprintln!("  [learn] '{}' for: {}", applet, task);
             console::set_color(LTGRAY);
@@ -2416,6 +2458,24 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
     // the editor window, because an editor is what "write" with nothing to
     // write means. Decided here, before sysbox, or the applet's usage error
     // would claim the bare form.
+    // "write a haiku about kernels" is a request for a haiku, and was the
+    // `write` applet making `/a` with "haiku about kernels" in it. A first
+    // argument that is not shaped like a path, followed by prose, is language.
+    if typed && cmd == "write" && crate::ai::intent::write_is_prose(rest) {
+        run_decision(crate::ai::intent::decide(line), boot, acpi, interp);
+        return;
+    }
+    // "find files that mention godel" searched for that whole phrase and found
+    // nothing. The word being looked for is what follows the sentence around it.
+    if typed && cmd == "find" {
+        if let Some(k) = crate::ai::intent::find_keyword(rest) {
+            console::set_color(LTGRAY);
+            kprintln!("  (searching for '{}')", k);
+            console::set_color(WHITE);
+            execute(&alloc::format!("find {}", k), boot, acpi, interp);
+            return;
+        }
+    }
     if cmd == "write" && rest.splitn(2, char::is_whitespace).nth(1).is_none() {
         crate::gfx::desk::open_write(rest);
         return;
@@ -2446,7 +2506,21 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
     // sysbox first otherwise: it owns a whole vocabulary of short names, and
     // claiming them here keeps that list in one place instead of spreading
     // twenty more arms across this match.
+    // A sentence that happens to start with a command's name is still a
+    // sentence: "help me find the big files" is not the `help` command.
+    if crate::ai::intent::verb_first_language(cmd, rest) {
+        run_decision(crate::ai::intent::decide(line), boot, acpi, interp);
+        return;
+    }
+
+    let errors_before = crate::sysbox::errors();
     if !shell_owns && crate::sysbox::dispatch(cmd, rest) {
+        // It ran and said no. The operator meant something, and the machine
+        // can usually find another way to it.
+        if crate::sysbox::errors() != errors_before && crate::ai::intent::rescue_on() {
+            let why = crate::sysbox::last_error();
+            run_decision(crate::ai::intent::rescue(line, &why), boot, acpi, interp);
+        }
         return;
     }
 
@@ -3386,66 +3460,6 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                 }
                 _ => kprintln!("  usage: recall [on|off]"),
-            }
-        }
-        "ask" => {
-            let mut opts = crate::ai::GenOpts { steps: 64, temperature: 0.3, ..Default::default() };
-            let mut q = rest;
-            // Flags in any order, and -t before -n is the natural way to type
-            // it, so this loops rather than testing a fixed sequence.
-            loop {
-                if let Some(t) = q.strip_prefix("-t ") {
-                    opts.think = true;
-                    q = t.trim_start();
-                } else if let Some(t) = q.strip_prefix("-n ") {
-                    let mut it = t.splitn(2, ' ');
-                    match (it.next(), it.next()) {
-                        (Some(n), Some(tail)) => {
-                            opts.steps = n.parse().unwrap_or(opts.steps);
-                            q = tail.trim_start();
-                        }
-                        _ => break,
-                    }
-                } else {
-                    break;
-                }
-            }
-            if opts.think && opts.steps < 256 {
-                // Reasoning is not free and a truncated <think> block prints as
-                // a monologue with no answer, which looks like a broken model.
-                opts.steps = 256;
-                kprintln!("  (thinking: raised to {} tokens)", opts.steps);
-            }
-            if q.is_empty() {
-                kprintln!("  usage: ask [-t] [-n tokens] <question>");
-                kprintln!("     -t  let the model reason first, if it can");
-                kprintln!("     one conversation, continued -- 'ask new' to forget it");
-            } else if q == "new" {
-                crate::ai::companion::reset();
-                kprintln!("  forgotten. the next question starts a new conversation");
-            } else {
-                // A turn of one conversation, not a question asked into the
-                // void. The cache already holds what was said, so this costs
-                // the tokens of this turn and not of the whole exchange.
-                let n = crate::ai::companion::turns();
-                crate::ai::companion::turn(q, &opts);
-                // **Not** parked per turn, and the measurement is why.
-                //
-                // Parking writes the whole KV cache as a blob. The store is
-                // append-only -- `alloc_next` only rises and nothing reclaims
-                // -- so with autosnap running, two turns of a 512-slot cache
-                // wrote 16,375 then 19,625 blocks and took half a 27 MiB
-                // region. A 0.6B at 8k has a cache three orders of magnitude
-                // larger. There is no cadence that makes this affordable, so
-                // it is on request: `ctx save live`, which `revive` reads at
-                // boot.
-                //
-                // What survives on its own is what is small: `/ai/about` is a
-                // few hundred bytes and autosnap carries it, which is the part
-                // that actually has to be automatic.
-                if n == 0 {
-                    kprintln!("  ('ctx save live' to carry this conversation past the reboot)");
-                }
             }
         }
         "repeat" => {
@@ -4873,6 +4887,96 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 kprintln!("  a request is already pending");
             }
         }
+        "volume" | "vol" => volume_verb(rest.trim()),
+        "voice" => match rest.trim() {
+            "on" => {
+                crate::voice::set_on(true);
+                kprintln!("  replies are spoken now");
+            }
+            "off" => {
+                crate::voice::set_on(false);
+                kprintln!("  quiet");
+            }
+            "stop" | "hush" => crate::voice::hush(),
+            r if r == "volume" || r.starts_with("volume ") => volume_verb(r[6..].trim()),
+            "" => kprintln!("  {}", crate::voice::status()),
+            "model" => kprintln!("  {}", crate::voice::neural::status()),
+            r if r.starts_with("say ") => {
+                // The headless way to hear it: the queue, as a reply would
+                // take, whatever `voice on` says.
+                let n = crate::voice::say(r[4..].trim());
+                kprintln!("  {} sentence(s) queued", n);
+            }
+            r if r.starts_with("verify ") => {
+                // The neural voice against the host's reference pass,
+                // stage by stage; the path is a GLADOSV1 dump from
+                // `tools/kokoro.py --dump`.
+                for line in crate::voice::neural::verify(r[7..].trim()) {
+                    kprintln!("  {}", line);
+                }
+            }
+            _ => kprintln!("  usage: voice [on|off|stop|volume [0-100|up|down|mute]|model|say <text>|verify <dump>]"),
+        },
+        "brain" => {
+            // The connectome: what it is, what it reads, and a way to drive
+            // it by hand -- the headless test, for the reason `linux feed`
+            // exists.
+            let w: alloc::vec::Vec<&str> = rest.split_whitespace().collect();
+            match w.as_slice() {
+                [] => {
+                    for line in crate::brain::report() {
+                        kprintln!("{}", line);
+                    }
+                }
+                ["pace", n] => match n.parse::<u64>() {
+                    Ok(p) if (1..=100).contains(&p) => {
+                        crate::brain::set_pace(p);
+                        kprintln!("  the brain may use {}% of a core", p);
+                    }
+                    _ => kprintln!("  pace wants a percent of one core, 1..100"),
+                },
+                ["sleep"] => {
+                    crate::brain::request_sleep(true);
+                    kprintln!("  it will rest at the next second -- touch or speech wakes it");
+                }
+                ["wake"] => {
+                    crate::brain::request_sleep(false);
+                    kprintln!("  waking");
+                }
+                ["on"] => crate::brain::set_on(true),
+                ["off"] => crate::brain::set_on(false),
+                ["poke", sense] | ["poke", sense, _] => match crate::brain::Sense::parse(sense) {
+                    Some(s) => {
+                        let ms = w.get(2).and_then(|m| m.parse().ok()).unwrap_or(500u64).min(60_000);
+                        crate::brain::stimulate(s, ms);
+                        kprintln!("  driving {} for {} ms of brain time", s.name(), ms);
+                    }
+                    None => kprintln!("  senses: touch, hearing (voice), reward (food), pain (noxious), heat (thermal)"),
+                },
+                _ => kprintln!("  usage: brain [on|off|sleep|wake|pace <percent>|poke <sense> [ms]]"),
+            }
+        }
+        "intent" => {
+            // How far plain language typed at the prompt may reach.
+            use crate::ai::intent::{self, Reach};
+            match rest.split_whitespace().collect::<alloc::vec::Vec<_>>().as_slice() {
+                [] => {
+                    let r = match intent::reach() {
+                        Reach::ReadOnly => "readonly -- tasks that would change things are described, not run",
+                        Reach::Ask => "ask -- tasks that would change things are offered, and run on y",
+                        Reach::Full => "full -- tasks run, mutating ones included",
+                    };
+                    kprintln!("  plain language: {}", r);
+                    kprintln!("  operator-only commands are never reachable this way, at any setting");
+                }
+                ["trust", "readonly"] => intent::set_reach(Reach::ReadOnly),
+                ["trust", "ask"] => intent::set_reach(Reach::Ask),
+                ["trust", "full"] => intent::set_reach(Reach::Full),
+                ["rescue", "on"] => intent::set_rescue(true),
+                ["rescue", "off"] => intent::set_rescue(false),
+                _ => kprintln!("  usage: intent [trust readonly|ask|full] [rescue on|off]"),
+            }
+        }
         "agent" => {
             // `agent [-n steps] [--trust full] goal words...` -- flags first,
             // the goal verbatim after them. Read-only by default: the grammar
@@ -4880,6 +4984,19 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             // applets unless full trust is asked for by name.
             if rest.trim() == "stop" {
                 kprintln!("  {}", crate::ai::agent::request_abort());
+                return;
+            }
+            if rest.trim() == "queue" {
+                let q = crate::ai::agent::queued();
+                if let Some(what) = crate::ai::agent::doing() {
+                    kprintln!("  now: {}", what);
+                }
+                if q.is_empty() {
+                    kprintln!("  nothing waiting");
+                }
+                for (i, line) in q.iter().enumerate() {
+                    kprintln!("  {}. {}", i + 1, line);
+                }
                 return;
             }
             // What the machine watched its own episodes do. Validity and
@@ -4958,10 +5075,9 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     _ => break,
                 }
             }
-            if crate::ai::mind_busy() {
-                kprintln!("  the mind is busy -- wait for it to finish first");
-                return;
-            }
+            // No longer refused while the mind thinks: an episode runs in the
+            // agent context, with its own cache and holder, so the two do not
+            // share anything that could collide.
             if !crate::sysbox::is_ready() {
                 kprintln!("  no namespace to act on");
                 return;
@@ -5079,7 +5195,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("  deeptrain [-n N -e E -r R]   train q/k/v as well as the head");
             kprintln!("  simd                         what the CPU has, and what is enabled");
             kprintln!("  smp [bench]                  the other cores, and what they are worth");
-            kprintln!("  ask [-t] <question>          one continuing conversation; 'ask new' forgets");
+            kprintln!("  (just type)                  one continuing conversation; 'start over' forgets");
             kprintln!("  about [text]                 what the model should know about you");
             kprintln!("  skill [trust <hash>]         which skills keep operator powers");
             kprintln!("  sandbox [keep] <path>        run a program, see what it touched, undo it");
@@ -5893,40 +6009,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 kprintln!("  no ECAM: the bus cannot be read");
                 return;
             };
-            let bring_up = |pick: Option<usize>| -> bool {
-                let found = crate::dev::hda::find(ecam);
-                if found.is_empty() {
-                    kprintln!("  no HD Audio controller on the bus");
-                    return false;
-                }
-                // The one asked for, or the first whose codecs have an output
-                // wired to something -- an HDMI-only controller has none.
-                let order: alloc::vec::Vec<usize> = match pick {
-                    Some(i) => alloc::vec![i],
-                    None => (0..found.len()).collect(),
-                };
-                for i in order {
-                    let Some(d) = found.get(i).copied() else {
-                        kprintln!("  no controller {}", i);
-                        return false;
-                    };
-                    match crate::dev::hda::Hda::up(ecam, d) {
-                        Ok(h) => {
-                            let has = h.output().is_some();
-                            for line in crate::dev::hda::describe(&h) {
-                                kprintln!("  {}", line);
-                            }
-                            if has || pick.is_some() {
-                                crate::dev::hda::hold(h);
-                                return true;
-                            }
-                        }
-                        Err(f) => kprintln!("  {:04x}:{:04x}: {}", d.vendor, d.device, f.why()),
-                    }
-                }
-                kprintln!("  no controller has an output to play to");
-                false
-            };
+            let bring_up = |pick: Option<usize>| -> bool { crate::dev::hda::bring_up(ecam, pick, true) };
             match sub {
                 "" => {
                     let found = crate::dev::hda::find(ecam);
@@ -6395,6 +6478,200 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 },
             }
         }
+        "wargame" => {
+            // Global Thermonuclear War (src/ai/wargame.rs): the board here, and
+            // a line from the model in its present character after each turn.
+            use crate::ai::wargame::{self as wg, End, Game, Side};
+            use crate::gfx::console::{self, LTGRAY, LTGREEN, WHITE};
+            let game = unsafe { &mut *wg::GAME.get() };
+            // The board (`Game`, `End`, `Side`) is pure; this arm is the screen.
+            let say = |lines: &[&str]| {
+                console::set_color(LTGREEN);
+                for l in lines {
+                    kprintln!("{}", l);
+                }
+                console::set_color(WHITE);
+            };
+            let board = |g: &Game| {
+                console::set_color(LTGREEN);
+                for l in g.board() {
+                    kprintln!("{}", l);
+                }
+                console::set_color(WHITE);
+            };
+            // The machine's line for the turn, on screen and in its voice.
+            let speak = |g: &Game, t: &wg::Turn| {
+                let dark = crate::ai::companion::decay(crate::brain::now()) >= 250;
+                let l = wg::line(g, t, dark);
+                console::set_color(console::LTRED);
+                kprintln!("  {}", l);
+                console::set_color(WHITE);
+                crate::voice::say(&l);
+            };
+            let words: Vec<&str> = rest.split_whitespace().collect();
+            match words.as_slice() {
+                [] if game.is_none() => {
+                    say(&wg::GREETING);
+                    console::set_color(LTGRAY);
+                    kprintln!("  ('wargame 1' or 'wargame 2' to choose a side)");
+                    console::set_color(WHITE);
+                }
+                [] => board(game.as_ref().unwrap()),
+                ["1"] | ["2"] | ["us"] | ["ussr"] => {
+                    let side = if matches!(words[0], "1" | "us") { Side::UnitedStates } else { Side::SovietUnion };
+                    let g = Game::new(side);
+                    say(&[&alloc::format!("YOU ARE THE {}. I AM THE {}.", side.name(), g.machine().name()), ""]);
+                    board(&g);
+                    console::set_color(LTGRAY);
+                    kprintln!("  ('wargame strike <1-{}>' or 'wargame hold')", wg::MAX_STRIKE);
+                    console::set_color(WHITE);
+                    *game = Some(g);
+                }
+                ["strike", n] if game.is_some() => {
+                    let g = game.as_mut().unwrap();
+                    let t = g.play(n.parse().unwrap_or(0));
+                    if t.fired > 0 {
+                        say(&[&alloc::format!("LAUNCH DETECTED: {} WARHEADS.", t.fired), &alloc::format!("RETALIATION: {} WARHEADS.", t.answered)]);
+                    } else {
+                        say(&["NO LAUNCH DETECTED. HOLDING."]);
+                    }
+                    board(g);
+                    match t.end {
+                        Some(End::OnlyWinningMove) => {
+                            say(&[""]);
+                            say(&wg::STRANGE);
+                        }
+                        Some(End::NoWinner) => say(&["", "WINNER: NONE"]),
+                        None => {}
+                    }
+                    speak(g, &t);
+                    if t.end.is_some() {
+                        *game = None;
+                    }
+                }
+                ["hold"] if game.is_some() => {
+                    let g = game.as_mut().unwrap();
+                    let t = g.play(0);
+                    say(&["NO LAUNCH DETECTED. HOLDING."]);
+                    board(g);
+                    match t.end {
+                        Some(End::OnlyWinningMove) => {
+                            say(&[""]);
+                            say(&wg::STRANGE);
+                        }
+                        Some(End::NoWinner) => say(&["", "WINNER: NONE"]),
+                        None => {}
+                    }
+                    speak(g, &t);
+                    if t.end.is_some() {
+                        *game = None;
+                    }
+                }
+                ["quit"] => {
+                    *game = None;
+                    say(&["GAME ABANDONED."]);
+                }
+                _ => kprintln!("  usage: wargame [1|2|strike <1-{}>|hold|quit]", wg::MAX_STRIKE),
+            }
+        }
+        "research" => {
+            // The research loop's operator surface (src/ai/research.rs).
+            use crate::ai::research as rs;
+            let args: Vec<&str> = rest.split_whitespace().collect();
+            match args.as_slice() {
+                [] => {
+                    kprintln!("  unattended research: {}", if rs::granted() { "granted" } else { "not granted ('research trust')" });
+                    let l = rs::ledger();
+                    let lines: Vec<&str> = l.lines().collect();
+                    kprintln!("  ledger: {} line(s){}", lines.len(), if lines.is_empty() { "" } else { ", newest last:" });
+                    for x in lines.iter().skip(lines.len().saturating_sub(12)) {
+                        kprintln!("    {}", x);
+                    }
+                }
+                ["exp"] => {
+                    for e in rs::EXPERIMENTS {
+                        kprintln!("  {:12} {:20} {}", e.name, e.shape, e.about);
+                    }
+                }
+                ["trust"] => kprintln!("  {}", if rs::set_grant(true) { "the research job may run unattended" } else { "could not write the grant" }),
+                ["untrust"] => kprintln!("  {}", if rs::set_grant(false) { "unattended research revoked" } else { "could not write the grant" }),
+                ["show", id] => match rs::load(id) {
+                    Some(h) => {
+                        for l in h.render().lines() {
+                            kprintln!("  {}", l);
+                        }
+                    }
+                    None => kprintln!("  no hypothesis {}", id),
+                },
+                ["run", exp, ..] => {
+                    // research run <exp> [args...] -- <pred>, <pred> ...
+                    let (head, preds) = rest.split_once("--").unwrap_or((rest, ""));
+                    let head: Vec<String> = head.split_whitespace().skip(2).map(String::from).collect();
+                    let predicates: Option<Vec<rs::Pred>> =
+                        preds.split(',').map(str::trim).filter(|p| !p.is_empty()).map(rs::Pred::parse).collect();
+                    let (Some(e), Some(predicates)) = (rs::find(exp), predicates) else {
+                        kprintln!("  usage: research run <experiment> [args] -- <metric> <op> <value>, ...  ('research exp' lists them)");
+                        return;
+                    };
+                    let Some(cmd) = (e.line)(&head) else {
+                        kprintln!("  {} takes: {}", e.name, e.shape);
+                        return;
+                    };
+                    let h = rs::Hypothesis {
+                        family: alloc::format!("operator.{}", e.name),
+                        claim: alloc::format!("operator: {}", rest.trim()),
+                        experiment: String::from(e.name),
+                        args: head,
+                        seed: crate::time::rdtsc() & 0xffff_ffff,
+                        predicates,
+                        parent: None,
+                    };
+                    let id = match rs::preregister(&h) {
+                        Ok(id) => id,
+                        Err(why) => {
+                            kprintln!("  not preregistered: {}", why);
+                            return;
+                        }
+                    };
+                    kprintln!("  preregistered {}, running: {}", id, cmd.join(" ; "));
+                    crate::gfx::console::begin_capture();
+                    for c in cmd.iter() {
+                        execute(c, boot, acpi, interp);
+                    }
+                    let out = crate::gfx::console::end_capture().unwrap_or_default();
+                    for l in out.lines() {
+                        kprintln!("{}", l);
+                    }
+                    let metrics = (e.parse)(&out);
+                    let v = rs::judge(&h.predicates, &metrics);
+                    match rs::record(&id, &v, &metrics) {
+                        Ok(()) => kprintln!("  {} -- {} ({} metric(s) measured)", id, v.word(), metrics.len()),
+                        Err(why) => kprintln!("  result not recorded: {}", why),
+                    }
+                    if let Some(n) = rs::narrow(&h, &v) {
+                        kprintln!("  next, by narrowing: research run {} {} -- ...", n.experiment, n.args.join(" "));
+                    }
+                }
+                _ => kprintln!("  usage: research [exp|trust|untrust|show <id>|run <experiment> [args] -- <predicates>]"),
+            }
+        }
+        "mind" if rest.trim_start().starts_with("introspect") => {
+            // The preregistered introspection test (design/indicators.md).
+            // `calibrate` alone picks the strengths and touches no brain.
+            let args: Vec<&str> = rest.split_whitespace().skip(1).collect();
+            let mut out = Vec::new();
+            if args.first() == Some(&"calibrate") {
+                crate::mind::calibrate(&mut out);
+            } else {
+                let n = args.first().and_then(|v| v.parse().ok()).unwrap_or(125usize);
+                let ms = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(500u64);
+                let seed = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(20261012u64);
+                crate::mind::introspect(n, ms, seed, &mut out);
+            }
+            for l in out {
+                kprintln!("{}", l);
+            }
+        }
         "mind" if rest.trim() == "open" => {
             // The workspace. One command because the arrangement is the point:
             // a machine reporting on itself in four places at once reads as a
@@ -6410,11 +6687,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("[mind]");
             console::set_color(LTGRAY);
             kprintln!(
-                "  initiative {} -- {} ticks: {} acted, {} episodes queued, {} stood down",
+                "  initiative {} -- {} ticks: {} acted, {} episodes queued, {} remark(s), {} stood down",
                 if enabled { "on" } else { "off" },
                 ticks,
                 acts,
                 episodes,
+                crate::ai::initiative::remarks(),
                 suppressed
             );
             kprintln!(
@@ -7220,6 +7498,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     kprintln!(
                         "  ps/2    {} interrupt(s), {} packet(s), {} byte(s) dropped to resync, {} half-packet(s) abandoned, {} byte(s) rescued",
                         irqs, packets, resyncs, stale, rescued
+                    );
+                    let (ps2_wheel, down, up) = crate::dev::mouse::wheel_stats();
+                    kprintln!(
+                        "  wheel   ps/2 {}, {} notch(es) down and {} up seen",
+                        if ps2_wheel { "enabled" } else { "not offered" },
+                        down,
+                        up
                     );
                     crate::dev::usbhid::report();
                 }
@@ -8332,7 +8617,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         //
         // A file rather than a setting, because it is prose and because the
         // operator has to be able to correct it. It is read at the start of
-        // every conversation, so an edit takes effect on the next `ask new`.
+        // every conversation, so an edit takes effect when the operator next
+        // says "start over".
         "about" => {
             let path = crate::ai::companion::ABOUT;
             if rest.is_empty() {
@@ -8361,7 +8647,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 let n = buf.len();
                 if crate::sysbox::write_blob(path, buf) {
                     kprintln!("  {} B at {}", n, path);
-                    kprintln!("  takes effect on the next new conversation ('ask new')");
+                    kprintln!("  takes effect on the next new conversation ('start over')");
                 } else {
                     kprintln!("  could not write {}", path);
                 }
@@ -8611,9 +8897,24 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             }
         }
         _ => {
-            // Not a command, so it is code. This is the point of the whole
-            // exercise: there is no boundary between using the machine and
-            // programming it.
+            // Not a command. Code if it parses, and language if it does not --
+            // `ai::intent` says why the parser decides and not a guess.
+            if let Some(d) = crate::ai::intent::answer(line) {
+                run_decision(d, boot, acpi, interp);
+                return;
+            }
+            if let crate::ai::intent::Class::Prose = crate::ai::intent::classify(line, |n| interp.has_var(n)) {
+                if let Some(v) = crate::ai::intent::near_miss(line) {
+                    console::set_color(YELLOW);
+                    kprintln!("  not a command -- did you mean '{}'?", v);
+                    console::set_color(WHITE);
+                    return;
+                }
+                run_decision(crate::ai::intent::decide(line), boot, acpi, interp);
+                return;
+            }
+            // Code. This is the point of the whole exercise: there is no
+            // boundary between using the machine and programming it.
             match aiksi::eval_line(interp, line) {
                 Ok(aiksi::Value::Nil) => {}
                 Ok(v) => {
@@ -8628,6 +8929,85 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
             }
         }
+    }
+}
+
+/// Set while a command `ai::intent` composed is running, so `learn` does not
+/// take it for the operator's own hand.
+static FROM_INTENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Carry out what `ai::intent` decided about a line of language, saying so.
+fn run_decision(d: crate::ai::intent::Decision, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi::Interp) {
+    match d {
+        crate::ai::intent::Decision::Run(cmd, why) => {
+            console::set_color(LTGRAY);
+            kprintln!("  ({})", why);
+            console::set_color(WHITE);
+            FROM_INTENT.store(true, core::sync::atomic::Ordering::Relaxed);
+            execute(&cmd, boot, acpi, interp);
+            FROM_INTENT.store(false, core::sync::atomic::Ordering::Relaxed);
+        }
+        crate::ai::intent::Decision::Chat(text, why) => {
+            console::set_color(LTGRAY);
+            kprintln!("  ({})", why);
+            console::set_color(WHITE);
+            chat(&text);
+        }
+        crate::ai::intent::Decision::Grounded(question, cmd, why) => {
+            console::set_color(LTGRAY);
+            kprintln!("  ({})", why);
+            console::set_color(WHITE);
+            console::begin_capture();
+            FROM_INTENT.store(true, core::sync::atomic::Ordering::Relaxed);
+            execute(&cmd, boot, acpi, interp);
+            FROM_INTENT.store(false, core::sync::atomic::Ordering::Relaxed);
+            let shown = console::end_capture().unwrap_or_default();
+            // Shown to the operator as well: the answer is only as good as
+            // what it was read from, and that should be on screen beside it.
+            kprint!("{}", shown);
+            // Bounded, because it goes into the prompt: a long listing would
+            // spend the context the question needs.
+            // A listing reshaped for reading: `ls` prints an address, a size
+            // and a name, and asked which file in /lib was biggest the 0.6B
+            // answered with an address. So the address goes, the size is
+            // labelled, and the biggest comes first.
+            let shown_for_model = readable_listing(&shown).unwrap_or_else(|| shown.clone());
+            let mut seen: alloc::string::String = shown_for_model.chars().take(1500).collect();
+            if seen.len() < shown_for_model.len() {
+                seen.push_str("\n...");
+            }
+            let framed = alloc::format!("(The machine shows, from `{}`:\n{})\n{}", cmd, seen.trim_end(), question);
+            chat(&framed);
+        }
+        crate::ai::intent::Decision::Forget => {
+            crate::ai::companion::reset();
+            kprintln!("  forgotten -- the next thing you say starts a new conversation");
+        }
+        crate::ai::intent::Decision::Say(what) => {
+            if !what.is_empty() {
+                console::set_color(YELLOW);
+                kprintln!("  {}", what);
+                console::set_color(WHITE);
+            }
+        }
+    }
+}
+
+/// A turn of the one continuing conversation. This was the `ask` command,
+/// and now nothing is typed in front of it: whatever the operator says that
+/// is not a command or code reaches here through `ai::intent`.
+///
+/// The cache already holds what was said, so a turn costs the tokens of that
+/// turn and not of the whole exchange. It is **not** parked per turn:
+/// parking writes the whole KV cache, the store is append-only, and two
+/// turns of a 512-slot cache once took half a 27 MiB region -- so carrying a
+/// conversation past a reboot is `ctx save live`, on request.
+fn chat(q: &str) {
+    let opts = crate::ai::GenOpts { steps: 96, temperature: 0.3, ..Default::default() };
+    let n = crate::ai::companion::turns();
+    crate::ai::companion::turn(q, &opts);
+    if n == 0 {
+        kprintln!("  ('ctx save live' to carry this conversation past the reboot)");
     }
 }
 
@@ -10232,4 +10612,55 @@ fn virtual_caveat() {
         kprintln!("           as much as about this machine. The real one comes off the GF63.");
         console::set_color(LTGRAY);
     }
+}
+
+/// `volume [0-100|up|down|mute]`: how loud the voice is. Also on the laptop's
+/// own volume keys, which go through the same setter.
+fn volume_verb(arg: &str) {
+    match arg {
+        "" => {}
+        "up" | "+" => crate::voice::nudge_volume(10),
+        "down" | "-" => crate::voice::nudge_volume(-10),
+        "mute" | "off" => {
+            crate::voice::set_volume(0);
+            crate::voice::hush();
+        }
+        n => match n.trim_end_matches('%').parse::<usize>() {
+            Ok(v) if v <= 100 => crate::voice::set_volume(v),
+            _ => {
+                kprintln!("  usage: volume [0-100|up|down|mute]");
+                return;
+            }
+        },
+    }
+    kprintln!("  volume {}", crate::voice::volume());
+}
+
+/// `ls` output as a model can read it: `name (N bytes)`, biggest first, with
+/// directories marked. `None` when the text is not an `ls` listing.
+fn readable_listing(text: &str) -> Option<alloc::string::String> {
+    let mut rows: alloc::vec::Vec<(u64, alloc::string::String)> = alloc::vec::Vec::new();
+    for line in text.lines() {
+        let w: alloc::vec::Vec<&str> = line.split_whitespace().collect();
+        if w.len() != 3 || w[0].len() != 12 || !w[0].chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let n: u64 = w[1].parse().ok()?;
+        let name = if w[2].ends_with('/') {
+            alloc::format!("{} (a directory of {} entries)", w[2], n)
+        } else {
+            alloc::format!("{} ({} bytes)", w[2], n)
+        };
+        rows.push((if w[2].ends_with('/') { 0 } else { n }, name));
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut out = alloc::format!("{} entries, largest first:\n", rows.len());
+    for (_, r) in rows {
+        out.push_str(&r);
+        out.push('\n');
+    }
+    Some(out)
 }

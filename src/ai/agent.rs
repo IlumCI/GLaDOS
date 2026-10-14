@@ -205,7 +205,16 @@ struct Req {
     autonomous: bool,
 }
 
-static REQUEST: Racy<Option<Req>> = Racy::new(None);
+/// Jobs waiting for the agent task, oldest first.
+///
+/// It was one slot, and a second `agent <goal>` while an episode ran was
+/// refused outright. An operator now queues up to `QUEUE_MAX`. The machine's
+/// own work does not queue behind anything: an autonomous job is offered only
+/// when the agent is idle, as before, so a night of initiative ticks cannot
+/// stack a backlog the operator then finds waiting in front of them.
+static REQUEST: Racy<alloc::collections::VecDeque<Req>> = Racy::new(alloc::collections::VecDeque::new());
+
+pub const QUEUE_MAX: usize = 8;
 
 /// True while the agent task is inside an episode nobody asked for.
 ///
@@ -284,10 +293,14 @@ pub fn queue_author(name: &str, goal: &str, budget: usize, autonomous: bool) -> 
 
 fn queue(job: Job, autonomous: bool) -> bool {
     crate::cpu::without_interrupts(|| unsafe {
-        if REQUEST.get().is_some() || busy() {
+        let q = REQUEST.get();
+        if autonomous && (!q.is_empty() || busy()) {
             return false;
         }
-        *REQUEST.get() = Some(Req { job, autonomous });
+        if q.len() >= QUEUE_MAX {
+            return false;
+        }
+        q.push_back(Req { job, autonomous });
         true
     })
 }
@@ -308,15 +321,33 @@ fn queue(job: Job, autonomous: bool) -> bool {
 /// engine holder rather than a flag per task, which is a change to
 /// `with_engine` and belongs on its own.
 pub fn idle() -> bool {
-    crate::cpu::without_interrupts(|| unsafe { REQUEST.get().is_none() }) && !busy()
+    crate::cpu::without_interrupts(|| unsafe { REQUEST.get().is_empty() }) && !busy()
+}
+
+/// What is waiting, oldest first, as one line each.
+pub fn queued() -> Vec<String> {
+    crate::cpu::without_interrupts(|| unsafe {
+        REQUEST
+            .get()
+            .iter()
+            .map(|r| match &r.job {
+                Job::Episode { goal, steps, .. } => alloc::format!("episode ({} steps): {}", steps, goal),
+                Job::Author { name, .. } => alloc::format!("write '{}'", name),
+            })
+            .collect()
+    })
 }
 
 fn take_request() -> Option<Req> {
-    crate::cpu::without_interrupts(|| unsafe { REQUEST.get().take() })
+    crate::cpu::without_interrupts(|| unsafe { REQUEST.get().pop_front() })
 }
 
 /// The resident agent task. Spawned once; never returns.
 pub fn agent_task() {
+    // Episodes run in their own context: their own KV cache, so an episode
+    // no longer rewinds `pos` under the conversation, and their own holder,
+    // so `ask` answers while an episode runs.
+    super::ctx::adopt(super::ctx::Ctx::Agent);
     loop {
         let Some(req) = take_request() else {
             crate::task::yield_now();
@@ -330,6 +361,9 @@ pub fn agent_task() {
         // than faulting. `busy` still says *that* work is happening, for the
         // console and the shell's messages; the claim is what actually keeps
         // the engine.
+        // A job somebody is waiting on outranks the night's trial, so judging
+        // parks between tokens until the job ends.
+        let _fg = super::sched::foreground();
         let _claim = super::claim_engine();
         // Work the machine chose to do stays off the operator's console. It is
         // still on the serial port, still in the log ring and still in the
@@ -997,6 +1031,16 @@ pub fn run(goal: &str, trust: Trust, max_steps: usize) {
     signal.append();
     console::set_color(LTGRAY);
     kprintln!("  [agent] {}", signal.render());
+    // What happened, felt: an episode that went well is food, one that went
+    // badly is noxious. By the same score the outcome row records, so the
+    // brain hears exactly what the log says and nothing a second rule
+    // decided.
+    let sc = signal.score();
+    if sc > 0.0 {
+        crate::brain::stimulate(crate::brain::Sense::Food, 500);
+    } else if sc < 0.0 {
+        crate::brain::stimulate(crate::brain::Sense::Noxious, 500);
+    }
     unsafe { *LAST_OUTCOME.get() = Some(signal) };
 
     // Transcript into the namespace. Content-addressed like everything else:

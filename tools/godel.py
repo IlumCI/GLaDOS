@@ -87,7 +87,7 @@ KERNEL_SPEND = [
 #: runner class, rounded up to 5. The doubling and the cap are the design;
 #: the base is a measurement.
 BASE_MINUTES = 40
-MAX_LEVEL = 3
+MAX_LEVEL = 5
 
 #: Retrieval queries at level 0, doubling with the level. The judge hands
 #: both arms the same figure, so the pair is always over one population.

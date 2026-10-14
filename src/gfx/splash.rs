@@ -936,6 +936,7 @@ impl Glide {
                 stripes: 0.0,
                 top: wall::lin3((first.r, first.g, first.b)),
                 bot: wall::lin3((last.r, last.g, last.b)),
+                halo: wall::Sun::rest(w, h).halo,
             },
             rest: wall::Sun::rest(w, h),
         })
@@ -966,6 +967,7 @@ impl Glide {
             stripes: e,
             top: lerp3(s.top, r.top),
             bot: lerp3(s.bot, r.bot),
+            halo: lerp3(s.halo, r.halo),
         };
         crate::gfx::wall::overlay_sun_behind(fb, &sun, &self.tables, e);
     }

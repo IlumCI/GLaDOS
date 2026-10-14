@@ -461,7 +461,23 @@ fn show(path: &[String]) -> String {
     s
 }
 
+static ERRORS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static LAST_ERROR: crate::sync::Spin<String> = crate::sync::Spin::new(String::new());
+
+/// How many applet errors have been printed, so a caller can tell whether
+/// the command it just dispatched said no.
+pub fn errors() -> usize {
+    ERRORS.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// The words of the last one.
+pub fn last_error() -> String {
+    LAST_ERROR.lock_irq().clone()
+}
+
 fn err(msg: &str) {
+    ERRORS.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    *LAST_ERROR.lock_irq() = String::from(msg);
     console::set_color(LTRED);
     kprintln!("  {}", msg);
     console::set_color(LTGRAY);

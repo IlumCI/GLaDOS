@@ -1,0 +1,6 @@
+# payload manifest -- sha256, size, name
+#
+# Written by tools/payload.py. The bytes an ISO build must fetch
+# before it can run mkiso.py, and what they have to hash to.
+c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4  11357  LICENSE-VOICE.TXT
+18beecf2876f88dcd0929adffdabbd936daf5ced7e01d83a7fb79ca5f65ad855  180147016  voice.bin

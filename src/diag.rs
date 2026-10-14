@@ -275,6 +275,46 @@ pub const SUITES: &[Suite] = &[
         run: crate::ai::learn_selftest,
     },
     Suite {
+        name: "ctx",
+        about: "contexts share weights, keep their own caches, and keep trials to themselves",
+        run: crate::ai::ctx::selftest,
+    },
+    Suite {
+        name: "voice",
+        about: "what is never read aloud, words to phones, and a deterministic formant voice",
+        run: crate::voice::selftest,
+    },
+    Suite {
+        name: "markdown",
+        about: "the model's markdown rendered on the console, markers split across tokens included",
+        run: crate::ai::markdown_selftest,
+    },
+    Suite {
+        name: "wargame",
+        about: "Global Thermonuclear War: answered harder each turn, no winner, and the film's ending for three holds",
+        run: crate::ai::wargame::selftest,
+    },
+    Suite {
+        name: "research",
+        about: "hypotheses hash what they promise, a result needs a prediction before it, and the job writes only its own area",
+        run: crate::ai::research::selftest,
+    },
+    Suite {
+        name: "introspect",
+        about: "the introspection test's projection, schedule and statistics, and steering through prefill and decode alike",
+        run: crate::mind::selftest,
+    },
+    Suite {
+        name: "brain",
+        about: "the connectome agrees with its oracle spike for spike, and the nociceptor still drives reversal",
+        run: crate::brain::selftest,
+    },
+    Suite {
+        name: "intent",
+        about: "what is code, what is language, and what may run without asking",
+        run: crate::ai::intent::selftest,
+    },
+    Suite {
         name: "migrate",
         about: "a task carried onto another core and back",
         run: crate::task::migration_selftest,
@@ -770,7 +810,7 @@ fn web_selftest() -> bool {
 /// says it exists to prevent. A `static` cannot be read in a const context, so
 /// the array cannot be measured directly; naming its length is the next best
 /// thing and it is now the only place the number appears.
-const SLOTS: usize = 93;
+const SLOTS: usize = 101;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.

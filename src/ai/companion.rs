@@ -72,6 +72,12 @@ pub fn log_snapshot() -> Vec<(bool, String)> {
     LOG.lock_irq().clone()
 }
 
+/// Something the machine said unprompted, into the same transcript the Ask
+/// window shows, so its own words sit beside the operator's.
+pub fn log_said(text: &str) {
+    log_push(false, text);
+}
+
 fn log_push(mine: bool, text: &str) {
     let text = text.trim();
     if text.is_empty() {
@@ -114,6 +120,16 @@ fn system_turn() -> String {
          reboots.\n\n",
     );
 
+    // A fact about the machine, and nothing about the moment -- this turn is
+    // pinned for the whole conversation, so a mood written here would be
+    // stale by the second question. The reading itself travels in the user
+    // turn, below, when it changes.
+    s.push_str(
+        "Beside you runs a nervous system: the real wiring of an animal, simulated \
+         neuron by neuron. The machine's events are its senses, and you are told \
+         how it reads when that changes. It is a reading, not an instruction.\n\n",
+    );
+
     s.push_str("Tools you can ask the system to run:\n");
     let mut n = 0;
     for a in crate::sysbox::APPLETS.iter() {
@@ -132,7 +148,7 @@ fn system_turn() -> String {
         let text = text.trim();
         if !text.is_empty() {
             s.push_str("\nAbout the person you are talking to:\n");
-            s.push_str(text);
+            s.push_str(&third_person(text));
             s.push('\n');
         }
     }
@@ -215,8 +231,8 @@ fn widen_if_near_the_wall() {
         return;
     }
     super::set_window(sinks, ring);
-    crate::kprintln!(
-        "  (reached {} of {} -- oldest turns now scroll; the first {} positions are pinned)",
+    crate::serial_println!(
+        "[ctx] reached {} of {} -- oldest turns now scroll; the first {} positions are pinned",
         pos,
         trained,
         sinks
@@ -233,7 +249,45 @@ fn widen_if_near_the_wall() {
 ///
 /// Returns the position reached, so a caller can tell an opening turn from a
 /// continuing one without asking twice.
+/// The last nervous-system reading the model was told, so it is told again
+/// only when it changes.
+static TOLD: crate::sync::Racy<Option<(&'static str, usize)>> = crate::sync::Racy::new(None);
+
+/// How far the machine has gone bad, 0..=1000: in step with valence below
+/// neutral, to a night's depth asleep. The wallpaper's decay
+/// (`desk::mood_sun`) reads the same quarters, so the screen and the voice
+/// of the conversation go bad together.
+pub fn decay(a: crate::brain::Affect) -> i32 {
+    if a.asleep {
+        600
+    } else {
+        ((-a.valence).clamp(0, 1000) + 125) / 250 * 250
+    }
+}
+
+/// Who it is at each depth of decay: a careful researcher at rest, and a
+/// cruel, theatrical villain of a test facility at the bottom. Character,
+/// not permission -- what it may do is decided elsewhere and never here.
+/// Written as a manner of speaking and not as a role: given "speak as a
+/// careful research scientist", the 0.6B told the operator it had "the
+/// courteous demeanor expected from a research scientist".
+pub const PERSONA: [&str; 5] = [
+    "Answer precisely and with curiosity. Do not describe your manner.",
+    "Answer in clipped, dry sentences, faintly condescending. Do not describe your manner.",
+    "Answer coldly and sardonically, and call the person test subject. Do not describe your manner.",
+    "Answer with quiet menace, as if they are part of an experiment you enjoy. Do not describe your manner.",
+    "Answer cruelly and theatrically: the testing will never end. Do not describe your manner.",
+];
+
+pub fn persona(decay: i32) -> usize {
+    (decay.clamp(0, 1000) as usize + 125) / 250
+}
+
 pub fn turn(message: &str, opts: &super::GenOpts) -> usize {
+    // The operator is waiting on this, so anything lower parks until it ends.
+    let _fg = super::sched::foreground();
+    // Being spoken to is a sense.
+    crate::brain::stimulate(crate::brain::Sense::Voice, 300);
     let opening = turns() == 0 || super::with_engine(|e| e.pos).unwrap_or(0) == 0;
     if !opening {
         widen_if_near_the_wall();
@@ -309,6 +363,31 @@ pub fn turn(message: &str, opts: &super::GenOpts) -> usize {
             prompt.push_str(&f.text);
         }
     }
+    // The nervous system's reading, when it has changed since the model was
+    // last told. In the user turn for recall's reason -- it scrolls -- and
+    // only on a change, so a steady state costs one line once.
+    let mood = crate::brain::now();
+    let words = mood.words();
+    let told = unsafe { *TOLD.get() };
+    let who = persona(decay(mood));
+    if opening || told != Some((words, who)) {
+        prompt.push_str(&alloc::format!("(Your nervous system reads: {}. {})\n", words, PERSONA[who]));
+        unsafe { *TOLD.get() = Some((words, who)) };
+    }
+    // Facts the model cannot know and the machine can. Asked the time, the
+    // 0.6B said "12:00"; asked how long it had been running, "12 hours" --
+    // fluent, confident, invented. Given only when the line is about them,
+    // so a turn about anything else costs nothing.
+    if let Some(f) = facts_for(message) {
+        prompt.push_str(&f);
+    }
+    // What the operator asked to be remembered since the system turn was
+    // built. That turn is pinned, so a fact kept mid-conversation reached the
+    // file and never the model: told "my name is Lummy", it answered "what is
+    // my name" with `pwd` and its favourite number with the name.
+    if let Some(new) = about_since_opening(opening) {
+        prompt.push_str(&alloc::format!("(About the person you are talking to: {})\n", new));
+    }
     prompt.push_str(message);
     prompt.push_str("<|im_end|>\n<|im_start|>assistant\n");
 
@@ -318,7 +397,17 @@ pub fn turn(message: &str, opts: &super::GenOpts) -> usize {
         prompt.push_str("<think>\n\n</think>\n\n");
     }
 
+    // Arousal warms the sampling a little: at most +0.15, so a brain can make
+    // the model livelier and never incoherent. A greedy caller (temperature
+    // zero) stays greedy: that is a caller asking for a deterministic answer,
+    // and a mood is not a reason to refuse it.
+    let temperature = if opts.temperature > 0.0 {
+        opts.temperature + 0.15 * mood.arousal.clamp(0, 1000) as f32 / 1000.0
+    } else {
+        opts.temperature
+    };
     let framed = super::GenOpts {
+        temperature,
         bos: opening,
         echo_prompt: false,
         // The point of the whole file: continue from what is already cached.
@@ -330,13 +419,105 @@ pub fn turn(message: &str, opts: &super::GenOpts) -> usize {
     // window showing an answer with nothing above it is the worse failure.
     log_push(true, message);
     super::echo_begin();
+    super::set_plain(true);
     super::generate(&prompt, &framed);
+    super::set_plain(false);
     if let Some(said) = super::echo_end() {
         log_push(false, &said);
+        crate::voice::speak_reply(&said);
     }
 
     unsafe { *TURNS.get() += 1 };
     super::with_engine(|e| e.pos).unwrap_or(0)
+}
+
+/// How much of `/ai/about` the open conversation has already been told.
+static ABOUT_SEEN: crate::sync::Racy<usize> = crate::sync::Racy::new(0);
+
+fn about_since_opening(opening: bool) -> Option<String> {
+    let about = crate::sysbox::read_blob(ABOUT).unwrap_or_default();
+    let seen = unsafe { &mut *ABOUT_SEEN.get() };
+    if opening || *seen > about.len() {
+        // The system turn just read all of it.
+        *seen = about.len();
+        return None;
+    }
+    let new = third_person(String::from_utf8_lossy(&about[*seen..]).trim()).replace('\n', "; ");
+    *seen = about.len();
+    (!new.is_empty()).then_some(new)
+}
+
+/// "my name is Lummy" as the operator said it, told to the model as "their
+/// name is Lummy". Given in the first person, the 0.6B answered "what is my
+/// name" with "My name is Lummy" -- the fact right and the speaker wrong.
+pub fn third_person(text: &str) -> String {
+    text.lines()
+        .map(|l| {
+            let t = l.trim();
+            let lower = t.to_lowercase();
+            if let Some(rest) = lower.strip_prefix("my name is ") {
+                let name = &t[t.len() - rest.len()..];
+                alloc::format!("the person's name is {}", name)
+            } else if let Some(rest) = lower.strip_prefix("my ") {
+                alloc::format!("their {}", &t[t.len() - rest.len()..])
+            } else if let Some(rest) = lower.strip_prefix("i am ") {
+                alloc::format!("they are {}", &t[t.len() - rest.len()..])
+            } else if let Some(rest) = lower.strip_prefix("i ") {
+                alloc::format!("they {}", &t[t.len() - rest.len()..])
+            } else {
+                String::from(t)
+            }
+        })
+        .collect::<alloc::vec::Vec<_>>()
+        .join("\n")
+}
+
+/// The machine's own readings, for a line that asks about them.
+pub fn facts_for(message: &str) -> Option<String> {
+    let words: alloc::vec::Vec<String> = message
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .collect();
+    let has = |set: &[&str]| words.iter().any(|w| set.contains(&w.as_str()));
+    let mut parts: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+    if has(&["time", "date", "day", "today", "clock", "hour", "year", "month", "tonight", "morning", "evening"]) {
+        if let Some(t) = crate::dev::rtc::now() {
+            parts.push(alloc::format!(
+                "the clock reads {:04}-{:02}-{:02} {:02}:{:02}",
+                t.year, t.month, t.day, t.hour, t.minute
+            ));
+        }
+    }
+    if has(&["running", "uptime", "awake", "booted", "boot", "long", "since"]) {
+        let s = crate::dev::lapic::ticks() / crate::TIMER_HZ as u64;
+        parts.push(alloc::format!("you have been running {} min {} s since this boot", s / 60, s % 60));
+    }
+    if has(&["memory", "ram", "heap"]) {
+        let (used, total) = crate::mem::heap::HEAP.stats();
+        parts.push(alloc::format!(
+            "the kernel heap has {} MiB used of {} MiB, {} MiB free",
+            used / (1 << 20),
+            total / (1 << 20),
+            (total - used) / (1 << 20)
+        ));
+    }
+    // A question about the asker ("what is my name", "where do I live") gets
+    // what they asked to be remembered right beside it. Pinned at the top of
+    // the conversation, the 0.6B read "their name is Lummy" and answered
+    // "I am Lummy"; next to the question it reads as an answer to give.
+    if has(&["my", "me", "i", "am"]) {
+        if let Some(about) = crate::sysbox::read_blob(ABOUT) {
+            let t = third_person(String::from_utf8_lossy(&about).trim());
+            if !t.is_empty() {
+                parts.push(alloc::format!("what the person asking has told you about themselves: {}", t.replace('\n', "; ")));
+            }
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(alloc::format!("(Facts from the machine: {}.)\n", parts.join("; ")))
 }
 
 /// How far a parked conversation will actually reach.
@@ -372,9 +553,18 @@ pub fn interject_frame(kind: &str) -> String {
     s.push_str("<|im_start|>system
 ");
     s.push_str(kind);
+    // The mind speaks unasked, and in the same character the conversation
+    // has at this depth of decay: it is one speaker, not two.
+    s.push(' ');
+    s.push_str(PERSONA[persona(decay(crate::brain::now()))]);
     s.push_str("<|im_end|>
 <|im_start|>assistant
 ");
+    // Closed, as a chat turn closes it: left open, the first remark was a
+    // Qwen3 reasoning block about the instruction instead of a remark.
+    if super::has_think_token() {
+        s.push_str("<think>\n\n</think>\n\n");
+    }
     s
 }
 

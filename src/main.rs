@@ -21,6 +21,8 @@ mod boot_report;
 mod checklist;
 mod repair;
 mod ai;
+mod brain;
+mod voice;
 mod app;
 mod cpu;
 mod crypto;
@@ -36,6 +38,7 @@ mod aiksi;
 mod linux;
 mod log;
 mod mem;
+mod mind;
 mod mine;
 mod net;
 mod pkg;
@@ -93,12 +96,23 @@ pub struct BootInfo {
     /// A DER bundle of root certificates. `None` means TLS can encrypt and
     /// cannot authenticate, which is reported rather than assumed.
     pub roots: Option<Blob>,
+    /// A GLADOSB1 connectome. `None` is normal: the worm is compiled in, and
+    /// a staged file only replaces it with a larger animal.
+    pub brain: Option<Blob>,
+    /// A GLADOSV1 voice model (`tools/kokoro.py`). `None` is normal: the
+    /// formant voice is compiled in and this one replaces it.
+    pub voice: Option<Blob>,
 }
 
 /// Where the weights live on the boot volume. Backslashes: this is a UEFI path
 /// on the ESP, not a namespace path.
 pub const MODEL_PATH: &str = "\\GLADOS\\model.bin";
 pub const TOKENIZER_PATH: &str = "\\GLADOS\\tokenizer.bin";
+/// A connectome (`tools/connectome.py build`). Read whole, like the model: the
+/// fly is about 30 MB and `dev::firmware` caps a file at 8.
+pub const BRAIN_PATH: &str = "\\GLADOS\\brain.bin";
+/// The neural voice, about 170 MB, read whole for the same reason.
+pub const VOICE_PATH: &str = "\\GLADOS\\voice.bin";
 
 #[no_mangle]
 pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
@@ -374,6 +388,8 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
 
     let model = uefi::read_file(bs, image, MODEL_PATH);
     let tokenizer = uefi::read_file(bs, image, TOKENIZER_PATH);
+    let brain = uefi::read_file(bs, image, BRAIN_PATH);
+    let voice_model = uefi::read_file(bs, image, VOICE_PATH);
     // The root bundle comes off the same volume for the same reason: this is
     // the only moment there is a filesystem to read it from.
     let roots = uefi::read_file(bs, image, net::trust::ROOTS_PATH);
@@ -473,6 +489,8 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         model,
         tokenizer,
         roots,
+        brain,
+        voice: voice_model,
     };
 
     console::init(boot.fb, 2, palette::BLACK);
@@ -668,6 +686,14 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // rather than off the ESP.
     gfx::splash::stage("loading the model");
     ai::init(boot.model, boot.tokenizer);
+    // How far plain language at the prompt may reach, as the operator last
+    // set it. After the namespace, which is where it is kept.
+    ai::intent::load();
+    // A nervous system, before the mind that will read it.
+    brain::init(boot.brain.as_ref().map(|b| b.as_slice()));
+    // The voice task; it brings the audio controller up the first time it
+    // has something to say.
+    voice::init(acpi.as_ref().and_then(|a| a.mcfg), boot.voice.as_ref().map(|b| b.as_slice()));
 
     // **The router fits itself, because waiting to be asked is not a feature.**
     //

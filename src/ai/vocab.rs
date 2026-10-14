@@ -60,6 +60,7 @@ use alloc::vec::Vec;
 /// Width of the hypernetwork's hidden layer.
 const HIDDEN: usize = 64;
 
+#[derive(Clone)]
 pub struct Head {
     dim: usize,
     /// Frozen description embeddings, one row of `dim` per applet.

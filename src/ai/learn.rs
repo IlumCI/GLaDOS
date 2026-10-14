@@ -92,6 +92,9 @@ pub enum Verdict {
     Known,
     /// This boot has written as many as it may.
     Spent,
+    /// The agent changed something and the operator then looked: `ls` after
+    /// `mkdir` is checking the result, not saying `ls` was the right answer.
+    Looking,
 }
 
 /// Does this operator command correct the agent's last choice?
@@ -118,6 +121,21 @@ pub fn judge(
     // corpus with the model's own output rather than merely be useless.
     if chose == Some(verb) {
         return Verdict::Agreed;
+    }
+    // A change followed by a look. Measured on the first afternoon: the agent
+    // made `/notes` for "create a folder called notes", the operator typed
+    // `ls /` to see it, and `ls` was filed as the right applet for creating a
+    // folder. A read-only command after a mutating choice is the operator
+    // checking the work; a *mutating* command after it still counts, since
+    // that is the operator redoing it another way.
+    // The same for a request that asked for a change whatever the agent did:
+    // `cat /hello.txt` after "make a file named hello.txt" was filed as `cat`
+    // being the way to make a file.
+    let looked = crate::sysbox::applet_mutates(verb) == Some(false)
+        && (chose.map_or(false, |c| crate::sysbox::applet_mutates(c) == Some(true))
+            || crate::ai::intent::changing_verb(goal));
+    if looked {
+        return Verdict::Looking;
     }
     // A request is several words of prose. One word is a label, and a line
     // carrying a path or a slash is somebody typing a command rather than
@@ -218,6 +236,11 @@ pub fn operator_ran(verb: &str) -> Verdict {
         return Verdict::NoGoal;
     }
     let (goal, chose) = pending();
+    // A rescue is the machine trying again after a command failed, not a
+    // routing decision a person can correct (`intent::RESCUE_MARK`).
+    if goal.as_deref().map_or(false, |g| g.starts_with(crate::ai::intent::RESCUE_MARK)) {
+        return Verdict::NoGoal;
+    }
     let is_applet = crate::sysbox::is_applet(verb);
     // Asked before the lock is taken again: `known` walks the corpus, which
     // reads the namespace, and holding this module's lock across that is a lock
@@ -311,6 +334,18 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push((
         "an empty goal is no goal, not a short one",
         judge(Some("   "), Some("find"), "ls", true, false, 0) == Verdict::NoGoal,
+    ));
+    out.push((
+        "looking at what the agent changed is not correcting it",
+        judge(Some("create a folder called notes"), Some("mkdir"), "ls", true, false, 0) == Verdict::Looking,
+    ));
+    out.push((
+        "a look after a request for a change is not a correction, whatever the agent ran",
+        judge(Some("please make a file named hello.txt that says hi"), Some("find"), "cat", true, false, 0) == Verdict::Looking,
+    ));
+    out.push((
+        "but redoing it with another change still is",
+        matches!(judge(Some("create a file called notes"), Some("mkdir"), "write", true, false, 0), Verdict::Learn(_, _)),
     ));
     out
 }

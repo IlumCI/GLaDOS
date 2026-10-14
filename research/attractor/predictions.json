@@ -1,0 +1,56 @@
+{
+ "written": "2026-10-12T20:17:00",
+ "rule": "ignites (persistent firing 500-1000 ms after a 500 ms, 150 Hz poke ends) iff excitatory synapses onto the 477-neuron core >= 1000",
+ "cases": {
+  "ORN_DP1m": {
+   "core_synapses": 25917,
+   "n": 32,
+   "predict_ignites": true
+  },
+  "ORN_DM1": {
+   "core_synapses": 15396,
+   "n": 68,
+   "predict_ignites": true
+  },
+  "ORN_DA1": {
+   "core_synapses": 11371,
+   "n": 126,
+   "predict_ignites": true
+  },
+  "ORN_DP1l": {
+   "core_synapses": 8932,
+   "n": 24,
+   "predict_ignites": true
+  },
+  "ORN_DL1": {
+   "core_synapses": 8722,
+   "n": 69,
+   "predict_ignites": true
+  },
+  "ORN_DM5": {
+   "core_synapses": 898,
+   "n": 42,
+   "predict_ignites": false
+  },
+  "TRN_VP3a": {
+   "core_synapses": 843,
+   "n": 7,
+   "predict_ignites": false
+  },
+  "HRN_VP5": {
+   "core_synapses": 631,
+   "n": 16,
+   "predict_ignites": false
+  },
+  "ORN_DA3": {
+   "core_synapses": 618,
+   "n": 30,
+   "predict_ignites": false
+  },
+  "ORN_VA5": {
+   "core_synapses": 584,
+   "n": 12,
+   "predict_ignites": false
+  }
+ }
+}

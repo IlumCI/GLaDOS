@@ -1,0 +1,26 @@
+{
+ "written": "2026-10-13T14:44:50",
+ "model": "core + inhibitory loop (reduced2.py)",
+ "cases": {
+  "DA2_lPN": {
+   "predict_ignites": false,
+   "n": 11
+  },
+  "M_lvPNm48": {
+   "predict_ignites": false,
+   "n": 6
+  },
+  "DA1_lPN": {
+   "predict_ignites": true,
+   "n": 15
+  },
+  "ORN_DC1": {
+   "predict_ignites": true,
+   "n": 39
+  },
+  "ORN_DM2": {
+   "predict_ignites": true,
+   "n": 54
+  }
+ }
+}

@@ -950,6 +950,7 @@ pub fn train(epochs: usize, lr: f32) -> Option<TrainReport> {
                 let mut probs = e.head.logits(x, &all);
                 tensor::softmax(&mut probs);
                 e.head.learn(x, &all, &probs, *target, lr);
+                e.router_epoch += 1;
             }
         }
 
@@ -1475,6 +1476,7 @@ pub fn fit_router(lambda: f32) -> bool {
 
         let params = p.params();
         e.probe = Some(p);
+        e.router_epoch += 1;
 
         // The corroborating cores train on the same examples the probe did --
         // never on the held-out tail, or agreement would be measured against
@@ -1497,6 +1499,7 @@ pub fn fit_router(lambda: f32) -> bool {
                 Some(c) => {
                     let n = c.params();
                     e.council = Some(c);
+                    e.router_epoch += 1;
                     n
                 }
                 None => 0,
@@ -1721,6 +1724,7 @@ pub fn ensure_router() -> bool {
     with_engine(|e| {
         e.probe = Some(p);
         e.council = Some(c);
+        e.router_epoch += 1;
     })
     .is_some()
 }
@@ -1850,7 +1854,7 @@ pub fn route_report(task: &str, trust: Trust) {
             kprintln!("    character  {}", e.head.name(v.character));
         });
         kprintln!("  {} of 3 agree (measured 50% right when split)", v.agreement);
-        kprintln!("  'ask <question>' to put it to the model instead");
+        kprintln!("  just say it to put it to the model instead");
     }
 
     let mhz = crate::time::tsc_mhz();
@@ -3455,6 +3459,7 @@ pub fn search_report() {
         let texts: Vec<&str> = f.texts.iter().map(|t| t.as_str()).collect();
         e.probe = super::probe::Probe::fit(&f.xs, &f.ys, f.classes, cfg.lambda);
         e.council = super::council::Council::fit(&texts, &f.ys, f.classes, &e.tok);
+        e.router_epoch += 1;
         let saved = save_config(cfg);
 
         Some((cfg, vok, vn, tok_, tn, tried, reads, saved))
@@ -3544,7 +3549,7 @@ pub fn capture_stack(prompt: &str) -> bool {
 
         let cfg = e.model.cfg.clone();
         let mut tape = super::model::Tape::new(&cfg, take);
-        let mut st = super::model::State::new(&cfg);
+        let mut st = super::model::State::scratch(&cfg, take + 1);
         for (t, id) in ids.iter().enumerate() {
             if !e.model.forward_taped(&mut st, *id, t, &mut tape) {
                 return false;

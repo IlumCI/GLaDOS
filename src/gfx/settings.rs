@@ -27,6 +27,14 @@ const PATH: &str = "/etc/desk";
 /// one missed.
 static GENERATION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
+/// Something every painter reads changed without anybody setting it: the
+/// glass's backdrop, retaken when the wallpaper's sun has moved. Same
+/// consequence as a setting, so the same counter.
+pub fn touch() {
+    GENERATION.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    super::render::damage_all();
+}
+
 pub fn generation() -> u64 {
     GENERATION.load(core::sync::atomic::Ordering::Relaxed)
 }

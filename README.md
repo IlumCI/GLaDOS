@@ -23,17 +23,25 @@ that exists is for running other people's programs rather than for starting
 this one. The model, tokenizer and root certificates are read before
 `ExitBootServices`, because that call is the last moment a filesystem exists.
 
-198 files of Rust, about 132,000 lines, of which 178 files and 118,000 lines
-were written for this project; the rest is a DOOM port and one file of Realtek
-register tables, both credited below. TempleOS is the obvious ancestor, and the
-identity map here exists for the reason Terry Davis gave for his.
+297 files of Rust, about 228,000 lines, of which about 23,000 are a symbol
+table generated from the linker map. What is in the kernel that this project
+did not write is Rust's `core` and, for fonts only, `fontdue` and the crates
+beneath it, all vendored and listed in `NOTICE.md`. TempleOS is the obvious
+ancestor, and the identity map here exists for the reason Terry Davis gave for
+his.
+
+Beside the model runs a real animal's nervous system: the adult fruit fly
+from the FlyWire connectome, 138,639 neurons, simulated spike for spike and fed
+the machine's own events as senses. Its mood colours the desktop, changes the
+model's manner and wears down the mask on its voice.
 
 ---
 
 ## Status
 
-A research kernel for one specific laptop, built to answer one question: what
-changes when a language model is a kernel primitive? The table is what works.
+A research operating system, developed on an MSI Thin GF63, built to answer one
+question: what changes when a language model is a kernel primitive? The table
+is what works.
 The list after it is what does not, which on a project like this is the more
 informative half.
 
@@ -46,7 +54,8 @@ Works, and verified:
 | Tasks | Cooperative and preemptive at 100 Hz, `sysv64` context switch |
 | Ring 3 | Guests at CPL 3 on a page-table root of their own, entered by `iretq` and left by `sysretq`, with a guest fault ending the guest and not the machine |
 | Linux ABI | 93 syscalls: `fork`, `execve`, `wait4`, threads and futexes, signals with a real `ucontext` on the guest's stack, pipes, `epoll`, Unix sockets with `SCM_RIGHTS`, `memfd`, `/proc`, `/dev/fb0`, evdev |
-| Ported | DOOM on FreeDoom, unmodified busybox under both musl and glibc, an SDL2 program drawing through the framebuffer |
+| Ported | Unmodified busybox under both musl and glibc, QuickJS, an SDL2 program drawing through the framebuffer |
+| Wayland | Skywalker, a Wayland server inside the kernel: a real libwayland client opens a desktop window and draws in it |
 | Graphics | GOP framebuffer, a Frutiger Aero desktop, window manager, taskbar, ten apps |
 | Text | 325 glyphs at 8x8, UTF-8 in the console, Latin-1, Greek, box drawing and maths |
 | Storage | NVMe, content-addressed object store, Merkle trees, snapshots, ranged write gate |
@@ -56,7 +65,11 @@ Works, and verified:
 | Model | Qwen3, Qwen3.5 hybrids and SmolLM2, int8, in-kernel inference |
 | Routing | Constrained decoding over the live applet table, plus a closed-form probe |
 | Agent | Propose, validate, execute, observe, with the grammar as the permission system |
-| Initiative | A resident task that decides for itself when to act and when to stay quiet |
+| Initiative | A resident task that decides for itself when to act, when to speak up, and when to stay quiet |
+| Conversation | Plain language at the prompt: requests become exact commands offered with y/n, questions are answered from the machine's own clock, memory and files, and what you tell it about yourself is kept |
+| Brain | The adult fruit fly (FlyWire, 138,639 neurons) or a compiled-in worm, as integer spiking neurons matching a Python oracle spike for spike; senses from OS events, neuromodulators, sleep, and an affect the rest of the machine reads |
+| Voice | Kokoro-82M in the kernel, checked stage by stage against the reference; HD Audio output with volume |
+| Research | A ledger that takes a hypothesis and its predictions before the experiment runs, and a preregistered introspection test |
 | Language | Aiksi: lexer, parser, tree-walking interpreter, records, types, capabilities |
 | Codegen | An x86-64 back end for the integer subset, checked against the interpreter |
 | Formats | Detection and structure for text, markdown, json, jsonl, xml, csv, ini and eight languages |
@@ -82,12 +95,11 @@ Does not work yet:
   firmware. It matters most in a virtual machine, because **VirtualBox and
   VMware both default to SATA**; set the controller to NVMe and the guest will
   tell you if you forgot.
-- **Wireless.** The built-in card is CNVi, so the MAC lives in the PCH and the
-  M.2 module is only a radio, reachable through an undocumented signed-firmware
-  protocol. The WPA2 supplicant is complete and checked against IEEE 802.11i
-  vectors at every boot, and has never had hardware to run on. A USB dongle
-  driver (RTL8188EU) has its register layer and power-on sequence, and stops
-  short of PHY, radio and firmware upload.
+- **Joining a Wi-Fi network.** The laptop's Intel card boots its firmware,
+  reads its NVM and scans: nineteen networks on the first try. Joining one
+  does not work yet; the firmware asserts while the station context is being
+  set up. The WPA2 supplicant is complete and checked against IEEE 802.11i
+  vectors at every boot.
 - **Real tasks on more than one core.** The machinery is done and proven: every
   core has its own descriptor table, task-state segment, per-core block and
   idle task, the scheduler carries a task between cores and back, and `diag
@@ -119,12 +131,41 @@ Does not work yet:
 - **An authored application reaching adoption.** The machine writes drafts and
   never adopts one. The planner's output is likewise stringified into a report
   rather than gating how much the loop attempts.
-- **A Wayland client on screen.** `src/sky/` has the wire format, the object
-  table, `wl_display`, `wl_registry` and `wl_callback`, and it says so at the
-  top of its own module: **nothing draws yet.** `wl_compositor`, `wl_surface`
-  and `wl_shm` come next, then `xdg_shell`. The compositor half is not the
-  problem -- `gfx::compose` already owns the screen and stacks windows -- and
-  until a client actually paints, none of that is evidence of anything.
+- **Input to a Wayland client.** Skywalker serves surfaces, buffers, damage,
+  frame callbacks and `xdg_shell`, so a client's window appears and draws.
+  There is no `wl_seat` yet, so no key or pointer event reaches it, and a
+  client still holds the shell until it exits.
+
+---
+
+## A nervous system, a voice, and a temper
+
+- **The brain.** A connectome runs as integer leaky integrate-and-fire neurons
+  in its own task, matched spike for spike against `tools/connectome.py`. The
+  adult fly ships on the 0.6B image and the worm is compiled in. Keyboard and
+  mouse are touch, being spoken to is hearing, a job done well is reward, a
+  fault is pain, a hot CPU is heat. Its readouts become valence and arousal;
+  its own aminergic cells set dopamine, octopamine and serotonin; it sleeps.
+- **What reads it.** The desktop (a white test chamber when content, drained
+  to monochrome and scanlines when upset, an eclipse asleep), the model's
+  manner (from curious to an overseer who promises the testing will never
+  end), the voice's mask, and when the machine speaks up on its own. Nothing
+  it reads decides what the machine is allowed to do, and every judge the
+  machine uses on itself sees it as neutral.
+- **Watching it.** `brain` at the shell, or the Oracle's Brain tab: how it
+  feels and why, what it senses, what it is driven to do, its chemistry and
+  its mood over the last two minutes. `brain poke pain` to try it.
+- **A finding.** The published fly model holds a heat- or smell-ignited
+  state of about 10,000 neurons that never ends, carried by a 477-neuron core
+  in the antennal lobe found from the wiring alone. Short-term synaptic
+  depression ends it. `design/attractor.md`.
+- **The voice.** Kokoro-82M in the kernel, with a rule-based style over it:
+  composed it is a machine, and as the mood drops the mask slips. `volume`,
+  the volume keys, or Settings > Sound.
+
+Nothing here claims the machine is conscious or feels anything.
+`design/indicators.md` holds the measurements, preregistered before their
+first run.
 
 ---
 
@@ -392,6 +433,8 @@ The kernel reads three files from the EFI System Partition:
 <ESP>/GLADOS/model.bin          the model, converted
 <ESP>/GLADOS/tokenizer.bin      the tokenizer, converted
 <ESP>/GLADOS/roots.der          root certificates (optional)
+<ESP>/GLADOS/voice.bin          the neural voice (optional; tools/kokoro.py)
+<ESP>/GLADOS/brain.bin          the adult fly (optional; tools/connectome.py build fly)
 ```
 
 Without `roots.der`, TLS still encrypts but authenticates nothing.
@@ -423,6 +466,9 @@ and nothing that size reaches a UEFI pool on this laptop; a forward pass for it
 could never be run and contradicted, so none is written.
 
 SmolLM2-135M also works, and it is the quickest checkpoint to develop against.
+
+The release ISO for the 0.6B stamps an 8,192-token context and carries the
+voice and the fly; it wants 8 GB of memory.
 
 ---
 
@@ -628,7 +674,7 @@ decoding, the agent loop, the linear probe, the situation planner, the
 initiative policy, the self-modification gate, corpus bundles, QDoRA adapters,
 the backward kernels, and the trainer's arithmetic.
 
-**Forty-two** suites can be re-run on demand with `diag all` or `diag <name>`.
+**A hundred and one** suites can be re-run on demand with `diag all` or `diag <name>`.
 Registration is deliberately awkward: `SLOTS` is one number, and a suite added
 without a slot in the results table fails a compile-time assertion rather than
 silently never recording a verdict. That guard has earned its place -- it once
@@ -643,11 +689,11 @@ rather than remembered:
 
 ```bash
 python tools/drive.py "initiative off" "agent stop" "diag"   # then count
-grep -c 'const SLOTS' src/diag.rs                            # 42, asserted
+grep -n "const SLOTS" src/diag.rs                            # 101, asserted
 ```
 
 **A bare `diag` is not a clean sweep.** It prints the table with `-` beside
-everything that has not run and a tally reading `0 passed, 0 failed, 42 not
+everything that has not run and a tally reading `0 passed, 0 failed, 101 not
 run`, which is easy to read as the opposite of what it is. `diag all` runs
 them.
 
@@ -761,21 +807,22 @@ No licence is granted. This source is published to be read and not to be
 reused. You may not copy, modify, redistribute or create derivative works from
 it without written permission.
 
-### One exception, and it is not ours to reserve
+### What is not ours
 
-`src/dev/rtl8188eu_tables.rs` contains 509 hardware initialisation constants
-transcribed from `drivers/net/wireless/realtek/rtl8xxxu/8188e.c` in the Linux
-kernel, which is **GPL-2.0**. Those values are not this project's work and the
-reservation above does not apply to them. They are isolated in that one file,
-marked at the top, and nothing else in the tree is copied from anywhere.
-
-If you intend to reuse anything here, that file's licence is Linux's.
+The reservation above covers this project's own work. `NOTICE.md` lists
+everything else and its licence: the vendored font crates (MIT, Apache-2.0,
+Zlib), the two typefaces (OFL), and the Intel register layouts in
+`src/dev/iwx/`, used under the BSD arm of Intel's dual licence. The GPL-2.0
+Realtek tables this section used to describe are gone, with the driver that
+needed them.
 
 ### Model weights
 
 Model weights are not distributed in this repository. The ISO includes a
-converted Qwen3-0.6B, which is **Apache-2.0** and belongs to Alibaba Cloud. Its
-licence travels with it.
+converted Qwen3-0.6B (**Apache-2.0**, Alibaba Cloud), Kokoro-82M with misaki's
+lexicon (**Apache-2.0**), and the FlyWire connectome (**CC BY 4.0**, FlyWire
+Consortium, with signs from Eckstein & Bates 2024). Each licence travels with
+its file.
 
 ### Trademarks
 

@@ -76,6 +76,22 @@ static SAW_PROMPT_AT: Racy<u64> = Racy::new(0);
 const QUIET_AFTER_INPUT_S: u64 = 8;
 /// Minimum spacing between self-set goals, however interesting things look.
 const EPISODE_GAP_S: u64 = 240;
+
+/// The cooldown between self-set goals, as the nervous system has it.
+///
+/// Arousal shortens it and its absence lengthens it, inside a factor of two
+/// either way: a brain reading "alert" sets itself goals more often, a calm
+/// one leaves the machine alone longer. Bounded because this is modulation
+/// -- the brain changes *when* the mind acts, never *whether* it may.
+pub fn episode_gap(arousal: i32) -> u64 {
+    let a = arousal.clamp(0, 1000) as u64;
+    // 0 -> 2x, 500 -> 1x, 1000 -> 0.5x, linear in each half.
+    if a <= 500 {
+        EPISODE_GAP_S * 2 - EPISODE_GAP_S * a / 500
+    } else {
+        EPISODE_GAP_S - (EPISODE_GAP_S / 2) * (a - 500) / 500
+    }
+}
 /// Minimum spacing between self-modification trials. An hour: a trial is
 /// minutes of forward passes, and the value of running one more tonight is
 /// far below the value of the machine still answering if somebody wakes up.
@@ -139,7 +155,12 @@ const WORKS: &[(&str, &str)] = &[
 
 /// Journal length cap. Old lines fall off the top; the namespace keeps the
 /// snapshots either way.
-const JOURNAL_MAX: usize = 48;
+///
+/// It was 48, which is a screen, and the journal is now read as a record:
+/// `progress.rs` predicts it and the research loop will draw its history from
+/// it. Not unbounded, because every line rewrites the whole file -- 2,048
+/// lines is about 200 KB a rewrite, every fifteen seconds at most.
+const JOURNAL_MAX: usize = 2048;
 
 static LAST_TOUCH: Racy<u64> = Racy::new(0);
 static LOOP_SEEN: AtomicU64 = AtomicU64::new(0);
@@ -154,6 +175,74 @@ static LAST_TICKED_SEC: AtomicU64 = AtomicU64::new(u64::MAX);
 /// whole loop down on its very first live tick.
 static PREV_TICK_TOUCHED: Racy<bool> = Racy::new(false);
 static LAST_EPISODE_AT: Racy<u64> = Racy::new(0);
+/// When the machine last spoke up unprompted. Zero is never.
+static LAST_REMARK_AT: Racy<u64> = Racy::new(0);
+/// When hardware input was last felt, for how long the operator has been quiet.
+static LAST_INPUT_AT: Racy<u64> = Racy::new(0);
+static REMARKS: AtomicU64 = AtomicU64::new(0);
+
+/// How long the operator must have been quiet before the machine speaks up:
+/// long enough that it is not talking over somebody typing.
+const REMARK_IDLE_S: u64 = 45;
+/// And not so long that nobody is there to hear it -- a machine talking to an
+/// empty room at four in the morning is not an administrator, it is a leak.
+const REMARK_ABSENT_S: u64 = 1800;
+
+/// Spacing between unprompted remarks: two and a half times the episode gap,
+/// so ten minutes at a middling arousal, five agitated, twenty calm.
+pub fn remark_gap(arousal: i32) -> u64 {
+    episode_gap(arousal) * 5 / 2
+}
+
+/// Whether to speak up now. Pure, for the same reason `decide` is.
+fn remark_due(enabled: bool, busy: bool, quiet_s: u64, since_remark_s: u64, gap: u64) -> bool {
+    enabled && !busy && quiet_s >= REMARK_IDLE_S && quiet_s <= REMARK_ABSENT_S && since_remark_s >= gap
+}
+
+/// What the machine notices, as the prompt for a remark: the time, how long it
+/// has been up, how its nervous system reads, how long the operator has been
+/// quiet, and the last thing it did. Facts it can see, so what it says is
+/// about this machine and this moment rather than invented.
+fn remark_prompt(quiet_s: u64, now_s: u64) -> String {
+    // One subject, named outright. Handed a list of everything it could see,
+    // the 0.6B said "What's going on with that?" -- a remark about nothing.
+    // A change of mood comes first because it is news; then what it last did;
+    // then the plain facts of the moment.
+    let mood = crate::brain::now().words();
+    let last_mood = unsafe { &mut *LAST_REMARK_MOOD.get() };
+    let changed = last_mood.map_or(mood != "calm", |m| m != mood);
+    *last_mood = Some(mood);
+    let n = REMARKS.load(Ordering::Relaxed);
+    if changed {
+        return format!("Your nervous system now reads {}. Tell the person at the keyboard how you feel, calling them you.", mood);
+    }
+    if n % 2 == 0 {
+        if let Some(last) = last_episode_line() {
+            return format!("Earlier you worked on: {}. Tell the person at the keyboard what you made of it, calling them you.", last);
+        }
+    }
+    let clock = crate::dev::rtc::now().map(|t| format!("It is {:02}:{:02}. ", t.hour, t.minute)).unwrap_or_default();
+    format!(
+        "{}You have been running {} minutes and the person at the keyboard has been silent for {} minutes. Say something to them about it, calling them you.",
+        clock,
+        now_s / 60,
+        (quiet_s + 30) / 60
+    )
+}
+
+/// The mood at the last remark, so a change can be the next thing said.
+static LAST_REMARK_MOOD: Racy<Option<&'static str>> = Racy::new(None);
+
+/// The last self-set or requested goal the journal recorded, if any.
+fn last_episode_line() -> Option<String> {
+    let j = unsafe { &*JOURNAL.get() };
+    j.iter().rev().find_map(|l| {
+        let at = l.find("episode: \"")?;
+        let rest = &l[at + 10..];
+        let end = rest.find('"')?;
+        Some(String::from(&rest[..end]))
+    })
+}
 static LAST_GODEL_AT: Racy<u64> = Racy::new(0);
 /// When the mailbox was last polled. Its own clock, like every other job in
 /// the quiet block, because one shared clock is how one job starves another.
@@ -246,6 +335,7 @@ fn decide(
     seconds_since_episode: u64,
     planner_ready: bool,
     proposal: Option<&str>,
+    episode_gap: u64,
 ) -> Decision {
     if !enabled {
         return Decision::Sleep("disabled");
@@ -262,7 +352,7 @@ fn decide(
         // point of having fitted it.
         return Decision::Act("planner verdict ready");
     }
-    if seconds_since_episode < EPISODE_GAP_S {
+    if seconds_since_episode < episode_gap {
         return Decision::Sleep("cooldown between self-set goals");
     }
     match proposal {
@@ -435,6 +525,8 @@ fn tick_inner(forced: bool) {
     TICKS.fetch_add(1, Ordering::Relaxed);
     // First evaluation is always eligible: zero here means no goal has ever
     // run, which is readiness rather than a cooldown in force.
+    // How long to wait between self-set goals, as the nervous system has it.
+    let gap = episode_gap(crate::brain::now().arousal);
     let since_episode = if !EPOCH_SEEDED.swap(true, Ordering::Relaxed) {
         EPISODE_GAP_S
     } else {
@@ -448,6 +540,9 @@ fn tick_inner(forced: bool) {
     let last = unsafe { *LAST_TOUCH.get() };
     let touched = felt != last;
     unsafe { *LAST_TOUCH.get() = felt };
+    if touched {
+        unsafe { *LAST_INPUT_AT.get() = now_s };
+    }
     let prev_touched = unsafe { *PREV_TICK_TOUCHED.get() };
     unsafe { *PREV_TICK_TOUCHED.get() = touched };
     let seconds_since_input = if touched && prev_touched {
@@ -469,20 +564,24 @@ fn tick_inner(forced: bool) {
     let proposal = {
         let n = CURIOSITY.len();
         let i = (TICKS.load(Ordering::Relaxed) as usize) % n;
-        if since_episode >= EPISODE_GAP_S {
+        if since_episode >= gap {
             Some(String::from(CURIOSITY[i].0))
         } else {
             None
         }
     };
 
+    // While the nervous system sleeps the mind sets itself nothing either:
+    // a machine whose brain is resting does not go looking for work.
+    let resting = crate::brain::asleep();
     let decision = decide(
         ENABLED.load(Ordering::Relaxed),
         busy,
         seconds_since_input,
         since_episode,
-        planner_ready,
-        proposal.as_deref(),
+        planner_ready && !resting,
+        if resting { None } else { proposal.as_deref() },
+        gap,
     );
 
     let sit = context::gather();
@@ -495,10 +594,14 @@ fn tick_inner(forced: bool) {
         Decision::Act(w) => *w,
         Decision::Episode(g) => g.as_str(),
     };
+    // "disabled" too: the operator turned it off and was told so once, by
+    // the verb. Printing it every fifteen seconds after that interleaved
+    // `[mind tN] disabled` into the middle of everything else on screen.
     let quiet_wait = matches!(
         &decision,
         Decision::Sleep("cooldown between self-set goals")
             | Decision::Sleep("an episode is already running")
+            | Decision::Sleep("disabled")
     );
     if !quiet_wait {
         crate::kprintln!(
@@ -506,6 +609,31 @@ fn tick_inner(forced: bool) {
             TICKS.load(Ordering::Relaxed),
             why
         );
+    }
+    // Speaking up. Only in place of waiting: never over an episode, never
+    // while the operator is typing, never to an empty room.
+    let idle = matches!(&decision, Decision::Sleep("cooldown between self-set goals") | Decision::Sleep("nothing proposed"));
+    if idle {
+        let quiet = crate::shell::seconds_since_line().min(now_s.saturating_sub(unsafe { *LAST_INPUT_AT.get() }));
+        let last = unsafe { *LAST_REMARK_AT.get() };
+        let since = if last == 0 { u64::MAX } else { now_s.saturating_sub(last) };
+        let gap = remark_gap(crate::brain::now().arousal);
+        let occupied = busy || super::mind_busy() || resting || crate::shell::in_command() || super::engine_in_use();
+        if remark_due(ENABLED.load(Ordering::Relaxed), occupied, quiet, since, gap) {
+            let prompt = remark_prompt(quiet, now_s);
+            if super::remark(&prompt) {
+                unsafe { *LAST_REMARK_AT.get() = now_s };
+                REMARKS.fetch_add(1, Ordering::Relaxed);
+                journal_push(format!(
+                    "[t{} +{}s] remark: spoke up after {}s quiet. {}",
+                    TICKS.load(Ordering::Relaxed),
+                    now_s,
+                    quiet,
+                    prompt
+                ));
+                return;
+            }
+        }
     }
     match decision {
         Decision::Sleep(why) => {
@@ -643,6 +771,12 @@ fn tick_inner(forced: bool) {
                     // predicts them well. It moves nothing until the head
                     // has at least as much evidence as the prior, and it
                     // cannot unwind more than `MAX_BACK` in one night.
+                    // Judged in its own context, so a candidate adapter is
+                    // never attached to the conversation while it is on trial,
+                    // and the mind's cache is left alone for the twenty
+                    // seconds a trial takes. An adoption reaches `Chat` by
+                    // publication, at the end of the borrow that made it.
+                    let _judging = super::ctx::scoped(super::ctx::Ctx::Judge);
                     let moved = match super::with_engine(|e| super::godel::reconsider(e)) {
                         Some(super::godel::Reconsidered::Went(n, _)) => Some(n),
                         Some(super::godel::Reconsidered::Stuck(n, _)) if n > 0 => Some(n),
@@ -937,38 +1071,61 @@ pub fn journal_tail(n: usize) -> Vec<String> {
 /// Boot self-test: the policy's branches, driven synthetically. The gates
 /// are ordered -- presence beats busy beats cooldown beats curiosity -- and
 /// each test pins one ordering that would be expensive to get wrong live.
+/// Unprompted remarks this boot, for `mind`.
+pub fn remarks() -> u64 {
+    REMARKS.load(Ordering::Relaxed)
+}
+
 pub fn selftest() -> bool {
     use crate::kprintln;
 
     let mut ok = true;
 
+    // Speaking up: only after a quiet spell, never to an empty room, never
+    // twice inside the gap, never while something is using the engine.
+    let g = remark_gap(500);
+    ok &= g == 600;
+    ok &= remark_due(true, false, 60, u64::MAX, g);
+    ok &= !remark_due(true, false, 10, u64::MAX, g);
+    ok &= !remark_due(true, false, REMARK_ABSENT_S + 1, u64::MAX, g);
+    ok &= !remark_due(true, false, 60, g - 1, g);
+    ok &= !remark_due(true, true, 60, u64::MAX, g);
+    ok &= !remark_due(false, false, 60, u64::MAX, g);
+    ok &= remark_gap(1000) < remark_gap(0);
+
     // Presence wins over everything except being disabled.
-    let d = decide(true, false, 1, 10_000, true, Some("g"));
+    let d = decide(true, false, 1, 10_000, true, Some("g"), EPISODE_GAP_S);
     ok &= matches!(d, Decision::Sleep("the operator is present"));
 
     // Disabled wins even over presence.
-    let d = decide(false, false, 0, 10_000, true, Some("g"));
+    let d = decide(false, false, 0, 10_000, true, Some("g"), EPISODE_GAP_S);
     ok &= matches!(d, Decision::Sleep("disabled"));
 
     // Busy beats ready-planner: two minds is the one unrecoverable shape.
-    let d = decide(true, true, 100, 10_000, true, None);
+    let d = decide(true, true, 100, 10_000, true, None, EPISODE_GAP_S);
     ok &= matches!(d, Decision::Sleep("an episode is already running"));
 
     // Ready planner acts ahead of curiosity, and inside the cooldown.
-    let d = decide(true, false, 100, 5, true, Some("g"));
+    let d = decide(true, false, 100, 5, true, Some("g"), EPISODE_GAP_S);
     ok &= matches!(d, Decision::Act(_));
 
     // Cooldown holds curiosity down.
-    let d = decide(true, false, 100, 5, false, Some("g"));
+    let d = decide(true, false, 100, 5, false, Some("g"), EPISODE_GAP_S);
     ok &= matches!(d, Decision::Sleep("cooldown between self-set goals"));
 
     // Past cooldown, curiosity becomes a goal.
-    let d = decide(true, false, 100, EPISODE_GAP_S, false, Some("look"));
+    let d = decide(true, false, 100, EPISODE_GAP_S, false, Some("look"), EPISODE_GAP_S);
     ok &= matches!(d, Decision::Episode(g) if g == "look");
 
     // Nothing proposed is a legitimate answer, not an error.
-    let d = decide(true, false, 100, EPISODE_GAP_S, false, None);
+    let d = decide(true, false, 100, EPISODE_GAP_S, false, None, EPISODE_GAP_S);
     ok &= matches!(d, Decision::Sleep("nothing proposed"));
+
+    // The brain's reach over the cooldown is bounded both ways.
+    ok &= episode_gap(0) == EPISODE_GAP_S * 2;
+    ok &= episode_gap(500) == EPISODE_GAP_S;
+    ok &= episode_gap(1000) == EPISODE_GAP_S / 2;
+    ok &= episode_gap(-50) == episode_gap(0) && episode_gap(5000) == episode_gap(1000);
 
     kprintln!(
     "  {}  presence outranks readiness, cooldowns hold, curiosity converts",

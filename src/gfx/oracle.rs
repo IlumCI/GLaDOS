@@ -27,7 +27,12 @@
 //!   change what somebody does.
 //! - **Ledger**: the self-improvement machine's search state -- which cells of
 //!   the MAP-Elites archive are lit, and how uncertain each axis is.
-//! - **Outcome**: how far apart two applets are, measured by what they print.
+//! - **Brain**: the connectome running beside the model -- its mood plane and
+//!   the trail it took, a raster of the neurons each sense reaches, which
+//!   senses are driven, and the readouts and modulators the mood comes from.
+//!   It replaced Outcome, which showed nothing until a key was pressed and
+//!   answered a question only the self-improvement loop asks
+//!   (`outcome` still prints it at the shell).
 //!
 //! ### Nothing here may block the compositor
 //!
@@ -35,8 +40,8 @@
 //! work that is the *only* painter -- so a panel that waited on the model would
 //! stop the whole display, not just itself. `trace` copies applet names in at
 //! record time so this never calls `with_engine`, the ledger reads are small
-//! namespace lookups, and the outcome matrix dispatches fourteen applets and is
-//! therefore behind a keypress rather than computed on a frame.
+//! namespace lookups, and the brain tab draws a copy `brain::view` takes in one
+//! short lock.
 
 use super::theme::{self, Rect};
 use super::{Color, DeskApp, Framebuffer};
@@ -45,7 +50,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-const TABS: [&str; 6] = ["Learn", "Net", "Route", "Council", "Ledger", "Outcome"];
+const TABS: [&str; 6] = ["Learn", "Net", "Route", "Council", "Ledger", "Brain"];
 
 /// The probe, the lexical core, the character core. One colour each, used for
 /// the vote markers and the agreement bars alike so the two panels read as one
@@ -62,10 +67,6 @@ pub struct Oracle {
     /// runs from here rather than from the fit, because the fit happens at
     /// boot and would always be over by the time anybody opened the window.
     shown_ms: u64,
-    /// The applet distance matrix, once somebody has asked for it. Never
-    /// computed during a frame: `outcome::probe` dispatches fourteen applets
-    /// and captures their output, which is a long way past what a paint may do.
-    matrix: Option<crate::ai::outcome::Matrix>,
     status: String,
 }
 
@@ -75,7 +76,7 @@ impl Oracle {
             .iter()
             .position(|t| t.eq_ignore_ascii_case(arg.trim()))
             .unwrap_or(0);
-        let mut o = Self { tab, shown_ms: now_ms(), matrix: None, status: String::new() };
+        let mut o = Self { tab, shown_ms: now_ms(), status: String::new() };
         // **Opening the panel takes the reading.** It was behind the N key, on
         // the reasoning that a forward pass is too expensive for a frame --
         // which is true, and has nothing to do with opening a window. Asking
@@ -514,38 +515,154 @@ impl Oracle {
 
     // --- Outcome ---------------------------------------------------------
 
-    fn draw_outcome(&self, fb: &Framebuffer, r: Rect) -> String {
-        let lh = theme::text_h();
-        let Some(m) = &self.matrix else {
-            theme::text_over(fb, r.x + 8, r.y + 6,
-                "how far apart two applets are, by what they printed",
-                theme::SHADOW);
-            theme::text_over(fb, r.x + 8, r.y + 10 + lh,
-                "press M to measure -- it runs fourteen applets,",
-                theme::SCREEN_TEXT);
-            theme::text_over(fb, r.x + 8, r.y + 12 + lh * 2,
-                "which is why it is not done on a frame",
-                theme::SCREEN_TEXT);
-            return String::from("not measured this boot");
-        };
+    // --- Brain -----------------------------------------------------------
 
-        let n = m.len().min(16) as u32;
-        let cell = ((r.w.saturating_sub(16)).min(r.h.saturating_sub(lh + 16)) / n.max(1)).max(4);
-        let top = r.y + 8 + lh;
-        theme::text_over(fb, r.x + 8, r.y + 4,
-            &clip("dark is near, light is far", fits(r.w.saturating_sub(16))),
-            theme::SHADOW);
-        for a in 0..n {
-            for b in 0..n {
-                let d = m.get(a as usize, b as usize).clamp(0.0, 1.0);
-                let v = (d * 220.0) as u8;
-                fb.rect(r.x + 8 + b * cell, top + a * cell,
-                        cell.saturating_sub(1), cell.saturating_sub(1),
-                        Color::new(v / 3, v / 2, v));
+    /// The connectome, in plain words: how it feels and why, what it senses,
+    /// what it is driven to do, its chemistry, and its mood over the last two
+    /// minutes.
+    ///
+    /// **It was a raster of neuron ids and an abstract plane, and the first
+    /// person to open it said they had no idea what they were looking at.** So
+    /// every number here is put as the question somebody would ask -- how is it
+    /// feeling, what is happening to it -- and every sense is named by what
+    /// drives it on this machine rather than by the animal's cell type.
+    fn draw_brain(&self, fb: &Framebuffer, r: Rect) -> String {
+        let Some(v) = crate::brain::view() else {
+            theme::text_over(fb, r.x + 8, r.y + 8, "no brain is running", theme::SCREEN_TEXT);
+            return String::from("no connectome loaded");
+        };
+        let a = v.affect;
+        let lh = theme::text_h();
+        let pad = 10u32;
+        let col_w = (r.w.saturating_sub(pad * 3)) / 2;
+        let lx = r.x + pad;
+        let rx = lx + col_w + pad;
+
+        // --- How it feels, and why.
+        let (word, tone) = feeling(a.words());
+        theme::text_over(fb, lx, r.y + 6, "It feels", theme::SHADOW);
+        let big = 4u32;
+        theme::text_over_at(fb, lx, r.y + 8 + lh, word, tone, big);
+        let mut y = r.y + 14 + lh + theme::text_h_at(big);
+        let driven: Vec<&str> = v.senses.iter().filter(|s| s.1).map(|s| s.0.as_str()).collect();
+        let why = if !v.running {
+            String::from("Its simulation is switched off.")
+        } else if a.asleep {
+            String::from("It is asleep. Touch or speech will wake it.")
+        } else if driven.is_empty() && matches!(a.words(), "calm" | "content") {
+            String::from("Nothing is happening to it right now.")
+        } else if driven.is_empty() {
+            // A mood outlasts what caused it: the readouts settle over about
+            // two seconds of brain time and the chemistry over longer.
+            String::from("Nothing is happening to it now; it is still settling from earlier.")
+        } else {
+            let parts: Vec<&str> = driven.iter().map(|d| sense_cause(d)).collect();
+            format!("Because {}.", parts.join(", and "))
+        };
+        for line in wrap(&why, col_w) {
+            theme::text_over(fb, lx, y, &line, theme::SCREEN_TEXT);
+            y += lh + 2;
+        }
+        y += 4;
+        for line in wrap("Its mood sets the desktop's colours, the voice, and how it talks to you.", col_w) {
+            theme::text_over(fb, lx, y, &line, theme::SHADOW);
+            y += lh + 2;
+        }
+
+        // --- Mood over time: two lines, labelled.
+        y += 10;
+        theme::text_over(fb, lx, y, "Mood over the last two minutes", theme::FACE);
+        y += lh + 4;
+        let foot_room = lh * 4 + 20;
+        let ch = (r.y + r.h).saturating_sub(y + foot_room).max(40);
+        let chart = Rect::new(lx, y, col_w, ch);
+        fb.rect(chart.x, chart.y, chart.w, chart.h, Color::new(0x12, 0x16, 0x1C));
+        fb.rect(chart.x, chart.y + chart.h / 2, chart.w, 1, Color::new(0x2A, 0x32, 0x3C));
+        const GOOD: Color = Color::new(0x6C, 0xD0, 0x8A);
+        const BAD: Color = Color::new(0xE0, 0x5A, 0x48);
+        const AROUSE: Color = Color::new(0x6A, 0xA8, 0xE8);
+        let n = v.trail.len();
+        if n >= 2 {
+            let x_of = |i: usize| chart.x + 2 + (i as u32 * (chart.w - 4)) / (crate::brain::HISTORY_COLS as u32 - 1).max(1);
+            let off = crate::brain::HISTORY_COLS.saturating_sub(n);
+            let yv = |val: i32| chart.y + 2 + ((1000 - val.clamp(-1000, 1000)) as u32 * (chart.h - 4)) / 2000;
+            let ya = |aro: i32| chart.y + 2 + ((1000 - aro.clamp(0, 1000)) as u32 * (chart.h - 4)) / 1000;
+            for i in 1..n {
+                let (x0, x1) = (x_of(off + i - 1), x_of(off + i));
+                let (v0, v1) = (v.trail[i - 1].0, v.trail[i].0);
+                seg(fb, x0, yv(v0), x1, yv(v1), if v1 >= 0 { GOOD } else { BAD });
+                seg(fb, x0, ya(v.trail[i - 1].1), x1, ya(v.trail[i].1), AROUSE);
+            }
+        } else {
+            theme::text_over(fb, chart.x + 8, chart.y + 8, "collecting...", theme::SHADOW);
+        }
+        theme::text_over(fb, chart.x + 4, chart.y + 2, "good", GOOD);
+        theme::text_over(fb, chart.x + 4, chart.y + chart.h.saturating_sub(lh + 2), "bad", BAD);
+        let ty = chart.y + chart.h + 2;
+        theme::text_over(fb, chart.x, ty, "2 min ago", theme::SHADOW);
+        theme::text_over(fb, (chart.x + chart.w).saturating_sub(theme::text_w_of("now")), ty, "now", theme::SHADOW);
+        let ly = ty + lh + 4;
+        fb.rect(lx, ly + lh / 2, 14, 3, GOOD);
+        theme::text_over(fb, lx + 18, ly, "mood", theme::SCREEN_TEXT);
+        let mx = lx + 18 + theme::text_w_of("mood") + 16;
+        fb.rect(mx, ly + lh / 2, 14, 3, AROUSE);
+        theme::text_over(fb, mx + 18, ly, "excitement", theme::SCREEN_TEXT);
+
+        // --- Right: what it senses, what it is driven to do, its chemistry.
+        let mut y = r.y + 6;
+        let bar_w = col_w;
+        let row = |fb: &Framebuffer, y: &mut u32, name: &str, sub: &str, frac: f32, lit: bool, c: Color| {
+            let label = if sub.is_empty() { String::from(name) } else { format!("{} -- {}", name, sub) };
+            theme::text_over(fb, rx, *y, &fit_label(&label, bar_w), if lit { theme::APERTURE } else { theme::SCREEN_TEXT });
+            *y += lh + 2;
+            fb.rect(rx, *y, bar_w, 6, Color::new(0x1C, 0x22, 0x2A));
+            let w = (frac.clamp(0.0, 1.0) * bar_w as f32) as u32;
+            if w > 0 {
+                fb.rect(rx, *y, w, 6, if lit { theme::APERTURE } else { c });
+            }
+            *y += 12;
+        };
+        theme::text_over(fb, rx, y, "What it senses", theme::FACE);
+        y += lh + 6;
+        for (name, lit, mhz) in v.senses.iter() {
+            let (label, sub) = sense_label(name);
+            row(fb, &mut y, label, sub, *mhz as f32 / 1000.0 / 100.0, *lit, Color::new(0x7A, 0x86, 0x94));
+        }
+        y += 6;
+        theme::text_over(fb, rx, y, "What it is driven to do", theme::FACE);
+        y += lh + 6;
+        let mut by_role = [0i64; 3];
+        for ro in v.readouts.iter() {
+            match ro.role {
+                "approach" => by_role[0] += ro.mhz,
+                "avoid" => by_role[1] += ro.mhz,
+                "arousal" => by_role[2] += ro.mhz,
+                _ => {}
             }
         }
-        format!("{} of {} ran; the rest mutate", m.ran, m.len())
+        row(fb, &mut y, "Move toward", "seek what is good", by_role[0] as f32 / 1000.0 / 40.0, false, GOOD);
+        row(fb, &mut y, "Back away", "escape what hurts", by_role[1] as f32 / 1000.0 / 40.0, false, BAD);
+        row(fb, &mut y, "Be alert", "ready to act", by_role[2] as f32 / 1000.0 / 40.0, false, AROUSE);
+        y += 6;
+        if y + (lh + 14) * 2 < r.y + r.h {
+            theme::text_over(fb, rx, y, "Its chemistry", theme::FACE);
+            y += lh + 6;
+            for (name, sub, lvl, c) in [
+                ("Dopamine", "reward", v.mods[0], Color::new(0xE8, 0xC0, 0x40)),
+                ("Octopamine", "excitement", v.mods[1], Color::new(0xC0, 0x70, 0xE0)),
+                ("Serotonin", "calm", v.mods[2], Color::new(0x40, 0xC0, 0xC0)),
+                ("Sleep need", "", v.pressure_pct * 10, Color::new(0x70, 0x80, 0xA0)),
+            ] {
+                if y + lh + 14 > r.y + r.h {
+                    break;
+                }
+                row(fb, &mut y, name, sub, lvl as f32 / 1000.0, false, c);
+            }
+        }
+
+        format!("{}, {} neurons, running live", animal(v.source), v.neurons)
     }
+
 }
 
 /// `gfx::now_ms`: the frame's time while a frame is drawn, so a moving tab's
@@ -592,7 +709,7 @@ impl DeskApp for Oracle {
     fn stamp(&self) -> Option<u64> {
         use core::hash::{Hash, Hasher};
         let mut h = super::scene::Stamp::new();
-        (self.tab, self.status.as_str(), self.matrix.is_some()).hash(&mut h);
+        (self.tab, self.status.as_str()).hash(&mut h);
         let since = now_ms().saturating_sub(self.shown_ms);
         match self.tab {
             // Past the reveal is its own bucket, so the last frame is drawn at
@@ -600,6 +717,7 @@ impl DeskApp for Oracle {
             0 => (trace::generation(), if since >= REVEAL_MS { u64::MAX } else { since / ANIM_MS }).hash(&mut h),
             1 => (trace::generation(), now_ms() / ANIM_MS).hash(&mut h),
             2 | 3 => trace::generation().hash(&mut h),
+            5 => crate::brain::generation().hash(&mut h),
             4 => (
                 crate::sysbox::blob_len(crate::ai::godel::LEDGER),
                 crate::sysbox::hash_of(crate::ai::godel::ARCHIVE),
@@ -617,6 +735,8 @@ impl DeskApp for Oracle {
             1 => Some(ANIM_MS as u32),
             // Written by other tasks -- a routing decision, a trial.
             0 | 2 | 3 | 4 => Some(1000),
+            // The brain publishes a readout window several times a second.
+            5 => Some(200),
             _ => None,
         }
     }
@@ -637,10 +757,10 @@ impl DeskApp for Oracle {
             2 => self.draw_route(fb, inner),
             3 => self.draw_council(fb, inner),
             4 => self.draw_ledger(fb, inner),
-            _ => self.draw_outcome(fb, inner),
+            _ => self.draw_brain(fb, inner),
         };
         let line = if self.status.is_empty() { note } else { self.status.clone() };
-        theme::text_over(fb, foot.x + 2, foot.y, &clip(&line, fits(foot.w)), theme::SHADOW);
+        theme::text_over(fb, foot.x + 2, foot.y, &fit_label(&line, foot.w.saturating_sub(4)), theme::SHADOW);
     }
 
     fn key(&mut self, k: u8) -> bool {
@@ -665,16 +785,6 @@ impl DeskApp for Oracle {
             b'n' | b'N' => {
                 self.capture();
                 self.tab = 1;
-                self.shown_ms = now_ms();
-                true
-            }
-            b'm' | b'M' => {
-                self.matrix = crate::ai::outcome::probe();
-                self.status = match &self.matrix {
-                    Some(_) => String::new(),
-                    None => String::from("the applet table would not answer"),
-                };
-                self.tab = 5;
                 self.shown_ms = now_ms();
                 true
             }
@@ -707,5 +817,108 @@ impl DeskApp for Oracle {
         self.tab = (((self.tab as i32 + notches.signum()) % n + n) % n) as usize;
         self.shown_ms = now_ms();
         true
+    }
+}
+
+/// The mood word, and its colour: green when good, red when bad.
+fn feeling(words: &str) -> (&'static str, Color) {
+    match words {
+        "agitated" => ("Upset", Color::new(0xE0, 0x5A, 0x48)),
+        "uneasy" => ("Uneasy", Color::new(0xD8, 0x8A, 0x50)),
+        "eager" => ("Excited", Color::new(0x6C, 0xD0, 0x8A)),
+        "content" => ("Content", Color::new(0x6C, 0xD0, 0x8A)),
+        "alert" => ("Alert", Color::new(0x6A, 0xA8, 0xE8)),
+        "asleep" => ("Asleep", Color::new(0x90, 0x98, 0xB0)),
+        _ => ("Calm", Color::new(0xC8, 0xC8, 0xC8)),
+    }
+}
+
+/// What a sense is called here, and what drives it on this machine.
+fn sense_label(name: &str) -> (&str, &'static str) {
+    match name {
+        "touch" => ("Touch", "keyboard and mouse"),
+        "voice" => ("Hearing", "being spoken to"),
+        "food" => ("Reward", "something went well"),
+        "noxious" => ("Pain", "faults and failures"),
+        "thermal" => ("Heat", "the processor running hot"),
+        other => (other, ""),
+    }
+}
+
+/// Why a driven sense is driven, as the end of "It feels upset because ...".
+fn sense_cause(name: &str) -> &'static str {
+    match name {
+        "touch" => "someone is touching the keyboard or mouse",
+        "voice" => "it is being spoken to",
+        "food" => "something went well",
+        "noxious" => "something went wrong -- a fault, or a refused action",
+        "thermal" => "the processor is running hot",
+        _ => "one of its senses is being driven",
+    }
+}
+
+/// The animal, in words.
+fn animal(source: &str) -> &'static str {
+    if source.contains("worm") {
+        "A worm's brain (C. elegans)"
+    } else if source.contains("fly") || source.contains("FlyWire") {
+        "A fruit fly's brain"
+    } else {
+        "An animal's brain"
+    }
+}
+
+/// Words onto lines no wider than `w` pixels, measured in the face they are
+/// drawn in -- counting characters wrapped this proportional text at half
+/// the width it had.
+fn wrap(text: &str, w: u32) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_whitespace() {
+        let trial = if cur.is_empty() { String::from(word) } else { format!("{} {}", cur, word) };
+        if !cur.is_empty() && theme::text_w_of(&trial) > w {
+            out.push(core::mem::take(&mut cur));
+        }
+        let w = word;
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(w);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// A label that fits `w` pixels: whole if it fits, the part before " -- "
+/// if that does, cut with a full stop if neither.
+fn fit_label(label: &str, w: u32) -> String {
+    if theme::text_w_of(label) <= w {
+        return String::from(label);
+    }
+    let head = label.split(" -- ").next().unwrap_or(label);
+    if theme::text_w_of(head) <= w {
+        return String::from(head);
+    }
+    let mut out = String::new();
+    for c in head.chars() {
+        out.push(c);
+        if theme::text_w_of(&out) > w {
+            out.pop();
+            break;
+        }
+    }
+    out
+}
+
+/// A line segment two pixels thick, stepped along its longer axis.
+fn seg(fb: &Framebuffer, x0: u32, y0: u32, x1: u32, y1: u32, c: Color) {
+    let (dx, dy) = (x1 as i64 - x0 as i64, y1 as i64 - y0 as i64);
+    let steps = dx.abs().max(dy.abs()).max(1);
+    for k in 0..=steps {
+        let x = x0 as i64 + dx * k / steps;
+        let y = y0 as i64 + dy * k / steps;
+        fb.rect(x.max(0) as u32, y.max(0) as u32, 2, 2, c);
     }
 }

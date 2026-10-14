@@ -131,6 +131,28 @@ const SKY: [(f32, Color); 3] = [
     (0.72, Color::new(40, 36, 78)),
 ];
 
+/// The clinical scene: the same geometry, lit like a test chamber. A
+/// near-white sky cooling toward the horizon, hill bodies stepping from light
+/// to darker grey front to back so they read as depth, and rims drawn as crisp
+/// lines rather than glow -- added light vanishes on white.
+const SKY_CLINIC: [(f32, Color); 3] = [
+    (0.0, Color::new(250, 251, 253)),
+    (0.5, Color::new(238, 242, 247)),
+    (0.72, Color::new(222, 230, 239)),
+];
+const HILLS_CLINIC: [((u8, u8, u8), (u8, u8, u8)); 3] = [
+    ((216, 223, 231), (52, 128, 206)),
+    ((196, 205, 215), (0, 150, 182)),
+    ((170, 181, 194), (238, 120, 32)),
+];
+
+/// Which scene a base is painted as.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Scene {
+    Night,
+    Clinic,
+}
+
 /// Coverage of the sun at a pixel centre, stripes included.
 fn sun_cov(x: f32, y: f32, cx: f32, cy: f32, r: f32, stripes: f32) -> f32 {
     let c = super::splash::aperture_coverage(x - cx, y - cy, r);
@@ -195,6 +217,9 @@ pub struct Sun {
     pub stripes: f32,
     pub top: [f32; 3],
     pub bot: [f32; 3],
+    /// The halo's colour, linear. Its own field so an eclipse can be a dark
+    /// disc in a red corona.
+    pub halo: [f32; 3],
 }
 
 impl Sun {
@@ -208,7 +233,96 @@ impl Sun {
             stripes: 1.0,
             top: lin3((255, 226, 120)),
             bot: lin3((255, 84, 40)),
+            halo: lin3((255, 120, 40)),
         }
+    }
+}
+
+/// The sun's colours at the two ends of valence, and asleep. The middle is
+/// `Sun::rest`, so a calm mind is the approved wallpaper bit for bit.
+/// Approach: a clinical pale blue, the lab with the lights on.
+/// Strong enough to hold its edge against a white sky: pale at the top,
+/// Aperture blue at the foot.
+const CLINIC: ((u8, u8, u8), (u8, u8, u8)) = ((150, 200, 245), (40, 112, 196));
+const CLINIC_HALO: (u8, u8, u8) = (190, 220, 250);
+/// Avoidance: the colour drains out of it; grey, top and bottom.
+const ASH: ((u8, u8, u8), (u8, u8, u8)) = ((196, 196, 196), (104, 104, 104));
+const ASH_HALO: (u8, u8, u8) = (150, 150, 150);
+/// Asleep: an eclipse. The disc goes nearly black inside a pale corona.
+const ECLIPSE: ((u8, u8, u8), (u8, u8, u8)) = ((8, 8, 8), (4, 4, 4));
+const ECLIPSE_HALO: (u8, u8, u8) = (225, 225, 225);
+/// Full arousal lifts the sun this much of the screen height, and sleep sinks
+/// it this much: far enough that the hills take its lower half, which is the
+/// one pose in which "a new day" is deliberately not true.
+const LIFT: f32 = 0.06;
+
+impl Sun {
+    /// Where the brain's mood puts it. Valence and arousal are thousandths,
+    /// as `brain::Affect` carries them. Arousal is height; valence is colour
+    /// -- toward gold, or toward blood -- and asleep it is eclipsed. Nothing
+    /// moves it sideways or resizes it, so the windows on the right never see
+    /// it. A pure function, so the selftest can hold every pose.
+    pub fn for_mood(w: u32, h: u32, valence: i32, arousal: i32, asleep: bool) -> Sun {
+        let rest = Sun::rest(w, h);
+        let hf = h as f32;
+        if asleep {
+            return Sun { top: lin3(ECLIPSE.0), bot: lin3(ECLIPSE.1), halo: lin3(ECLIPSE_HALO), stripes: 0.0, ..rest };
+        }
+        let v = valence.clamp(-1000, 1000) as f32 / 1000.0;
+        let a = arousal.clamp(0, 1000) as f32 / 1000.0;
+        let (toward, halo) = if v >= 0.0 { (CLINIC, CLINIC_HALO) } else { (ASH, ASH_HALO) };
+        // Fully there at +/-400: half of either way is about as far as a real
+        // brain goes, and in linear light a half mix still reads as the gold
+        // it started from.
+        let k = (v.abs() * 2.5).min(1.0);
+        let mix = |r: [f32; 3], t: [f32; 3]| [r[0] + (t[0] - r[0]) * k, r[1] + (t[1] - r[1]) * k, r[2] + (t[2] - r[2]) * k];
+        Sun {
+            cy: rest.cy - LIFT * hf * a,
+            top: mix(rest.top, lin3(toward.0)),
+            bot: mix(rest.bot, lin3(toward.1)),
+            halo: mix(rest.halo, lin3(halo)),
+            ..rest
+        }
+    }
+
+    /// Part way from `self` to `to`, every field.
+    pub fn lerp(&self, to: &Sun, t: f32) -> Sun {
+        // `a + (b - a) * 1` is not always `b` in floats, and a glide whose
+        // last frame missed its pose by a bit would never stop differing.
+        if t >= 1.0 {
+            return *to;
+        }
+        let l = |a: f32, b: f32| a + (b - a) * t;
+        let l3 = |a: [f32; 3], b: [f32; 3]| [l(a[0], b[0]), l(a[1], b[1]), l(a[2], b[2])];
+        Sun {
+            cx: l(self.cx, to.cx),
+            cy: l(self.cy, to.cy),
+            r: l(self.r, to.r),
+            stripes: l(self.stripes, to.stripes),
+            top: l3(self.top, to.top),
+            bot: l3(self.bot, to.bot),
+            halo: l3(self.halo, to.halo),
+        }
+    }
+
+    /// Every pixel the overlay can touch, halo included, clipped to the
+    /// screen: what has to be put back to base before it moves.
+    pub fn reach(&self, w: u32, h: u32) -> (u32, u32, u32, u32) {
+        let reach = self.r * (1.0 + HALO_REACH);
+        let x0 = ((self.cx - reach).max(0.0)) as u32;
+        let x1 = ((self.cx + reach).max(0.0) as u32 + 1).min(w);
+        let y0 = ((self.cy - reach).max(0.0)) as u32;
+        let y1 = ((self.cy + reach).max(0.0) as u32 + 1).min(h);
+        (x0.min(w), y0.min(h), x1, y1)
+    }
+
+    /// Bits that change whenever anything drawn changes, for a scene stamp.
+    pub fn key(&self) -> [u32; 13] {
+        let b = |f: f32| f.to_bits();
+        [
+            b(self.cx), b(self.cy), b(self.r), b(self.stripes), b(self.top[0]), b(self.top[1]), b(self.top[2]),
+            b(self.bot[0]), b(self.bot[1]), b(self.bot[2]), b(self.halo[0]), b(self.halo[1]), b(self.halo[2]),
+        ]
     }
 }
 
@@ -253,7 +367,7 @@ pub fn overlay_sun_behind(fb: &Framebuffer, sun: &Sun, t: &Tables, hills: f32) {
         return;
     }
     let bgr = fb.format() == super::Format::Bgrx;
-    let warm = lin3((255, 120, 40));
+    let warm = sun.halo;
     // Per column, the nearest crest; per quarter pixel of distance, the halo.
     // Both are functions of one coordinate and were costing three sines and two
     // exponentials a pixel -- most of 75 ms a glide frame.
@@ -371,6 +485,12 @@ fn vignette(u: f32, v: f32) -> f32 {
 
 /// Everything but the sun: sky, hills, their light, the vignette.
 pub fn paint_base(fb: &Framebuffer) {
+    paint_scene(fb, Scene::Night);
+}
+
+/// `paint_base` in either scene. Night is the approved picture, unchanged.
+pub fn paint_scene(fb: &Framebuffer, scene: Scene) {
+    let clinic = scene == Scene::Clinic;
     let (w, h) = (fb.width() as usize, fb.height() as usize);
     if w == 0 || h == 0 {
         return;
@@ -379,7 +499,7 @@ pub fn paint_base(fb: &Framebuffer) {
     let scale = hf / 1080.0;
 
     // The sky, one ramp entry per row, in linear light.
-    let sky_ramp = super::grad::Ramp::bake(&SKY, h);
+    let sky_ramp = super::grad::Ramp::bake(if clinic { &SKY_CLINIC } else { &SKY }, h);
     let sky_row: Vec<[f32; 3]> = (0..h)
         .map(|y| {
             let c = sky_ramp.at(y);
@@ -396,8 +516,16 @@ pub fn paint_base(fb: &Framebuffer) {
             [HILLS[0].0(u) * hf, HILLS[1].0(u) * hf, HILLS[2].0(u) * hf]
         })
         .collect();
-    let bodies: Vec<[f32; 3]> = HILLS.iter().map(|hl| lin3(hl.1)).collect();
-    let rims: Vec<[f32; 3]> = HILLS.iter().map(|hl| lin3(hl.2)).collect();
+    let bodies: Vec<[f32; 3]> = if clinic {
+        HILLS_CLINIC.iter().map(|hl| lin3(hl.0)).collect()
+    } else {
+        HILLS.iter().map(|hl| lin3(hl.1)).collect()
+    };
+    let rims: Vec<[f32; 3]> = if clinic {
+        HILLS_CLINIC.iter().map(|hl| lin3(hl.1)).collect()
+    } else {
+        HILLS.iter().map(|hl| lin3(hl.2)).collect()
+    };
     for y in 0..h {
         let yc = y as f32 + 0.5;
         for x in 0..w {
@@ -410,11 +538,26 @@ pub fn paint_base(fb: &Framebuffer) {
                 let d = yc - crests[x][k];
                 let fill = (d + 0.5).clamp(0.0, 1.0);
                 if fill > 0.0 {
-                    let lift = 1.0 + 0.6 * crate::ai::tensor::expf(-d.max(0.0) / (90.0 * scale));
+                    // Night: lit from the crest, brighter just under it.
+                    // Clinic: shaded away from it, a little darker with depth,
+                    // as a matte surface under top light.
+                    let near = crate::ai::tensor::expf(-d.max(0.0) / (90.0 * scale));
+                    let lift = if clinic { 1.0 - 0.10 * (1.0 - near) } else { 1.0 + 0.6 * near };
                     for c in 0..3 {
                         px[c] = px[c] * (1.0 - fill) + bodies[k][c] * lift * fill;
                         g[c] *= 1.0 - fill;
                     }
+                }
+                if clinic {
+                    // A crisp drawn line, mixed over the picture, not added.
+                    let e = d / (1.1 * scale);
+                    if e.abs() < 4.0 {
+                        let line = crate::ai::tensor::expf(-e * e) * hl.3;
+                        for c in 0..3 {
+                            px[c] = px[c] * (1.0 - line) + rims[k][c] * line;
+                        }
+                    }
+                    continue;
                 }
                 let e = d / (1.6 * scale);
                 if e.abs() < 6.0 {
@@ -450,7 +593,8 @@ pub fn paint_base(fb: &Framebuffer) {
         let v = (y as f32 + 0.5) / hf;
         for x in 0..w {
             let u = (x as f32 + 0.5) / wf;
-            let vg = vignette(u, v);
+            // On white a strong vignette reads as dirt in the corners.
+            let vg = if clinic { 1.0 - (1.0 - vignette(u, v)) * 0.18 } else { vignette(u, v) };
             let i = (y * w + x) * 3;
             let fine = [enc.at(img[i] * vg), enc.at(img[i + 1] * vg), enc.at(img[i + 2] * vg)];
             let c = super::grad::dither(fine, x as u32, y as u32);
@@ -461,6 +605,70 @@ pub fn paint_base(fb: &Framebuffer) {
 }
 
 /// `video wall`: the wallpaper alone, and how long it took.
+/// The wallpaper draining as the mood drops: `level` <= 0. Greyscale,
+/// darker with depth, every third row scored as a scanline; full strength at
+/// -500, about as low as a real brain's mood goes. Applied to the cached
+/// base when the mood steps, never per frame. The other direction is not a
+/// grade -- lifting everything toward white is a fog -- but a second picture,
+/// `Scene::Clinic`, blended in by `blend`.
+pub fn grade(fb: &Framebuffer, level: i32, t: &Tables) {
+    if level >= 0 {
+        return;
+    }
+    let k = (level.unsigned_abs() as f32 / 500.0).min(1.0);
+    let (w, h) = (fb.width(), fb.height());
+    let bgr = fb.format() == super::Format::Bgrx;
+    let lanes = if bgr { [2, 1, 0] } else { [0, 1, 2] };
+    let mut row: Vec<u32> = alloc::vec![0; w as usize];
+    for y in 0..h {
+        let scan = if y % 3 == 0 { 1.0 - 0.35 * k } else { 1.0 };
+        for x in 0..w {
+            let p = fb.get(x, y);
+            let mut lin = [0f32; 3];
+            for c in 0..3 {
+                lin[c] = t.dec[((p >> (8 * lanes[c])) & 0xff) as usize];
+            }
+            let lum = 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+            let mut fine = [0u16; 3];
+            for c in 0..3 {
+                fine[c] = t.enc.at((lin[c] + (lum - lin[c]) * k) * (1.0 - 0.6 * k) * scan);
+            }
+            row[x as usize] = super::blend::opaque(fb.encode(super::grad::dither(fine, x, y)));
+        }
+        fb.blit_span(0, y, &row);
+    }
+}
+
+/// `fb` toward `other` (same size and format) by `k` in 0..=1, in linear
+/// light. How the night scene becomes the clinic as the mood rises.
+pub fn blend(fb: &Framebuffer, other: &[u32], k: f32, t: &Tables) {
+    let k = k.clamp(0.0, 1.0);
+    if k == 0.0 {
+        return;
+    }
+    let (w, h) = (fb.width(), fb.height());
+    let bgr = fb.format() == super::Format::Bgrx;
+    let lanes = if bgr { [2, 1, 0] } else { [0, 1, 2] };
+    let mut row: Vec<u32> = alloc::vec![0; w as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let (p, q) = (fb.get(x, y), other[(y * w + x) as usize]);
+            if k >= 1.0 {
+                row[x as usize] = q;
+                continue;
+            }
+            let mut fine = [0u16; 3];
+            for c in 0..3 {
+                let a = t.dec[((p >> (8 * lanes[c])) & 0xff) as usize];
+                let b = t.dec[((q >> (8 * lanes[c])) & 0xff) as usize];
+                fine[c] = t.enc.at(a + (b - a) * k);
+            }
+            row[x as usize] = super::blend::opaque(fb.encode(super::grad::dither(fine, x, y)));
+        }
+        fb.blit_span(0, y, &row);
+    }
+}
+
 pub fn proof(fb: &Framebuffer) {
     let ms = paint(fb);
     crate::kprintln!("  painted the wallpaper in {} ms", ms);
@@ -521,6 +729,61 @@ pub fn selftest() -> bool {
         x += 4.0;
     }
     claim("the whole sun clears the nearest crest at every column", clear);
+
+    // The mood's poses. Calm is the approved picture exactly; any waking mood
+    // still clears the hills; warmth and height go the way they say.
+    let (w1, h1) = (1920u32, 1080u32);
+    let rest = Sun::rest(w1, h1);
+    let calm = Sun::for_mood(w1, h1, 0, 0, false);
+    claim("a calm mind's sun is the wallpaper's own, bit for bit", calm.key() == rest.key());
+    let mut awake_clear = true;
+    for (v, a) in [(-1000, 0), (1000, 0), (-1000, 1000), (1000, 1000), (0, 1000)] {
+        let s = Sun::for_mood(w1, h1, v, a, false);
+        awake_clear &= s.cy + s.r < HILLS.iter().map(|hl| hl.0(s.cx / wf) * hf).fold(f32::MAX, f32::min) && s.cy - s.r >= 0.0;
+    }
+    claim("every waking pose is whole, clear of the hills and on screen", awake_clear);
+    let (glad, sore) = (Sun::for_mood(w1, h1, 1000, 0, false), Sun::for_mood(w1, h1, -1000, 0, false));
+    // Pale blue: more blue per red than the gold at rest. Ash: no hue at all,
+    // the three channels equal, and darker than the gold.
+    let share = |s: &Sun, k: usize| [s.top[k] / (s.top[0] + 1e-6), s.bot[k] / (s.bot[0] + 1e-6)];
+    let more = |a: [f32; 2], b: [f32; 2]| a[0] > b[0] && a[1] > b[1];
+    let lum = |c: [f32; 3]| c[0] + c[1] + c[2];
+    let grey = |c: [f32; 3]| (c[0] - c[1]).abs() < 1e-4 && (c[1] - c[2]).abs() < 1e-4;
+    claim("approach turns the sun clinical pale blue", more(share(&glad, 2), share(&rest, 2)) && glad.halo[2] > glad.halo[0]);
+    claim(
+        "avoidance drains it to grey, darker than the gold",
+        grey(sore.top) && grey(sore.bot) && grey(sore.halo) && lum(sore.bot) < lum(rest.bot),
+    );
+    claim("arousal lifts it and nothing moves it sideways", Sun::for_mood(w1, h1, 0, 1000, false).cy < rest.cy && glad.cx == rest.cx && sore.r == rest.r);
+    let night = Sun::for_mood(w1, h1, 0, 0, true);
+    claim(
+        "asleep it is eclipsed: a near-black disc in a pale corona, where it rests",
+        lum(night.top) < 0.02 && lum(night.halo) > 2.0 && night.cy == rest.cy,
+    );
+    // The grade: nothing at zero; below it, grey and darker with scanlines on
+    // every third row; above it, lighter toward white.
+    let probe = |level: i32| {
+        let mut px: Vec<u32> = alloc::vec![0x00_20_40_80; 4 * 3];
+        let fbp = unsafe { Framebuffer::over_ram(px.as_mut_ptr() as u64, 4, 3, 4, super::Format::Bgrx) };
+        grade(&fbp, level, &Tables::new());
+        px
+    };
+    let (none, dark, light) = (probe(0), probe(-1000), probe(1000));
+    // A positive level is not a grade at all: blend owns that direction.
+    let mut target: Vec<u32> = alloc::vec![0x00_f0_f0_f0; 4 * 3];
+    let mut src: Vec<u32> = alloc::vec![0x00_20_40_80; 4 * 3];
+    let fbs = unsafe { Framebuffer::over_ram(src.as_mut_ptr() as u64, 4, 3, 4, super::Format::Bgrx) };
+    blend(&fbs, &target, 1.0, &Tables::new());
+    let full = src.clone();
+    target.fill(0);
+    let ch = |p: u32, k: u32| (p >> (8 * k)) & 0xff;
+    claim("no grade leaves the picture alone", none.iter().all(|&p| p == 0x00_20_40_80));
+    claim(
+        "a deep negative grade is grey, darker, and scored with scanlines",
+        ch(dark[4], 0).abs_diff(ch(dark[4], 2)) <= 2 && (0..3).all(|k| ch(dark[4], k) < 0x40) && ch(dark[0], 1) < ch(dark[4], 1),
+    );
+    claim("a positive level leaves the grade alone, and a full blend is the other picture", light == none && full.iter().all(|&p| p & 0x00ff_ffff == 0x00_f0_f0_f0));
+    claim("a glide's ends are its ends", rest.lerp(&glad, 0.0).key() == rest.key() && rest.lerp(&glad, 1.0).key() == glad.key());
 
     // Deterministic, and every pixel written: two paints of a small screen.
     let (sw, sh) = (192u32, 108u32);

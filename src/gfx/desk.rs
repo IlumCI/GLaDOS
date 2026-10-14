@@ -4207,6 +4207,7 @@ pub fn anim_step() {
         });
     }
     moving |= flip_step(now);
+    moving |= mood_gliding();
     ANIMATING.store(moving, core::sync::atomic::Ordering::Relaxed);
     // One more frame after the last tween ends, which is the one that draws
     // the window plainly or clears the last of a ghost.
@@ -4579,8 +4580,12 @@ fn wheel_at(x: i32, y: i32, notches: i32) {
             a.wheel(notches)
         }
         // Up is back, which is the direction every terminal has agreed on.
-        // Three rows a notch, matching the log windows.
-        Content::Terminal(ch) => super::console::scroll_view(*ch, (notches * 3) as isize),
+        // Three rows a notch, matching the log windows. Negated: a notch
+        // counts positive *downward* and `scroll_view` counts positive
+        // *back*, and passing it through turned the wheel round -- a notch
+        // toward you climbed into history, where every other window here
+        // moved down.
+        Content::Terminal(ch) => super::console::scroll_view(*ch, -(notches * 3) as isize),
         _ => false,
     })
     .unwrap_or(false);
@@ -5233,7 +5238,12 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
     let mut out = Vec::new();
     let mut wake = u32::MAX;
     let inputs = (gutter_marks(), status_text());
-    out.push(Layer { id: LayerId::Wallpaper, bounds: Rect::new(0, 0, w, h), stamp: Stamp::of((w, h)), parts: Vec::new() });
+    // The sun is a part of the wallpaper: a mood that moves it repaints its
+    // box and nothing else, and the diff takes the box it left as well.
+    let sun = mood_sun(w, h, now);
+    let (sx0, sy0, sx1, sy1) = sun.reach(w, h);
+    let sun_part = (Rect::new(sx0, sy0, sx1 - sx0, sy1 - sy0), Stamp::of(sun.key()));
+    out.push(Layer { id: LayerId::Wallpaper, bounds: Rect::new(0, 0, w, h), stamp: Stamp::of((w, h)), parts: alloc::vec![sun_part] });
 
     let icons = icon_rects(fb);
     if let Some(b) = icons.iter().map(|(r, _)| *r).reduce(|a, b| {
@@ -5433,6 +5443,199 @@ const GLASS_SIGMA: f32 = 14.0;
 pub(crate) fn adopt_wallpaper(px: Vec<u32>, w: u32, h: u32) {
     super::glass::set_backdrop(&px, w, h, GLASS_SIGMA);
     unsafe { *WALL.get() = Some((px, w, h)) };
+    unsafe { *WALL_SUN.get() = Some(super::wall::Sun::rest(w, h)) };
+}
+
+/// The sun the brain's mood puts on the wall (`wall::Sun::for_mood`).
+///
+/// **Felt, not shown**, which is the release's rule for the brain: there is no
+/// window for it, and this is one of the places it surfaces -- the sun higher
+/// when the mind is aroused, gold when it is drawn toward something, washed
+/// and bruised when it is avoiding something, set behind the hills asleep.
+///
+/// Three things keep it from costing what a moving wallpaper costs. The mood
+/// is read once a second and **bucketed** to quarters with hysteresis, so a
+/// valence wandering about a boundary does not move the sun back and forth.
+/// A glide starts at most once in `MOOD_GAP_US`. And a glide repaints the
+/// sun's own box from a cached copy of the base (`WALL_BASE`), never the
+/// screen: the glass blur, which samples the wallpaper, is retaken once when
+/// the glide lands rather than every frame of it -- for those 2.4 s a pane
+/// over the sun shows where it was, which nobody can see through the blur.
+struct Mood {
+    from: super::wall::Sun,
+    to: super::wall::Sun,
+    glide: Option<super::anim::Tween>,
+    /// Quarters of valence and arousal, and whether asleep.
+    bucket: (i32, i32, bool),
+    checked_us: u64,
+    started_us: u64,
+    size: (u32, u32),
+    shown: super::wall::Sun,
+    /// A glide landed and the glass has not been reblurred since.
+    landed: bool,
+    /// The wallpaper's grade, -1000 (monochrome) ..= 1000 (white) (`wall::grade`).
+    decay: i32,
+}
+
+static MOOD: Racy<Option<Mood>> = Racy::new(None);
+/// The pose painted into `WALL`, so a frame knows what to take back out.
+static WALL_SUN: Racy<Option<super::wall::Sun>> = Racy::new(None);
+/// The wallpaper without its sun, made the first time the sun moves.
+static WALL_BASE: Racy<Option<Vec<u32>>> = Racy::new(None);
+/// The base with the mood's decay applied, and the depth it was made at.
+/// Sun glides repaint from this; a new depth rebuilds it from `WALL_BASE`.
+static DECAYED: Racy<Option<(i32, Vec<u32>)>> = Racy::new(None);
+/// The clinic scene (`wall::Scene::Clinic`), painted the first time the mood
+/// rises and kept.
+static CLINIC_BASE: Racy<Option<Vec<u32>>> = Racy::new(None);
+static SUN_TABLES: Racy<Option<super::wall::Tables>> = Racy::new(None);
+
+const MOOD_STEP: i32 = 250;
+const MOOD_SLACK: i32 = 50;
+const MOOD_CHECK_US: u64 = 1_000_000;
+const MOOD_GAP_US: u64 = 8_000_000;
+const MOOD_GLIDE_MS: u32 = 2400;
+
+/// Which quarter `value` is in, staying in `cur` until the value is clearly
+/// past its edge.
+fn mood_bucket(value: i32, cur: i32) -> i32 {
+    let near = (value + MOOD_STEP / 2 * value.signum()) / MOOD_STEP;
+    if near != cur && (value - cur * MOOD_STEP).abs() <= MOOD_STEP / 2 + MOOD_SLACK {
+        cur
+    } else {
+        near
+    }
+}
+
+/// The pose to draw this frame, advancing the glide and starting one when the
+/// mood has moved. The compositor's, from `layers`.
+fn mood_sun(w: u32, h: u32, now: u64) -> super::wall::Sun {
+    use super::wall::Sun;
+    let m = unsafe { &mut *MOOD.get() };
+    if m.as_ref().map(|m| m.size) != Some((w, h)) {
+        let rest = Sun::rest(w, h);
+        *m = Some(Mood { from: rest, to: rest, glide: None, bucket: (0, 0, false), checked_us: 0, started_us: 0, size: (w, h), shown: rest, landed: false, decay: 0 });
+    }
+    let m = m.as_mut().unwrap();
+    if let Some(t) = m.glide {
+        m.shown = m.from.lerp(&m.to, t.at(now));
+        if t.done(now) {
+            m.shown = m.to;
+            m.glide = None;
+            m.landed = true;
+        }
+        return m.shown;
+    }
+    if now.saturating_sub(m.checked_us) < MOOD_CHECK_US {
+        return m.shown;
+    }
+    m.checked_us = now;
+    let a = crate::brain::now();
+    let b = (mood_bucket(a.valence, m.bucket.0), mood_bucket(a.arousal, m.bucket.1), a.asleep);
+    if b != m.bucket && (m.started_us == 0 || now.saturating_sub(m.started_us) >= MOOD_GAP_US) {
+        m.bucket = b;
+        m.from = m.shown;
+        m.to = Sun::for_mood(w, h, b.0 * MOOD_STEP, b.1 * MOOD_STEP, b.2);
+        // The world follows the mood: drained to monochrome below neutral,
+        // lit clinical white above it, half-drained asleep. Not the arousal --
+        // an excited mind is not a frightened one.
+        m.decay = if b.2 { -600 } else { (b.0 * MOOD_STEP).clamp(-1000, 1000) };
+        m.glide = Some(super::anim::Tween::new(MOOD_GLIDE_MS, super::anim::Curve::EaseInOutCubic));
+        m.started_us = now;
+        ANIMATING.store(true, core::sync::atomic::Ordering::Relaxed);
+        super::render::invalidate();
+    }
+    m.shown
+}
+
+fn mood_gliding() -> bool {
+    unsafe { &*MOOD.get() }.as_ref().is_some_and(|m| m.glide.is_some())
+}
+
+/// `mood` for the shell: the quarters the sun is posed at, and whether it is
+/// on its way there.
+pub fn mood_report() -> Option<(i32, i32, bool, bool)> {
+    unsafe { &*MOOD.get() }.as_ref().map(|m| (m.bucket.0 * MOOD_STEP, m.bucket.1 * MOOD_STEP, m.bucket.2, m.glide.is_some()))
+}
+
+/// Bring the cached wallpaper's sun to the pose this frame wants: the base
+/// put back under the box it was in and the box it is going to, and the sun
+/// laid over. Then, once a glide has landed, the glass reblurred and every
+/// pane that samples it told so.
+fn resun(px: &mut [u32], w: u32, h: u32, format: super::Format) {
+    let (want, want_decay) = match unsafe { &*MOOD.get() } {
+        Some(m) if m.size == (w, h) => (m.shown, m.decay),
+        _ => return,
+    };
+    let had = unsafe { &mut *WALL_SUN.get() };
+    let had_sun = had.unwrap_or_else(|| super::wall::Sun::rest(w, h));
+    let decayed = unsafe { &mut *DECAYED.get() };
+    let stale = decayed.as_ref().map(|d| (d.0, d.1.len())) != Some((want_decay, px.len()));
+    if had_sun.key() != want.key() || stale {
+        let base = unsafe { &mut *WALL_BASE.get() };
+        if base.as_ref().map(|b| b.len()) != Some(px.len()) {
+            let mut b = Vec::new();
+            if b.try_reserve_exact(px.len()).is_err() {
+                return;
+            }
+            b.resize(px.len(), 0u32);
+            let surf = unsafe { Framebuffer::over_ram(b.as_mut_ptr() as u64, w, h, w, format) };
+            super::wall::paint_base(&surf);
+            *base = Some(b);
+        }
+        let tables = unsafe { &mut *SUN_TABLES.get() }.get_or_insert_with(super::wall::Tables::new);
+        if stale {
+            // A new depth of decay: the whole picture changes, so it is
+            // rebuilt whole from the clean base, once, and the glass is
+            // retaken and every pane told -- the same path a landed glide
+            // takes, at most once per mood step.
+            let mut d = base.as_ref().unwrap().clone();
+            let surf = unsafe { Framebuffer::over_ram(d.as_mut_ptr() as u64, w, h, w, format) };
+            if want_decay < 0 {
+                super::wall::grade(&surf, want_decay, tables);
+            } else if want_decay > 0 {
+                // The clinic scene, painted once per screen size and kept.
+                let clinic = unsafe { &mut *CLINIC_BASE.get() };
+                if clinic.as_ref().map(|c| c.len()) != Some(px.len()) {
+                    let mut c = alloc::vec![0u32; px.len()];
+                    let cs = unsafe { Framebuffer::over_ram(c.as_mut_ptr() as u64, w, h, w, format) };
+                    super::wall::paint_scene(&cs, super::wall::Scene::Clinic);
+                    *clinic = Some(c);
+                }
+                // Full at +500, as the grade is at -500.
+                super::wall::blend(&surf, clinic.as_ref().unwrap(), want_decay as f32 / 500.0, tables);
+            }
+            px.copy_from_slice(&d);
+            *decayed = Some((want_decay, d));
+            let surf = unsafe { Framebuffer::over_ram(px.as_mut_ptr() as u64, w, h, w, format) };
+            super::wall::overlay_sun(&surf, &want, tables);
+            *had = Some(want);
+            if let Some(m) = unsafe { &mut *MOOD.get() }.as_mut() {
+                m.landed = true;
+            }
+            super::render::damage_all();
+        }
+    }
+    if had_sun.key() != want.key() && !stale {
+        let base = &decayed.as_ref().unwrap().1;
+        let (a0, b0, a1, b1) = had_sun.reach(w, h);
+        let (c0, d0, c1, d1) = want.reach(w, h);
+        let (x0, y0, x1, y1) = (a0.min(c0), b0.min(d0), a1.max(c1), b1.max(d1));
+        for y in y0..y1 {
+            let r = (y * w) as usize;
+            px[r + x0 as usize..r + x1 as usize].copy_from_slice(&base[r + x0 as usize..r + x1 as usize]);
+        }
+        let tables = unsafe { &mut *SUN_TABLES.get() }.get_or_insert_with(super::wall::Tables::new);
+        let surf = unsafe { Framebuffer::over_ram(px.as_mut_ptr() as u64, w, h, w, format) };
+        super::wall::overlay_sun(&surf, &want, tables);
+        *had = Some(want);
+    }
+    let m = unsafe { &mut *MOOD.get() }.as_mut().unwrap();
+    if m.landed {
+        m.landed = false;
+        super::glass::set_backdrop(px, w, h, GLASS_SIGMA);
+        super::settings::touch();
+    }
 }
 
 fn wallpaper_cached(fb: &Framebuffer) {
@@ -5450,7 +5653,12 @@ fn wallpaper_cached(fb: &Framebuffer) {
             // this is the one moment the wallpaper changes.
             super::glass::set_backdrop(&px, w, h, GLASS_SIGMA);
             *cache = Some((px, w, h));
+            unsafe { *WALL_SUN.get() = Some(super::wall::Sun::rest(w, h)) };
+            unsafe { *WALL_BASE.get() = None };
         }
+    }
+    if let Some((px, cw, ch)) = cache.as_mut() {
+        resun(px, *cw, *ch, fb.format());
     }
     match cache.as_ref() {
         Some((px, w, _)) => {

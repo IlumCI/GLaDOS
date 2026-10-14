@@ -88,6 +88,9 @@ struct Iface {
     armed: bool,
     /// The previous report, which is what makes events out of state.
     last: [u8; 8],
+    /// Where a mouse's fields sit when it was left in report protocol, read
+    /// off its own report descriptor. `None` is the boot report.
+    layout: Option<Layout>,
     /// Reports seen, for `usb hid`.
     reports: u64,
     /// Transfers that completed with an error, and how many of those the
@@ -296,14 +299,34 @@ fn setup(dev: &mut Device, hid: HidIface) -> Result<Iface, &'static str> {
         return Err("no interrupt endpoint on the boot interface");
     }
 
+    // A mouse whose own report describes a wheel is left in report protocol
+    // and decoded by that description. The boot report is three bytes by the
+    // spec, and a fourth carrying the wheel is a courtesy most mice do not
+    // extend once they are asked for boot reports -- which is why the wheel
+    // never turned anything on a USB mouse. Anything the reader cannot place
+    // X, Y and a wheel in goes to the boot report exactly as before.
+    let layout = if hid.protocol == MOUSE { read_layout(dev, hid.number).filter(|l| l.wheel.size > 0) } else { None };
+    let layout = match layout {
+        // SET_PROTOCOL(1), said rather than assumed: firmware with legacy USB
+        // support leaves a mouse in boot protocol, and a device answers in
+        // whichever it was last told.
+        Some(l) => match xhci::with_ctl(|c| c.control(dev, 0x21, SET_PROTOCOL, 1, hid.number as u16, 0, 0)) {
+            Some(Ok(_)) => Some(l),
+            _ => None,
+        },
+        None => None,
+    };
+
     // SET_PROTOCOL(0) is what actually asks for boot reports. A device that
     // supports the boot subclass still powers up in *report* protocol, so
     // skipping this gets a device-defined report that happens to look right on
     // simple keyboards and does not on anything else.
-    xhci::with_ctl(|c| {
-        c.control(dev, 0x21, SET_PROTOCOL, 0, hid.number as u16, 0, 0)
-    })
-    .unwrap_or(Err("no controller"))?;
+    if layout.is_none() {
+        xhci::with_ctl(|c| {
+            c.control(dev, 0x21, SET_PROTOCOL, 0, hid.number as u16, 0, 0)
+        })
+        .unwrap_or(Err("no controller"))?;
+    }
 
     // SET_IDLE(0) means "report only when something changes". The default is
     // to repeat the current state forever at a fixed rate, which works and
@@ -329,6 +352,7 @@ fn setup(dev: &mut Device, hid: HidIface) -> Result<Iface, &'static str> {
         buf,
         armed: false,
         last: [0; 8],
+        layout,
         reports: 0,
         failures: 0,
         recovered: 0,
@@ -527,13 +551,20 @@ fn poll_iface(dev: &mut Device, i: &mut Iface, vid: u16, pid: u16) {
         );
     }
 
-    let mut report = [0u8; 8];
-    for k in 0..report.len().min(n as usize) {
-        report[k] = unsafe { core::ptr::read_volatile((i.buf + k as u64) as *const u8) };
+    let mut wide = [0u8; REPORT_LEN as usize];
+    for k in 0..wide.len().min(n as usize) {
+        wide[k] = unsafe { core::ptr::read_volatile((i.buf + k as u64) as *const u8) };
     }
-    match i.protocol {
-        KEYBOARD => keyboard(i, &report),
-        MOUSE => mouse(&report, n),
+    let mut report = [0u8; 8];
+    report.copy_from_slice(&wide[..8]);
+    match (i.protocol, i.layout) {
+        (KEYBOARD, _) => keyboard(i, &report),
+        (MOUSE, Some(l)) => {
+            if let Some((dx, dy, buttons, wheel)) = l.decode(&wide[..(n as usize).min(wide.len())]) {
+                super::mouse::apply(dx, dy, buttons & 1 != 0, buttons & 2 != 0, wheel);
+            }
+        }
+        (MOUSE, None) => mouse(&report, n),
         _ => {}
     }
 
@@ -641,6 +672,214 @@ fn emit(sc: u16, pressed: bool) {
     super::kbd::inject_scancode(if pressed { code } else { code | 0x80 });
 }
 
+/// GET_DESCRIPTOR for a HID report descriptor, sent to the interface.
+const REPORT_DESCRIPTOR: u16 = 0x2200;
+/// Longer than any mouse's: a five-button mouse with a wheel and a tilt
+/// describes itself in about eighty bytes, a gaming mouse in a few hundred.
+const DESCRIPTOR_MAX: usize = 512;
+
+/// One field of a report: where it starts, how wide each value is, and how
+/// many values there are. `size` 0 is a field the descriptor never named.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+struct Field {
+    bit: u16,
+    size: u8,
+    count: u8,
+}
+
+/// Where a mouse keeps its buttons, its two axes and its wheel.
+///
+/// **This is not a HID stack, and the module doc's refusal of one still
+/// stands.** It answers one question -- which bits of which report are the
+/// buttons, X, Y and the wheel -- for one kind of device, and any descriptor it
+/// cannot answer that for is handed back to the boot report, which is what
+/// every mouse got before. The two failure shapes are therefore "no wheel",
+/// as before, and never "a pointer that moves wrongly": `setup` keeps report
+/// protocol only when all three of X, Y and a wheel were found.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+struct Layout {
+    /// The report ID carrying them, or 0 when the device uses none.
+    id: u8,
+    buttons: Field,
+    x: Field,
+    y: Field,
+    wheel: Field,
+}
+
+impl Layout {
+    /// Movement, buttons and wheel out of one report, in `mouse::apply`'s
+    /// conventions: y and the wheel both count positive *downward*, where HID
+    /// counts y downward and the wheel *upward*.
+    ///
+    /// `None` for a report of another ID -- a mouse with media keys sends
+    /// those on its own ID through the same endpoint, and reading one as
+    /// movement throws the pointer across the screen.
+    fn decode(&self, report: &[u8]) -> Option<(i32, i32, u8, i32)> {
+        let data = if self.id != 0 {
+            if report.first() != Some(&self.id) {
+                return None;
+            }
+            &report[1..]
+        } else {
+            report
+        };
+        let dx = bits(data, self.x, true)?;
+        let dy = bits(data, self.y, true)?;
+        let wheel = if self.wheel.size > 0 { bits(data, self.wheel, true).unwrap_or(0) } else { 0 };
+        let mut buttons = 0u8;
+        for k in 0..self.buttons.count.min(8) {
+            let f = Field { bit: self.buttons.bit + k as u16 * self.buttons.size as u16, ..self.buttons };
+            if bits(data, f, false).unwrap_or(0) != 0 {
+                buttons |= 1 << k;
+            }
+        }
+        // `apply` takes PS/2's upward y, and the wheel positive downward.
+        Some((dx, -dy, buttons, -wheel))
+    }
+}
+
+/// One value of `f` out of `data`, little-endian bit order as HID lays it.
+/// `None` when the field runs past what the device sent.
+fn bits(data: &[u8], f: Field, signed: bool) -> Option<i32> {
+    let size = f.size as usize;
+    if size == 0 || size > 32 {
+        return None;
+    }
+    let start = f.bit as usize;
+    if start + size > data.len() * 8 {
+        return None;
+    }
+    let mut v: u64 = 0;
+    for k in 0..size {
+        let b = start + k;
+        if data[b / 8] >> (b % 8) & 1 != 0 {
+            v |= 1 << k;
+        }
+    }
+    if signed && size < 64 && v >> (size - 1) & 1 != 0 {
+        v |= !0u64 << size;
+    }
+    Some(v as i64 as i32)
+}
+
+/// Fetch and read an interface's report descriptor.
+fn read_layout(dev: &mut Device, iface: u8) -> Option<Layout> {
+    let lay = core::alloc::Layout::from_size_align(DESCRIPTOR_MAX, 64).ok()?;
+    let buf = xhci::dma(DESCRIPTOR_MAX, 64)?;
+    let got = xhci::with_ctl(|c| c.control(dev, 0x81, 6, REPORT_DESCRIPTOR, iface as u16, buf, DESCRIPTOR_MAX as u16));
+    let out = match got {
+        Some(Ok(n)) => {
+            let n = (n as usize).min(DESCRIPTOR_MAX);
+            let mut d = Vec::with_capacity(n);
+            for k in 0..n {
+                d.push(unsafe { core::ptr::read_volatile((buf + k as u64) as *const u8) });
+            }
+            parse_layout(&d)
+        }
+        _ => None,
+    };
+    unsafe { alloc::alloc::dealloc(buf as *mut u8, lay) };
+    out
+}
+
+/// The report descriptor's short items, walked once with the one piece of
+/// state that matters: how many input bits each report ID has used so far.
+///
+/// Global items that are not page, size, count or ID are skipped, and so is
+/// Push/Pop -- no mouse this has seen uses it, and a descriptor that does gets
+/// offsets this walk cannot vouch for, which `parse_layout`'s caller survives
+/// by falling back to the boot report rather than by trusting a guess.
+fn parse_layout(d: &[u8]) -> Option<Layout> {
+    const GD: u32 = 0x01;
+    const BUTTON: u32 = 0x09;
+    let (mut page, mut size, mut count, mut id) = (0u32, 0u32, 0u32, 0u8);
+    let mut usages: Vec<u32> = Vec::new();
+    let (mut umin, mut umax): (Option<u32>, Option<u32>) = (None, None);
+    // Bits used per report ID; 0 is "no ID".
+    let mut used: Vec<(u8, u32)> = Vec::new();
+    let mut found: Vec<Layout> = Vec::new();
+    let full = |raw: u32, wide: bool, page: u32| if wide { raw } else { page << 16 | raw };
+    let mut i = 0usize;
+    while i < d.len() {
+        let b = d[i];
+        if b == 0xFE {
+            // A long item: data size in the next byte, and nothing a mouse uses.
+            let n = *d.get(i + 1)? as usize;
+            i += 3 + n;
+            continue;
+        }
+        let n = [0usize, 1, 2, 4][(b & 3) as usize];
+        if i + 1 + n > d.len() {
+            return None;
+        }
+        let mut data = 0u32;
+        for k in 0..n {
+            data |= (d[i + 1 + k] as u32) << (8 * k);
+        }
+        let (kind, tag) = ((b >> 2) & 3, b >> 4);
+        match (kind, tag) {
+            // Input
+            (0, 0x8) => {
+                let at = match used.iter_mut().find(|(r, _)| *r == id) {
+                    Some(e) => e,
+                    None => {
+                        used.push((id, 0));
+                        used.last_mut()?
+                    }
+                };
+                let start = at.1;
+                at.1 += size * count;
+                let constant = data & 1 != 0;
+                if !constant && size > 0 && size <= 32 && count > 0 {
+                    let l = match found.iter_mut().find(|l| l.id == id) {
+                        Some(l) => l,
+                        None => {
+                            found.push(Layout { id, ..Layout::default() });
+                            found.last_mut()?
+                        }
+                    };
+                    for k in 0..count {
+                        let usage = if !usages.is_empty() {
+                            usages[(k as usize).min(usages.len() - 1)]
+                        } else if let Some(lo) = umin {
+                            (lo + k).min(umax.unwrap_or(u32::MAX))
+                        } else {
+                            0
+                        };
+                        let f = Field { bit: (start + k * size) as u16, size: size as u8, count: 1 };
+                        match (usage >> 16, usage & 0xFFFF) {
+                            (BUTTON, _) if l.buttons.size == 0 => {
+                                l.buttons = Field { count: count.min(8) as u8, ..f };
+                            }
+                            (GD, 0x30) if l.x.size == 0 => l.x = f,
+                            (GD, 0x31) if l.y.size == 0 => l.y = f,
+                            (GD, 0x38) if l.wheel.size == 0 => l.wheel = f,
+                            _ => {}
+                        }
+                    }
+                }
+                usages.clear();
+                (umin, umax) = (None, None);
+            }
+            // Output, Feature, Collection, End Collection: locals end here.
+            (0, _) => {
+                usages.clear();
+                (umin, umax) = (None, None);
+            }
+            (1, 0x0) => page = data,
+            (1, 0x7) => size = data,
+            (1, 0x8) => id = data as u8,
+            (1, 0x9) => count = data,
+            (2, 0x0) => usages.push(full(data, n == 4, page)),
+            (2, 0x1) => umin = Some(full(data, n == 4, page)),
+            (2, 0x2) => umax = Some(full(data, n == 4, page)),
+            _ => {}
+        }
+        i += 1 + n;
+    }
+    found.into_iter().find(|l| l.x.size > 0 && l.y.size > 0)
+}
+
 fn mouse(report: &[u8; 8], n: u32) {
     let buttons = report[0];
     let dx = report[1] as i8 as i32;
@@ -718,7 +957,7 @@ pub fn report() {
         for i in h.ifaces.iter() {
             let kind = if i.protocol == KEYBOARD { "keyboard" } else { "mouse" };
             crate::kprintln!(
-                "  {:04x}:{:04x}  {}  port {}  slot {}  {} report(s), {} failed, {} recovered{}",
+                "  {:04x}:{:04x}  {}  port {}  slot {}  {} report(s), {} failed, {} recovered{}{}",
                 h.dev.vid,
                 h.dev.pid,
                 kind,
@@ -727,6 +966,11 @@ pub fn report() {
                 i.reports,
                 i.failures,
                 i.recovered,
+                match (i.protocol, i.layout) {
+                    (MOUSE, Some(_)) => "  report protocol, wheel",
+                    (MOUSE, None) => "  boot report, no wheel",
+                    _ => "",
+                },
                 if i.armed { "" } else { "  (not armed)" }
             );
         }
@@ -783,6 +1027,59 @@ pub fn selftest() -> bool {
     claim(&mut ok, encode_interval(10) == 6, "a 10 ms interval rounds down rather than up");
     claim(&mut ok, encode_interval(0) == 3, "and a device claiming zero is polled, not divided by it");
 
+    // The report-descriptor reader, against the two shapes a mouse comes in.
+    // A plain wheel mouse: no report ID, three buttons padded to a byte, then
+    // X, Y and the wheel as signed bytes.
+    const PLAIN: [u8; 52] = [
+        0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x01, 0xA1, 0x00, 0x05, 0x09, 0x19, 0x01, 0x29,
+        0x03, 0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01, 0x75, 0x05,
+        0x81, 0x01, 0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x38, 0x15, 0x81, 0x25, 0x7F, 0x75,
+        0x08, 0x95, 0x03, 0x81, 0x06, 0xC0, 0xC0,
+    ];
+    let plain = parse_layout(&PLAIN);
+    claim(
+        &mut ok,
+        plain.map(|l| (l.id, l.buttons.count, l.x.bit, l.y.bit, l.wheel.bit, l.wheel.size)) == Some((0, 3, 8, 16, 24, 8)),
+        "a plain wheel mouse: three buttons, then X, Y and the wheel a byte each",
+    );
+    // A gaming mouse: report ID 1, five buttons, 16-bit axes, a wheel byte.
+    const GAMING: [u8; 66] = [
+        0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85, 0x01, 0x09, 0x01, 0xA1, 0x00, 0x05, 0x09, 0x19,
+        0x01, 0x29, 0x05, 0x15, 0x00, 0x25, 0x01, 0x95, 0x05, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01,
+        0x75, 0x03, 0x81, 0x01, 0x05, 0x01, 0x16, 0x01, 0x80, 0x26, 0xFF, 0x7F, 0x75, 0x10, 0x95,
+        0x02, 0x09, 0x30, 0x09, 0x31, 0x81, 0x06, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x01,
+        0x09, 0x38, 0x81, 0x06, 0xC0, 0xC0,
+    ];
+    let gaming = parse_layout(&GAMING);
+    claim(
+        &mut ok,
+        gaming.map(|l| (l.id, l.x.size, l.y.bit, l.wheel.bit)) == Some((1, 16, 24, 40)),
+        "a gaming mouse: report ID 1, sixteen-bit axes, the wheel after them",
+    );
+    // Left held, 5 right, 3 up the desk, one notch away from the user.
+    let moved = gaming.and_then(|l| l.decode(&[0x01, 0x01, 0x05, 0x00, 0xFD, 0xFF, 0x01]));
+    claim(
+        &mut ok,
+        moved == Some((5, 3, 1, -1)),
+        "and its report reads in apply's terms: y up, a notch away is negative",
+    );
+    claim(
+        &mut ok,
+        gaming.and_then(|l| l.decode(&[0x02, 0x01, 0x05, 0x00, 0xFD, 0xFF, 0x01])).is_none(),
+        "a report under another ID is not read as movement",
+    );
+    // No wheel described: X and Y are found and the wheel is not, which is
+    // the shape `setup` sends back to the boot report.
+    let mut wheelless = PLAIN;
+    wheelless[38] = 0x09;
+    wheelless[39] = 0x00; // usage 0x38 becomes undefined
+    claim(
+        &mut ok,
+        parse_layout(&wheelless).map(|l| l.wheel.size) == Some(0),
+        "a mouse that describes no wheel has none, and stays on the boot report",
+    );
+    claim(&mut ok, parse_layout(&PLAIN[..20]).is_none(), "and a truncated descriptor answers nothing");
+
     // A boot report is state, so the same report twice must produce no
     // events. Checked through the real path, with nothing attached: what is
     // being claimed is the diffing, and `last` is where it lives.
@@ -792,6 +1089,7 @@ pub fn selftest() -> bool {
         buf: 0,
         armed: false,
         last: [0; 8],
+        layout: None,
         reports: 0,
         failures: 0,
         recovered: 0,

@@ -241,8 +241,19 @@ jobs:
           - name: qwen3-0.6b
             payload: payload-qwen3-0.6b-v1
             manifest: qwen3-0.6b
-            seq: 0
+            # 8K, stamped (tools/ctxstamp.py). The payload is canonical at 512,
+            # which a few turns of conversation fill; at 8192 the int8 KV cache
+            # is about 470 MB a context and a full boot uses 750 MB of heap.
+            seq: 8192
             label: GLADOS
+            # The neural voice (payload/voice.txt, 180 MB) rides on this
+            # image only: the 2B images are 1.90 GB against GitHub's 2 GB
+            # asset limit, and it does not fit beside them.
+            voice: true
+            # The adult fly's connectome (payload/brain.txt, 92 MB), same
+            # reason and same image. Without it the kernel runs the worm it
+            # carries compiled in, so the 2B images still have a brain.
+            brain: true
           # The 2B distill, Apache-2.0. Its payload is canonical at seq 512,
           # which is not a context worth shipping for a model this size, so
           # both variants stamp. The weights are uploaded once and these two
@@ -346,6 +357,46 @@ jobs:
           done
           python3 tools/wifi_fw.py --selftest
           python3 tools/payload.py verify payload-dir/FW payload/firmware.txt
+
+      # The neural voice, \GLADOS\voice.bin and its licence, from a pinned
+      # release like the firmware and for the same reason. Fetched into its
+      # own directory and verified there, because `payload.py verify` walks
+      # what it is given and would read the model as a stray; moved into
+      # place only afterwards, and after the model's own verify above.
+      - name: Fetch the neural voice
+        if: matrix.voice == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p payload-voice
+          for f in $(grep -v '^#' payload/voice.txt | awk 'NF >= 3 {print $3}'); do
+            gh release download payload-voice-v1 --dir payload-voice --clobber --pattern "$f"
+          done
+          # kokoro.py imports numpy at the top and the runner's python has
+          # none; the selftest needs nothing else (torch only converts).
+          python3 -m pip install --quiet --disable-pip-version-check numpy
+          python3 tools/kokoro.py --selftest
+          python3 tools/payload.py verify payload-voice payload/voice.txt
+          mv payload-voice/* payload-dir/
+
+      # The fly, \GLADOS\brain.bin and its attribution, from a pinned release
+      # in the voice's shape. The digest says these are the bytes
+      # `connectome.py build fly` produced, which it does byte for byte from
+      # the pinned sources; `check` walks them to the last byte and requires
+      # every sense and an approach, avoid and arousal readout, with the
+      # standard library alone, since the runner has no numpy.
+      - name: Fetch the fly's connectome
+        if: matrix.brain == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p payload-brain
+          for f in $(grep -v '^#' payload/brain.txt | awk 'NF >= 3 {print $3}'); do
+            gh release download payload-brain-fly-v1 --dir payload-brain --clobber --pattern "$f"
+          done
+          python3 tools/payload.py verify payload-brain payload/brain.txt
+          python3 tools/connectome.py check payload-brain/brain.bin
+          mv payload-brain/* payload-dir/
 
       - name: Build the ISO
         run: |
