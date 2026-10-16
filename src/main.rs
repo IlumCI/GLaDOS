@@ -33,6 +33,7 @@ mod edit;
 mod fmt;
 mod gfx;
 mod gpu;
+mod job;
 mod json;
 mod aiksi;
 mod linux;

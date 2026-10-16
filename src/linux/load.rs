@@ -570,7 +570,7 @@ pub fn own_space() -> bool {
 /// 0 has no isolation of any kind: a guest that faults halts the machine, and
 /// the fault report will at least name the guest's pages because `load` armed
 /// them.
-pub unsafe fn run(g: &mut Guest) -> u64 {
+pub unsafe fn run(g: &mut Guest, limit: u64) -> u64 {
     syscall::clear_trace();
     // Open exactly the guest's own three regions to ring 3 and nothing else.
     // Every other page in the machine keeps a clear U bit, which is what makes
@@ -652,7 +652,7 @@ pub unsafe fn run(g: &mut Guest) -> u64 {
         }
     }
 
-    let out = unsafe { syscall::run(g.entry, g.stack_top) };
+    let out = unsafe { syscall::run(g.entry, g.stack_top, limit) };
 
     // Clear the root *before* the space drops, and the order is the whole of
     // it: `set_root` puts the kernel's back immediately, and only then may the

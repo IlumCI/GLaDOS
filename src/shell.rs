@@ -27,6 +27,10 @@ const PROMPT_LEN: usize = PROMPT.len();
 const HISTORY_MAX: usize = 64;
 
 fn prompt() {
+    for n in crate::job::take_notices() {
+        console::set_color(YELLOW);
+        kprint!("\n{}", n);
+    }
     console::set_color(LTGREEN);
     kprint!("\n{}", PROMPT);
     console::set_color(WHITE);
@@ -1969,6 +1973,25 @@ fn gpu_wake(acpi: &Option<Acpi>, act: bool, named: Option<(u8, u8, u8)>) {
             kprintln!("  to be retrained is the next thing to look at -- PEG1 carries");
             kprintln!("  L23E and L23R for exactly that.");
             console::set_color(WHITE);
+        }
+    }
+}
+
+/// Every background job, whichever runtime it belongs to.
+fn jobs_cmd() {
+    let rows = crate::job::list();
+    if rows.is_empty() {
+        kprintln!("  no jobs -- 'linux bg <path> [args]' starts one beside the shell");
+        return;
+    }
+    for r in rows {
+        let task = r.task.map(|t| alloc::format!("task {}", t)).unwrap_or_default();
+        kprintln!(
+            "  [{}] {:<8} {:<6} {:>5}s  {:<8} {}",
+            r.id, r.state, r.runtime, r.seconds, task, r.title
+        );
+        if !r.summary.is_empty() {
+            kprintln!("        {}", r.summary);
         }
     }
 }
@@ -5439,6 +5462,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             }
         },
         "gpu" => gpu_cmd(acpi, rest.trim()),
+        "jobs" => jobs_cmd(),
+        "kill" => match rest.trim().trim_start_matches('%').parse::<u32>() {
+            Ok(id) => kprintln!("  [job {}] {}", id, crate::job::kill(id)),
+            Err(_) => kprintln!("  usage: kill <job number>   ('jobs' lists them)"),
+        },
         "abstract" => abstract_cmd(rest),
         "study" => study_cmd(rest),
         "work" => work_cmd(rest),
@@ -7115,6 +7143,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         kprintln!("  no such blob: {}", path);
                         return;
                     };
+                    if let Some(why) = linux::busy() {
+                        kprintln!("  {}", why);
+                        return;
+                    }
                     // Everything after the path is the guest's argv, with the
                     // path itself as argv[0], which is what a program expects
                     // and what busybox dispatches on.
@@ -7151,7 +7183,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             // Safety: the whole of stage 0 is this call. The
                             // guest's pages are armed, so a fault at least
                             // names them.
-                            let r = unsafe { linux::load::run(&mut g) };
+                            let r = unsafe { linux::load::run(&mut g, linux::syscall::limit()) };
                             let calls = linux::syscall::trace();
                             for c in &calls {
                                 if let Some(p) = c.path() {
@@ -7267,6 +7299,17 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 }
                             }
                         }
+                    }
+                }
+                "bg" => {
+                    let Some(path) = words.next() else {
+                        kprintln!("  usage: linux bg <path> [args...]   -- runs beside the shell");
+                        return;
+                    };
+                    let args: alloc::vec::Vec<&str> = words.collect();
+                    match linux::start_job(path, &args) {
+                        Ok(id) => kprintln!("  [job {}] started -- 'jobs' to see it, 'kill {}' to end it", id, id),
+                        Err(why) => kprintln!("  {}", why),
                     }
                 }
                 "env" => {

@@ -772,6 +772,10 @@ fn cmd_linux(rest: &str) {
         err(&format!("{} is installed but unreadable", name));
         return;
     };
+    if let Some(why) = crate::linux::busy() {
+        err(why);
+        return;
+    }
 
     // The resolved path as argv[0], which is what the shell verb passes and
     // what a multi-call binary dispatches on, with the model's own words
@@ -801,7 +805,7 @@ fn cmd_linux(rest: &str) {
     // Safety: the same call the shell verb makes. The guest's pages are armed,
     // a fault at ring 3 ends the guest and not the machine, and the session
     // deadline bounds a program that will not stop.
-    let r = unsafe { crate::linux::load::run(&mut g) };
+    let r = unsafe { crate::linux::load::run(&mut g, crate::linux::syscall::limit()) };
     let calls = crate::linux::syscall::trace().len();
 
     if r & crate::linux::syscall::OVERRAN != 0 {

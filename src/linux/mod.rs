@@ -59,3 +59,72 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     out.extend(load::checks());
     out
 }
+
+/// Linux as a `job` runtime.
+pub static RUNTIME: crate::job::Runtime = crate::job::Runtime {
+    name: "linux",
+    kill: |task| syscall::doom(task, syscall::SIGNALED | 9),
+};
+
+/// Why a new Linux session cannot start now, or `None` when it can.
+///
+/// **One session at a time, still.** Moving the session off the shell's task
+/// is this step; letting two run at once is the next, and it is a different
+/// size of change: `MAIN_TASK`, the session deadline, the syscall trace, the
+/// thread pool's `begin_exit` and `fork::doom_all` are all one per machine,
+/// and the last two would end the *other* session's processes when either
+/// finished. Refusing is honest until those are per session.
+pub fn busy() -> Option<&'static str> {
+    if syscall::main_task().is_some() {
+        Some("a Linux session is already running -- one at a time for now ('jobs' lists them)")
+    } else if crate::job::live(&RUNTIME) {
+        Some("a Linux job is running in the background -- one session at a time for now ('jobs', 'kill <n>')")
+    } else {
+        None
+    }
+}
+
+/// Start `path` with `args` as a background job. Answers the job number.
+///
+/// The bytes are read here so a wrong path is refused at the prompt; the load
+/// happens on the job's own task, because a loaded `Guest` holds raw pointers
+/// to its pages and is not a thing to hand between tasks.
+pub fn start_job(path: &str, args: &[&str]) -> Result<u32, &'static str> {
+    if let Some(why) = busy() {
+        return Err(why);
+    }
+    let bytes = crate::sysbox::read_blob(path).ok_or("no such blob")?;
+    let mut argv: alloc::vec::Vec<alloc::string::String> = alloc::vec![alloc::string::String::from(path)];
+    argv.extend(args.iter().map(|a| alloc::string::String::from(*a)));
+    let title = argv.join(" ");
+    crate::job::start(
+        &RUNTIME,
+        title,
+        alloc::boxed::Box::new(move || {
+            let argv: alloc::vec::Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+            let mut g = match load::load(&bytes, &argv) {
+                Ok(g) => g,
+                Err(why) => return alloc::format!("will not run it: {}", why),
+            };
+            // Safety: the same call `linux run` makes, on a task of its own
+            // and with no deadline -- see `syscall::run`.
+            let r = unsafe { load::run(&mut g, 0) };
+            describe(r, syscall::trace().len())
+        }),
+    )
+}
+
+/// How a session ended, in one line.
+pub fn describe(r: u64, calls: usize) -> alloc::string::String {
+    if r & syscall::OVERRAN != 0 {
+        alloc::format!("killed for running too long after {} syscall(s)", calls)
+    } else if r & syscall::FAULTED != 0 {
+        alloc::format!("killed by fault {:#04x} after {} syscall(s), machine intact", r & 0xFFFF_FFFF, calls)
+    } else if r & syscall::SIGNALED != 0 {
+        alloc::format!("ended by signal {} after {} syscall(s)", r & 0x7F, calls)
+    } else if r & syscall::EXITED != 0 {
+        alloc::format!("exited {} after {} syscall(s)", r & 0xFFFF_FFFF, calls)
+    } else {
+        alloc::format!("returned without exiting -- {} syscall(s)", calls)
+    }
+}

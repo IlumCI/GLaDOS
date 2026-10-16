@@ -5829,7 +5829,7 @@ unsafe fn kill_with(code: u64) -> ! {
 /// Jumps to an address derived from a file. Everything in the module docs
 /// about stage 0 containing bugs rather than malice applies here and nowhere
 /// more directly.
-pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
+pub unsafe fn run(entry: u64, stack_top: u64, want: u64) -> u64 {
     arm();
     // The guest is about to be allowed to write `FS`, and `FS` is a register
     // of this machine that the kernel goes on using afterwards. Parked here
@@ -5857,7 +5857,9 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
     GUEST_RUNNING.store(true, Ordering::Relaxed);
     // Zero means no deadline, and `overran` already reads a zero `DEADLINE`
     // as "nothing to enforce", so the two agree without a second condition.
-    let want = limit();
+    // The caller chooses: a foreground run passes `limit()`, a background job
+    // passes zero, because a job runs on its own task and a runaway there
+    // costs a share of a core rather than the shell.
     DEADLINE.store(
         if want == 0 { 0 } else { crate::dev::lapic::ticks() + want },
         Ordering::Relaxed,
