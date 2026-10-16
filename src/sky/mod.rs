@@ -49,6 +49,7 @@ pub mod client;
 pub mod object;
 pub mod server;
 pub mod surface;
+pub mod seat;
 pub mod wire;
 
 /// What `diag sky` asks of everything here.

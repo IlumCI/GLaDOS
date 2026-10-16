@@ -111,6 +111,9 @@ pub struct Frame {
     /// Pixels copied out of client buffers over this window's life, which a
     /// claim reads to tell a damage-limited commit from a whole one.
     pub copied: u64,
+    /// Whether the desktop last drew this window focused, which is when the
+    /// seat hands it the keyboard.
+    pub focused: bool,
 }
 
 pub type Shared = Arc<Spin<Frame>>;
@@ -447,6 +450,7 @@ impl Client {
                     commits: 1,
                     presented: 0,
                     copied: n,
+                    focused: false,
                 }));
                 tl.window = Some((key, Arc::clone(&frame)));
                 self.scene.effects.push(Effect::Open { key, title: tl.title.clone(), frame });
@@ -780,6 +784,12 @@ impl Client {
     /// The windows this connection has on the desktop.
     pub fn windows(&self) -> Vec<(u64, Shared)> {
         self.scene.toplevels.values().filter_map(|t| t.window.clone()).collect()
+    }
+
+    /// The `wl_surface` behind a desktop window, for delivering input to it.
+    pub fn surface_of(&self, key: u64) -> Option<u32> {
+        let tl = self.scene.toplevels.values().find(|t| t.window.as_ref().is_some_and(|(k, _)| *k == key))?;
+        self.scene.xdg.get(&tl.xdg).map(|x| x.surface)
     }
 
     pub fn take_effects(&mut self) -> Vec<Effect> {

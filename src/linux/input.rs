@@ -278,6 +278,22 @@ pub fn read(d: Dev, cursor: &mut u64, out: &mut [u8]) -> usize {
     n
 }
 
+/// The next keyboard event past `cursor`, for an in-kernel reader -- the
+/// display server, giving a focused window its keys as evdev codes.
+pub fn next_key(cursor: &mut u64) -> Option<Ev> {
+    let r = ring(Dev::Keyboard);
+    let head = r.head.load(Ordering::Acquire);
+    if head.saturating_sub(*cursor) > CAP as u64 {
+        *cursor = head - CAP as u64;
+    }
+    if *cursor >= head {
+        return None;
+    }
+    let e = r.at(*cursor);
+    *cursor += 1;
+    Some(e)
+}
+
 /// One record, in the byte order a `struct input_event` has.
 ///
 /// The `timeval` is two 8-byte fields rather than a 16-byte one, because that

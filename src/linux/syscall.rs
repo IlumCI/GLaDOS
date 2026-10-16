@@ -2945,36 +2945,83 @@ pub(super) fn scatter(iov: u64, cnt: u64, data: &[u8]) -> Result<usize, u64> {
     Ok(done)
 }
 
+/// A `msghdr`'s four fields this kernel reads -- iov, iovlen, control,
+/// controllen -- at the running guest's width: 28 bytes of 4-byte fields on
+/// i386, 56 bytes with 8-byte pointers and lengths on x86-64.
+fn msghdr_in(hdr: u64, write: bool) -> Result<(u64, u64, u64, u64), u64> {
+    let (size, w) = if abi32() { (28usize, 4u64) } else { (msg::SIZE, 8u64) };
+    if !reachable(hdr, size, write) {
+        return Err(EFAULT);
+    }
+    let rd = |i: u64| unsafe {
+        if w == 4 {
+            core::ptr::read_unaligned((hdr + i * 4) as *const u32) as u64
+        } else {
+            core::ptr::read_unaligned((hdr + i * 8) as *const u64)
+        }
+    };
+    // name, namelen, iov, iovlen, control, controllen, flags
+    Ok((rd(2), rd(3), rd(4), rd(5)))
+}
+
+/// What `recvmsg` writes back: the control length used, no flags, no name.
+fn msghdr_out(hdr: u64, control_len: u64) {
+    unsafe {
+        if abi32() {
+            core::ptr::write_unaligned((hdr + 20) as *mut u32, control_len as u32);
+            core::ptr::write_unaligned((hdr + 24) as *mut u32, 0);
+            core::ptr::write_unaligned((hdr + 4) as *mut u32, 0);
+        } else {
+            core::ptr::write((hdr + msg::CONTROLLEN) as *mut u64, control_len);
+            core::ptr::write((hdr + msg::FLAGS) as *mut u32, 0);
+            core::ptr::write((hdr + msg::NAMELEN) as *mut u32, 0);
+        }
+    }
+}
+
+/// A control message header: (where its data starts, alignment). i386's
+/// `cmsghdr` is three 4-byte fields aligned to 4; x86-64's carries an 8-byte
+/// length and aligns to 8. Wayland passes every shared-memory buffer through
+/// one of these, so a width mismatch is a display that never gets a frame.
+fn cmsg_shape() -> (u64, u64) {
+    if abi32() { (12, 4) } else { (msg::CMSG_DATA, 8) }
+}
+
 /// Pull `SCM_RIGHTS` descriptors out of a control buffer.
 fn control_fds(at: u64, len: u64) -> Result<Vec<super::fs::Fd>, u64> {
     let mut out = Vec::new();
-    if at == 0 || len < msg::CMSG_DATA {
+    let (data, align) = cmsg_shape();
+    if at == 0 || len < data {
         return Ok(out);
     }
     if !reachable(at, len as usize, false) {
         return Err(EFAULT);
     }
     let mut off = 0u64;
-    while off + msg::CMSG_DATA <= len {
+    while off + data <= len {
         let h = at + off;
-        let clen = unsafe { core::ptr::read((h + msg::CMSG_LEN) as *const u64) };
-        let level = unsafe { core::ptr::read((h + msg::CMSG_LEVEL) as *const u32) };
-        let kind = unsafe { core::ptr::read((h + msg::CMSG_TYPE) as *const u32) };
-        // A length that does not cover its own header, or runs past the
-        // buffer, ends the walk rather than being trusted -- the field is the
-        // guest's and a loop that believed it would read whatever follows.
-        if clen < msg::CMSG_DATA || off + clen > len {
+        let (clen, level, kind) = unsafe {
+            if data == 12 {
+                (
+                    core::ptr::read_unaligned(h as *const u32) as u64,
+                    core::ptr::read_unaligned((h + 4) as *const u32),
+                    core::ptr::read_unaligned((h + 8) as *const u32),
+                )
+            } else {
+                (
+                    core::ptr::read((h + msg::CMSG_LEN) as *const u64),
+                    core::ptr::read((h + msg::CMSG_LEVEL) as *const u32),
+                    core::ptr::read((h + msg::CMSG_TYPE) as *const u32),
+                )
+            }
+        };
+        if clen < data || off + clen > len {
             break;
         }
         if level == msg::SOL_SOCKET && kind == msg::SCM_RIGHTS {
-            let n = ((clen - msg::CMSG_DATA) / 4) as usize;
+            let n = ((clen - data) / 4) as usize;
             for i in 0..n {
-                let fd = unsafe {
-                    core::ptr::read((h + msg::CMSG_DATA + (i * 4) as u64) as *const u32)
-                } as u64;
-                // **Cloned, not moved.** The sender keeps its descriptor; what
-                // travels is another name for the same open file description,
-                // which is what `SCM_RIGHTS` means and why `Fd::share` exists.
+                let fd = unsafe { core::ptr::read_unaligned((h + data + (i * 4) as u64) as *const u32) } as u64;
                 let Some(f) = with_fds(|fds, _| {
                     fds.get(fd as usize).and_then(|x| x.as_ref()).map(|x| x.share())
                 })
@@ -2984,22 +3031,19 @@ fn control_fds(at: u64, len: u64) -> Result<Vec<super::fs::Fd>, u64> {
                 out.push(f);
             }
         }
-        off += msg::align8(clen);
+        off += (clen + align - 1) & !(align - 1);
     }
     Ok(out)
 }
 
-/// Put descriptors into the table and describe them in a control buffer.
+/// Install received descriptors and write one `SCM_RIGHTS` header naming them.
 fn write_control(at: u64, room: u64, fds: Vec<super::fs::Fd>) -> Result<u64, u64> {
     if fds.is_empty() {
         return Ok(0);
     }
-    let need = msg::CMSG_DATA + (fds.len() * 4) as u64;
+    let (data, _) = cmsg_shape();
+    let need = data + (fds.len() * 4) as u64;
     if at == 0 || room < need {
-        // Linux sets `MSG_CTRUNC` and drops them. Dropping a descriptor
-        // silently is how a receiver ends up with a message referring to a
-        // buffer it was never given, so this refuses the call instead and
-        // says which way it failed.
         return Err(EMSGSIZE);
     }
     if !reachable(at, need as usize, true) {
@@ -3014,15 +3058,22 @@ fn write_control(at: u64, room: u64, fds: Vec<super::fs::Fd>) -> Result<u64, u64
         nums.push(n as u32);
     }
     unsafe {
-        core::ptr::write((at + msg::CMSG_LEN) as *mut u64, need);
-        core::ptr::write((at + msg::CMSG_LEVEL) as *mut u32, msg::SOL_SOCKET);
-        core::ptr::write((at + msg::CMSG_TYPE) as *mut u32, msg::SCM_RIGHTS);
+        if data == 12 {
+            core::ptr::write_unaligned(at as *mut u32, need as u32);
+            core::ptr::write_unaligned((at + 4) as *mut u32, msg::SOL_SOCKET);
+            core::ptr::write_unaligned((at + 8) as *mut u32, msg::SCM_RIGHTS);
+        } else {
+            core::ptr::write((at + msg::CMSG_LEN) as *mut u64, need);
+            core::ptr::write((at + msg::CMSG_LEVEL) as *mut u32, msg::SOL_SOCKET);
+            core::ptr::write((at + msg::CMSG_TYPE) as *mut u32, msg::SCM_RIGHTS);
+        }
         for (i, n) in nums.iter().enumerate() {
-            core::ptr::write((at + msg::CMSG_DATA + (i * 4) as u64) as *mut u32, *n);
+            core::ptr::write_unaligned((at + data + (i * 4) as u64) as *mut u32, *n);
         }
     }
     Ok(need)
 }
+
 
 fn unix_stream(fd: u64) -> Option<(alloc::rc::Rc<core::cell::RefCell<super::unix::Pipe>>,
                                    super::unix::Side)> {
@@ -3036,13 +3087,10 @@ fn unix_stream(fd: u64) -> Option<(alloc::rc::Rc<core::cell::RefCell<super::unix
 
 pub(super) fn sys_sendmsg(fd: u64, hdr: u64, _flags: u64) -> u64 {
     let Some((pipe, side)) = unix_stream(fd) else { return ENOTCONN };
-    if !reachable(hdr, msg::SIZE, false) {
-        return EFAULT;
-    }
-    let iov = unsafe { core::ptr::read((hdr + msg::IOV) as *const u64) };
-    let cnt = unsafe { core::ptr::read((hdr + msg::IOVLEN) as *const u64) };
-    let ctl = unsafe { core::ptr::read((hdr + msg::CONTROL) as *const u64) };
-    let ctl_len = unsafe { core::ptr::read((hdr + msg::CONTROLLEN) as *const u64) };
+    let (iov, cnt, ctl, ctl_len) = match msghdr_in(hdr, false) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let data = match gather(iov, cnt) {
         Ok(v) => v,
         Err(e) => return e,
@@ -3065,13 +3113,10 @@ pub(super) fn sys_sendmsg(fd: u64, hdr: u64, _flags: u64) -> u64 {
 pub(super) fn sys_recvmsg(fd: u64, hdr: u64, flags: u64) -> u64 {
     const MSG_DONTWAIT: u64 = 0x40;
     let Some((pipe, side)) = unix_stream(fd) else { return ENOTCONN };
-    if !reachable(hdr, msg::SIZE, true) {
-        return EFAULT;
-    }
-    let iov = unsafe { core::ptr::read((hdr + msg::IOV) as *const u64) };
-    let cnt = unsafe { core::ptr::read((hdr + msg::IOVLEN) as *const u64) };
-    let ctl = unsafe { core::ptr::read((hdr + msg::CONTROL) as *const u64) };
-    let ctl_len = unsafe { core::ptr::read((hdr + msg::CONTROLLEN) as *const u64) };
+    let (iov, cnt, ctl, ctl_len) = match msghdr_in(hdr, true) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     let mut room = 0usize;
     for i in 0..cnt.min(1024) {
@@ -3108,12 +3153,8 @@ pub(super) fn sys_recvmsg(fd: u64, hdr: u64, flags: u64) -> u64 {
         Ok(v) => v,
         Err(e) => return e,
     };
-    unsafe {
-        core::ptr::write((hdr + msg::CONTROLLEN) as *mut u64, wrote);
-        core::ptr::write((hdr + msg::FLAGS) as *mut u32, 0);
-        core::ptr::write((hdr + msg::NAMELEN) as *mut u32, 0);
-        let _ = msg::NAME;
-    }
+    msghdr_out(hdr, wrote);
+    let _ = msg::NAME;
     got as u64
 }
 
@@ -4059,7 +4100,7 @@ pub(super) fn sys_ppoll(fds: u64, nfds: u64, ts: u64, _mask: u64, _setsize: u64)
     do_poll(fds, nfds, limit)
 }
 
-fn do_poll(fds: u64, nfds: u64, limit: Option<u64>) -> u64 {
+pub(super) fn do_poll(fds: u64, nfds: u64, limit: Option<u64>) -> u64 {
     use super::poll::{PFD_LEN, POLLNVAL};
     if nfds > MAX_WATCHED {
         return EINVAL;

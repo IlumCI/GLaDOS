@@ -57,7 +57,16 @@ struct Session {
     /// Each window's commit count as last shown, so only a new picture
     /// repaints the desktop.
     shown: Vec<(u64, u64)>,
+    /// Where this connection is in the keyboard's evdev ring, and which of its
+    /// windows last had the focus.
+    kbd: u64,
+    focused: Option<u64>,
 }
+
+/// Pointer input the desktop gathered for a window, by window key, waiting
+/// for that window's connection to take its turn. A lock because the
+/// compositor's task pushes and the guest's task drains.
+static INPUT: crate::sync::Spin<Vec<(u64, super::seat::Input)>> = crate::sync::Spin::new(Vec::new());
 
 static LISTENER: Racy<Option<Rc<RefCell<Sock>>>> = Racy::new(None);
 static SESSIONS: Racy<Vec<Session>> = Racy::new(Vec::new());
@@ -89,6 +98,8 @@ pub fn pump() {
         client.publish(surface::WL_COMPOSITOR, 4);
         client.publish(surface::WL_SHM, 1);
         client.publish(surface::XDG_WM_BASE, 1);
+        client.publish(super::seat::WL_OUTPUT, 3);
+        client.publish(super::seat::WL_SEAT, 5);
         sessions.push(Session {
             pipe,
             side,
@@ -98,6 +109,8 @@ pub fn pump() {
             last_frame: 0,
             asked: Vec::new(),
             shown: Vec::new(),
+            kbd: crate::linux::input::now_at(crate::linux::input::Dev::Keyboard),
+            focused: None,
         });
     }
     if sessions.is_empty() {
@@ -189,7 +202,48 @@ fn turn(s: &mut Session, now: u64, changed: &mut bool) -> bool {
         }
     }
 
-    // Answers, as far as the socket has room.
+    // Input for this connection's windows: pointer events the desktop
+    // queued, and the keyboard's evdev events while one of them has focus.
+    let windows = s.client.windows();
+    let mine: Vec<(u64, super::seat::Input)> = {
+        let mut q = INPUT.lock_irq();
+        let (take, keep): (Vec<_>, Vec<_>) = q.drain(..).partition(|(k, _)| windows.iter().any(|(w, _)| w == k));
+        *q = keep;
+        take
+    };
+    for (key, ev) in mine {
+        if let Some(surf) = s.client.surface_of(key) {
+            s.client.input(surf, ev);
+        }
+    }
+    let focused = windows.iter().find(|(_, f)| f.lock_irq().focused).map(|(k, _)| *k);
+    if focused != s.focused {
+        if let Some(surf) = s.focused.and_then(|k| s.client.surface_of(k)) {
+            s.client.input(surf, super::seat::Input::Focus(false));
+        }
+        if let Some(surf) = focused.and_then(|k| s.client.surface_of(k)) {
+            s.client.input(surf, super::seat::Input::Focus(true));
+        }
+        s.focused = focused;
+        // Keys pressed while somebody else had the focus are not this
+        // window's.
+        s.kbd = crate::linux::input::now_at(crate::linux::input::Dev::Keyboard);
+    }
+    if let Some(surf) = focused.and_then(|k| s.client.surface_of(k)) {
+        while let Some(e) = crate::linux::input::next_key(&mut s.kbd) {
+            // EV_KEY, press or release; autorepeat is the client's to do.
+            if e.kind == 1 && e.value != 2 {
+                s.client.input(surf, super::seat::Input::Key { code: e.code as u32, down: e.value == 1 });
+            }
+        }
+    }
+
+    // Answers, as far as the socket has room -- and any descriptors the events
+    // carry, attached first so they travel with the bytes that name them.
+    let fds = core::mem::take(&mut s.client.out_fds);
+    if !fds.is_empty() {
+        unix::attach(&s.pipe, s.side, fds);
+    }
     s.outbuf.extend(s.client.take_out());
     if !s.outbuf.is_empty() {
         match unix::write(&s.pipe, s.side, &s.outbuf) {
@@ -249,7 +303,7 @@ fn apply(e: Effect) {
             desk::post(desk::Op::OpenTagged {
                 title,
                 icon: desk::ICO_PROGRAMS,
-                app: Box::new(Window { key, frame }),
+                app: Box::new(Window { key, frame, last: (0, 0), held: 0 }),
                 w: w + theme::frame_w() * 2,
                 h: h + theme::title_h() + theme::frame_w() * 2,
             });
@@ -263,6 +317,19 @@ fn apply(e: Effect) {
 struct Window {
     key: u64,
     frame: Shared,
+    /// Where the pointer last pressed or dragged, in window coordinates, and
+    /// which button is held -- `release` is told neither.
+    last: (i32, i32),
+    held: u32,
+}
+
+impl Window {
+    fn point(&mut self, client: crate::gfx::theme::Rect, x: i32, y: i32, button: Option<(u32, bool)>) -> bool {
+        let at = (x - client.x as i32, y - client.y as i32);
+        self.last = at;
+        INPUT.lock_irq().push((self.key, super::seat::Input::Pointer { x: at.0, y: at.1, button }));
+        true
+    }
 }
 
 impl crate::gfx::DeskApp for Window {
@@ -275,6 +342,7 @@ impl crate::gfx::DeskApp for Window {
 
     fn draw_in(&self, fb: &crate::gfx::Framebuffer, client: crate::gfx::theme::Rect, _focused: bool) {
         let mut f = self.frame.lock_irq();
+        f.focused = _focused;
         // Painted is shown: the desktop lays this surface into the frame it
         // is composing and presents it before it next looks at a client.
         f.presented = f.commits;
@@ -306,12 +374,31 @@ impl crate::gfx::DeskApp for Window {
         }
     }
 
+    /// Taken and dropped: a client's keys are the evdev events, delivered as
+    /// such, and handing it the decoded character too would type twice.
     fn key(&mut self, _k: u8) -> bool {
-        false
+        true
     }
 
-    fn press(&mut self, _client: crate::gfx::theme::Rect, _x: i32, _y: i32) -> bool {
-        false
+    fn press(&mut self, client: crate::gfx::theme::Rect, x: i32, y: i32) -> bool {
+        self.held = 0x110; // BTN_LEFT
+        self.point(client, x, y, Some((0x110, true)))
+    }
+
+    fn right_press(&mut self, client: crate::gfx::theme::Rect, x: i32, y: i32) -> bool {
+        self.held = 0x111; // BTN_RIGHT
+        self.point(client, x, y, Some((0x111, true)))
+    }
+
+    fn drag(&mut self, client: crate::gfx::theme::Rect, x: i32, y: i32) -> bool {
+        self.point(client, x, y, None)
+    }
+
+    fn release(&mut self) -> bool {
+        let (x, y) = self.last;
+        let b = core::mem::take(&mut self.held);
+        INPUT.lock_irq().push((self.key, super::seat::Input::Pointer { x, y, button: Some((b.max(0x110), false)) }));
+        true
     }
 
     fn min_size(&self) -> (u32, u32) {

@@ -79,6 +79,10 @@ pub struct Client {
     pub fds: alloc::collections::VecDeque<crate::linux::fs::Fd>,
     /// Pools, buffers, surfaces and windows. See `surface`.
     pub(super) scene: super::surface::Scene,
+    /// Pointers, keyboards and what they are over. See `seat`.
+    pub(super) seat: super::seat::Seat,
+    /// Descriptors to send with the next bytes written -- a keymap.
+    pub out_fds: Vec<crate::linux::fs::Fd>,
 }
 
 impl Default for Client {
@@ -98,6 +102,8 @@ impl Client {
             gone: false,
             fds: alloc::collections::VecDeque::new(),
             scene: super::surface::Scene::default(),
+            seat: super::seat::Seat::default(),
+            out_fds: Vec::new(),
         }
     }
 
@@ -183,6 +189,7 @@ impl Client {
             WL_DISPLAY => self.display(msg),
             WL_REGISTRY => self.registry(msg),
             iface if super::surface::handles(iface) => self.surface_request(entry.iface, entry.version, msg),
+            iface if super::seat::handles(iface) => self.seat_request(entry.iface, entry.version, msg),
             // An object of an interface nothing answers for yet. Refusing is
             // the honest response and it is also the useful one: the trace
             // says which interface to write next, the way `-ENOSYS` does for
@@ -290,6 +297,7 @@ impl Client {
                 }
                 self.objects.create(id, g.iface, version)?;
                 self.bound(id, g.iface);
+                self.seat_bound(id, g.iface);
                 Ok(())
             }
             _ => Err(Error::NoMethod),

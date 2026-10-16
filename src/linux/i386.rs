@@ -592,6 +592,45 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
         355 => (sc::sys_getrandom(b, c, d), true),
         // rseq: refused, as the 64-bit door refuses it and for its reason.
         386 => (sc::ENOSYS, true),
+        // Sockets: i386 has had direct calls since 4.3, which is what glibc
+        // uses; the arguments are the 64-bit door's, and `msghdr` and the
+        // control headers are read at the guest's width inside.
+        359 => (sc::sys_socket(b, c, d), true),
+        360 => (sc::sys_socketpair(b, c, d, si), true),
+        361 => (sc::sys_bind(b, c, d), true),
+        362 => (sc::sys_connect(b, c, d), true),
+        363 => (sc::sys_listen(b), true),
+        364 => (sc::sys_accept4(b, c, d, si), true),
+        365 | 366 => (0, true),
+        369 => (sc::sys_send(b, c, d), true),
+        370 => (sc::sys_sendmsg(b, c, d), true),
+        371 => (sc::sys_recv(b, c, d), true),
+        372 => (sc::sys_recvmsg(b, c, d), true),
+        373 => (sc::sys_shutdown(b, c), true),
+        356 => (sc::sys_memfd_create(b, c), true),
+        93 => (sc::sys_ftruncate(b, c), true),
+        194 => (sc::sys_ftruncate(b, (d << 32) | c), true),
+        414 => (sc::sys_ppoll(b, c, d, si, di), true),
+        // ppoll with a 32-bit timespec, which libwayland's dispatch reaches.
+        309 => {
+            if d == 0 {
+                (sc::do_poll(b, c, None), true)
+            } else if !sc::reachable(d, 8, false) {
+                (sc::EFAULT, true)
+            } else {
+                let (s, ns) = unsafe {
+                    (
+                        core::ptr::read_unaligned(d as *const u32) as i64,
+                        core::ptr::read_unaligned((d + 4) as *const u32) as i64,
+                    )
+                };
+                (sc::do_poll(b, c, super::poll::ticks_for_ms(s * 1000 + ns / 1_000_000)), true)
+            }
+        }
+        254 => (sc::sys_epoll_create(b), true),
+        329 => (sc::sys_epoll_create1(b), true),
+        255 => (sc::sys_epoll_ctl(b, c, d, si), true),
+        256 => (sc::sys_epoll_wait(b, c, d, si), true),
         403 => (sc::sys_clock_gettime(b, c), true),
         407 => (sc::sys_nanosleep(d), true),
         240 => (sc::futex(b, c, d, si, di, bp, true), true),
@@ -661,6 +700,13 @@ pub fn name_of(nr: u64) -> &'static str {
         311 => "set_robust_list",
         340 => "prlimit64",
         355 => "getrandom",
+        356 => "memfd_create",
+        359 => "socket",
+        362 => "connect",
+        370 => "sendmsg",
+        372 => "recvmsg",
+        414 => "ppoll_time64",
+        309 => "ppoll",
         383 => "statx",
         386 => "rseq",
         403 => "clock_gettime64",
