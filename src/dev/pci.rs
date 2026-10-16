@@ -127,6 +127,24 @@ pub fn bar(io_base_ecam: u64, d: &Device, index: usize) -> Option<u64> {
     }
 }
 
+/// Every memory BAR base below 4 GiB on the bus, for anything that has to stay
+/// clear of device memory without knowing how big each BAR is.
+pub fn bars32(ecam: u64) -> alloc::vec::Vec<u64> {
+    let mut out = alloc::vec::Vec::new();
+    scan(ecam, 255, |d| {
+        // A bridge has two BARs, an ordinary function six.
+        let n = if d.header_type & 0x7f == 1 { 2 } else { 6 };
+        for i in 0..n {
+            if let Some(b) = bar(ecam, &d, i) {
+                if b != 0 && b < (1 << 32) {
+                    out.push(b);
+                }
+            }
+        }
+    });
+    out
+}
+
 /// Set the bus-master and memory-space enable bits in the command register.
 ///
 /// Without bus-master a device cannot DMA, so an NVMe controller will accept

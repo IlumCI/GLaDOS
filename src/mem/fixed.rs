@@ -80,6 +80,69 @@ struct Free {
     ready: bool,
 }
 
+/// Every range below 4 GiB the firmware described at all, of any type, merged.
+///
+/// Kept for `hole32`: a 32-bit guest needs private mappings below 4 GiB, and
+/// in an identity-mapped kernel those shadow physical addresses. The only ones
+/// that are safe to shadow are the ones with nothing behind them -- no RAM of
+/// any kind and no device -- which is the complement of this list below the
+/// lowest device the kernel talks to.
+const MAX_DESCRIBED: usize = 128;
+static DESCRIBED: Racy<([Range; MAX_DESCRIBED], usize)> =
+    Racy::new(([Range { at: 0, end: 0 }; MAX_DESCRIBED], 0));
+
+const FOUR_GIB: u64 = 1 << 32;
+
+/// The largest range below 4 GiB with nothing behind it: no memory the
+/// firmware described and no device. `devices` are the bases of everything
+/// memory-mapped the kernel may touch -- PCI BARs, ECAM, the interrupt
+/// controllers, the framebuffer -- and the hole must lie below all of them,
+/// because a BAR's size is not known here (`pci.rs` cannot size one) and a
+/// base is the only safe bound.
+///
+/// Floored at 16 MiB, so nothing a legacy structure or the AP trampoline uses
+/// is ever in it, and aligned to 2 MiB both ways.
+pub fn hole32(devices: &[u64]) -> Option<(u64, u64)> {
+    let floor = devices
+        .iter()
+        .copied()
+        // Below 1 MiB is not a memory BAR on any real bus -- it is a BAR that
+        // reads back type bits or an I/O window -- and taking it as a floor
+        // would close the hole on a reading that means nothing.
+        .filter(|&d| d >= 0x10_0000 && d < FOUR_GIB)
+        .min()
+        .unwrap_or(FOUR_GIB)
+        .min(0xFEC0_0000);
+    let (ranges, n) = unsafe { &*DESCRIBED.get() };
+    let mut ranges: alloc::vec::Vec<Range> = ranges[..*n].to_vec();
+    ranges.sort_by_key(|r| r.at);
+    let mut best: Option<(u64, u64)> = None;
+    let mut cursor = 0x0100_0000u64;
+    let mut consider = |at: u64, end: u64, best: &mut Option<(u64, u64)>| {
+        let at = at.div_ceil(0x20_0000) * 0x20_0000;
+        let end = (end.min(floor)) & !(0x20_0000 - 1);
+        if end > at && best.is_none_or(|(a, e)| end - at > e - a) {
+            *best = Some((at, end));
+        }
+    };
+    for r in &ranges {
+        if r.at > cursor {
+            consider(cursor, r.at, &mut best);
+        }
+        cursor = cursor.max(r.end);
+    }
+    consider(cursor, floor, &mut best);
+    best
+}
+
+/// The described ranges below 4 GiB, for a report.
+pub fn described32() -> alloc::vec::Vec<(u64, u64)> {
+    let (ranges, n) = unsafe { &*DESCRIBED.get() };
+    let mut v: alloc::vec::Vec<(u64, u64)> = ranges[..*n].iter().map(|r| (r.at, r.end)).collect();
+    v.sort();
+    v
+}
+
 static FREE: Racy<Free> = Racy::new(Free {
     ranges: [Range { at: 0, end: 0 }; MAX_RANGES],
     n: 0,
@@ -105,6 +168,20 @@ pub unsafe fn snapshot(
     f.ready = true;
     if desc_size == 0 {
         return;
+    }
+    {
+        let (ds, dn) = unsafe { DESCRIBED.get() };
+        *dn = 0;
+        for i in 0..mmap_size / desc_size {
+            let d = unsafe { &*(mmap.add(i * desc_size) as *const crate::uefi::MemoryDescriptor) };
+            let at = d.phys_start;
+            let end = d.phys_start + d.num_pages * PAGE_SIZE;
+            if at >= FOUR_GIB || *dn >= MAX_DESCRIBED {
+                continue;
+            }
+            ds[*dn] = Range { at, end: end.min(FOUR_GIB) };
+            *dn += 1;
+        }
     }
     for i in 0..mmap_size / desc_size {
         let d = unsafe { &*(mmap.add(i * desc_size) as *const crate::uefi::MemoryDescriptor) };

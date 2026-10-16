@@ -17,10 +17,44 @@
 //! atomic load, which is cheap enough for the paths that need it and is the
 //! reason the allocator can bill anybody at all.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 /// MSR holding the base address `gs:` offsets are added to.
 const IA32_GS_BASE: u32 = 0xC000_0101;
+/// What `rdpid` and `rdtscp` read back: free for an operating system to set,
+/// and per core, which is exactly the property GS was being used for.
+const IA32_TSC_AUX: u32 = 0xC000_0103;
+
+/// How this core finds out who it is.
+///
+/// **GS was the answer, and it stops being one the moment a guest owns GS.**
+/// 32-bit Linux puts thread-local storage behind `%gs` -- glibc i386 reads
+/// `%gs:0` on nearly every call -- and loading a user selector into GS
+/// overwrites the base the kernel reads its per-core block through. An
+/// interrupt taken while such a guest runs would then read a guest's TLS as a
+/// per-core block. `rdpid` reads `IA32_TSC_AUX`, which no guest can write, in
+/// one instruction; `rdtscp` reads it too, more slowly, on parts without
+/// `rdpid`. GS stays as the last resort, and a machine on it cannot run
+/// 32-bit guests -- `owns_gs_freely` says so.
+const BY_GS: u8 = 0;
+const BY_RDTSCP: u8 = 1;
+const BY_RDPID: u8 = 2;
+static HOW: AtomicU8 = AtomicU8::new(BY_GS);
+
+/// Whether a guest may load GS without the kernel losing track of its cores.
+pub fn owns_gs_freely() -> bool {
+    HOW.load(Ordering::Relaxed) != BY_GS
+}
+
+fn choose() -> u8 {
+    if super::cpuid(7, 0)[2] & (1 << 22) != 0 {
+        return BY_RDPID;
+    }
+    if super::cpuid(0x8000_0001, 0)[3] & (1 << 27) != 0 {
+        return BY_RDTSCP;
+    }
+    BY_GS
+}
 
 /// What every core keeps about itself.
 ///
@@ -52,8 +86,13 @@ pub fn armed() -> bool {
 /// Room for the same number of cores the scheduler knows about.
 const MAX_CPUS: usize = crate::task::MAX_CPUS;
 
-static BLOCKS: crate::sync::Racy<[*mut PerCpu; MAX_CPUS]> =
-    crate::sync::Racy::new([core::ptr::null_mut(); MAX_CPUS]);
+/// **Atomics, not `Racy`, and that is load-bearing.** `sync::audit::visit`
+/// runs on every `Racy` access while the sharing audit is on and asks this
+/// module who is touching it -- so a lookup that went through a `Racy` would
+/// audit itself, recurse, and run off the end of the stack. It did, inside
+/// `diag mt`, as a hang with nothing printed.
+static BLOCKS: [core::sync::atomic::AtomicPtr<PerCpu>; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()) }; MAX_CPUS];
 
 /// Build a block for every core, on the bootstrap processor.
 ///
@@ -64,18 +103,44 @@ pub fn prepare(cores: usize) {
     for cpu in 0..cores.min(MAX_CPUS) {
         let block =
             alloc::boxed::Box::leak(alloc::boxed::Box::new(PerCpu { cpu: cpu as u64, task: 0 }));
-        unsafe { BLOCKS.get()[cpu] = block as *mut PerCpu };
+        BLOCKS[cpu].store(block as *mut PerCpu, Ordering::Release);
     }
 }
 
 /// Point this core's GS at the block `prepare` built for it.
 pub fn adopt(cpu: usize) -> bool {
-    let b = unsafe { BLOCKS.get().get(cpu).copied().unwrap_or(core::ptr::null_mut()) };
+    let b = BLOCKS.get(cpu).map(|p| p.load(Ordering::Acquire)).unwrap_or(core::ptr::null_mut());
     if b.is_null() {
         return false;
     }
     unsafe { super::wrmsr(IA32_GS_BASE, b as u64) };
+    // Every core makes the same choice -- one machine, one CPUID -- so the
+    // first to adopt decides and the rest agree with it.
+    let how = choose();
+    if how != BY_GS {
+        unsafe { super::wrmsr(IA32_TSC_AUX, cpu as u64) };
+    }
+    HOW.store(how, Ordering::Relaxed);
     true
+}
+
+/// This core's block, found without GS.
+#[inline(always)]
+fn block() -> *mut PerCpu {
+    let cpu: u64;
+    match HOW.load(Ordering::Relaxed) {
+        BY_RDPID => unsafe {
+            core::arch::asm!("rdpid {}", out(reg) cpu, options(nomem, nostack, preserves_flags));
+        },
+        BY_RDTSCP => unsafe {
+            let aux: u32;
+            core::arch::asm!("rdtscp", out("ecx") aux, out("eax") _, out("edx") _,
+                options(nomem, nostack, preserves_flags));
+            cpu = aux as u64;
+        },
+        _ => return core::ptr::null_mut(),
+    }
+    BLOCKS.get(cpu as usize).map(|p| p.load(Ordering::Relaxed)).unwrap_or(core::ptr::null_mut())
 }
 
 /// Declare that every core has its block. Called once, from the bootstrap
@@ -97,6 +162,10 @@ pub fn arm() {
 /// `smp::this_cpu`, which asks the interrupt controller and is always safe.
 #[inline(always)]
 pub fn cpu_id() -> u64 {
+    let b = block();
+    if !b.is_null() {
+        return unsafe { (*b).cpu };
+    }
     let v: u64;
     unsafe {
         core::arch::asm!("mov {}, gs:[0]", out(reg) v, options(nostack, preserves_flags));
@@ -107,6 +176,10 @@ pub fn cpu_id() -> u64 {
 /// The task this core is running.
 #[inline(always)]
 pub fn task() -> u64 {
+    let b = block();
+    if !b.is_null() {
+        return unsafe { (*b).task };
+    }
     let v: u64;
     unsafe {
         core::arch::asm!("mov {}, gs:[8]", out(reg) v, options(nostack, preserves_flags));
@@ -118,6 +191,11 @@ pub fn task() -> u64 {
 #[inline(always)]
 pub fn set_task(index: u64) {
     if !armed() {
+        return;
+    }
+    let b = block();
+    if !b.is_null() {
+        unsafe { (*b).task = index };
         return;
     }
     unsafe {

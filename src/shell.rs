@@ -5267,6 +5267,35 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 run / 1024 / 1024
             );
             mem::fixed::report();
+            // Where a 32-bit guest's private mappings could go: below 4 GiB,
+            // with no memory and no device behind the addresses.
+            if let Some(ecam) = acpi.as_ref().and_then(|a| a.mcfg) {
+                let mut devs = crate::dev::pci::bars32(ecam);
+                devs.push(ecam);
+                match mem::fixed::hole32(&devs) {
+                    Some((at, end)) => kprintln!(
+                        "  32-bit hole  {:#x}..{:#x}  {} MiB, below {} device base(s)",
+                        at, end, (end - at) >> 20, devs.len()
+                    ),
+                    None => kprintln!("  32-bit hole  none -- nothing below 4 GiB is free of memory and devices"),
+                }
+                if rest.trim() == "hole" {
+                    devs.sort();
+                    for d in &devs {
+                        kprintln!("    device base {:#x}", d);
+                    }
+                    let mut last = (0u64, 0u64);
+                    for (at, end) in mem::fixed::described32() {
+                        if at > last.1 + 0x10_0000 || at < 0x0100_0000 && false {
+                            kprintln!("    described {:#x}..{:#x}", last.0, last.1);
+                            last = (at, end);
+                        } else {
+                            last.1 = last.1.max(end);
+                        }
+                    }
+                    kprintln!("    described {:#x}..{:#x}", last.0, last.1);
+                }
+            }
         }
         // **The notice, readable from the machine that carries it.** The BSD arm
         // asks that a binary distribution reproduce it "in the documentation
