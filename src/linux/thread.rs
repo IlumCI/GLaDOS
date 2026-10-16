@@ -186,6 +186,25 @@ pub fn begin_exit() {
     }
 }
 
+/// Tell every running thread of session `s` to end itself with `code`.
+///
+/// **Setting `exiting` was never enough on its own.** It makes the next futex
+/// wait answer `EINTR`, and glibc answers `EINTR` from a futex by waiting
+/// again -- so a thread parked in a lock spun forever on a flag that asked it
+/// to stop and gave it no way to, and outlived the memory it was running in.
+/// A doom is the mechanism that actually ends a task: it lands at the next
+/// syscall boundary, in any wait loop's deadline check, or from the timer at
+/// ring 3.
+pub fn doom_session(s: usize, code: u64) {
+    for slot in unsafe { &*SLOTS.get() }.iter() {
+        if slot.live && slot.work.is_some_and(|w| w.session == s) {
+            if let Some(t) = slot.task {
+                super::syscall::doom(t, code);
+            }
+        }
+    }
+}
+
 /// How many threads of session `s` are running, its main thread excluded.
 pub fn live_in(s: usize) -> usize {
     unsafe { &*SLOTS.get() }

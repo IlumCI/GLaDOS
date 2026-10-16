@@ -233,7 +233,9 @@ const OPEN_MAX_BYTES: usize = 64 * 1024 * 1024;
 const DENTS_MAX: usize = 1 << 20;
 
 /// How many descriptors a guest may hold, and how long a path may be.
-const MAX_FDS: usize = 64;
+/// Linux's usual soft limit. It was 64, and a Source game keeps dozens of
+/// archive chunks open at once.
+const MAX_FDS: usize = 1024;
 const PATH_MAX: usize = 4096;
 
 /// The largest single mapping a guest may ask for.
@@ -243,7 +245,11 @@ const PATH_MAX: usize = 4096;
 /// produce a *small* allocation and hand back a pointer to far less memory
 /// than the guest was told it had. A cap makes that unreachable at the one
 /// place it can be checked cheaply.
-const MAP_MAX: u64 = 64 * 1024 * 1024;
+///
+/// A gigabyte: well short of any wrap, and above the largest single library
+/// a real program maps -- Mesa's 32-bit `libLLVM` is 177 MB, and the old
+/// 64 MiB cap answered `ENOMEM` for it and left the program with no OpenGL.
+const MAP_MAX: u64 = 1024 * 1024 * 1024;
 
 /// What the guest had in its registers when it trapped.
 ///
@@ -2587,7 +2593,13 @@ fn memfd(fd: u64) -> Option<alloc::rc::Rc<core::cell::RefCell<super::fs::Memfd>>
 pub(super) fn sys_memfd_create(name: u64, flags: u64) -> u64 {
     const MFD_CLOEXEC: u64 = 1;
     const MFD_ALLOW_SEALING: u64 = 2;
-    if flags & !(MFD_CLOEXEC | MFD_ALLOW_SEALING) != 0 {
+    // NOEXEC_SEAL and EXEC (Linux 6.3) say whether the file may be mapped
+    // executable. Nothing maps a memfd executable here and no seal is
+    // enforced, so both are accepted as statements about intent; refusing
+    // them cost every new libwayland a failed first attempt.
+    const MFD_NOEXEC_SEAL: u64 = 8;
+    const MFD_EXEC: u64 = 0x10;
+    if flags & !(MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL | MFD_EXEC) != 0 {
         return EINVAL;
     }
     let name = match read_cstr(name) {
@@ -2611,6 +2623,25 @@ pub(super) fn sys_memfd_create(name: u64, flags: u64) -> u64 {
 ///
 /// Every real user sizes before mapping, which is the order the call was
 /// designed around: create, size, map, draw.
+/// `fallocate` in its default mode, on a memfd: make the file at least
+/// `offset + len` long, which is what `posix_fallocate` asks before a client
+/// maps a shared buffer. Anything else -- punching holes, collapsing ranges,
+/// a file in the store -- is refused, since only growth has a meaning here.
+pub(super) fn sys_fallocate(fd: u64, mode: u64, offset: u64, len: u64) -> u64 {
+    const EOPNOTSUPP: u64 = (-95i64) as u64;
+    if mode != 0 {
+        return EOPNOTSUPP;
+    }
+    let Some(end) = offset.checked_add(len) else { return EINVAL };
+    match memfd(fd) {
+        Some(m) => {
+            let have = m.borrow().len as u64;
+            if end <= have { 0 } else { sys_ftruncate(fd, end) }
+        }
+        None => EOPNOTSUPP,
+    }
+}
+
 pub(super) fn sys_ftruncate(fd: u64, len: u64) -> u64 {
     if (len as i64) < 0 {
         return EINVAL;
@@ -3558,6 +3589,27 @@ pub(super) fn sys_gettimeofday(tv: u64, tz: u64) -> u64 {
 /// rather than lazy: close-on-exec is a promise about what survives an `exec`,
 /// and there is no `exec` here for anything to survive. The day there is, this
 /// has to start remembering, and it is written down here so that day finds it.
+/// `mincore`: which pages of a range are resident. Every page a guest owns is
+/// -- nothing here is ever paged out -- so the answer is "all of them" for a
+/// range it owns and `ENOMEM` for one it does not, which is exactly the
+/// question Mesa's EGL asks with it: is this pointer real memory? It was
+/// unimplemented, and Mesa read that as "no" about the Wayland display it had
+/// just been handed and answered "Could not get EGL display".
+pub(super) fn sys_mincore(at: u64, len: u64, vec: u64) -> u64 {
+    if at % 4096 != 0 {
+        return EINVAL;
+    }
+    let pages = page_up(len as usize) / 4096;
+    if !owns(at, len.max(1) as usize) {
+        return ENOMEM;
+    }
+    if !reachable(vec, pages.max(1), true) {
+        return EFAULT;
+    }
+    unsafe { core::ptr::write_bytes(vec as *mut u8, 1, pages) };
+    0
+}
+
 pub(super) fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
     let known = with_fds(|fds, _| matches!(fds.get(fd as usize), Some(Some(_)))).unwrap_or(false);
     if !known {
@@ -3569,6 +3621,15 @@ pub(super) fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
         2 => 0,                                    // F_SETFD, accepted and not stored
         3 => 0,                                    // F_GETFL, everything here is O_RDONLY
         4 => 0,                                    // F_SETFL, no flag it could set applies
+        // Record locks, in both widths. One process at a time owns any file
+        // it writes here, so there is nobody to lock against.
+        5 | 6 | 7 | 12 | 13 | 14 => 0,
+        1030 => sys_dup(fd, None).max_free_from(arg), // F_DUPFD_CLOEXEC
+        // File seals on a memfd: accepted and not enforced. A client seals
+        // its buffer so the compositor can trust its size, and the compositor
+        // here copies a commit out under its own bounds check anyway.
+        1033 => 0,                                 // F_ADD_SEALS
+        1034 => 0,                                 // F_GET_SEALS: none
         _ => EINVAL,
     }
 }
@@ -5538,7 +5599,15 @@ fn give_back(at: u64, len: usize, from: Option<Source>) {
 pub(super) fn sys_munmap(at: u64, len: u64) -> u64 {
     let sp = unsafe { guest_slot() };
     let Some(sp) = sp.as_mut() else { return EINVAL };
-    match sp.maps.iter().position(|m| m.at == at && m.len == len as usize) {
+    if at % 4096 != 0 || len == 0 {
+        return EINVAL;
+    }
+    // The record's length and the guest's are compared page-rounded: the
+    // guest passes whatever it asked `mmap` for, and compared as given, every
+    // mapping of an odd length -- every library a linker maps -- could never
+    // be unmapped at all.
+    let want = page_up(len as usize);
+    match sp.maps.iter().position(|m| m.at == at && page_up(m.len) == want) {
         Some(i) => {
             let m = sp.maps.remove(i);
             // **Close it before giving it back.** `teardown` does this for a
@@ -5551,6 +5620,14 @@ pub(super) fn sys_munmap(at: u64, len: u64) -> u64 {
             give_back(m.at, m.len, Some(m.from));
             0
         }
+        // **Part of a mapping: accepted, and the pages kept.** The heap cannot
+        // free part of an allocation, so the honest options were to refuse --
+        // which `ld.so` meets every time it trims a reservation, and then
+        // reports as a failed load -- or to keep the pages mapped until the
+        // whole mapping or the guest goes. This is the second: it costs
+        // memory, not correctness, except that the guest can still read what
+        // it unmapped rather than faulting there.
+        None if sp.maps.iter().any(|m| at >= m.at && at + want as u64 <= m.at + page_up(m.len) as u64) => 0,
         None => EINVAL,
     }
 }
@@ -5702,6 +5779,8 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_ACCESS => (sys_access(f.rdi, f.rsi), true),
         SYS_FACCESSAT => (sys_access(f.rsi, f.rdx), true),
         SYS_FTRUNCATE => (sys_ftruncate(f.rdi, f.rsi), true),
+        285 => (sys_fallocate(f.rdi, f.rsi, f.rdx, f.r10), true),
+        27 => (sys_mincore(f.rdi, f.rsi, f.rdx), true),
         SYS_MEMFD_CREATE => (sys_memfd_create(f.rdi, f.rsi), true),
         SYS_EPOLL_CREATE => (sys_epoll_create(f.rdi), true),
         SYS_EPOLL_CREATE1 => (sys_epoll_create1(f.rdi), true),
@@ -5796,6 +5875,9 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_ARCH_PRCTL => (sys_arch_prctl(f.rdi, f.rsi), true),
         SYS_EXIT | SYS_EXIT_GROUP => {
             record(Call { nr, args, ret: 0, served: true, path: [0; PATH_SNIP], path_len: 0 });
+            if nr == SYS_EXIT_GROUP {
+                exit_group_from_thread(f.rdi);
+            }
             // Does not return. The host's stack and callee-saved registers
             // were parked by `glados_enter_guest`, so this is a longjmp back
             // into whoever started the guest -- there is no unwinder here and
@@ -6232,6 +6314,21 @@ pub fn adopt_fault(f: Fault) {
     }
 }
 
+/// `exit_group` called by a thread rather than by the main thread: the whole
+/// process ends, as on Linux. The main thread is doomed with the code -- its
+/// end is what tears the session down and dooms every other thread -- and
+/// this thread then leaves the way any `exit` does.
+pub(super) fn exit_group_from_thread(code: u64) {
+    if let Some(m) = main_task() {
+        if m != me() {
+            doom(m, (code & 0xFF) | EXITED);
+            if let Some(s) = super::session::current() {
+                super::session::begin_exit(s);
+            }
+        }
+    }
+}
+
 /// The longjmp both reasons share.
 ///
 /// # Safety
@@ -6379,6 +6476,7 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64, bits32: bool) -> u64 {
     // shell's jobs. A child that does not notice inside the bound is still
     // doomed, and the timer ends it at its next tick at ring 3.
     super::session::begin_exit(sess);
+    super::thread::doom_session(sess, code | EXITED);
     super::fork::doom_all(sess, SIGNALED | 9);
     let give_up = crate::dev::lapic::ticks() + 200;
     while (super::thread::live_in(sess) > 0 || super::fork::live_in(sess) > 0)
@@ -6968,8 +7066,8 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let zeroed = got && unsafe { core::slice::from_raw_parts(at as *const u8, 8192) }.iter().all(|b| *b == 0);
         out.push(("an anonymous mapping is page-aligned and zeroed", got && zeroed));
         out.push((
-            "a partial unmap is refused rather than approximated",
-            sys_munmap(at, 4096) == EINVAL,
+            "a partial unmap is accepted and keeps the pages, since the heap cannot free part of one",
+            sys_munmap(at, 4096) == 0,
         ));
         out.push(("unmapping the whole thing gives it back", sys_munmap(at, 8192) == 0));
         out.push((

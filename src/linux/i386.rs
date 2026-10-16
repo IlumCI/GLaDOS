@@ -427,6 +427,9 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
     let (ret, served) = match nr {
         1 | 252 => {
             sc::record(Call { nr: nr | TAG, args: a, ret: 0, served: true, path: [0; PATH_SNIP], path_len: 0 });
+            if nr == 252 {
+                sc::exit_group_from_thread(b);
+            }
             unsafe { sc::glados_leave_guest(b | sc::EXITED) }
         }
         3 => (sc::sys_read(b, c, d), true),
@@ -544,6 +547,7 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
         192 => (sc::sys_mmap(b, c, d, si, sx(di), bp.wrapping_mul(4096)), true),
         195 | 196 => (sc::sys_statat(AT_FDCWD, b, c, 0), true),
         197 => (sc::sys_fstat(b, c), true),
+        218 => (sc::sys_mincore(b, c, d), true),
         219 => (0, true),
         220 => (sc::sys_getdents64(b, c, d), true),
         224 => (super::thread::current_tid(), true),
@@ -608,6 +612,8 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
         372 => (sc::sys_recvmsg(b, c, d), true),
         373 => (sc::sys_shutdown(b, c), true),
         356 => (sc::sys_memfd_create(b, c), true),
+        // fallocate(fd, mode, offset as two halves, len as two halves).
+        324 => (sc::sys_fallocate(b, c, (si << 32) | d, (bp << 32) | di), true),
         93 => (sc::sys_ftruncate(b, c), true),
         194 => (sc::sys_ftruncate(b, (d << 32) | c), true),
         414 => (sc::sys_ppoll(b, c, d, si, di), true),
