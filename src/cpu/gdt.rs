@@ -125,6 +125,46 @@ const DESC_USER_CODE64: u64 = 0x00AF_FB00_0000_FFFF;
 /// the guest's to corrupt.
 static RSP0_STACK: Racy<Stack> = Racy::new(Stack([0; STACK_SIZE]));
 
+/// The TSS each core actually loaded, and the ring-3 entry stack it started
+/// with, so `set_rsp0` can point a core's entry stack at a task's own.
+static LOADED: Racy<[*mut Tss; MAX_CPUS]> = Racy::new([core::ptr::null_mut(); MAX_CPUS]);
+static DEFAULT_RSP0: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+
+/// Where an interrupt taken at ring 3 on this core will land, or the core's
+/// own default for `0`.
+///
+/// **One entry stack per core was a stack shared by every ring-3 task on that
+/// core**, and the timer switches tasks while standing on it: a guest
+/// preempted at ring 3 is suspended *inside* its interrupt frame, and the
+/// next guest preempted at ring 3 pushes its frame onto the same bytes. With
+/// one guest at a time that never happened; two background programs spinning
+/// at ring 3 did it on the first `kill`, as an invalid-opcode fault at ring 0
+/// in a function that had nothing to do with it.
+///
+/// So `task` points it at the incoming task's syscall stack on every switch
+/// into a guest, and back at the default otherwise. A syscall stack is
+/// exactly the right thing to use: it is the task's own, and it is empty
+/// whenever the task is at ring 3, because nothing is mid-syscall then.
+///
+/// Called with interrupts off -- from inside `schedule`, or under the task
+/// table's lock -- so no interrupt can arrive between the store and the
+/// switch it belongs to.
+pub fn set_rsp0(top: u64) {
+    let cpu = crate::smp::this_cpu() as usize;
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    let tss = unsafe { LOADED.get()[cpu] };
+    if tss.is_null() {
+        return;
+    }
+    let v = if top == 0 { DEFAULT_RSP0[cpu].load(core::sync::atomic::Ordering::Relaxed) } else { top };
+    if v != 0 {
+        unsafe { (*tss).rsp[0] = v };
+    }
+}
+
 fn stack_top(s: &Stack) -> u64 {
     let base = s.0.as_ptr() as u64;
     // Stacks grow down, so hand out the far end, 16-byte aligned.
@@ -297,6 +337,8 @@ pub fn adopt(cpu: usize) -> bool {
         );
 
         asm!("ltr {0:x}", in(reg) TSS_SEL, options(nostack, preserves_flags));
+        LOADED.get()[cpu] = core::ptr::addr_of_mut!((*t).tss);
+        DEFAULT_RSP0[cpu].store((*t).tss.rsp[0], core::sync::atomic::Ordering::Relaxed);
     }
     true
 }
@@ -320,6 +362,8 @@ pub fn init() {
         gdt[7] = DESC_USER_CODE64;
 
         tss.rsp[0] = stack_top(RSP0_STACK.get());
+        LOADED.get()[0] = tss as *mut Tss;
+        DEFAULT_RSP0[0].store(tss.rsp[0], core::sync::atomic::Ordering::Relaxed);
 
         let ptr = DescriptorTablePointer {
             limit: (size_of::<[u64; 8]>() - 1) as u16,

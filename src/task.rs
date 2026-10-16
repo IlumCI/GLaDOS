@@ -1189,8 +1189,13 @@ pub fn ring3_active(on: bool, syscall_stack: u64) {
             r.syscall_stack = syscall_stack;
         }
         t[me].ring3 = Some(r);
+        // Now, not at the next switch: the guest is about to be entered
+        // without one, and its first timer tick at ring 3 must not land on
+        // the core's shared entry stack.
+        crate::cpu::gdt::set_rsp0(r.syscall_stack);
     } else {
         t[me].ring3 = None;
+        crate::cpu::gdt::set_rsp0(0);
     }
 }
 

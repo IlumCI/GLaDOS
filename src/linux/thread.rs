@@ -52,7 +52,7 @@
 
 use crate::sync::Racy;
 use alloc::alloc::{alloc, Layout};
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// How many guest threads may exist at once.
 ///
@@ -103,6 +103,11 @@ pub struct Work {
     /// notification. A thread library given a kernel that ignores this waits
     /// forever on a thread that finished.
     pub ctid: u64,
+    /// The guest entry the thread's process lives in, and its session. A
+    /// thread shares its process's memory, so it must speak for the same
+    /// entry and walk the same tables; `run_thread` installs both.
+    pub guest: usize,
+    pub session: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -141,18 +146,28 @@ pub fn live() -> usize {
 /// checks on the way into every syscall, which bounds how long a thread
 /// outlives `exit_group` by however long it takes to make one -- and the run
 /// deadline is the backstop for a thread that makes none.
-static EXITING: AtomicU64 = AtomicU64::new(0);
-
+///
+/// **Per session now.** One flag for the machine meant one session's
+/// `exit_group` stopped every other session's threads at their next syscall.
 pub fn exiting() -> bool {
-    EXITING.load(Ordering::Acquire) != 0
+    super::session::current().is_some_and(super::session::exiting)
 }
 
 pub fn begin_exit() {
-    EXITING.store(1, Ordering::Release);
+    if let Some(s) = super::session::current() {
+        super::session::begin_exit(s);
+    }
+}
+
+/// How many threads of session `s` are running, its main thread excluded.
+pub fn live_in(s: usize) -> usize {
+    unsafe { &*SLOTS.get() }
+        .iter()
+        .filter(|x| x.live && x.work.is_some_and(|w| w.session == s))
+        .count()
 }
 
 pub fn reset() {
-    EXITING.store(0, Ordering::Release);
     LIVE.store(0, Ordering::Release);
     let s = unsafe { &mut *SLOTS.get() };
     for slot in s.iter_mut() {
@@ -191,6 +206,8 @@ pub fn spawn(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64, rip: u64) -
         fs: if flags & CLONE_SETTLS != 0 { tls } else { 0 },
         tid,
         ctid: if flags & CLONE_CHILD_CLEARTID != 0 { ctid } else { 0 },
+        guest: super::syscall::current_guest(),
+        session: super::session::current().unwrap_or(usize::MAX),
     };
 
     let idx = {

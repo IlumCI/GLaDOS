@@ -40,6 +40,7 @@ pub mod poll;
 pub mod epoll;
 pub mod proc;
 pub mod program;
+pub mod session;
 pub mod syscall;
 
 /// What `diag linux` asks of everything here.
@@ -57,6 +58,7 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     out.extend(program::checks());
     out.extend(syscall::checks());
     out.extend(load::checks());
+    out.extend(session::checks());
     out
 }
 
@@ -68,17 +70,12 @@ pub static RUNTIME: crate::job::Runtime = crate::job::Runtime {
 
 /// Why a new Linux session cannot start now, or `None` when it can.
 ///
-/// **One session at a time, still.** Moving the session off the shell's task
-/// is this step; letting two run at once is the next, and it is a different
-/// size of change: `MAIN_TASK`, the session deadline, the syscall trace, the
-/// thread pool's `begin_exit` and `fork::doom_all` are all one per machine,
-/// and the last two would end the *other* session's processes when either
-/// finished. Refusing is honest until those are per session.
+/// Several may run at once -- each is its own pid namespace with its own
+/// deadline, trace and processes (see `session`) -- up to `session::MAX`,
+/// which is about the fork and thread pools they share rather than memory.
 pub fn busy() -> Option<&'static str> {
-    if syscall::main_task().is_some() {
-        Some("a Linux session is already running -- one at a time for now ('jobs' lists them)")
-    } else if crate::job::live(&RUNTIME) {
-        Some("a Linux job is running in the background -- one session at a time for now ('jobs', 'kill <n>')")
+    if session::live_count() >= session::MAX {
+        Some("every Linux session is in use -- 'jobs' lists them, 'kill <n>' ends one")
     } else {
         None
     }

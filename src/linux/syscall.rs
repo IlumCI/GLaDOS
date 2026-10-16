@@ -564,8 +564,12 @@ pub fn ring3_load(r: Option<crate::task::Ring3>) {
             core::ptr::write(core::ptr::addr_of_mut!(GLADOS_SYSCALL_STACK), r.syscall_stack);
             core::ptr::write(core::ptr::addr_of_mut!(GLADOS_HOST_RSP), r.host_rsp);
             crate::cpu::wrmsr(IA32_FS_BASE, r.fs_base);
+            // This task's own landing for an interrupt taken at ring 3. See
+            // `gdt::set_rsp0` for what sharing one cost.
+            crate::cpu::gdt::set_rsp0(r.syscall_stack);
         },
         None => {
+            crate::cpu::gdt::set_rsp0(0);
             if let Some(sp) = unsafe { guest_slot().as_ref() } {
                 unsafe { crate::cpu::wrmsr(IA32_FS_BASE, sp.saved_fs) };
             }
@@ -964,7 +968,7 @@ pub fn guest_rsp() -> u64 {
 /// Whether the run deadline has passed, for a loop that would otherwise wait
 /// forever on a child that is never coming back.
 pub unsafe fn kill_if_overdue() -> bool {
-    let d = DEADLINE.load(Ordering::Relaxed);
+    let d = super::session::current().map(super::session::deadline_of).unwrap_or(0);
     doomed() != 0 || (d != 0 && crate::dev::lapic::ticks() >= d)
 }
 
@@ -1067,10 +1071,20 @@ pub fn set_current_guest(i: usize) {
 }
 
 /// The lowest slot holding no guest, growing the table if every one is taken.
+///
+/// **Never slot 0.** Every task's guest index starts at 0, so slot 0 is what a
+/// task that is in no session speaks for -- and with one session it was also
+/// where that session's guest lived, which made "the shell's task" and "the
+/// guest" the same index. With several sessions that would let the shell's
+/// task, or any pool task between tenants, resolve `guest_slot()` to whichever
+/// session happened to land in slot 0. Kept empty, it answers `None` to them.
 pub fn free_guest_slot() -> usize {
     let t = unsafe { TABLE.get() };
-    if let Some(i) = t.iter().position(|g| g.is_none()) {
-        return i;
+    while t.is_empty() {
+        t.push(None);
+    }
+    if let Some(i) = t.iter().skip(1).position(|g| g.is_none()) {
+        return i + 1;
     }
     t.push(None);
     t.len() - 1
@@ -1173,7 +1187,10 @@ const PAGE: u64 = 4096;
 /// read it would be reading a dangling range it believed it had verified.
 pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
     let brk = r.brk;
-    teardown();
+    // A slot of its own rather than tearing down whatever the task last held:
+    // with several sessions, "whatever this task last held" may be nothing it
+    // owns. See `free_guest_slot` for why it is never slot 0.
+    set_current_guest(free_guest_slot());
     // A display server is listening before the guest's first instruction, so
     // a client that connects first thing finds one. See `sky::server`.
     crate::sky::server::serve();
@@ -1217,18 +1234,22 @@ pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
 /// `exit_group` is how programs end -- so the teardown is where mappings are
 /// actually reclaimed and `munmap` is only the early return of one.
 pub fn teardown() -> usize {
-    // Every display connection ends with the guest that held it, and its
-    // windows with it: nothing else would take them down.
-    crate::sky::server::reap();
-    // **Before anything else, and unconditionally.** A guest that took the
-    // display and then faulted is exactly the case this has to cover, and a
-    // release conditional on a tidy exit would leave the desktop stood down
-    // with the last frame of a dead program on it and no way back short of a
-    // reboot.
-    super::dev::hold_screen(false);
-    super::input::stop();
-    super::thread::reset();
-    super::fork::reset();
+    // **Before anything else, and unconditionally for this session.** A guest
+    // that took the display and then faulted is exactly the case this has to
+    // cover, and a release conditional on a tidy exit would leave the desktop
+    // stood down with the last frame of a dead program on it and no way back
+    // short of a reboot. Only *this* session's hold, though: another session
+    // holding the screen is still drawing on it.
+    let sess = super::session::current();
+    super::dev::release_screen(sess);
+    // The scripted input feed is one per machine and is a test harness's, so
+    // it stands down only when the last session does.
+    if super::session::live_count() <= 1 {
+        super::input::stop();
+    }
+    if let Some(s) = sess {
+        super::fork::reset(s);
+    }
     let mut freed = 0;
     unsafe {
         if let Some(sp) = guest_slot().as_mut() {
@@ -1293,6 +1314,11 @@ pub fn teardown() -> usize {
         }
         *guest_slot() = None;
     }
+    // The display connections this guest held closed with its descriptors
+    // above; end those and no others. `reap` ended every client on the
+    // machine, which with several sessions is everybody else's windows too.
+    crate::sky::server::reap_closed();
+    set_current_guest(0);
     freed
 }
 
@@ -1395,7 +1421,13 @@ fn path_arg(nr: u64) -> Option<usize> {
     })
 }
 
-static TRACE: Racy<Vec<Call>> = Racy::new(Vec::new());
+/// The last finished session's calls, per task that ran one, so the shell and
+/// a background job each read the trace of the session *they* ran rather than
+/// whichever finished last. Recording goes to the session itself
+/// (`session::record`), so a forked child's and a thread's calls land in their
+/// session's trace whichever task made them.
+static TASK_TRACE: Racy<[Vec<Call>; crate::task::MAX_TASKS]> =
+    Racy::new([const { Vec::new() }; crate::task::MAX_TASKS]);
 /// Bounded, because a guest in a loop on an unimplemented call would otherwise
 /// grow this until the heap gave out -- and the first thousand entries are the
 /// measurement anyway. What matters is which calls appear, not how often.
@@ -1440,11 +1472,11 @@ pub fn armed() -> bool {
 
 /// Everything the guest has asked for.
 pub fn trace() -> Vec<Call> {
-    unsafe { TRACE.get().clone() }
+    unsafe { (*TASK_TRACE.get())[me()].clone() }
 }
 
 pub fn clear_trace() {
-    unsafe { TRACE.get().clear() }
+    unsafe { (*TASK_TRACE.get())[me()].clear() }
 }
 
 fn record(mut c: Call) {
@@ -1460,10 +1492,7 @@ fn record(mut c: Call) {
             c.path_len = n as u8;
         }
     }
-    let t = unsafe { TRACE.get() };
-    if t.len() < TRACE_CAP {
-        t.push(c);
-    }
+    super::session::record(c, TRACE_CAP);
 }
 
 /// The guest wrote something. Only the two standard descriptors, and every
@@ -3440,17 +3469,24 @@ fn sys_clone(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64, rip: u64) -
 
 /// How many addresses a futex wait queue can name at once.
 const FUTEX_SLOTS: usize = 32;
-/// (address, how many times it has been woken).
-static FUTEX: Racy<[(u64, u64); FUTEX_SLOTS]> = Racy::new([(0, 0); FUTEX_SLOTS]);
+/// (address space, address, how many times it has been woken).
+///
+/// **The address space is part of the key.** Every guest with a root of its
+/// own maps its image, stack and arena at the same virtual addresses, so two
+/// sessions -- or a parent and its forked child -- waiting on "the same"
+/// address are waiting on different words. Keyed by address alone, a wake in
+/// one woke the other: harmless only because every waiter re-reads its word.
+static FUTEX: Racy<[(u64, u64, u64); FUTEX_SLOTS]> = Racy::new([(0, 0, 0); FUTEX_SLOTS]);
 
 fn futex_bump(addr: u64) -> u64 {
     let t = unsafe { &mut *FUTEX.get() };
-    if let Some(e) = t.iter_mut().find(|e| e.0 == addr) {
-        e.1 += 1;
-        return e.1;
+    let root = guest_root();
+    if let Some(e) = t.iter_mut().find(|e| e.1 == addr && e.0 == root) {
+        e.2 += 1;
+        return e.2;
     }
-    if let Some(e) = t.iter_mut().find(|e| e.0 == 0) {
-        *e = (addr, 1);
+    if let Some(e) = t.iter_mut().find(|e| e.1 == 0) {
+        *e = (root, addr, 1);
         return 1;
     }
     // Out of slots. Every waiter re-reads the word it is waiting on as well,
@@ -3461,7 +3497,8 @@ fn futex_bump(addr: u64) -> u64 {
 
 fn futex_count(addr: u64) -> u64 {
     let t = unsafe { &*FUTEX.get() };
-    t.iter().find(|e| e.0 == addr).map(|e| e.1).unwrap_or(0)
+    let root = guest_root();
+    t.iter().find(|e| e.1 == addr && e.0 == root).map(|e| e.2).unwrap_or(0)
 }
 
 /// Wait on a word, or wake whoever is waiting on one.
@@ -3569,6 +3606,17 @@ pub fn run_thread(w: super::thread::Work, stack: u64) {
     unsafe {
         core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags))
     };
+    // **The thread speaks for its process's guest and walks its tables.** A
+    // pool task's guest index was whatever it last held, and its root the
+    // kernel's: right while the main guest always sat in slot 0 on the
+    // kernel's root, and wrong for any guest with a space of its own, whose
+    // memory a thread on the kernel's root cannot even see. Set here, the way
+    // a forked child's `body` sets them, and put back below.
+    let me_t = crate::task::current();
+    let prev = current_guest();
+    set_current_guest(w.guest);
+    super::session::enter(w.session);
+    crate::task::set_root(me_t, guest_root());
     crate::task::ring3_active(true, stack);
     unsafe {
         core::ptr::write(core::ptr::addr_of_mut!(GLADOS_SYSCALL_STACK), stack);
@@ -3589,7 +3637,7 @@ pub fn run_thread(w: super::thread::Work, stack: u64) {
         if let Some(m) = main_task() {
             doom(m, code);
         }
-        super::thread::begin_exit();
+        super::session::begin_exit(w.session);
     }
     // **Clearing this is the whole of how `pthread_join` works.** The joiner
     // futex-waits on the word, and the kernel zeroing it is the notification;
@@ -3600,6 +3648,9 @@ pub fn run_thread(w: super::thread::Work, stack: u64) {
         futex_bump(w.ctid);
     }
     crate::task::ring3_active(false, 0);
+    crate::task::set_root(me_t, 0);
+    super::session::leave();
+    set_current_guest(prev);
     if flags & (1 << 9) != 0 {
         crate::cpu::enable_interrupts();
     }
@@ -5443,7 +5494,6 @@ pub fn limit() -> u64 {
     LIMIT.load(Ordering::Acquire)
 }
 
-static DEADLINE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Whether the running guest has outstayed its welcome.
 ///
@@ -5459,8 +5509,11 @@ pub fn overran(now: u64) -> bool {
     if doomed() != 0 {
         return true;
     }
-    let d = DEADLINE.load(Ordering::Relaxed);
-    d != 0 && now >= d && GUEST_RUNNING.load(Ordering::Relaxed)
+    // The running task's own session's deadline. One per machine, this was
+    // the deadline of whichever session started last, so a second session
+    // starting reset the first one's clock.
+    let d = super::session::current().map(super::session::deadline_of).unwrap_or(0);
+    d != 0 && now >= d
 }
 
 /// What a task ending at a deadline or a doom check ends with.
@@ -5515,7 +5568,11 @@ pub struct Fault {
     pub cr2: u64,
 }
 
-static LAST_FAULT: Racy<Option<Fault>> = Racy::new(None);
+/// Per task: the fault the session that task ran ended with. Written by the
+/// main thread's own kill, or adopted from a thread whose crash ended the
+/// process, and read by whoever ran the session -- on the same task.
+static LAST_FAULT: Racy<[Option<Fault>; crate::task::MAX_TASKS]> =
+    Racy::new([None; crate::task::MAX_TASKS]);
 
 /// The same three addresses said in words, resolved while the space was still
 /// installed.
@@ -5525,7 +5582,8 @@ static LAST_FAULT: Racy<Option<Fault>> = Racy::new(None);
 /// three times about a guest that had just died. The strings are made in
 /// `run`, one line earlier, which is the only moment both the fault and the
 /// map it should be read against exist together.
-static FAULT_AT: Racy<Option<(String, String, String)>> = Racy::new(None);
+static FAULT_AT: Racy<[Option<(String, String, String)>; crate::task::MAX_TASKS]> =
+    Racy::new([const { None }; crate::task::MAX_TASKS]);
 
 /// The words around the guest's stack pointer when it died, each said in
 /// words as well as in hex.
@@ -5536,10 +5594,11 @@ static FAULT_AT: Racy<Option<(String, String, String)>> = Racy::new(None);
 /// is freed by the teardown two lines after the guest returns. Sixteen words
 /// either side is enough to hold a small frame and the return address above
 /// it, and small enough that the report stays readable.
-static FAULT_STACK: Racy<Option<Vec<(u64, u64, String)>>> = Racy::new(None);
+static FAULT_STACK: Racy<[Option<Vec<(u64, u64, String)>>; crate::task::MAX_TASKS]> =
+    Racy::new([const { None }; crate::task::MAX_TASKS]);
 
 pub fn fault_stack() -> Option<Vec<(u64, u64, String)>> {
-    unsafe { (*FAULT_STACK.get()).clone() }
+    unsafe { (*FAULT_STACK.get())[me()].clone() }
 }
 
 /// Each general-purpose register, named, with what it points at.
@@ -5549,19 +5608,20 @@ pub fn fault_stack() -> Option<Vec<(u64, u64, String)>> {
 /// resolved at print time and answered "no guest" fifteen times about a guest
 /// that had just died, which is the identical mistake made twice, once for
 /// three addresses and once for fifteen.
-static FAULT_REGS: Racy<Option<Vec<(&'static str, u64, String)>>> = Racy::new(None);
+static FAULT_REGS: Racy<[Option<Vec<(&'static str, u64, String)>>; crate::task::MAX_TASKS]> =
+    Racy::new([const { None }; crate::task::MAX_TASKS]);
 
 pub fn fault_regs() -> Option<Vec<(&'static str, u64, String)>> {
-    unsafe { (*FAULT_REGS.get()).clone() }
+    unsafe { (*FAULT_REGS.get())[me()].clone() }
 }
 
 pub fn last_fault() -> Option<Fault> {
-    unsafe { *LAST_FAULT.get() }
+    unsafe { (*LAST_FAULT.get())[me()] }
 }
 
 /// Where the rip, the faulting address and the stack pointer were, in words.
 pub fn fault_where() -> Option<(String, String, String)> {
-    unsafe { (*FAULT_AT.get()).clone() }
+    unsafe { (*FAULT_AT.get())[me()].clone() }
 }
 
 /// Which of the guest's own ranges an address falls in.
@@ -5594,15 +5654,6 @@ pub fn locate(at: u64) -> alloc::string::String {
         .unwrap_or_else(|| alloc::string::String::from("nothing this guest owns"))
 }
 
-/// Whether a guest is on the stack right now.
-///
-/// A plain atomic that Rust both writes and reads, rather than a look at the
-/// stack pointer `glados_enter_guest` parked. That indirection is deliberate:
-/// the fault handler asks this question from inside an interrupt gate on an
-/// IST stack, having just come from ring 3, and it must not depend on reading
-/// a `static mut` whose only writer is assembly. The first version did, and it
-/// took a #GP inside the read on exactly that path.
-static GUEST_RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// **Per task, and one flag for the machine was the bug that halted it.**
 /// `GUEST_RUNNING` answered "is a guest running" for everybody, and the kill
@@ -5638,13 +5689,11 @@ static DOOM: [core::sync::atomic::AtomicU64; crate::task::MAX_TASKS] =
 static TASK_FAULT: Racy<[Option<Fault>; crate::task::MAX_TASKS]> =
     Racy::new([None; crate::task::MAX_TASKS]);
 
-/// The task running the session's first guest, the one `linux run` started.
-static MAIN_TASK: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(usize::MAX);
-
+/// The task running the first guest of the running task's session -- the one
+/// `linux run` or a job started. `None` outside a session, which is what the
+/// shell's own task always is.
 pub fn main_task() -> Option<usize> {
-    let t = MAIN_TASK.load(Ordering::Relaxed);
-    (t != usize::MAX).then_some(t)
+    super::session::main_task_of(super::session::current()?)
 }
 
 fn me() -> usize {
@@ -5772,14 +5821,16 @@ pub unsafe fn kill(f: Fault) -> ! {
     let t = me();
     unsafe { (*TASK_FAULT.get())[t] = Some(f) };
     if main_task() == Some(t) {
-        unsafe { *LAST_FAULT.get() = Some(f) };
+        unsafe { (*LAST_FAULT.get())[t] = Some(f) };
     }
     unsafe { kill_with(FAULTED | vector) }
 }
 
 /// Record a fault as the session's, for a thread whose crash ends the process.
 pub fn adopt_fault(f: Fault) {
-    unsafe { *LAST_FAULT.get() = Some(f) };
+    if let Some(m) = main_task() {
+        unsafe { (*LAST_FAULT.get())[m.min(crate::task::MAX_TASKS - 1)] = Some(f) };
+    }
 }
 
 /// The longjmp both reasons share.
@@ -5830,7 +5881,31 @@ unsafe fn kill_with(code: u64) -> ! {
 /// about stage 0 containing bugs rather than malice applies here and nowhere
 /// more directly.
 pub unsafe fn run(entry: u64, stack_top: u64, want: u64) -> u64 {
+    // A session of its own, which is what lets two of these run at once: its
+    // deadline, its main task, its trace and its processes are its own, and
+    // the end of this one sweeps only them. Callers ask `linux::busy` first,
+    // so running out here is a race between two starts, answered plainly.
+    let Some(sess) = super::session::claim() else {
+        crate::kprintln!("  every Linux session is in use ({} at once)", super::session::MAX);
+        return 0;
+    };
+    // **And a syscall stack of its own.** The main thread's syscalls ran on
+    // one static 16 KiB stack, which is correct for exactly one session: a
+    // second main thread blocked in a syscall beside the first would be
+    // pushing onto the frame the first is suspended in.
+    let sys_layout = core::alloc::Layout::from_size_align(16 * 1024, 16).unwrap();
+    let sys_stack = unsafe { alloc::alloc::alloc(sys_layout) };
+    if sys_stack.is_null() {
+        super::session::release(sess);
+        return 0;
+    }
     arm();
+    unsafe {
+        core::ptr::write(
+            core::ptr::addr_of_mut!(GLADOS_SYSCALL_STACK),
+            sys_stack as u64 + 16 * 1024,
+        )
+    };
     // The guest is about to be allowed to write `FS`, and `FS` is a register
     // of this machine that the kernel goes on using afterwards. Parked here
     // rather than inside `arch_prctl`, so a guest that sets it forty times
@@ -5850,19 +5925,19 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64) -> u64 {
         core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags))
     };
     unsafe {
-        *LAST_FAULT.get() = None;
-        *FAULT_AT.get() = None;
-        *FAULT_REGS.get() = None;
+        (*LAST_FAULT.get())[me()] = None;
+        (*FAULT_AT.get())[me()] = None;
+        (*FAULT_REGS.get())[me()] = None;
+        (*FAULT_STACK.get())[me()] = None;
     }
-    GUEST_RUNNING.store(true, Ordering::Relaxed);
     // Zero means no deadline, and `overran` already reads a zero `DEADLINE`
     // as "nothing to enforce", so the two agree without a second condition.
     // The caller chooses: a foreground run passes `limit()`, a background job
     // passes zero, because a job runs on its own task and a runaway there
     // costs a share of a core rather than the shell.
-    DEADLINE.store(
+    super::session::set_deadline(
+        sess,
         if want == 0 { 0 } else { crate::dev::lapic::ticks() + want },
-        Ordering::Relaxed,
     );
     // Scheduled input is measured from here, which is the only moment that
     // means anything to it: a script armed at the prompt has no idea how long
@@ -5878,7 +5953,8 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64) -> u64 {
     crate::task::ring3_active(true, unsafe {
         core::ptr::read(core::ptr::addr_of!(GLADOS_SYSCALL_STACK))
     });
-    MAIN_TASK.store(me(), Ordering::Relaxed);
+    super::session::set_main(sess, me(), current_guest());
+    super::session::enter(sess);
     let code = as_guest(|| unsafe { glados_enter_guest(entry, stack_top) });
     crate::task::ring3_active(false, 0);
     // **Every thread has to be gone before the space is.** A child still
@@ -5895,17 +5971,15 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64) -> u64 {
     // had already cleared the flag. `SIGKILL`, as a terminal hangup ends a
     // shell's jobs. A child that does not notice inside the bound is still
     // doomed, and the timer ends it at its next tick at ring 3.
-    super::thread::begin_exit();
-    super::fork::doom_all(SIGNALED | 9);
+    super::session::begin_exit(sess);
+    super::fork::doom_all(sess, SIGNALED | 9);
     let give_up = crate::dev::lapic::ticks() + 200;
-    while (super::thread::live() > 0 || super::fork::live() > 0)
+    while (super::thread::live_in(sess) > 0 || super::fork::live_in(sess) > 0)
         && crate::dev::lapic::ticks() < give_up
     {
         crate::task::yield_now();
     }
-    MAIN_TASK.store(usize::MAX, Ordering::Relaxed);
-    DEADLINE.store(0, Ordering::Relaxed);
-    GUEST_RUNNING.store(false, Ordering::Relaxed);
+    super::session::set_deadline(sess, 0);
     if flags & (1 << 9) != 0 {
         crate::cpu::enable_interrupts();
     }
@@ -5913,9 +5987,9 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64) -> u64 {
     // reads. This is the only point where the fault and the map it has to be
     // read against are both alive.
     unsafe {
-        *FAULT_AT.get() =
+        (*FAULT_AT.get())[me()] =
             last_fault().map(|f| (locate(f.regs.rip), locate(f.cr2), locate(f.regs.rsp)));
-        *FAULT_REGS.get() = last_fault().map(|f| {
+        (*FAULT_REGS.get())[me()] = last_fault().map(|f| {
             let g = f.regs;
             [
                 ("rax", g.rax), ("rbx", g.rbx), ("rcx", g.rcx),
@@ -5928,7 +6002,7 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64) -> u64 {
             .map(|(n, v)| (n, v, locate(v)))
             .collect()
         });
-        *FAULT_STACK.get() = last_fault().and_then(|f| {
+        (*FAULT_STACK.get())[me()] = last_fault().and_then(|f| {
             let base = f.regs.rsp & !7;
             let mut out = Vec::new();
             for i in 0..24u64 {
@@ -5946,6 +6020,12 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64) -> u64 {
         });
     }
     teardown();
+    // The session's trace becomes this task's, for whoever ran it to read.
+    unsafe { (*TASK_TRACE.get())[me()] = super::session::take_trace(sess) };
+    super::session::leave();
+    super::session::release(sess);
+    // After `leave`: nothing can enter a syscall on this stack any more.
+    unsafe { alloc::alloc::dealloc(sys_stack, sys_layout) };
     code
 }
 

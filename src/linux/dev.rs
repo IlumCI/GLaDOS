@@ -367,6 +367,12 @@ pub fn hold_screen(on: bool) {
     if HOLDING.swap(on, Ordering::AcqRel) == on {
         return;
     }
+    // Which session took it, so a *different* session ending does not hand
+    // the screen back from under the one still drawing on it.
+    HOLDER.store(
+        if on { super::session::current().unwrap_or(usize::MAX) } else { usize::MAX },
+        Ordering::Release,
+    );
     if on {
         *GUEST_LEASE.lock_irq() = crate::gfx::lease::take(crate::gfx::lease::Owner::Guest);
         // Blanked on the way in, for the reason `port::with_screen` gives: a
@@ -381,6 +387,19 @@ pub fn hold_screen(on: bool) {
         // order -- the order this function used to have to get right itself.
         let lease = GUEST_LEASE.lock_irq().take();
         drop(lease);
+    }
+}
+
+static HOLDER: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// Give the screen back if session `sess` holds it. `None` -- a teardown with
+/// no session, as the selftests do -- releases it unconditionally, which is
+/// what every teardown did before there was more than one session.
+pub fn release_screen(sess: Option<usize>) {
+    use core::sync::atomic::Ordering;
+    let holder = HOLDER.load(Ordering::Acquire);
+    if sess.is_none() || holder == usize::MAX || Some(holder) == sess {
+        hold_screen(false);
     }
 }
 

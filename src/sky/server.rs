@@ -212,6 +212,21 @@ fn end(s: Session) {
 
 /// Every connection, ended. When the guest goes, its end of each socket goes
 /// with it and nothing would otherwise take the windows down.
+/// End only the connections whose client end has closed -- what a guest's
+/// teardown leaves behind once its descriptors are gone. `reap` ends every
+/// client, which with several sessions running is everybody's windows.
+pub fn reap_closed() {
+    let sessions = unsafe { SESSIONS.get() };
+    let mut i = 0;
+    while i < sessions.len() {
+        if unix::peer_open(&sessions[i].pipe, sessions[i].side) {
+            i += 1;
+        } else {
+            end(sessions.remove(i));
+        }
+    }
+}
+
 pub fn reap() {
     let sessions = unsafe { SESSIONS.get() };
     for s in sessions.drain(..) {
