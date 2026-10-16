@@ -25,7 +25,7 @@ const sybils = new Map(honest);
 for (let i = 0; i < 100; i++) sybils.set("0xs" + i, 10n);
 ok(medianFloor(sybils, 0.25) === 200n, "a hundred sybil addresses doing slivers cannot move it");
 
-// A whole epoch: the delta since the last one, the gate, the floor.
+// A whole epoch: the delta since the last one, the floor, and who is paid.
 const rich = 100_000n * G;
 const now = new Map([[A, 1500n], [B, 900n], [C, 50n]]);
 const prev = new Map([[A, 500n]]);
@@ -34,9 +34,12 @@ ok(e.work[A] === "1000", "an address is credited only the work since the last ep
 ok(e.recipients.join() === [A, B].sort().join(), "the two real miners are paid alike");
 ok(/floor/.test(e.excluded[C]), "and one doing a sliver of typical is not a share");
 
-const poor = build({ now, prev, balances: new Map([[A, rich], [B, 49_999n * G]]), gateMin: 50_000n * G, minFrac: 0 });
-ok(!poor.recipients.includes(B) && /holds 49999 of 50000/.test(poor.excluded[B]), "an address under the gate is not paid, and says why");
-ok(/unreadable/.test(poor.excluded[C]), "an address whose balance could not be read is refused, not waved through");
+// The holding minimum no longer bars a payout -- it gates the reward type,
+// which runner decides from the same balance. A wallet under it is still a
+// recipient here (paid in $GLaDOS); only an unreadable balance carries.
+const poor = build({ now, prev, balances: new Map([[A, rich], [B, 49_999n * G]]), minFrac: 0 });
+ok(poor.recipients.includes(A) && poor.recipients.includes(B) && poor.excluded[B] === undefined, "an address under the holding minimum is still paid, not excluded");
+ok(/unreadable/.test(poor.excluded[C]), "an address whose balance could not be read carries, not waved through");
 
 const again = build({ now, prev: now, balances: new Map([[A, rich], [B, rich], [C, rich]]), gateMin: 50_000n * G });
 ok(again.recipients.length === 0, "an epoch right after the last pays nobody twice");
