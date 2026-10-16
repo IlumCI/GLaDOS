@@ -38,6 +38,9 @@ const CLASS64: u8 = 2;
 const LSB: u8 = 1;
 /// `EM_X86_64`.
 const X86_64: u16 = 0x3E;
+/// `ELFCLASS32` and `EM_386`: a 32-bit x86 program, run in compatibility mode.
+const CLASS32: u8 = 1;
+const I386: u16 = 3;
 
 /// An executable with fixed addresses.
 pub const ET_EXEC: u16 = 2;
@@ -94,6 +97,11 @@ pub struct Image {
     pub phoff: usize,
     pub phentsize: usize,
     pub phnum: usize,
+    /// A 32-bit (i386) program rather than an x86-64 one. Everything a loader
+    /// does differs from here: where it may live (below 4 GiB), how it is
+    /// entered (a 32-bit code segment), how it asks for things (`int 0x80`)
+    /// and the width of every pointer on its stack.
+    pub bits32: bool,
 }
 
 impl Image {
@@ -145,8 +153,14 @@ pub fn parse(bytes: &[u8]) -> Result<Image, &'static str> {
     if bytes[0..4] != MAGIC {
         return Err("not an ELF");
     }
+    if bytes[4] == CLASS32 {
+        if bytes[5] != LSB {
+            return Err("not little-endian");
+        }
+        return parse32(bytes);
+    }
     if bytes[4] != CLASS64 {
-        return Err("not 64-bit");
+        return Err("neither 32- nor 64-bit");
     }
     if bytes[5] != LSB {
         return Err("not little-endian");
@@ -223,7 +237,77 @@ pub fn parse(bytes: &[u8]) -> Result<Image, &'static str> {
         }
         segments.push(Segment { offset, vaddr, filesz, memsz, flags, align });
     }
-    Ok(Image { entry, kind, segments, interp, phoff, phentsize, phnum })
+    Ok(Image { entry, kind, segments, interp, phoff, phentsize, phnum, bits32: false })
+}
+
+/// The ELF32 form: the same fields at the narrower offsets the 32-bit header
+/// and program header put them, read under the same checks.
+///
+/// A second function rather than a width parameter threaded through the first,
+/// because the program header's *field order* differs too -- `p_flags` is at
+/// 4 in ELF64 and at 24 in ELF32 -- and a parser parameterised over widths
+/// alone would read the flags out of `p_offset`.
+fn parse32(bytes: &[u8]) -> Result<Image, &'static str> {
+    if bytes.len() < 52 {
+        return Err("shorter than an ELF32 header");
+    }
+    let kind = u16_at(bytes, 16).ok_or("truncated e_type")?;
+    if u16_at(bytes, 18) != Some(I386) {
+        return Err("a 32-bit ELF, but not for i386");
+    }
+    if kind != ET_EXEC && kind != ET_DYN {
+        return Err("neither an executable nor a shared object");
+    }
+    let entry = u32_at(bytes, 24).ok_or("truncated e_entry")? as u64;
+    let phoff = u32_at(bytes, 28).ok_or("truncated e_phoff")? as usize;
+    let phentsize = u16_at(bytes, 42).ok_or("truncated e_phentsize")? as usize;
+    let phnum = u16_at(bytes, 44).ok_or("truncated e_phnum")? as usize;
+    if phentsize < 32 {
+        return Err("program header entries are too small to hold one");
+    }
+    let end = phnum
+        .checked_mul(phentsize)
+        .and_then(|n| n.checked_add(phoff))
+        .ok_or("program header table overflows")?;
+    if end > bytes.len() {
+        return Err("program headers past the end of the file");
+    }
+    let mut segments = Vec::new();
+    let mut interp = None;
+    for i in 0..phnum {
+        let at = phoff + i * phentsize;
+        let ty = u32_at(bytes, at).ok_or("truncated p_type")?;
+        let offset = u32_at(bytes, at + 4).ok_or("truncated p_offset")? as usize;
+        let vaddr = u32_at(bytes, at + 8).ok_or("truncated p_vaddr")? as u64;
+        let filesz = u32_at(bytes, at + 16).ok_or("truncated p_filesz")? as usize;
+        let memsz = u32_at(bytes, at + 20).ok_or("truncated p_memsz")? as usize;
+        let flags = u32_at(bytes, at + 24).ok_or("truncated p_flags")?;
+        let align = u32_at(bytes, at + 28).ok_or("truncated p_align")? as u64;
+        if ty == PT_INTERP {
+            let to = offset.checked_add(filesz).ok_or("interpreter path overflows")?;
+            let raw = bytes.get(offset..to).ok_or("interpreter path past the end of the file")?;
+            let cut = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+            interp = core::str::from_utf8(&raw[..cut]).ok().map(String::from);
+            continue;
+        }
+        if ty != PT_LOAD {
+            continue;
+        }
+        let to = offset.checked_add(filesz).ok_or("segment overflows the file")?;
+        if to > bytes.len() {
+            return Err("segment past the end of the file");
+        }
+        if memsz < filesz {
+            return Err("a segment smaller in memory than on disk");
+        }
+        // A 32-bit address space ends at 4 GiB, and a segment past it is one
+        // the program cannot even name.
+        if vaddr + memsz as u64 > (1u64 << 32) {
+            return Err("a segment runs past the end of a 32-bit address space");
+        }
+        segments.push(Segment { offset, vaddr, filesz, memsz, flags, align });
+    }
+    Ok(Image { entry, kind, segments, interp, phoff, phentsize, phnum, bits32: true })
 }
 
 /// What `diag linux` asks of the parser.

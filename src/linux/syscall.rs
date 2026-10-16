@@ -164,43 +164,43 @@ pub const SYS_EXIT_GROUP: u64 = 231;
 
 /// `-ENOSYS`, as Linux returns it: errors come back as small negatives in
 /// `rax` rather than through any side channel.
-const ENOSYS: u64 = (-38i64) as u64;
-const EBADF: u64 = (-9i64) as u64;
-const EPERM: u64 = (-1i64) as u64;
-const ENOMEM: u64 = (-12i64) as u64;
-const EINVAL: u64 = (-22i64) as u64;
-const EFAULT: u64 = (-14i64) as u64;
-const ENOENT: u64 = (-2i64) as u64;
-const EACCES: u64 = (-13i64) as u64;
-const EMFILE: u64 = (-24i64) as u64;
-const ENOTDIR: u64 = (-20i64) as u64;
-const EISDIR: u64 = (-21i64) as u64;
-const ENOTTY: u64 = (-25i64) as u64;
-const ESPIPE: u64 = (-29i64) as u64;
-const ENOTCONN: u64 = (-107i64) as u64;
-const EAGAIN: u64 = (-11i64) as u64;
-const EINTR: u64 = (-4i64) as u64;
-const ENAMETOOLONG: u64 = (-36i64) as u64;
-const EROFS: u64 = (-30i64) as u64;
-const EEXIST: u64 = (-17i64) as u64;
-const ERANGE: u64 = (-34i64) as u64;
-const ENOTEMPTY: u64 = (-39i64) as u64;
-const ENODEV: u64 = (-19i64) as u64;
-const ENOSPC: u64 = (-28i64) as u64;
+pub(super) const ENOSYS: u64 = (-38i64) as u64;
+pub(super) const EBADF: u64 = (-9i64) as u64;
+pub(super) const EPERM: u64 = (-1i64) as u64;
+pub(super) const ENOMEM: u64 = (-12i64) as u64;
+pub(super) const EINVAL: u64 = (-22i64) as u64;
+pub(super) const EFAULT: u64 = (-14i64) as u64;
+pub(super) const ENOENT: u64 = (-2i64) as u64;
+pub(super) const EACCES: u64 = (-13i64) as u64;
+pub(super) const EMFILE: u64 = (-24i64) as u64;
+pub(super) const ENOTDIR: u64 = (-20i64) as u64;
+pub(super) const EISDIR: u64 = (-21i64) as u64;
+pub(super) const ENOTTY: u64 = (-25i64) as u64;
+pub(super) const ESPIPE: u64 = (-29i64) as u64;
+pub(super) const ENOTCONN: u64 = (-107i64) as u64;
+pub(super) const EAGAIN: u64 = (-11i64) as u64;
+pub(super) const EINTR: u64 = (-4i64) as u64;
+pub(super) const ENAMETOOLONG: u64 = (-36i64) as u64;
+pub(super) const EROFS: u64 = (-30i64) as u64;
+pub(super) const EEXIST: u64 = (-17i64) as u64;
+pub(super) const ERANGE: u64 = (-34i64) as u64;
+pub(super) const ENOTEMPTY: u64 = (-39i64) as u64;
+pub(super) const ENODEV: u64 = (-19i64) as u64;
+pub(super) const ENOSPC: u64 = (-28i64) as u64;
 /// `O_NONBLOCK`, which on an event device is the difference between a program
 /// that polls and one that waits.
 const O_NONBLOCK: u64 = 0o4000;
 
 /// `AT_EMPTY_PATH`: operate on the descriptor rather than on a path under it.
 const AT_EMPTY_PATH: u64 = 0x1000;
-const EAFNOSUPPORT: u64 = (-97i64) as u64;
-const EPROTONOSUPPORT: u64 = (-93i64) as u64;
-const ENOTSOCK: u64 = (-88i64) as u64;
-const ECONNREFUSED: u64 = (-111i64) as u64;
-const ETIMEDOUT: u64 = (-110i64) as u64;
-const ENETDOWN: u64 = (-100i64) as u64;
-const EISCONN: u64 = (-106i64) as u64;
-const ENOBUFS: u64 = (-105i64) as u64;
+pub(super) const EAFNOSUPPORT: u64 = (-97i64) as u64;
+pub(super) const EPROTONOSUPPORT: u64 = (-93i64) as u64;
+pub(super) const ENOTSOCK: u64 = (-88i64) as u64;
+pub(super) const ECONNREFUSED: u64 = (-111i64) as u64;
+pub(super) const ETIMEDOUT: u64 = (-110i64) as u64;
+pub(super) const ENETDOWN: u64 = (-100i64) as u64;
+pub(super) const EISCONN: u64 = (-106i64) as u64;
+pub(super) const ENOBUFS: u64 = (-105i64) as u64;
 
 /// `O_WRONLY` and `O_RDWR`. This view is read-only, so both are refused.
 const O_WRONLY: u64 = 1;
@@ -539,8 +539,12 @@ static mut SYSCALL_STACK: Stack = Stack([0; 16 * 1024]);
 /// its own task is running *is* per-task, provided somebody swaps it at the
 /// boundary.
 pub fn ring3_now() -> crate::task::Ring3 {
+    let (tls, gs, bits32) = super::i386::save();
     unsafe {
         crate::task::Ring3 {
+            tls,
+            gs,
+            bits32,
             guest_rsp: core::ptr::read(core::ptr::addr_of!(GLADOS_GUEST_RSP)),
             syscall_stack: core::ptr::read(core::ptr::addr_of!(GLADOS_SYSCALL_STACK)),
             host_rsp: core::ptr::read(core::ptr::addr_of!(GLADOS_HOST_RSP)),
@@ -567,6 +571,7 @@ pub fn ring3_load(r: Option<crate::task::Ring3>) {
             // This task's own landing for an interrupt taken at ring 3. See
             // `gdt::set_rsp0` for what sharing one cost.
             crate::cpu::gdt::set_rsp0(r.syscall_stack);
+            super::i386::load(r.tls, r.gs, r.bits32);
         },
         None => {
             crate::cpu::gdt::set_rsp0(0);
@@ -682,6 +687,10 @@ pub struct Regions {
     pub interp_mapped: bool,
     pub stack_mapped: bool,
     pub brk_mapped: bool,
+    /// The ABI, and where its `mmap` arena runs.
+    pub bits32: bool,
+    pub mmap_at: u64,
+    pub mmap_end: u64,
 }
 
 /// What a guest owns.
@@ -759,6 +768,12 @@ pub struct Space {
     /// means a free list, and a free list is worth building when something
     /// runs out rather than before.
     pub mmap_next: u64,
+    /// Where the arena must stop: the stack for a 32-bit guest, which has no
+    /// room to spare below 4 GiB, and effectively nowhere for a 64-bit one.
+    pub mmap_end: u64,
+    /// A 32-bit guest: `int 0x80`, a compatibility code segment, 4-byte
+    /// pointers in every structure it hands over.
+    pub bits32: bool,
     pub image_path: String,
     pub interp_path: Option<String>,
     /// `FS` base as the kernel left it. A guest sets `FS` for its
@@ -934,7 +949,9 @@ pub fn replace_guest(
         signals: super::signal::State::default(),
         holder: None,
         owned: alloc::vec::Vec::new(),
-        mmap_next: GUEST_MMAP_AT,
+        mmap_next: r.mmap_at,
+        mmap_end: r.mmap_end,
+        bits32: r.bits32,
         image_path: String::new(),
         interp_path: None,
         saved_fs,
@@ -1025,6 +1042,8 @@ pub fn clone_guest(
         tables: Some(tables),
         owned,
         mmap_next: p.mmap_next,
+        mmap_end: p.mmap_end,
+        bits32: p.bits32,
         image_path: p.image_path.clone(),
         interp_path: p.interp_path.clone(),
         saved_fs: p.saved_fs,
@@ -1206,7 +1225,9 @@ pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
             signals: super::signal::State::default(),
             holder: None,
             owned: alloc::vec::Vec::new(),
-            mmap_next: GUEST_MMAP_AT,
+            mmap_next: r.mmap_at,
+            mmap_end: r.mmap_end,
+            bits32: r.bits32,
             stack: r.stack,
             brk_start: brk.at,
             brk_now: brk.at,
@@ -1457,6 +1478,8 @@ pub fn arm() {
         // stack; DF because Rust's memory intrinsics assume it is clear and a
         // guest is under no obligation to leave it that way.
         crate::cpu::wrmsr(IA32_FMASK, 0x700);
+        // And the 32-bit door beside it.
+        super::i386::arm();
         let efer = crate::cpu::rdmsr(IA32_EFER);
         crate::cpu::wrmsr(IA32_EFER, efer | EFER_SCE);
     }
@@ -1479,7 +1502,7 @@ pub fn clear_trace() {
     unsafe { (*TASK_TRACE.get())[me()].clear() }
 }
 
-fn record(mut c: Call) {
+pub(super) fn record(mut c: Call) {
     // Read the path *here*, after the call has run and while the guest's
     // memory is still its own. `read_cstr` is bounds-checked, so a guest
     // passing rubbish costs an `EFAULT` this quietly drops rather than a
@@ -1498,7 +1521,7 @@ fn record(mut c: Call) {
 /// The guest wrote something. Only the two standard descriptors, and every
 /// other fd is `-EBADF` rather than silently accepted -- a write to fd 7 that
 /// reported success would be a program whose output vanished.
-fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
+pub(super) fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
     // **Ask the table, not the number.** This compared `fd` against 1 and 2,
     // which is right until a guest does the one thing every shell does:
     // `close(1)` then `open(...)` hands the file descriptor 1, and a write to
@@ -1658,7 +1681,7 @@ pub fn read_cstr(at: u64) -> Result<String, u64> {
 }
 
 /// The descriptor table, or nothing when no guest is running.
-fn with_fds<T>(f: impl FnOnce(&mut Vec<Option<super::fs::Fd>>, &str) -> T) -> Option<T> {
+pub(super) fn with_fds<T>(f: impl FnOnce(&mut Vec<Option<super::fs::Fd>>, &str) -> T) -> Option<T> {
     let sp = unsafe { guest_slot() };
     // Destructured rather than borrowed twice, which is also why the working
     // directory is no longer cloned here. It was, because `&mut sp.fds` and
@@ -1742,7 +1765,7 @@ fn place_fd(fds: &mut Vec<Option<super::fs::Fd>>, entry: super::fs::Fd) -> u64 {
     }
 }
 
-fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
+pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
     let raw = match read_cstr(path_at) {
         Ok(v) => v,
         Err(e) => return e,
@@ -1933,7 +1956,7 @@ fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
 /// One function because they are one decision three times over: resolve, check
 /// the jail, then ask the tree. Splitting them would put the `EROFS` check in
 /// three places, which is how one of them ends up missing it.
-fn sys_name_op(path_at: u64, op: u8) -> u64 {
+pub(super) fn sys_name_op(path_at: u64, op: u8) -> u64 {
     let raw = match read_cstr(path_at) {
         Ok(v) => v,
         Err(e) => return e,
@@ -1983,7 +2006,7 @@ fn sys_name_op(path_at: u64, op: u8) -> u64 {
 /// There is no `chdir`, so this is a constant -- and it is still worth serving,
 /// because `pwd` exits 1 without it and every program that resolves a relative
 /// path for a message calls it.
-fn sys_getcwd(buf: u64, len: u64) -> u64 {
+pub(super) fn sys_getcwd(buf: u64, len: u64) -> u64 {
     let cwd = with_fds(|_, cwd| alloc::string::String::from(cwd)).unwrap_or_default();
     let n = cwd.len() + 1;
     if (len as usize) < n {
@@ -2009,7 +2032,7 @@ fn sys_getcwd(buf: u64, len: u64) -> u64 {
 /// gives the tick a chance to fire. It costs the CPU it is not using, which is
 /// the trade a kernel with one runnable guest has, and it is bounded by the
 /// same deadline everything else is.
-fn sys_nanosleep(req: u64) -> u64 {
+pub(super) fn sys_nanosleep(req: u64) -> u64 {
     if !reachable(req, 16, false) {
         return EFAULT;
     }
@@ -2019,6 +2042,11 @@ fn sys_nanosleep(req: u64) -> u64 {
             core::ptr::read_volatile((req + 8) as *const u64),
         )
     };
+    sleep_for(sec, nsec)
+}
+
+/// The sleep itself, for any ABI's timespec.
+pub(super) fn sleep_for(sec: u64, nsec: u64) -> u64 {
     if nsec >= 1_000_000_000 {
         return EINVAL;
     }
@@ -2122,7 +2150,7 @@ fn write_file(fd: u64, buf: u64, len: usize) -> u64 {
 /// Every pointer is checked twice over: once for the vector itself, and once
 /// per buffer, because the vector is guest memory holding guest pointers and
 /// neither is trustworthy.
-fn sys_writev(fd: u64, iov: u64, cnt: u64) -> u64 {
+pub(super) fn sys_writev(fd: u64, iov: u64, cnt: u64) -> u64 {
     // Linux's own bound. Refused rather than clamped: a caller that asked for
     // more than this has a bug, and writing the first thousand of its buffers
     // would hide it behind a short count.
@@ -2132,19 +2160,13 @@ fn sys_writev(fd: u64, iov: u64, cnt: u64) -> u64 {
     if cnt == 0 {
         return 0;
     }
-    let Some(bytes) = (cnt as usize).checked_mul(16) else { return EINVAL };
+    let Some(bytes) = (cnt as usize).checked_mul(iov_size() as usize) else { return EINVAL };
     if !reachable(iov, bytes, false) {
         return EFAULT;
     }
     let mut total: u64 = 0;
     for i in 0..cnt as usize {
-        let at = iov + (i * 16) as u64;
-        let (base, len) = unsafe {
-            (
-                core::ptr::read_volatile(at as *const u64),
-                core::ptr::read_volatile((at + 8) as *const u64),
-            )
-        };
+        let (base, len) = iov_at(iov, i as u64);
         if len == 0 {
             continue;
         }
@@ -2275,7 +2297,7 @@ fn pipe_end(fd: u64) -> Option<alloc::rc::Rc<core::cell::RefCell<super::fs::Pipe
 /// the direction each end drives has to be right, and `Fd::pipe_side` is the
 /// one place that decides -- a pipe whose two ends shared a queue would work
 /// perfectly when talking to itself and deliver nothing across.
-fn do_pipe(at: u64, flags: u64) -> u64 {
+pub(super) fn do_pipe(at: u64, flags: u64) -> u64 {
     const O_NONBLOCK: u64 = 0o4000;
     const O_CLOEXEC: u64 = 0o2000000;
     // Refused rather than ignored. `O_DIRECT` on a pipe changes it to packet
@@ -2327,7 +2349,7 @@ fn epoll_set(fd: u64) -> Option<alloc::rc::Rc<core::cell::RefCell<super::epoll::
     .flatten()
 }
 
-fn sys_epoll_create(size: u64) -> u64 {
+pub(super) fn sys_epoll_create(size: u64) -> u64 {
     // The hint has been ignored since 2.6.8 and a non-positive one is still
     // refused, because a program passing zero computed a number wrongly rather
     // than choosing a default.
@@ -2337,7 +2359,7 @@ fn sys_epoll_create(size: u64) -> u64 {
     make_epoll()
 }
 
-fn sys_epoll_create1(flags: u64) -> u64 {
+pub(super) fn sys_epoll_create1(flags: u64) -> u64 {
     const EPOLL_CLOEXEC: u64 = 0o2000000;
     if flags & !EPOLL_CLOEXEC != 0 {
         return EINVAL;
@@ -2351,7 +2373,7 @@ fn make_epoll() -> u64 {
     ))))
 }
 
-fn sys_epoll_ctl(epfd: u64, op: u64, fd: u64, ev: u64) -> u64 {
+pub(super) fn sys_epoll_ctl(epfd: u64, op: u64, fd: u64, ev: u64) -> u64 {
     let Some(set) = epoll_set(epfd) else { return EBADF };
     // A set watching itself would be asked its own readiness to compute its own
     // readiness, so it is refused where Linux refuses it too.
@@ -2396,7 +2418,7 @@ fn sys_epoll_ctl(epfd: u64, op: u64, fd: u64, ev: u64) -> u64 {
     }
 }
 
-fn sys_epoll_wait(epfd: u64, evs: u64, maxevents: u64, timeout: u64) -> u64 {
+pub(super) fn sys_epoll_wait(epfd: u64, evs: u64, maxevents: u64, timeout: u64) -> u64 {
     let Some(set) = epoll_set(epfd) else { return EBADF };
     if (maxevents as i64) <= 0 || maxevents > MAX_WATCHED {
         return EINVAL;
@@ -2454,7 +2476,7 @@ fn sys_epoll_wait(epfd: u64, evs: u64, maxevents: u64, timeout: u64) -> u64 {
     }
 }
 
-const EBUSY: u64 = (-16i64) as u64;
+pub(super) const EBUSY: u64 = (-16i64) as u64;
 
 /// The anonymous file a descriptor names, if it is one.
 fn memfd(fd: u64) -> Option<alloc::rc::Rc<core::cell::RefCell<super::fs::Memfd>>> {
@@ -2472,7 +2494,7 @@ fn memfd(fd: u64) -> Option<alloc::rc::Rc<core::cell::RefCell<super::fs::Memfd>>
 /// accepting it costs nothing, and `fcntl(F_ADD_SEALS)` fails the way it does
 /// on a kernel built without the feature. A compositor that required its
 /// clients to have sealed would be one written here, and it is not.
-fn sys_memfd_create(name: u64, flags: u64) -> u64 {
+pub(super) fn sys_memfd_create(name: u64, flags: u64) -> u64 {
     const MFD_CLOEXEC: u64 = 1;
     const MFD_ALLOW_SEALING: u64 = 2;
     if flags & !(MFD_CLOEXEC | MFD_ALLOW_SEALING) != 0 {
@@ -2499,7 +2521,7 @@ fn sys_memfd_create(name: u64, flags: u64) -> u64 {
 ///
 /// Every real user sizes before mapping, which is the order the call was
 /// designed around: create, size, map, draw.
-fn sys_ftruncate(fd: u64, len: u64) -> u64 {
+pub(super) fn sys_ftruncate(fd: u64, len: u64) -> u64 {
     if (len as i64) < 0 {
         return EINVAL;
     }
@@ -2608,7 +2630,7 @@ fn sockaddr_un(at: u64, len: u64) -> Result<String, u64> {
     Ok(out)
 }
 
-fn sys_bind(fd: u64, at: u64, len: u64) -> u64 {
+pub(super) fn sys_bind(fd: u64, at: u64, len: u64) -> u64 {
     let Some(sock) = unix_sock(fd) else { return ENOTSOCK };
     let path = match sockaddr_un(at, len) {
         Ok(v) => v,
@@ -2620,7 +2642,7 @@ fn sys_bind(fd: u64, at: u64, len: u64) -> u64 {
     }
 }
 
-fn sys_listen(fd: u64) -> u64 {
+pub(super) fn sys_listen(fd: u64) -> u64 {
     let Some(sock) = unix_sock(fd) else { return ENOTSOCK };
     match super::unix::listen(&sock) {
         Ok(()) => 0,
@@ -2634,7 +2656,7 @@ fn sys_listen(fd: u64) -> u64 {
 /// same bargain `futex` and `nanosleep` make here. A server that blocks costs
 /// the CPU it is not using; one that passes `SOCK_NONBLOCK` gets `EAGAIN` and
 /// decides for itself.
-fn sys_accept4(fd: u64, addr: u64, alen: u64, flags: u64) -> u64 {
+pub(super) fn sys_accept4(fd: u64, addr: u64, alen: u64, flags: u64) -> u64 {
     const SOCK_NONBLOCK: u64 = 0o4000;
     let Some(sock) = unix_sock(fd) else { return ENOTSOCK };
     loop {
@@ -2669,7 +2691,7 @@ fn sys_accept4(fd: u64, addr: u64, alen: u64, flags: u64) -> u64 {
     }
 }
 
-fn sys_socketpair(domain: u64, kind: u64, _proto: u64, sv: u64) -> u64 {
+pub(super) fn sys_socketpair(domain: u64, kind: u64, _proto: u64, sv: u64) -> u64 {
     if domain != 1 {
         return EAFNOSUPPORT;
     }
@@ -2709,7 +2731,7 @@ fn sys_socketpair(domain: u64, kind: u64, _proto: u64, sv: u64) -> u64 {
 /// `size_t`. A structure read one field out of step produces a control
 /// message that looks well-formed and names the wrong descriptors.
 /// Too big for the control buffer offered.
-const EMSGSIZE: u64 = (-90i64) as u64;
+pub(super) const EMSGSIZE: u64 = (-90i64) as u64;
 
 mod msg {
     pub const NAME: u64 = 0;
@@ -2747,19 +2769,51 @@ mod msg {
 /// Bounded at `IOV_MAX`, which Linux also bounds, and refused rather than
 /// clamped: a caller that asked to send more than this and got a short count
 /// would have to guess whether the rest was dropped or never attempted.
-fn gather(iov: u64, cnt: u64) -> Result<Vec<u8>, u64> {
+/// Whether the running guest is 32-bit, which is what decides the shape of
+/// every structure it hands the kernel. Asked at the boundary, by the function
+/// that reads or writes the structure, so one implementation of a call serves
+/// both ABIs and only the bytes differ.
+pub(super) fn abi32() -> bool {
+    unsafe { guest_slot() }.as_ref().is_some_and(|s| s.bits32)
+}
+
+/// How wide one `struct iovec` is for the running guest: two pointers.
+pub(super) fn iov_size() -> u64 {
+    if abi32() { 8 } else { msg::IOV_SIZE }
+}
+
+/// Entry `i` of an `iovec` array, as (base, length), at the guest's width.
+/// The caller has already checked the array is reachable.
+pub(super) fn iov_at(iov: u64, i: u64) -> (u64, u64) {
+    let e = iov + i * iov_size();
+    unsafe {
+        if abi32() {
+            (
+                core::ptr::read_volatile(e as *const u32) as u64,
+                core::ptr::read_volatile((e + 4) as *const u32) as u64,
+            )
+        } else {
+            (
+                core::ptr::read_volatile((e + msg::IOV_BASE) as *const u64),
+                core::ptr::read_volatile((e + msg::IOV_LEN) as *const u64),
+            )
+        }
+    }
+}
+
+pub(super) fn gather(iov: u64, cnt: u64) -> Result<Vec<u8>, u64> {
     const IOV_MAX: u64 = 1024;
     if cnt > IOV_MAX {
         return Err(EINVAL);
     }
     let mut out = Vec::new();
     for i in 0..cnt {
-        let e = iov + i * msg::IOV_SIZE;
-        if !reachable(e, msg::IOV_SIZE as usize, false) {
+        let e = iov + i * iov_size();
+        if !reachable(e, iov_size() as usize, false) {
             return Err(EFAULT);
         }
-        let base = unsafe { core::ptr::read((e + msg::IOV_BASE) as *const u64) };
-        let len = unsafe { core::ptr::read((e + msg::IOV_LEN) as *const u64) } as usize;
+        let (base, len) = iov_at(iov, i);
+        let len = len as usize;
         if len == 0 {
             continue;
         }
@@ -2772,7 +2826,7 @@ fn gather(iov: u64, cnt: u64) -> Result<Vec<u8>, u64> {
 }
 
 /// Total room an `iovec` array offers, and a writer for filling it.
-fn scatter(iov: u64, cnt: u64, data: &[u8]) -> Result<usize, u64> {
+pub(super) fn scatter(iov: u64, cnt: u64, data: &[u8]) -> Result<usize, u64> {
     const IOV_MAX: u64 = 1024;
     if cnt > IOV_MAX {
         return Err(EINVAL);
@@ -2782,12 +2836,12 @@ fn scatter(iov: u64, cnt: u64, data: &[u8]) -> Result<usize, u64> {
         if done == data.len() {
             break;
         }
-        let e = iov + i * msg::IOV_SIZE;
-        if !reachable(e, msg::IOV_SIZE as usize, false) {
+        let e = iov + i * iov_size();
+        if !reachable(e, iov_size() as usize, false) {
             return Err(EFAULT);
         }
-        let base = unsafe { core::ptr::read((e + msg::IOV_BASE) as *const u64) };
-        let len = unsafe { core::ptr::read((e + msg::IOV_LEN) as *const u64) } as usize;
+        let (base, len) = iov_at(iov, i);
+        let len = len as usize;
         let n = len.min(data.len() - done);
         if n == 0 {
             continue;
@@ -2890,7 +2944,7 @@ fn unix_stream(fd: u64) -> Option<(alloc::rc::Rc<core::cell::RefCell<super::unix
     }
 }
 
-fn sys_sendmsg(fd: u64, hdr: u64, _flags: u64) -> u64 {
+pub(super) fn sys_sendmsg(fd: u64, hdr: u64, _flags: u64) -> u64 {
     let Some((pipe, side)) = unix_stream(fd) else { return ENOTCONN };
     if !reachable(hdr, msg::SIZE, false) {
         return EFAULT;
@@ -2918,7 +2972,7 @@ fn sys_sendmsg(fd: u64, hdr: u64, _flags: u64) -> u64 {
     n as u64
 }
 
-fn sys_recvmsg(fd: u64, hdr: u64, flags: u64) -> u64 {
+pub(super) fn sys_recvmsg(fd: u64, hdr: u64, flags: u64) -> u64 {
     const MSG_DONTWAIT: u64 = 0x40;
     let Some((pipe, side)) = unix_stream(fd) else { return ENOTCONN };
     if !reachable(hdr, msg::SIZE, true) {
@@ -2931,11 +2985,11 @@ fn sys_recvmsg(fd: u64, hdr: u64, flags: u64) -> u64 {
 
     let mut room = 0usize;
     for i in 0..cnt.min(1024) {
-        let e = iov + i * msg::IOV_SIZE;
-        if !reachable(e, msg::IOV_SIZE as usize, false) {
+        let e = iov + i * iov_size();
+        if !reachable(e, iov_size() as usize, false) {
             return EFAULT;
         }
-        room += unsafe { core::ptr::read((e + msg::IOV_LEN) as *const u64) } as usize;
+        room += iov_at(iov, i).1 as usize;
     }
     let mut buf = alloc::vec![0u8; room.min(64 * 1024)];
     let got = loop {
@@ -2973,7 +3027,7 @@ fn sys_recvmsg(fd: u64, hdr: u64, flags: u64) -> u64 {
     got as u64
 }
 
-fn sys_socket(domain: u64, kind: u64, proto: u64) -> u64 {
+pub(super) fn sys_socket(domain: u64, kind: u64, proto: u64) -> u64 {
     // `AF_UNIX`, which is what wineserver speaks and what nothing on a wire
     // ever sees. Answered before the `AF_INET` path rather than inside it,
     // because the two share a syscall number and nothing else.
@@ -3028,7 +3082,7 @@ fn sock_of(fd: u64) -> Result<alloc::rc::Rc<core::cell::RefCell<super::fs::Sock>
     .unwrap_or(Err(EBADF))
 }
 
-fn sys_connect(fd: u64, at: u64, len: u64) -> u64 {
+pub(super) fn sys_connect(fd: u64, at: u64, len: u64) -> u64 {
     // `AF_UNIX` first, because the two share a syscall number and nothing
     // else: `sock_of` below demands a TCP socket and would refuse this one
     // with a message about the wrong thing.
@@ -3082,7 +3136,7 @@ fn sys_connect(fd: u64, at: u64, len: u64) -> u64 {
 /// than the guest deadline that would otherwise end the argument.
 const SOCK_TIMEOUT_MS: u64 = 10_000;
 
-fn sys_send(fd: u64, buf: u64, len: u64) -> u64 {
+pub(super) fn sys_send(fd: u64, buf: u64, len: u64) -> u64 {
     if len == 0 {
         return 0;
     }
@@ -3101,7 +3155,7 @@ fn sys_send(fd: u64, buf: u64, len: u64) -> u64 {
     }
 }
 
-fn sys_recv(fd: u64, buf: u64, len: u64) -> u64 {
+pub(super) fn sys_recv(fd: u64, buf: u64, len: u64) -> u64 {
     if len == 0 {
         return 0;
     }
@@ -3128,7 +3182,7 @@ fn sys_recv(fd: u64, buf: u64, len: u64) -> u64 {
     n as u64
 }
 
-fn sys_shutdown(fd: u64, _how: u64) -> u64 {
+pub(super) fn sys_shutdown(fd: u64, _how: u64) -> u64 {
     let sock = match sock_of(fd) {
         Ok(v) => v,
         Err(e) => return e,
@@ -3149,26 +3203,20 @@ fn sys_shutdown(fd: u64, _how: u64) -> u64 {
 /// its input through this, so without it the applet opened the file,
 /// `dup2`ed it onto stdin, and then reported "Function not implemented"
 /// about a file it was holding open.
-fn sys_readv(fd: u64, iov: u64, cnt: u64) -> u64 {
+pub(super) fn sys_readv(fd: u64, iov: u64, cnt: u64) -> u64 {
     if cnt > 1024 {
         return EINVAL;
     }
     if cnt == 0 {
         return 0;
     }
-    let Some(bytes) = (cnt as usize).checked_mul(16) else { return EINVAL };
+    let Some(bytes) = (cnt as usize).checked_mul(iov_size() as usize) else { return EINVAL };
     if !reachable(iov, bytes, false) {
         return EFAULT;
     }
     let mut total: u64 = 0;
     for i in 0..cnt as usize {
-        let at = iov + (i * 16) as u64;
-        let (base, len) = unsafe {
-            (
-                core::ptr::read_volatile(at as *const u64),
-                core::ptr::read_volatile((at + 8) as *const u64),
-            )
-        };
+        let (base, len) = iov_at(iov, i as u64);
         if len == 0 {
             continue;
         }
@@ -3192,7 +3240,7 @@ fn sys_readv(fd: u64, iov: u64, cnt: u64) -> u64 {
 /// there is, and `W_OK` outside `/tmp` is the only "no" this can honestly
 /// give. That makes `access(p, W_OK)` a real test of the write jail, which is
 /// what a program uses it for.
-fn sys_access(path_at: u64, mode: u64) -> u64 {
+pub(super) fn sys_access(path_at: u64, mode: u64) -> u64 {
     let raw = match read_cstr(path_at) {
         Ok(v) => v,
         Err(e) => return e,
@@ -3223,7 +3271,7 @@ fn sys_access(path_at: u64, mode: u64) -> u64 {
 /// no guest pointer is dereferenced. `cat` reaches for it first and falls back
 /// to `read`/`write` when it fails, which is why it worked without this and
 /// still spent a refused call every time.
-fn sys_sendfile(out: u64, into: u64, off_at: u64, count: u64) -> u64 {
+pub(super) fn sys_sendfile(out: u64, into: u64, off_at: u64, count: u64) -> u64 {
     if off_at != 0 {
         // An explicit offset means "read from here and do not move the
         // cursor", which needs a second cursor this table does not keep.
@@ -3284,7 +3332,7 @@ fn sys_sendfile(out: u64, into: u64, off_at: u64, count: u64) -> u64 {
 /// wireless driver refuses to pretend it can associate, and the battery code
 /// refuses to invent a reading. The release is the real build version, so a
 /// bug report carries something true.
-fn sys_uname(buf: u64) -> u64 {
+pub(super) fn sys_uname(buf: u64) -> u64 {
     const N: usize = 65;
     if !reachable(buf, N * 6, true) {
         return EFAULT;
@@ -3318,7 +3366,7 @@ fn sys_uname(buf: u64) -> u64 {
 /// actually moves. A caller timing something short with `REALTIME` will
 /// measure zero, and that is a property of the hardware rather than of this
 /// call.
-fn clock_pair(which: u64) -> Option<(u64, u64)> {
+pub(super) fn clock_pair(which: u64) -> Option<(u64, u64)> {
     match which {
         // CLOCK_REALTIME and its coarse twin.
         0 | 5 => {
@@ -3337,7 +3385,7 @@ fn clock_pair(which: u64) -> Option<(u64, u64)> {
     }
 }
 
-fn sys_clock_gettime(which: u64, at: u64) -> u64 {
+pub(super) fn sys_clock_gettime(which: u64, at: u64) -> u64 {
     let Some((sec, nsec)) = clock_pair(which) else { return EINVAL };
     if !reachable(at, 16, true) {
         return EFAULT;
@@ -3349,7 +3397,7 @@ fn sys_clock_gettime(which: u64, at: u64) -> u64 {
     0
 }
 
-fn sys_gettimeofday(tv: u64, tz: u64) -> u64 {
+pub(super) fn sys_gettimeofday(tv: u64, tz: u64) -> u64 {
     // The timezone argument has been obsolete since 4.4BSD and glibc passes
     // NULL. A caller that passes one gets it zeroed rather than refused, since
     // refusing a field nobody means anything by would fail the whole call.
@@ -3379,7 +3427,7 @@ fn sys_gettimeofday(tv: u64, tz: u64) -> u64 {
 /// rather than lazy: close-on-exec is a promise about what survives an `exec`,
 /// and there is no `exec` here for anything to survive. The day there is, this
 /// has to start remembering, and it is written down here so that day finds it.
-fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
+pub(super) fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
     let known = with_fds(|fds, _| matches!(fds.get(fd as usize), Some(Some(_)))).unwrap_or(false);
     if !known {
         return EBADF;
@@ -3439,7 +3487,7 @@ impl MinFd for u64 {
 /// names for one address space and a program free to write through both.
 /// (This said `fork` was "the one thing this system cannot grow into", which
 /// `fork.rs` has since disproved.)
-fn sys_clone(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64, rip: u64) -> u64 {
+pub(super) fn sys_clone(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64, rip: u64) -> u64 {
     if !super::thread::is_thread(flags) {
         return ENOSYS;
     }
@@ -3478,7 +3526,7 @@ const FUTEX_SLOTS: usize = 32;
 /// one woke the other: harmless only because every waiter re-reads its word.
 static FUTEX: Racy<[(u64, u64, u64); FUTEX_SLOTS]> = Racy::new([(0, 0, 0); FUTEX_SLOTS]);
 
-fn futex_bump(addr: u64) -> u64 {
+pub(super) fn futex_bump(addr: u64) -> u64 {
     let t = unsafe { &mut *FUTEX.get() };
     let root = guest_root();
     if let Some(e) = t.iter_mut().find(|e| e.1 == addr && e.0 == root) {
@@ -3495,7 +3543,7 @@ fn futex_bump(addr: u64) -> u64 {
     0
 }
 
-fn futex_count(addr: u64) -> u64 {
+pub(super) fn futex_count(addr: u64) -> u64 {
     let t = unsafe { &*FUTEX.get() };
     let root = guest_root();
     t.iter().find(|e| e.1 == addr && e.0 == root).map(|e| e.2).unwrap_or(0)
@@ -3514,7 +3562,7 @@ fn futex_count(addr: u64) -> u64 {
 /// scheduler to block against, so a wait is this kernel's wait. It costs a
 /// context switch per tick per waiter, and it cannot deadlock the machine
 /// because the run deadline reaches it.
-fn sys_futex(uaddr: u64, op: u64, val: u64, timeout: u64) -> u64 {
+pub(super) fn sys_futex(uaddr: u64, op: u64, val: u64, timeout: u64) -> u64 {
     const FUTEX_WAIT: u64 = 0;
     const FUTEX_WAKE: u64 = 1;
     const PRIVATE: u64 = 128;
@@ -3656,7 +3704,7 @@ pub fn run_thread(w: super::thread::Work, stack: u64) {
     }
 }
 
-fn sys_dup3(from: u64, to: u64, flags: u64) -> u64 {
+pub(super) fn sys_dup3(from: u64, to: u64, flags: u64) -> u64 {
     const O_CLOEXEC: u64 = 0o2_000_000;
     if flags & !O_CLOEXEC != 0 {
         return EINVAL;
@@ -3667,7 +3715,7 @@ fn sys_dup3(from: u64, to: u64, flags: u64) -> u64 {
     sys_dup(from, Some(to))
 }
 
-fn sys_dup(from: u64, to: Option<u64>) -> u64 {
+pub(super) fn sys_dup(from: u64, to: Option<u64>) -> u64 {
     with_fds(|fds, _| {
         let copy = match fds.get(from as usize) {
             Some(Some(f)) => f.share(),
@@ -3703,7 +3751,7 @@ fn sys_dup(from: u64, to: Option<u64>) -> u64 {
     .unwrap_or(EBADF)
 }
 
-fn sys_close(fd: u64) -> u64 {
+pub(super) fn sys_close(fd: u64) -> u64 {
     with_fds(|fds, _| match fds.get_mut(fd as usize) {
         Some(slot @ Some(_)) => {
             // Committed here rather than on every write, and only when this is
@@ -3764,7 +3812,7 @@ fn span_ms(at: u64, per_ms: u64) -> Option<i64> {
     Some(whole.saturating_mul(1000).saturating_add(frac / per_ms) as i64)
 }
 
-fn sys_poll(fds: u64, nfds: u64, timeout: u64) -> u64 {
+pub(super) fn sys_poll(fds: u64, nfds: u64, timeout: u64) -> u64 {
     // The field is an `int`, so a wait of -1 arrives as 0xFFFFFFFF and has to
     // be read back through i32 before it means "no limit" rather than
     // "forty-nine days".
@@ -3780,7 +3828,7 @@ fn sys_poll(fds: u64, nfds: u64, timeout: u64) -> u64 {
 /// exact rather than lazy: there is no behaviour it could change. It stops
 /// being true the day delivery happens anywhere else, and `signal.rs` already
 /// records that the timer is the other candidate.
-fn sys_ppoll(fds: u64, nfds: u64, ts: u64, _mask: u64, _setsize: u64) -> u64 {
+pub(super) fn sys_ppoll(fds: u64, nfds: u64, ts: u64, _mask: u64, _setsize: u64) -> u64 {
     let limit = if ts == 0 {
         None
     } else {
@@ -3849,7 +3897,7 @@ fn do_poll(fds: u64, nfds: u64, limit: Option<u64>) -> u64 {
     }
 }
 
-fn sys_select(nfds: u64, r: u64, w: u64, e: u64, tv: u64) -> u64 {
+pub(super) fn sys_select(nfds: u64, r: u64, w: u64, e: u64, tv: u64) -> u64 {
     let limit = if tv == 0 {
         None
     } else {
@@ -3861,7 +3909,7 @@ fn sys_select(nfds: u64, r: u64, w: u64, e: u64, tv: u64) -> u64 {
     do_select(nfds, r, w, e, limit)
 }
 
-fn sys_pselect6(nfds: u64, r: u64, w: u64, e: u64, ts: u64) -> u64 {
+pub(super) fn sys_pselect6(nfds: u64, r: u64, w: u64, e: u64, ts: u64) -> u64 {
     // The sixth argument is a signal mask, and it cannot matter here for the
     // reason `ppoll` gives.
     let limit = if ts == 0 {
@@ -3945,7 +3993,7 @@ fn do_select(nfds: u64, rp: u64, wp: u64, ep: u64, limit: Option<u64>) -> u64 {
     }
 }
 
-fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
+pub(super) fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
     if len == 0 {
         return 0;
     }
@@ -4122,7 +4170,7 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
 /// 38" about a library it had already found, opened and read the first 832
 /// bytes of. Error 38 is `ENOSYS`, and the guest reported our gap more clearly
 /// than our own trace did.
-fn sys_pread64(fd: u64, buf: u64, len: u64, off: u64) -> u64 {
+pub(super) fn sys_pread64(fd: u64, buf: u64, len: u64, off: u64) -> u64 {
     if len == 0 {
         return 0;
     }
@@ -4198,7 +4246,7 @@ fn sys_pread64(fd: u64, buf: u64, len: u64, off: u64) -> u64 {
 /// **The answer is not NUL-terminated.** `readlink` returns a length and
 /// writes exactly that many bytes, and a terminator written past it would
 /// land in the caller's buffer beyond what it was told was used.
-fn sys_readlinkat(dirfd: u64, path_at: u64, buf: u64, size: u64) -> u64 {
+pub(super) fn sys_readlinkat(dirfd: u64, path_at: u64, buf: u64, size: u64) -> u64 {
     let raw = match read_cstr(path_at) {
         Ok(v) => v,
         Err(e) => return e,
@@ -4250,7 +4298,7 @@ fn sys_readlinkat(dirfd: u64, path_at: u64, buf: u64, size: u64) -> u64 {
     n as u64
 }
 
-fn sys_time(tloc: u64) -> u64 {
+pub(super) fn sys_time(tloc: u64) -> u64 {
     let secs = crate::dev::rtc::now()
         .map(|dt| crate::dev::rtc::unix_seconds(&dt) as u64)
         .unwrap_or(0);
@@ -4286,7 +4334,7 @@ const SYSINFO_LEN: usize = 112;
 /// deviation worth naming: the heap is one contiguous allocation the kernel
 /// already owns, so it is what a guest could actually be given, and reporting
 /// the firmware's total would promise memory nothing here can hand out.
-fn sys_sysinfo(buf: u64) -> u64 {
+pub(super) fn sys_sysinfo(buf: u64) -> u64 {
     if !reachable(buf, SYSINFO_LEN, true) {
         return EFAULT;
     }
@@ -4316,7 +4364,7 @@ fn sys_sysinfo(buf: u64) -> u64 {
 /// Answers the *bytes written* rather than zero, which is the part of this
 /// call that is easy to get wrong. A libc uses the return value to know how
 /// much of a much larger `cpu_set_t` it must clear itself.
-fn sys_sched_getaffinity(_pid: u64, len: u64, mask: u64) -> u64 {
+pub(super) fn sys_sched_getaffinity(_pid: u64, len: u64, mask: u64) -> u64 {
     // Linux insists on a whole number of longs, and it is worth insisting too:
     // a length that is not one means the caller and this disagree about the
     // shape of a bitmap, and a partial write is how that becomes silent.
@@ -4332,7 +4380,7 @@ fn sys_sched_getaffinity(_pid: u64, len: u64, mask: u64) -> u64 {
     8
 }
 
-fn sys_getrandom(buf: u64, len: u64, _flags: u64) -> u64 {
+pub(super) fn sys_getrandom(buf: u64, len: u64, _flags: u64) -> u64 {
     if len == 0 {
         return 0;
     }
@@ -4346,7 +4394,7 @@ fn sys_getrandom(buf: u64, len: u64, _flags: u64) -> u64 {
     n as u64
 }
 
-fn sys_set_robust_list(_head: u64, len: u64) -> u64 {
+pub(super) fn sys_set_robust_list(_head: u64, len: u64) -> u64 {
     if len != 24 {
         return EINVAL;
     }
@@ -4365,7 +4413,7 @@ fn sys_set_robust_list(_head: u64, len: u64) -> u64 {
 /// it must not claim to have accepted: a guest told its stack is now 8 MiB
 /// would grow into whatever is next in the heap. `EPERM` is what Linux answers
 /// a process that may not raise a hard limit, which is the nearest true thing.
-fn sys_prlimit64(_pid: u64, resource: u64, new: u64, old: u64) -> u64 {
+pub(super) fn sys_prlimit64(_pid: u64, resource: u64, new: u64, old: u64) -> u64 {
     const RLIMIT_DATA: u64 = 2;
     const RLIMIT_STACK: u64 = 3;
     const RLIMIT_NOFILE: u64 = 7;
@@ -4395,7 +4443,7 @@ fn sys_prlimit64(_pid: u64, resource: u64, new: u64, old: u64) -> u64 {
     0
 }
 
-fn sys_lseek(fd: u64, off: u64, whence: u64) -> u64 {
+pub(super) fn sys_lseek(fd: u64, off: u64, whence: u64) -> u64 {
     with_fds(|fds, _| match fds.get_mut(fd as usize) {
         Some(Some(super::fs::Fd::File(body))) => {
             let f = &mut *body.borrow_mut();
@@ -4465,7 +4513,10 @@ fn sys_lseek(fd: u64, off: u64, whence: u64) -> u64 {
     .unwrap_or(EBADF)
 }
 
-fn write_stat(buf: u64, kind: super::fs::Kind, size: usize, ino: u64) -> u64 {
+pub(super) fn write_stat(buf: u64, kind: super::fs::Kind, size: usize, ino: u64) -> u64 {
+    if abi32() {
+        return write_stat64(buf, kind, size, ino);
+    }
     if !reachable(buf, 144, true) {
         return EFAULT;
     }
@@ -4474,7 +4525,42 @@ fn write_stat(buf: u64, kind: super::fs::Kind, size: usize, ino: u64) -> u64 {
     0
 }
 
-fn sys_fstat(fd: u64, buf: u64) -> u64 {
+/// i386's `struct stat64`: 96 bytes, packed, with the inode twice -- a 32-bit
+/// copy at 12 and the full one at 88 -- and the times as 32-bit seconds and
+/// nanoseconds. Offsets read off the host's own header with `gcc -m32`, not
+/// recalled.
+fn write_stat64(buf: u64, kind: super::fs::Kind, size: usize, ino: u64) -> u64 {
+    if !reachable(buf, 96, true) {
+        return EFAULT;
+    }
+    // Reuse the 64-bit encoder for the fields that mean the same thing, so
+    // mode, link count and block count cannot be computed two ways.
+    let w = super::fs::stat_bytes(kind, size, ino);
+    let r32 = |at: usize| u32::from_le_bytes([w[at], w[at + 1], w[at + 2], w[at + 3]]);
+    let r64 = |at: usize| u64::from_le_bytes(w[at..at + 8].try_into().unwrap());
+    // x86-64 `struct stat`: dev 0, ino 8, nlink 16, mode 24, uid 28, gid 32,
+    // rdev 40, size 48, blksize 56, blocks 64, then three timespecs at 72.
+    let mut b = [0u8; 96];
+    b[0..8].copy_from_slice(&r64(0).to_le_bytes());
+    b[12..16].copy_from_slice(&(r64(8) as u32).to_le_bytes());
+    b[16..20].copy_from_slice(&r32(24).to_le_bytes());
+    b[20..24].copy_from_slice(&(r64(16) as u32).to_le_bytes());
+    b[24..28].copy_from_slice(&r32(28).to_le_bytes());
+    b[28..32].copy_from_slice(&r32(32).to_le_bytes());
+    b[32..40].copy_from_slice(&r64(40).to_le_bytes());
+    b[44..52].copy_from_slice(&r64(48).to_le_bytes());
+    b[52..56].copy_from_slice(&(r64(56) as u32).to_le_bytes());
+    b[56..64].copy_from_slice(&r64(64).to_le_bytes());
+    for (i, at) in [72usize, 88, 104].iter().enumerate() {
+        b[64 + i * 8..68 + i * 8].copy_from_slice(&(r64(*at) as u32).to_le_bytes());
+        b[68 + i * 8..72 + i * 8].copy_from_slice(&(r64(at + 8) as u32).to_le_bytes());
+    }
+    b[88..96].copy_from_slice(&r64(8).to_le_bytes());
+    unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), buf as *mut u8, 96) };
+    0
+}
+
+pub(super) fn sys_fstat(fd: u64, buf: u64) -> u64 {
     let found = with_fds(|fds, _| match fds.get(fd as usize) {
         Some(Some(super::fs::Fd::File(b))) => {
             let f = b.borrow();
@@ -4501,7 +4587,7 @@ fn sys_fstat(fd: u64, buf: u64) -> u64 {
     }
 }
 
-fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 {
+pub(super) fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 {
     let raw = match read_cstr(path_at) {
         Ok(v) => v,
         Err(e) => return e,
@@ -4565,7 +4651,7 @@ fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 {
     }
 }
 
-fn sys_getdents64(fd: u64, buf: u64, len: u64) -> u64 {
+pub(super) fn sys_getdents64(fd: u64, buf: u64, len: u64) -> u64 {
     if !reachable(buf, len as usize, true) {
         return EFAULT;
     }
@@ -4706,7 +4792,7 @@ fn input_ioctl(d: super::input::Dev, req: u64, arg: u64) -> u64 {
 /// `ENOTTY` rather than `EINVAL` for an unknown request, because that is how a
 /// program asks "are you a terminal" and gets told no -- which is what every
 /// runtime here does on startup and what `isatty` is built from.
-fn sys_ioctl(fd: u64, req: u64, arg: u64) -> u64 {
+pub(super) fn sys_ioctl(fd: u64, req: u64, arg: u64) -> u64 {
     let node = with_fds(|fds, _| match fds.get(fd as usize) {
         Some(Some(super::fs::Fd::Dev(b))) => Some(b.borrow().node),
         Some(Some(_)) => None,
@@ -4779,7 +4865,7 @@ fn sys_ioctl(fd: u64, req: u64, arg: u64) -> u64 {
 /// allocator asks `brk(0)` and grows from the answer -- but a program that
 /// assumed adjacency would be wrong, so it is written down rather than left to
 /// be discovered.
-fn sys_brk(want: u64) -> u64 {
+pub(super) fn sys_brk(want: u64) -> u64 {
     let sp = unsafe { guest_slot() };
     let Some(sp) = sp.as_mut() else { return 0 };
     if want >= sp.brk_start && want <= sp.brk_end {
@@ -4795,7 +4881,7 @@ fn sys_brk(want: u64) -> u64 {
 /// `MAP_FIXED` needs an address one address space can promise, which is the
 /// same objection that makes the loader decline `ET_EXEC`. And a zero length
 /// is `EINVAL` on Linux, so it is `EINVAL` here.
-fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64 {
+pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64 {
     if len == 0 {
         return EINVAL;
     }
@@ -4979,6 +5065,11 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
         let arena = unsafe { guest_slot() }.as_mut().and_then(|sp| {
             let t = sp.tables.as_mut()?;
             let at = sp.mmap_next;
+            // Out of arena is out of memory, said as Linux says it, rather
+            // than mapping over the stack a 32-bit guest keeps just above it.
+            if at.checked_add(want)? > sp.mmap_end {
+                return None;
+            }
             let mut off = 0u64;
             while off < want {
                 if !t.map_page(at + off, phys + off, true, true) {
@@ -5137,7 +5228,7 @@ fn give_back(at: u64, len: usize, from: Option<Source>) {
 /// approximated: splitting one allocation into two is not something the heap
 /// underneath can express, and silently unmapping more than was asked is worse
 /// than saying no.
-fn sys_munmap(at: u64, len: u64) -> u64 {
+pub(super) fn sys_munmap(at: u64, len: u64) -> u64 {
     let sp = unsafe { guest_slot() };
     let Some(sp) = sp.as_mut() else { return EINVAL };
     match sp.maps.iter().position(|m| m.at == at && m.len == len as usize) {
@@ -5172,7 +5263,7 @@ fn sys_munmap(at: u64, len: u64) -> u64 {
 ///
 /// The range must be one the loader gave this guest. Linux answers `ENOMEM`
 /// for a range with no mapping under it, so that is what comes back.
-fn sys_mprotect(at: u64, len: u64, prot: u64) -> u64 {
+pub(super) fn sys_mprotect(at: u64, len: u64, prot: u64) -> u64 {
     if at % PAGE != 0 {
         return EINVAL;
     }
@@ -5216,7 +5307,7 @@ fn sys_mprotect(at: u64, len: u64, prot: u64) -> u64 {
 ///
 /// Reading `GS` is refused for the smaller reason that it hands out a kernel
 /// pointer to code that has no business with one.
-fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
+pub(super) fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
     match code {
         ARCH_SET_FS => {
             unsafe { crate::cpu::wrmsr(IA32_FS_BASE, addr) };
@@ -5433,7 +5524,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
 }
 
 extern "sysv64" {
-    fn glados_leave_guest(code: u64) -> !;
+    pub(super) fn glados_leave_guest(code: u64) -> !;
 }
 
 /// Set on the way out so an exit code of zero is still distinguishable from
@@ -5760,7 +5851,7 @@ pub fn as_guest(enter: impl FnOnce() -> u64) -> u64 {
 ///
 /// # Safety
 /// Longjmps; only where `exit_group` itself could be served.
-unsafe fn die_if_doomed() {
+pub(super) unsafe fn die_if_doomed() {
     let d = doomed();
     if d != 0 {
         unsafe { glados_leave_guest(d) };
@@ -5880,7 +5971,7 @@ unsafe fn kill_with(code: u64) -> ! {
 /// Jumps to an address derived from a file. Everything in the module docs
 /// about stage 0 containing bugs rather than malice applies here and nowhere
 /// more directly.
-pub unsafe fn run(entry: u64, stack_top: u64, want: u64) -> u64 {
+pub unsafe fn run(entry: u64, stack_top: u64, want: u64, bits32: bool) -> u64 {
     // A session of its own, which is what lets two of these run at once: its
     // deadline, its main task, its trace and its processes are its own, and
     // the end of this one sweeps only them. Callers ask `linux::busy` first,
@@ -5955,7 +6046,15 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64) -> u64 {
     });
     super::session::set_main(sess, me(), current_guest());
     super::session::enter(sess);
-    let code = as_guest(|| unsafe { glados_enter_guest(entry, stack_top) });
+    super::i386::begin(bits32);
+    let code = as_guest(|| unsafe {
+        if bits32 {
+            super::i386::glados_enter_guest32(entry, stack_top)
+        } else {
+            glados_enter_guest(entry, stack_top)
+        }
+    });
+    super::i386::begin(false);
     crate::task::ring3_active(false, 0);
     // **Every thread has to be gone before the space is.** A child still
     // running would be reading regions `teardown` is about to hand back, and
@@ -6135,7 +6234,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     {
         let region = 0x10_0000u64;
         let fake = Region { at: region, len: 4096 * 4 };
-        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         let first = sys_brk(0);
         let grown = sys_brk(region + 8192);
         let refused = sys_brk(region + 1_000_000);
@@ -6160,7 +6259,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // than about the call, which is why they went the way `ET_EXEC` went.
     {
         let fake = Region { at: 0x10_0000, len: 4096 };
-        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         out.push((
             "a zero-length mapping is EINVAL, as Linux has it",
             sys_mmap(0, 0, 3, MAP_ANONYMOUS, u64::MAX, 0) == EINVAL,
@@ -6204,7 +6303,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; SYSINFO_LEN];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: SYSINFO_LEN };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
 
         let bare = sys_time(0);
         let through = sys_time(at);
@@ -6260,7 +6359,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; 64];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 64 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         out.push((
             "pread on a stream is ESPIPE, the same answer lseek gives it",
             sys_pread64(0, at, 8, 0) == ESPIPE,
@@ -6289,7 +6388,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0xAAu8; 160];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 160 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         name_guest(&["/tmp/g/bb"], "/tmp/g/bb", None);
         // Three separate strings rather than one rewritten in place: the last
         // time claims here shared a buffer, the first one's write took the NUL
@@ -6351,7 +6450,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // on its own code.
     if let Some(two) = alloc_pages(8192) {
         let mine = Region { at: two, len: 8192 };
-        install(Regions { image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         let reserved =
             sys_mmap(two, 8192, 0, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0) == two;
         let gone = crate::mem::paging::query(two).is_some_and(|p| !p.present);
@@ -6377,7 +6476,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; 144];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 144 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         // The empty path has to live *inside* what the guest owns, because
         // `read_cstr` bounds-checks it like any other guest pointer. Pointing
         // at a local outside the region answered `EFAULT` before any of the
@@ -6415,7 +6514,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; 512];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 512 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
 
         // Three disjoint slices of the one region: the paths have to live
         // inside what the guest owns, because `read_cstr` bounds-checks them
@@ -6481,7 +6580,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; 32];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 32 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
 
         // 50 ms as a timespec, which at TIMER_HZ is five ticks.
         buf[0..8].copy_from_slice(&0u64.to_le_bytes());
@@ -6513,7 +6612,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     if let Some(two) = alloc_pages(8192) {
         let img = Region { at: two, len: 4096 };
         let interp = Region { at: two + 4096, len: 4096 };
-        install(Regions { image: img, stack: img, brk: img, interp: Some(interp), image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { image: img, stack: img, brk: img, interp: Some(interp), image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         // PROT_READ. A real `ld.so` does exactly this to its own RELRO, which
         // is how the page that halted the machine got its rights.
         let asked = sys_mprotect(two + 4096, 4096, 1) == 0;
@@ -6534,7 +6633,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // pointing at 0x100000 would mark the low megabyte.
     if let Some(own) = alloc_pages(8192) {
         let mine = Region { at: own, len: 8192 };
-        install(Regions { image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         out.push((
             "MAP_FIXED over memory the guest already holds answers that address",
             sys_mmap(own, 4096, 3, MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0) == own,
@@ -6552,7 +6651,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 
     {
         let fake = Region { at: 0x10_0000, len: 4096 };
-        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
 
         let at = sys_mmap(0, 8192, 3, MAP_ANONYMOUS, u64::MAX, 0);
         let got = (at as i64) > 0 && at % 4096 == 0;
@@ -6579,7 +6678,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         // GET_FS writes eight bytes through a guest pointer, so it is bounds
         // checked now, so the destination has to be a range the guest owns.
         let owned = Region { at, len: 8 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         let was = unsafe { crate::cpu::rdmsr(IA32_FS_BASE) };
         let set = sys_arch_prctl(ARCH_SET_FS, 0xDEAD_0000);
         let got = sys_arch_prctl(ARCH_GET_FS, at);
@@ -6611,7 +6710,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut backing = [0u64; 64];
         let at = backing.as_mut_ptr() as u64;
         let one = Region { at, len: 512 };
-        install(Regions { image: one, stack: one, brk: one, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { image: one, stack: one, brk: one, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         out.push(("a range inside what the loader gave out is owned", owns(at, 8)));
         out.push(("a range that runs off the end is not", !owns(at + 508, 8)));
         out.push(("a range below it is not", !owns(at - 8, 8)));
@@ -6647,7 +6746,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             if !mem.is_null() {
                 let at = mem as u64;
                 let owned = Region { at, len: 4096 };
-                install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+                install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
                 out.push(("a page the guest owns starts reachable", reachable(at, 8, true)));
                 out.push((
                     "mprotect to PROT_NONE is accepted",
@@ -6985,6 +7084,32 @@ pub fn build_stack(
     args: &[&str],
     aux: Aux,
 ) -> Option<u64> {
+    build_stack_w(base, guest_base, size, args, aux, 8)
+}
+
+/// The same stack in 4-byte words, for a 32-bit guest: argc, every pointer and
+/// every auxiliary pair are the width of the guest's `long`. One builder with a
+/// width rather than two copies, because the layout -- strings at the top, the
+/// random bytes under them, argc at the stack pointer -- is the part the ABI
+/// fixes and two copies of it are two chances to disagree.
+pub fn build_stack32(
+    base: *mut u8,
+    guest_base: u64,
+    size: usize,
+    args: &[&str],
+    aux: Aux,
+) -> Option<u64> {
+    build_stack_w(base, guest_base, size, args, aux, 4)
+}
+
+fn build_stack_w(
+    base: *mut u8,
+    guest_base: u64,
+    size: usize,
+    args: &[&str],
+    aux: Aux,
+    word: usize,
+) -> Option<u64> {
     let bottom = base as usize;
     let mut top = bottom.checked_add(size)?;
     // Where the guest will see an address the kernel is writing at.
@@ -7073,33 +7198,41 @@ pub fn build_stack(
     // eight bytes. It read as an alignment fix and was a tautology, which is
     // the more expensive kind of dead code because it stops anybody looking.
     let words = 1 + ptrs.len() + 1 + envs.len() + 1 + pairs.len() * 2;
-    let sp = top.checked_sub(words * 8)? & !0xF;
+    let sp = top.checked_sub(words * word)? & !0xF;
     if sp < bottom {
         return None;
     }
-    unsafe {
-        let p = sp as *mut u64;
-        p.write(ptrs.len() as u64);
-        for (i, v) in ptrs.iter().enumerate() {
-            p.add(1 + i).write(*v);
+    // A word at index `i`, at the guest's own width.
+    let put_w = |i: usize, v: u64| unsafe {
+        if word == 4 {
+            (sp as *mut u32).add(i).write(v as u32);
+        } else {
+            (sp as *mut u64).add(i).write(v);
         }
-        p.add(1 + ptrs.len()).write(0); // argv terminator
-        let e0 = 2 + ptrs.len();
-        for (i, v) in envs.iter().enumerate() {
-            p.add(e0 + i).write(*v);
-        }
-        p.add(e0 + envs.len()).write(0); // envp terminator
-        let a0 = e0 + envs.len() + 1;
-        for (i, (k, v)) in pairs.iter().enumerate() {
-            p.add(a0 + i * 2).write(*k);
-            p.add(a0 + i * 2 + 1).write(*v);
-        }
+    };
+    put_w(0, ptrs.len() as u64);
+    for (i, v) in ptrs.iter().enumerate() {
+        put_w(1 + i, *v);
+    }
+    put_w(1 + ptrs.len(), 0); // argv terminator
+    let e0 = 2 + ptrs.len();
+    for (i, v) in envs.iter().enumerate() {
+        put_w(e0 + i, *v);
+    }
+    put_w(e0 + envs.len(), 0); // envp terminator
+    let a0 = e0 + envs.len() + 1;
+    for (i, (k, v)) in pairs.iter().enumerate() {
+        put_w(a0 + i * 2, *k);
+        put_w(a0 + i * 2 + 1, *v);
     }
     Some(seen(sp))
 }
 
 /// Name the calls stage 0 knows about, for a trace a person has to read.
 pub fn name_of(nr: u64) -> &'static str {
+    if nr & super::i386::TAG != 0 {
+        return super::i386::name_of(nr & !super::i386::TAG);
+    }
     match nr {
         SYS_READ => "read",
         SYS_WRITE => "write",

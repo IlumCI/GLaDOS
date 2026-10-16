@@ -7218,7 +7218,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                                 if let Some(p) = c.path() {
                                     kprintln!(
                                         "  {:>3} {:<16} {} -> {}",
-                                        c.nr, linux::syscall::name_of(c.nr), p, c.ret as i64
+                                        c.nr & !linux::i386::TAG, linux::syscall::name_of(c.nr), p, c.ret as i64
                                     );
                                     continue;
                                 }
@@ -7469,13 +7469,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         if let Some(p) = c.path() {
                             kprintln!(
                                 "  {:>3} {:<16} {} -> {}",
-                                c.nr, linux::syscall::name_of(c.nr), p, c.ret as i64
+                                c.nr & !linux::i386::TAG, linux::syscall::name_of(c.nr), p, c.ret as i64
                             );
                             continue;
                         }
                         kprintln!(
                             "  {:>3} {:<16} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} -> {}",
-                            c.nr, linux::syscall::name_of(c.nr),
+                            c.nr & !linux::i386::TAG, linux::syscall::name_of(c.nr),
                             c.args[0], c.args[1], c.args[2], c.args[3], c.args[4], c.args[5],
                             c.ret as i64
                         );

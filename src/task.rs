@@ -151,6 +151,11 @@ pub struct Ring3 {
     pub syscall_stack: u64,
     pub host_rsp: u64,
     pub fs_base: u64,
+    /// A 32-bit guest's thread-local descriptors, its `%gs` selector, and
+    /// whether it is one at all. See `linux::i386`.
+    pub tls: [u64; 3],
+    pub gs: u16,
+    pub bits32: bool,
 }
 
 #[derive(Clone, Copy)]

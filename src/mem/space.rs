@@ -239,7 +239,10 @@ impl Space {
     /// question about what the kernel is using, and `map_low` is the entry
     /// point that asks it.
     pub fn map_page(&mut self, at: u64, phys: u64, writable: bool, user: bool) -> bool {
-        if at < WINDOW {
+        // Below the window only inside the 32-bit hole: addresses with no
+        // memory and no device behind them, so shadowing one moves nothing the
+        // kernel uses. See `fixed::hole32`.
+        if at < WINDOW && !super::fixed::in_hole(at, 4096) {
             return false;
         }
         self.map_at(at, phys, writable, user)

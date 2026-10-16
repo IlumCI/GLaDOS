@@ -118,7 +118,7 @@ pub fn hole32(devices: &[u64]) -> Option<(u64, u64)> {
     ranges.sort_by_key(|r| r.at);
     let mut best: Option<(u64, u64)> = None;
     let mut cursor = 0x0100_0000u64;
-    let mut consider = |at: u64, end: u64, best: &mut Option<(u64, u64)>| {
+    let consider = |at: u64, end: u64, best: &mut Option<(u64, u64)>| {
         let at = at.div_ceil(0x20_0000) * 0x20_0000;
         let end = (end.min(floor)) & !(0x20_0000 - 1);
         if end > at && best.is_none_or(|(a, e)| end - at > e - a) {
@@ -133,6 +133,31 @@ pub fn hole32(devices: &[u64]) -> Option<(u64, u64)> {
     }
     consider(cursor, floor, &mut best);
     best
+}
+
+/// The hole in force, once something has asked for one. Atomics, because a
+/// page-table edit asks `in_hole` and must not take a lock to do it.
+static HOLE_LO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static HOLE_HI: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Record the hole a 32-bit guest may be mapped into.
+pub fn set_hole32(h: Option<(u64, u64)>) {
+    let (lo, hi) = h.unwrap_or((0, 0));
+    HOLE_LO.store(lo, core::sync::atomic::Ordering::Release);
+    HOLE_HI.store(hi, core::sync::atomic::Ordering::Release);
+}
+
+pub fn hole32_now() -> Option<(u64, u64)> {
+    let lo = HOLE_LO.load(core::sync::atomic::Ordering::Acquire);
+    let hi = HOLE_HI.load(core::sync::atomic::Ordering::Acquire);
+    (hi > lo).then_some((lo, hi))
+}
+
+/// Whether `[at, at+len)` lies wholly inside the recorded hole, which is the
+/// one range below 4 GiB a guest's own tables may map privately.
+pub fn in_hole(at: u64, len: usize) -> bool {
+    let Some((lo, hi)) = hole32_now() else { return false };
+    at >= lo && at.checked_add(len as u64).is_some_and(|e| e <= hi)
 }
 
 /// The described ranges below 4 GiB, for a report.

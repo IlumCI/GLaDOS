@@ -37,6 +37,13 @@ pub const SYSRET_BASE: u16 = 0x28;
 pub const USER_CS32: u16 = 0x28;
 pub const USER_DS: u16 = 0x30;
 pub const USER_CS: u16 = 0x38;
+/// The first of three thread-local-storage slots, 8..=10, for a 32-bit
+/// guest's `set_thread_area`. glibc i386 asks for "any free slot" and loads
+/// `%gs` with whatever it is told, so the index is this kernel's to choose.
+pub const TLS_FIRST: usize = 8;
+pub const TLS_SLOTS: usize = 3;
+/// Entries in every core's GDT.
+const ENTRIES: usize = TLS_FIRST + TLS_SLOTS;
 
 /// A selector as ring 3 must see it. The requested privilege level is part of
 /// the selector, so a descriptor at DPL 3 loaded with RPL 0 still faults.
@@ -103,7 +110,7 @@ static TSS: Racy<Tss> = Racy::new(Tss::new());
 // 0: null, 1: code, 2: data, 3+4: TSS (system descriptors are 16 bytes),
 // 5: user code32, 6: user data, 7: user code64. The last three are in that
 // order because `sysret` derives its selectors by adding to SYSRET_BASE.
-static GDT: Racy<[u64; 8]> = Racy::new([0; 8]);
+static GDT: Racy<[u64; ENTRIES]> = Racy::new([0; ENTRIES]);
 
 /// Long-mode ring-0 code: present, DPL 0, code segment, L bit set.
 const DESC_KERNEL_CODE: u64 = 0x00AF_9B00_0000_FFFF;
@@ -124,6 +131,47 @@ const DESC_USER_CODE64: u64 = 0x00AF_FB00_0000_FFFF;
 /// taken in a guest would push its frame onto the guest's own stack, which is
 /// the guest's to corrupt.
 static RSP0_STACK: Racy<Stack> = Racy::new(Stack([0; STACK_SIZE]));
+
+/// The GDT each core loaded, so `set_tls` can write the running task's
+/// thread-local descriptors into the table its `%gs` is resolved against.
+static LOADED_GDT: Racy<[*mut u64; MAX_CPUS]> = Racy::new([core::ptr::null_mut(); MAX_CPUS]);
+
+/// Put a task's three TLS descriptors into this core's GDT.
+///
+/// A descriptor is only read when a selector is *loaded*, so this changes
+/// nothing about a `%gs` already in force -- the caller reloads it. Called
+/// with interrupts off, from the scheduler or from `set_thread_area`.
+pub fn set_tls(desc: &[u64; TLS_SLOTS]) {
+    let cpu = crate::smp::this_cpu() as usize;
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    let g = unsafe { LOADED_GDT.get()[cpu] };
+    if g.is_null() {
+        return;
+    }
+    for (i, d) in desc.iter().enumerate() {
+        unsafe { g.add(TLS_FIRST + i).write_volatile(*d) };
+    }
+}
+
+/// A data descriptor a 32-bit guest's `%gs` can point at: base, a limit in
+/// bytes or pages, DPL 3, present, writable, 32-bit. The fields of Linux's
+/// `struct user_desc` that a TLS segment uses; code segments and 16-bit ones
+/// are refused by the caller rather than built here.
+pub fn tls_descriptor(base: u32, limit: u32, pages: bool, present: bool) -> u64 {
+    let limit = limit & 0xF_FFFF;
+    let mut d = (limit as u64 & 0xFFFF) | ((base as u64 & 0xFF_FFFF) << 16);
+    // Access byte: present, DPL 3, data, writable.
+    let access: u64 = if present { 0xF2 } else { 0x72 };
+    d |= access << 40;
+    d |= ((limit as u64 >> 16) & 0xF) << 48;
+    // Flags: D/B = 32-bit, G = page granularity when asked.
+    let flags: u64 = 0x4 | if pages { 0x8 } else { 0 };
+    d |= flags << 52;
+    d |= ((base as u64 >> 24) & 0xFF) << 56;
+    d
+}
 
 /// The TSS each core actually loaded, and the ring-3 entry stack it started
 /// with, so `set_rsp0` can point a core's entry stack at a task's own.
@@ -240,7 +288,7 @@ fn tss_descriptor(base: u64) -> (u64, u64) {
 /// One core's tables, built by the bootstrap processor and loaded by the core
 /// itself.
 struct CoreTables {
-    gdt: [u64; 8],
+    gdt: [u64; ENTRIES],
     tss: Tss,
 }
 
@@ -272,7 +320,7 @@ pub fn prepare(cores: usize) {
         let df = Box::leak(alloc::vec![0u8; STACK_SIZE].into_boxed_slice());
         let pf = Box::leak(alloc::vec![0u8; STACK_SIZE].into_boxed_slice());
 
-        let t = Box::leak(Box::new(CoreTables { gdt: [0; 8], tss: Tss::new() }));
+        let t = Box::leak(Box::new(CoreTables { gdt: [0; ENTRIES], tss: Tss::new() }));
         t.tss.ist[(IST_DOUBLE_FAULT - 1) as usize] =
             (df.as_ptr() as u64 + STACK_SIZE as u64) & !0xF;
         t.tss.ist[(IST_PAGE_FAULT - 1) as usize] =
@@ -310,7 +358,12 @@ pub fn adopt(cpu: usize) -> bool {
     }
     unsafe {
         let ptr = DescriptorTablePointer {
-            limit: (size_of::<[u64; 5]>() - 1) as u16,
+            // **All of it.** This said `[u64; 5]` while the table had eight
+            // entries, so on every application processor the three ring-3
+            // descriptors sat past the limit: a guest entered on one of those
+            // cores would have taken #GP loading its own code segment. Harmless
+            // only because every guest has been pinned to core 0.
+            limit: (size_of::<[u64; ENTRIES]>() - 1) as u16,
             base: (*t).gdt.as_ptr() as u64,
         };
         asm!("lgdt [{}]", in(reg) &ptr, options(readonly, nostack, preserves_flags));
@@ -338,6 +391,7 @@ pub fn adopt(cpu: usize) -> bool {
 
         asm!("ltr {0:x}", in(reg) TSS_SEL, options(nostack, preserves_flags));
         LOADED.get()[cpu] = core::ptr::addr_of_mut!((*t).tss);
+        LOADED_GDT.get()[cpu] = core::ptr::addr_of_mut!((*t).gdt) as *mut u64;
         DEFAULT_RSP0[cpu].store((*t).tss.rsp[0], core::sync::atomic::Ordering::Relaxed);
     }
     true
@@ -363,10 +417,11 @@ pub fn init() {
 
         tss.rsp[0] = stack_top(RSP0_STACK.get());
         LOADED.get()[0] = tss as *mut Tss;
+        LOADED_GDT.get()[0] = gdt.as_mut_ptr();
         DEFAULT_RSP0[0].store(tss.rsp[0], core::sync::atomic::Ordering::Relaxed);
 
         let ptr = DescriptorTablePointer {
-            limit: (size_of::<[u64; 8]>() - 1) as u16,
+            limit: (size_of::<[u64; ENTRIES]>() - 1) as u16,
             base: gdt.as_ptr() as u64,
         };
         asm!("lgdt [{}]", in(reg) &ptr, options(readonly, nostack, preserves_flags));

@@ -41,6 +41,7 @@ pub mod epoll;
 pub mod proc;
 pub mod program;
 pub mod session;
+pub mod i386;
 pub mod syscall;
 
 /// What `diag linux` asks of everything here.
@@ -59,6 +60,7 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     out.extend(syscall::checks());
     out.extend(load::checks());
     out.extend(session::checks());
+    out.extend(i386::checks());
     out
 }
 
