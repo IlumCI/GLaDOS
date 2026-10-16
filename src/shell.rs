@@ -1977,6 +1977,12 @@ fn gpu_cmd(acpi: &Option<Acpi>, rest: &str) {
     match rest {
         "wake" => return gpu_wake(acpi, false, None),
         "wake now" => return gpu_wake(acpi, true, None),
+        "virtio" => {
+            return match acpi.as_ref().and_then(|a| a.mcfg) {
+                Some(ecam) => crate::gpu::virtio::probe(ecam),
+                None => kprintln!("  no MCFG table, so no ECAM base and no PCIe enumeration at all"),
+            }
+        }
         t if t.starts_with("wake now ") => {
             return match parse_bdf(t[9..].trim()) {
                 Some(at) => gpu_wake(acpi, true, Some(at)),
@@ -1991,7 +1997,7 @@ fn gpu_cmd(acpi: &Option<Acpi>, rest: &str) {
         }
         "" => {}
         other => {
-            kprintln!("  usage: gpu | gpu wake | gpu wake now   (got '{}')", other);
+            kprintln!("  usage: gpu | gpu wake | gpu wake now | gpu virtio   (got '{}')", other);
             return;
         }
     }
