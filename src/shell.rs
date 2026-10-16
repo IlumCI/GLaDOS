@@ -7168,7 +7168,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         kprintln!("  usage: linux run <path to an ELF in the namespace>");
                         return;
                     };
-                    let Some(bytes) = crate::sysbox::read_blob(path) else {
+                    let Some(bytes) = linux::disk::program_bytes(path) else {
                         kprintln!("  no such blob: {}", path);
                         return;
                     };
@@ -7340,6 +7340,28 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         Ok(id) => kprintln!("  [job {}] started -- 'jobs' to see it, 'kill {}' to end it", id, id),
                         Err(why) => kprintln!("  {}", why),
                     }
+                }
+                "mount" => {
+                    // linux mount <guest path> <partition>: a FAT volume the
+                    // next guests read in place, by range.
+                    match (words.next(), words.next().and_then(|n| n.parse::<u32>().ok())) {
+                        (Some(at), Some(n)) => match linux::disk::mount(at, n) {
+                            Ok(()) => kprintln!("  partition {} is at {} for guests, read-only, read in place", n, at),
+                            Err(e) => kprintln!("  {}", e),
+                        },
+                        _ => {
+                            for (p, cb) in linux::disk::mounts() {
+                                kprintln!("  {}  FAT, {} B clusters", p, cb);
+                            }
+                            kprintln!("  usage: linux mount <path> <partition>   ('fat' lists partitions)");
+                        }
+                    }
+                }
+                "cwd" => {
+                    if let Some(p) = words.next() {
+                        linux::syscall::set_start_cwd(p);
+                    }
+                    kprintln!("  the next guest starts in {}", linux::syscall::start_cwd());
                 }
                 "env" => {
                     let rest: alloc::vec::Vec<&str> = words.collect();

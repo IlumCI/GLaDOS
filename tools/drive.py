@@ -485,6 +485,15 @@ def main():
     esp_on_nvme = "--esp-on-nvme" in argv
     if esp_on_nvme:
         argv.remove("--esp-on-nvme")
+    # A different NVMe disk image: a large FAT32 volume a guest reads in place
+    # through `linux mount`, which the 192 MB fixture image is far too small
+    # to hold. Opened read-only, since nothing writes it and it may be
+    # gigabytes of somebody's installed software.
+    nvme_image = None
+    if "--nvme-image" in argv:
+        i = argv.index("--nvme-image")
+        nvme_image = Path(argv[i + 1]).resolve()
+        del argv[i:i + 2]
     esp_image = None
     if "--esp-image" in argv:
         i = argv.index("--esp-image")
@@ -874,7 +883,7 @@ def main():
     # be larger than 3 MiB and reserves the last MiB for a GPT backup header
     # it will not find; 192 MiB is what the development machine has, so a CI
     # boot and a local one look at the same topology instead of two.
-    if not esp_on_nvme:
+    if not esp_on_nvme and nvme_image is None:
         nvme = ROOT / ".qemu/nvme.img"
         if not nvme.exists():
             nvme.parent.mkdir(parents=True, exist_ok=True)
@@ -990,7 +999,8 @@ def main():
         # volume it booted from, and anything that writes the ESP from a running
         # machine is untestable. OVMF enumerates NVMe as a boot device, so
         # nothing else has to change.
-        "-drive", f"file={esp_image if esp_on_nvme else ROOT / '.qemu/nvme.img'},if=none,id=nvm0,format=raw",
+        "-drive", (f"file={nvme_image},if=none,id=nvm0,format=raw,readonly=on" if nvme_image else
+                   f"file={esp_image if esp_on_nvme else ROOT / '.qemu/nvme.img'},if=none,id=nvm0,format=raw"),
         "-device", "nvme,serial=GLADOSQEMU0001,drive=nvm0",
         # A USB controller to develop against. QEMU emulates xHCI faithfully
         # enough to bring up rings and enumerate, which is the whole reason the

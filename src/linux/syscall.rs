@@ -835,9 +835,23 @@ pub const GUEST_MMAP_AT: u64 = crate::mem::space::WINDOW + 0x5000_0000;
 
 static TABLE: Racy<Vec<Option<Space>>> = Racy::new(Vec::new());
 
-/// Which slot the syscall path is speaking for.
-static CURRENT_GUEST: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
+/// Which slot each task's syscall path is speaking for.
+///
+/// **Indexed by task, rather than one global the scheduler swaps.** It was the
+/// global, saved and restored by `schedule` beside the ring-3 state, and that
+/// is correct only while every path that switches tasks goes through that one
+/// seam and in that one order. A 32-bit guest's threads found a path that did
+/// not: two pool tasks entered `futex` with the guest's own page tables in
+/// CR3 and index 0 in the global, so `owns` checked the wrong guest's regions
+/// and answered `EFAULT` about the guest's own memory -- glibc's "The futex
+/// facility returned an unexpected error code". An array indexed by the
+/// running task has no seam to miss.
+static TASK_GUEST: [core::sync::atomic::AtomicUsize; crate::task::MAX_TASKS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::task::MAX_TASKS];
+
+fn guest_index() -> usize {
+    TASK_GUEST[me()].load(core::sync::atomic::Ordering::Relaxed)
+}
 
 /// The running guest's slot, grown into existence if this is its first use.
 ///
@@ -847,7 +861,7 @@ static CURRENT_GUEST: core::sync::atomic::AtomicUsize =
 #[allow(clippy::mut_from_ref)]
 pub unsafe fn guest_slot() -> &'static mut Option<Space> {
     let t = unsafe { TABLE.get() };
-    let i = CURRENT_GUEST.load(core::sync::atomic::Ordering::Relaxed);
+    let i = guest_index();
     while t.len() <= i {
         t.push(None);
     }
@@ -1076,7 +1090,7 @@ pub unsafe fn slot_at(i: usize) -> &'static mut Option<Space> {
 
 /// Which guest the syscall path is speaking for.
 pub fn current_guest() -> usize {
-    CURRENT_GUEST.load(core::sync::atomic::Ordering::Relaxed)
+    guest_index()
 }
 
 /// Speak for a different guest from now on.
@@ -1086,7 +1100,12 @@ pub fn current_guest() -> usize {
 /// things one name, and the first time they needed to move apart -- a kernel
 /// reading a guest's memory without running it -- the fold would be the bug.
 pub fn set_current_guest(i: usize) {
-    CURRENT_GUEST.store(i, core::sync::atomic::Ordering::Relaxed);
+    TASK_GUEST[me()].store(i, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// What task `t` speaks for, for the scheduler's report and the selftest.
+pub fn guest_of_task(t: usize) -> usize {
+    TASK_GUEST.get(t).map(|g| g.load(core::sync::atomic::Ordering::Relaxed)).unwrap_or(0)
 }
 
 /// The lowest slot holding no guest, growing the table if every one is taken.
@@ -1189,7 +1208,9 @@ pub fn reachable(at: u64, len: usize, need_write: bool) -> bool {
     while page < end {
         match crate::mem::paging::query(page) {
             Some(p) if p.present && (!need_write || p.write) => {}
-            _ => return false,
+            _ => {
+                return false;
+            }
         }
         page += PAGE;
     }
@@ -1240,7 +1261,7 @@ pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
                 v.push(Some(super::fs::Fd::Stderr));
                 v
             },
-            cwd: String::from("/"),
+            cwd: start_cwd(),
             argv: Vec::new(),
             image_path: String::new(),
             interp_path: None,
@@ -1435,6 +1456,10 @@ impl Call {
 /// Descriptor-relative calls put the path second, which is the detail that
 /// makes reading `openat`'s first argument produce a plausible empty string.
 fn path_arg(nr: u64) -> Option<usize> {
+    // A 32-bit guest's calls are tagged, and their numbers are i386's.
+    if nr & super::i386::TAG != 0 {
+        return super::i386::path_arg(nr & !super::i386::TAG);
+    }
     Some(match nr {
         SYS_OPEN | SYS_STAT | SYS_LSTAT | SYS_ACCESS => 0,
         SYS_OPENAT | SYS_NEWFSTATAT => 1,
@@ -1791,6 +1816,33 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
             String::new()
         };
         let Some(path) = super::fs::resolve(&base, &raw) else { return ENOENT };
+        // A mounted volume, read in place by range. Before everything else,
+        // so a mount point shadows whatever the namespace has at that path.
+        if super::disk::claims(&path) {
+            if wants_write {
+                return EROFS;
+            }
+            let entry = match super::disk::lookup(&path) {
+                Some(Some(n)) if n.is_dir => super::fs::Fd::Dir(alloc::rc::Rc::new(
+                    core::cell::RefCell::new(super::fs::Dir {
+                        path: path.clone(),
+                        entries: super::disk::entries(&path),
+                        at: 0,
+                    }),
+                )),
+                Some(Some(_)) => {
+                    if flags & O_DIRECTORY != 0 {
+                        return ENOTDIR;
+                    }
+                    match super::disk::DiskFile::open(&path) {
+                        Ok(f) => super::fs::Fd::Disk(alloc::rc::Rc::new(core::cell::RefCell::new(f))),
+                        Err(_) => return ENOENT,
+                    }
+                }
+                _ => return ENOENT,
+            };
+            return place_fd(fds, entry);
+        }
         // **Before the store, because these are answers rather than blobs.**
         // Nothing under `/proc` is writable, listed by `sysbox` or in a
         // snapshot, and asking the store about it first would answer `ENOENT`
@@ -2006,6 +2058,44 @@ pub(super) fn sys_name_op(path_at: u64, op: u8) -> u64 {
 /// There is no `chdir`, so this is a constant -- and it is still worth serving,
 /// because `pwd` exits 1 without it and every program that resolves a relative
 /// path for a message calls it.
+/// Where the next guest starts, for a program that finds its data relative to
+/// the directory it was started in -- which is every game.
+static START_CWD: Racy<String> = Racy::new(String::new());
+
+pub fn set_start_cwd(p: &str) {
+    unsafe { *START_CWD.get() = String::from(p) };
+}
+
+pub fn start_cwd() -> String {
+    let c = unsafe { START_CWD.get().clone() };
+    if c.is_empty() { String::from("/") } else { c }
+}
+
+/// `chdir`: move the working directory to a directory that exists, wherever
+/// it is -- the namespace, a mounted volume, `/proc` or `/dev`.
+pub(super) fn sys_chdir(path_at: u64) -> u64 {
+    let raw = match read_cstr(path_at) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
+    let Some(path) = found else { return ENOENT };
+    let is_dir = match super::disk::lookup(&path) {
+        Some(on) => on.is_some_and(|n| n.is_dir),
+        None => sysbox::is_dir(&path) || super::dev::is_dir(&path) || super::proc::is_dir(&path) || path == "/",
+    };
+    if !is_dir {
+        return ENOTDIR;
+    }
+    match unsafe { guest_slot() }.as_mut() {
+        Some(sp) => {
+            sp.cwd = path;
+            0
+        }
+        None => EBADF,
+    }
+}
+
 pub(super) fn sys_getcwd(buf: u64, len: u64) -> u64 {
     let cwd = with_fds(|_, cwd| alloc::string::String::from(cwd)).unwrap_or_default();
     let n = cwd.len() + 1;
@@ -3563,8 +3653,42 @@ pub(super) fn futex_count(addr: u64) -> u64 {
 /// context switch per tick per waiter, and it cannot deadlock the machine
 /// because the run deadline reaches it.
 pub(super) fn sys_futex(uaddr: u64, op: u64, val: u64, timeout: u64) -> u64 {
+    futex(uaddr, op, val, timeout, 0, 0, false)
+}
+
+/// The whole of `futex`, for either ABI: `ts32` says whether the timeout is a
+/// 32-bit `timespec` (i386's original `futex`) or a 64-bit one.
+///
+/// **Seven operations, and the bitset forms were the gap that stopped a real
+/// program.** glibc i386 waits with `FUTEX_WAIT_BITSET`, whose timeout is an
+/// *absolute* time on the monotonic clock (or the real-time one with
+/// `FUTEX_CLOCK_REALTIME`), and anything else answered `ENOSYS` -- which glibc
+/// treats as impossible and reports as "The futex facility returned an
+/// unexpected error code", in a loop, from every thread that waited. The
+/// bitset itself is accepted and not used to select waiters: every waiter on
+/// the word is woken, which is a spurious wake for the ones the bitset
+/// excluded, and spurious wakes are part of the contract.
+///
+/// The requeue forms are honoured the same way. Moving waiters from one word
+/// to another needs a wait queue this kernel does not keep; waking them all
+/// sends each back through its own re-check, which lands it on whichever word
+/// it should now be waiting on. Correct by the contract, and slower than
+/// Linux under contention.
+///
+/// PI operations stay refused: priority inheritance needs a scheduler that
+/// knows about priorities.
+pub(super) fn futex(uaddr: u64, op: u64, val: u64, timeout: u64, uaddr2: u64, val3: u64, ts32: bool) -> u64 {
+    futex_inner(uaddr, op, val, timeout, uaddr2, val3, ts32)
+}
+
+fn futex_inner(uaddr: u64, op: u64, val: u64, timeout: u64, uaddr2: u64, val3: u64, ts32: bool) -> u64 {
     const FUTEX_WAIT: u64 = 0;
     const FUTEX_WAKE: u64 = 1;
+    const FUTEX_REQUEUE: u64 = 3;
+    const FUTEX_CMP_REQUEUE: u64 = 4;
+    const FUTEX_WAKE_OP: u64 = 5;
+    const FUTEX_WAIT_BITSET: u64 = 9;
+    const FUTEX_WAKE_BITSET: u64 = 10;
     const PRIVATE: u64 = 128;
     const CLOCK_REALTIME: u64 = 256;
     let kind = op & !(PRIVATE | CLOCK_REALTIME);
@@ -3574,35 +3698,66 @@ pub(super) fn sys_futex(uaddr: u64, op: u64, val: u64, timeout: u64) -> u64 {
     if !reachable(uaddr, 4, false) {
         return EFAULT;
     }
+    let read_ts = |at: u64| -> Option<(u64, u64)> {
+        if ts32 {
+            if !reachable(at, 8, false) {
+                return None;
+            }
+            Some(unsafe {
+                (
+                    core::ptr::read_unaligned(at as *const u32) as u64,
+                    core::ptr::read_unaligned((at + 4) as *const u32) as u64,
+                )
+            })
+        } else {
+            if !reachable(at, 16, false) {
+                return None;
+            }
+            Some(unsafe {
+                (
+                    core::ptr::read_unaligned(at as *const u64),
+                    core::ptr::read_unaligned((at + 8) as *const u64),
+                )
+            })
+        }
+    };
+    let woken_live = || val.min(super::thread::live() as u64 + 1);
     match kind {
-        FUTEX_WAIT => {
+        FUTEX_WAIT | FUTEX_WAIT_BITSET => {
+            if kind == FUTEX_WAIT_BITSET && val3 as u32 == 0 {
+                return EINVAL;
+            }
             let seen = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
-            if seen as u64 != val {
+            if seen as u64 != val as u32 as u64 {
                 // Already changed. `EAGAIN` and not zero, because a caller
                 // that slept would re-check and a caller told zero would not.
                 return EAGAIN;
             }
             let woken = futex_count(uaddr);
-            // A relative timeout, and a zero pointer means forever.
-            let until = if timeout != 0 && reachable(timeout, 16, false) {
-                let (sec, nsec) = unsafe {
-                    (
-                        core::ptr::read_volatile(timeout as *const u64),
-                        core::ptr::read_volatile((timeout + 8) as *const u64),
-                    )
-                };
-                let hz = crate::TIMER_HZ as u64;
-                Some(
-                    crate::dev::lapic::ticks()
-                        + sec.saturating_mul(hz)
-                        + nsec * hz / 1_000_000_000,
-                )
-            } else {
+            let hz = crate::TIMER_HZ as u64;
+            let until = if timeout == 0 {
                 None
+            } else {
+                let Some((sec, nsec)) = read_ts(timeout) else { return EFAULT };
+                if kind == FUTEX_WAIT_BITSET {
+                    // Absolute, on the clock the flag names.
+                    let clk = if op & CLOCK_REALTIME != 0 { 0 } else { 1 };
+                    let (now_s, now_ns) = clock_pair(clk).unwrap_or((0, 0));
+                    let want = sec.saturating_mul(1_000_000_000).saturating_add(nsec);
+                    let now = now_s.saturating_mul(1_000_000_000).saturating_add(now_ns);
+                    let left = want.saturating_sub(now);
+                    Some(crate::dev::lapic::ticks() + left / (1_000_000_000 / hz))
+                } else {
+                    Some(
+                        crate::dev::lapic::ticks()
+                            + sec.saturating_mul(hz)
+                            + nsec * hz / 1_000_000_000,
+                    )
+                }
             };
             loop {
                 let now = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
-                if now as u64 != val || futex_count(uaddr) != woken {
+                if now as u64 != val as u32 as u64 || futex_count(uaddr) != woken {
                     return 0;
                 }
                 if let Some(t) = until {
@@ -3622,13 +3777,64 @@ pub(super) fn sys_futex(uaddr: u64, op: u64, val: u64, timeout: u64) -> u64 {
                 crate::task::yield_now();
             }
         }
-        FUTEX_WAKE => {
+        FUTEX_WAKE | FUTEX_WAKE_BITSET => {
             futex_bump(uaddr);
             // How many were woken. There is no queue to count, so this answers
             // what was asked for, which is what a caller uses to decide
             // whether to bother with a syscall next time -- and over-reporting
             // is the safe direction, since it makes a caller do less.
-            val.min(super::thread::live() as u64 + 1)
+            woken_live()
+        }
+        FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
+            if kind == FUTEX_CMP_REQUEUE {
+                let now = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
+                if now != val3 as u32 {
+                    return EAGAIN;
+                }
+            }
+            futex_bump(uaddr);
+            woken_live()
+        }
+        FUTEX_WAKE_OP => {
+            // *uaddr2 = op(*uaddr2, oparg); wake uaddr; and wake uaddr2 too
+            // if the old value compares as the encoding says. Atomic here
+            // because a syscall runs with interrupts off on one core and the
+            // word is the guest's, which no other core can be running.
+            if uaddr2 % 4 != 0 || !reachable(uaddr2, 4, true) {
+                return EFAULT;
+            }
+            let enc = val3 as u32;
+            let (opn, cmp) = ((enc >> 28) & 7, (enc >> 24) & 15);
+            let mut oparg = (enc >> 12) & 0xFFF;
+            let cmparg = enc & 0xFFF;
+            if enc & (1 << 31) != 0 {
+                oparg = 1u32.checked_shl(oparg).unwrap_or(0);
+            }
+            let p = uaddr2 as *mut u32;
+            let old = unsafe { core::ptr::read_volatile(p) };
+            let new = match opn {
+                0 => oparg,
+                1 => old.wrapping_add(oparg),
+                2 => old | oparg,
+                3 => old & !oparg,
+                4 => old ^ oparg,
+                _ => return ENOSYS,
+            };
+            unsafe { core::ptr::write_volatile(p, new) };
+            futex_bump(uaddr);
+            let hit = match cmp {
+                0 => old == cmparg,
+                1 => old != cmparg,
+                2 => (old as i32) < cmparg as i32,
+                3 => (old as i32) <= cmparg as i32,
+                4 => (old as i32) > cmparg as i32,
+                5 => (old as i32) >= cmparg as i32,
+                _ => return ENOSYS,
+            };
+            if hit {
+                futex_bump(uaddr2);
+            }
+            woken_live()
         }
         _ => ENOSYS,
     }
@@ -3670,7 +3876,20 @@ pub fn run_thread(w: super::thread::Work, stack: u64) {
         core::ptr::write(core::ptr::addr_of_mut!(GLADOS_SYSCALL_STACK), stack);
         crate::cpu::wrmsr(IA32_FS_BASE, w.fs);
     }
-    let code = as_guest(|| unsafe { glados_enter_guest(w.rip, w.rsp) });
+    // A 32-bit thread carries its TLS and its `%gs` in from the clone; they
+    // go into this core's GDT and the segment register before the way in.
+    if w.regs32.is_some() {
+        super::i386::load(w.tls32, w.gs, true);
+    }
+    let code = as_guest(|| unsafe {
+        match &w.regs32 {
+            Some(r) => super::i386::glados_enter_guest32_regs(r as *const _),
+            None => glados_enter_guest(w.rip, w.rsp),
+        }
+    });
+    if w.regs32.is_some() {
+        super::i386::begin(false);
+    }
     // **A thread that crashes takes its process with it**, as on Linux: the
     // memory it shares with every other thread is exactly what a wild pointer
     // may have just corrupted, so the others carrying on would be running on
@@ -4125,6 +4344,14 @@ pub(super) fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
         // Zero is the honest answer and is what a program reading a closed
         // pipe sees.
         Some(Some(super::fs::Fd::Stdin)) => 0,
+        Some(Some(super::fs::Fd::Disk(body))) => {
+            let f = &mut *body.borrow_mut();
+            let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
+            let at = f.at;
+            let n = f.read_at(at, out);
+            f.at = at.saturating_add(n);
+            n as u64
+        }
         Some(Some(super::fs::Fd::File(body))) => {
             let f = &mut *body.borrow_mut();
             let (data, at) = (&f.data, &mut f.at);
@@ -4184,6 +4411,10 @@ pub(super) fn sys_pread64(fd: u64, buf: u64, len: u64, off: u64) -> u64 {
         return EFAULT;
     }
     with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Disk(body))) => {
+            let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
+            body.borrow_mut().read_at(off as usize, out) as u64
+        }
         Some(Some(super::fs::Fd::File(body))) => {
             let f = body.borrow();
             // Past the end is zero rather than an error, the same answer
@@ -4445,6 +4676,21 @@ pub(super) fn sys_prlimit64(_pid: u64, resource: u64, new: u64, old: u64) -> u64
 
 pub(super) fn sys_lseek(fd: u64, off: u64, whence: u64) -> u64 {
     with_fds(|fds, _| match fds.get_mut(fd as usize) {
+        Some(Some(super::fs::Fd::Disk(body))) => {
+            let f = &mut *body.borrow_mut();
+            let base = match whence {
+                0 => 0i64,
+                1 => f.at as i64,
+                2 => f.size as i64,
+                _ => return EINVAL,
+            };
+            let want = base.saturating_add(off as i64);
+            if want < 0 {
+                return EINVAL;
+            }
+            f.at = want as usize;
+            want as u64
+        }
         Some(Some(super::fs::Fd::File(body))) => {
             let f = &mut *body.borrow_mut();
             let (data, at) = (&f.data, &mut f.at);
@@ -4562,6 +4808,10 @@ fn write_stat64(buf: u64, kind: super::fs::Kind, size: usize, ino: u64) -> u64 {
 
 pub(super) fn sys_fstat(fd: u64, buf: u64) -> u64 {
     let found = with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Disk(b))) => {
+            let f = b.borrow();
+            Some((super::fs::Kind::File, f.size, super::fs::ino_of(&f.path)))
+        }
         Some(Some(super::fs::Fd::File(b))) => {
             let f = b.borrow();
             Some((super::fs::Kind::File, f.data.len(), super::fs::ino_of(&f.path)))
@@ -4621,6 +4871,13 @@ pub(super) fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 
         None => None,
     };
     let Some(path) = found else { return ENOENT };
+    if let Some(on) = super::disk::lookup(&path) {
+        return match on {
+            Some(n) if n.is_dir => write_stat(buf, super::fs::Kind::Dir, 0, super::fs::ino_of(&path)),
+            Some(n) => write_stat(buf, super::fs::Kind::File, n.size, super::fs::ino_of(&path)),
+            None => ENOENT,
+        };
+    }
     if let Some(n) = super::dev::node(&path) {
         return write_stat(buf, super::fs::Kind::Char, super::dev::size(n), super::fs::ino_of(&path));
     }
@@ -5011,6 +5268,15 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
         }
         let Some(sp) = (unsafe { guest_slot() }).as_ref() else { return ENOMEM };
         match sp.fds.get(fd as usize).and_then(|f| f.as_ref()) {
+            Some(super::fs::Fd::Disk(b)) => {
+                let mut f = b.borrow_mut();
+                let from = (off as usize).min(f.size);
+                let to = from.saturating_add(len as usize).min(f.size);
+                let mut v = alloc::vec![0u8; to - from];
+                let got = f.read_at(from, &mut v);
+                v.truncate(got);
+                Some(v)
+            }
             Some(super::fs::Fd::File(b)) => {
                 let f = b.borrow();
                 // A mapping may run past the end of the file, and the tail is
@@ -5410,6 +5676,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_PSELECT6 => (sys_pselect6(f.rdi, f.rsi, f.rdx, f.r10, f.r8), true),
         SYS_SENDFILE => (sys_sendfile(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_GETCWD => (sys_getcwd(f.rdi, f.rsi), true),
+        80 => (sys_chdir(f.rdi), true),
         SYS_MKDIR => (sys_name_op(f.rdi, b'm'), true),
         SYS_RMDIR => (sys_name_op(f.rdi, b'r'), true),
         SYS_UNLINK => (sys_name_op(f.rdi, b'u'), true),
@@ -5463,7 +5730,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         // Returns into a different program rather than to its caller, so the
         // frame it was handed is the thing it edits.
         SYS_EXECVE => (super::load::exec(f), true),
-        SYS_FUTEX => (sys_futex(f.rdi, f.rsi, f.rdx, f.r10), true),
+        SYS_FUTEX => (futex(f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9, false), true),
         SYS_GETTID => (super::thread::current_tid(), true),
         // A thread yielding to another is a thing this kernel can actually do,
         // which is unusual in this file: most scheduling calls are answered

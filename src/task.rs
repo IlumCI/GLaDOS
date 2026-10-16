@@ -1665,9 +1665,10 @@ fn schedule() {
         // the global and 0 still in its field, so a guard on the field skips
         // the save and loses the index. Two stores on a path that runs a
         // hundred times a second is not worth a branch that can be wrong.
-        let live = crate::linux::syscall::current_guest();
-        *out_guest = live;
-        crate::linux::syscall::set_current_guest(in_guest);
+        // Nothing to swap any more: the index is an array indexed by task
+        // (`linux::syscall::TASK_GUEST`), and the field is kept only so the
+        // tuple above stays the shape the rest of this function reads.
+        let _ = (out_guest, in_guest);
         if !in_fpu.is_null() {
             crate::cpu::xrstor_from(in_fpu);
         }

@@ -42,6 +42,7 @@ pub mod proc;
 pub mod program;
 pub mod session;
 pub mod i386;
+pub mod disk;
 pub mod syscall;
 
 /// What `diag linux` asks of everything here.
@@ -61,6 +62,7 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     out.extend(load::checks());
     out.extend(session::checks());
     out.extend(i386::checks());
+    out.extend(disk::checks());
     out
 }
 
@@ -92,7 +94,7 @@ pub fn start_job(path: &str, args: &[&str]) -> Result<u32, &'static str> {
     if let Some(why) = busy() {
         return Err(why);
     }
-    let bytes = crate::sysbox::read_blob(path).ok_or("no such blob")?;
+    let bytes = disk::program_bytes(path).ok_or("no such program")?;
     let mut argv: alloc::vec::Vec<alloc::string::String> = alloc::vec![alloc::string::String::from(path)];
     argv.extend(args.iter().map(|a| alloc::string::String::from(*a)));
     let title = argv.join(" ");

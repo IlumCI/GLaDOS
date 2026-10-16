@@ -170,6 +170,8 @@ pub enum Fd {
     /// `Vec` a `File` carries would be either impossible or a copy of the
     /// screen that nobody scans out.
     Dev(Rc<RefCell<DevFile>>),
+    /// A file on a mounted FAT volume, read by range. See `linux::disk`.
+    Disk(Rc<RefCell<crate::linux::disk::DiskFile>>),
 }
 
 /// An open `/dev` node and where its cursor sits.
@@ -297,6 +299,7 @@ impl Fd {
             Fd::Epoll(b) => Fd::Epoll(b.clone()),
             Fd::Memfd(b) => Fd::Memfd(b.clone()),
             Fd::Dev(b) => Fd::Dev(b.clone()),
+            Fd::Disk(b) => Fd::Disk(b.clone()),
         }
     }
 

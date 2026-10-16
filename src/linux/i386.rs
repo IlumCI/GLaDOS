@@ -126,9 +126,49 @@ glados_enter_guest32:
 // and the guest's first memory access a #GP. DPL 3 survives the return, and
 // the kernel, in 64-bit mode, does not care what is in them.
 
+core::arch::global_asm!(
+    r#"
+    .globl glados_enter_guest32_regs
+glados_enter_guest32_regs:
+    push rbp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov [rip + GLADOS_HOST_RSP], rsp
+    mov ax, 0x33
+    mov ds, ax
+    mov es, ax
+    push 0x33
+    push qword ptr [rdi + 8]
+    push qword ptr [rdi + 16]
+    push 0x2b
+    push qword ptr [rdi + 0]
+    mov eax, [rdi + 24]
+    mov ebx, [rdi + 32]
+    mov ecx, [rdi + 40]
+    mov edx, [rdi + 48]
+    mov esi, [rdi + 56]
+    mov ebp, [rdi + 72]
+    xor r8d, r8d
+    xor r9d, r9d
+    xor r10d, r10d
+    xor r11d, r11d
+    xor r12d, r12d
+    xor r13d, r13d
+    xor r14d, r14d
+    xor r15d, r15d
+    mov edi, [rdi + 64]
+    iretq
+"#
+);
+
 extern "sysv64" {
     fn glados_int80_entry();
     pub fn glados_enter_guest32(entry: u64, stack_top: u64) -> u64;
+    /// Enter a 32-bit guest with every register set, for a cloned thread.
+    pub fn glados_enter_guest32_regs(r: *const super::thread::Regs32) -> u64;
 }
 
 /// What the entry stub pushed, in the order it pushed it, followed by the
@@ -273,6 +313,64 @@ fn set_thread_area(at: u64) -> u64 {
     0
 }
 
+// ---- threads ---------------------------------------------------------------
+
+/// i386 `clone(flags, newsp, parent_tid, tls, child_tid)` -- note the order,
+/// which is not x86-64's: the TLS argument is fourth and is a pointer to a
+/// `struct user_desc`, not a base address.
+///
+/// Threads only. A clone without `CLONE_THREAD` is a new process, and a
+/// 32-bit `fork` is not here yet; `ENOSYS` is what glibc's `posix_spawn` and
+/// `fork` already know how to report.
+fn clone(f: &Frame32, flags: u64, newsp: u64, ptid: u64, tls_desc: u64, ctid: u64) -> u64 {
+    if !super::thread::is_thread(flags) {
+        return sc::ENOSYS;
+    }
+    if ptid != 0 && !sc::reachable(ptid, 4, true) {
+        return sc::EFAULT;
+    }
+    if ctid != 0 && !sc::reachable(ctid, 4, true) {
+        return sc::EFAULT;
+    }
+    // Four-byte aligned rather than sixteen: glibc i386 subtracts 28 from a
+    // sixteen-aligned stack before passing it, and the child pops back to
+    // alignment itself.
+    if newsp == 0 || newsp % 4 != 0 || !sc::owns(newsp.saturating_sub(64), 64) {
+        return sc::EINVAL;
+    }
+    // The child's thread-local storage: the parent's descriptors, with the
+    // one `CLONE_SETTLS` names replaced by the new thread's own.
+    let mut tls = unsafe { *core::ptr::addr_of!(TLS) };
+    if flags & super::thread::CLONE_SETTLS != 0 {
+        if !sc::reachable(tls_desc, 16, false) {
+            return sc::EFAULT;
+        }
+        let rd = |o: u64| unsafe { core::ptr::read_unaligned((tls_desc + o) as *const u32) };
+        let (entry, base, limit, bits) = (rd(0) as usize, rd(4), rd(8), rd(12));
+        if !(gdt::TLS_FIRST..gdt::TLS_FIRST + gdt::TLS_SLOTS).contains(&entry) {
+            return sc::EINVAL;
+        }
+        tls[entry - gdt::TLS_FIRST] = gdt::tls_descriptor(base, limit, bits & (1 << 4) != 0, bits & (1 << 5) == 0);
+    }
+    let (_, gs, _) = save();
+    let regs = super::thread::Regs32 {
+        eip: f.rip,
+        esp: newsp,
+        eflags: f.rflags,
+        eax: 0,
+        ebx: f.rbx as u32 as u64,
+        ecx: newsp,
+        edx: f.rdx as u32 as u64,
+        esi: f.rsi as u32 as u64,
+        edi: f.rdi as u32 as u64,
+        ebp: f.rbp as u32 as u64,
+    };
+    match super::thread::spawn32(flags, ptid, ctid, regs, tls, gs) {
+        Ok(tid) => tid,
+        Err(e) => e,
+    }
+}
+
 // ---- the dispatcher ------------------------------------------------------
 
 /// A 32-bit argument as the signed value a 64-bit implementation expects: a
@@ -335,6 +433,7 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
         4 => (sc::sys_write(b, c, d as usize), true),
         5 => (sc::sys_openat(AT_FDCWD, b, c, d), true),
         6 => (sc::sys_close(b), true),
+        12 => (sc::sys_chdir(b), true),
         13 => {
             let t = sc::sys_time(0);
             if b != 0 && !put_u32(b, t as u32) {
@@ -373,6 +472,7 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
             }
         }
         91 => (sc::sys_munmap(b, c), true),
+        120 => (clone(f, b, c, d, si, di), true),
         122 => (sc::sys_uname(b), true),
         125 => (sc::sys_mprotect(b, c, d), true),
         140 => {
@@ -450,6 +550,31 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
         242 => (sc::sys_sched_getaffinity(b, c, d), true),
         243 => (set_thread_area(b), true),
         258 => (super::thread::current_tid(), true),
+        267 => {
+            // clock_nanosleep with a 32-bit timespec; TIMER_ABSTIME (1) asks
+            // for a wake at an absolute time on that clock.
+            if !sc::reachable(d, 8, false) {
+                (sc::EFAULT, true)
+            } else {
+                let (s, ns) = unsafe {
+                    (
+                        core::ptr::read_unaligned(d as *const u32) as u64,
+                        core::ptr::read_unaligned((d + 4) as *const u32) as u64,
+                    )
+                };
+                if c & 1 != 0 {
+                    let (now_s, now_ns) = sc::clock_pair(b).unwrap_or((0, 0));
+                    // u64 nanoseconds, which last 584 years: this target has no
+                    // working 128-bit division, so u128 is not to be reached for.
+                    let want = s.saturating_mul(1_000_000_000).saturating_add(ns);
+                    let now = now_s.saturating_mul(1_000_000_000).saturating_add(now_ns);
+                    let left = want.saturating_sub(now);
+                    (sc::sleep_for(left / 1_000_000_000, left % 1_000_000_000), true)
+                } else {
+                    (sc::sleep_for(s, ns), true)
+                }
+            }
+        }
         265 => match sc::clock_pair(b) {
             Some((s, ns)) => (put_ts32(c, s, ns), true),
             None => (sc::EINVAL, true),
@@ -469,13 +594,23 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
         386 => (sc::ENOSYS, true),
         403 => (sc::sys_clock_gettime(b, c), true),
         407 => (sc::sys_nanosleep(d), true),
-        422 => (sc::sys_futex(b, c, d, si), true),
+        240 => (sc::futex(b, c, d, si, di, bp, true), true),
+        422 => (sc::futex(b, c, d, si, di, bp, false), true),
         _ => (sc::ENOSYS, false),
     };
     sc::record(Call { nr: nr | TAG, args: a, ret, served, path: [0; PATH_SNIP], path_len: 0 });
     crate::sky::server::pump();
     f.rax = ret as u32 as u64;
     unsafe { sc::die_if_doomed() };
+}
+
+/// Which argument of an i386 call is a path, for the trace.
+pub fn path_arg(nr: u64) -> Option<usize> {
+    Some(match nr {
+        5 | 12 | 33 | 85 | 195 | 196 => 0,
+        295 | 300 | 305 | 307 | 383 => 1,
+        _ => return None,
+    })
 }
 
 /// The i386 name of a call, for the trace.
@@ -495,6 +630,7 @@ pub fn name_of(nr: u64) -> &'static str {
         85 => "readlink",
         90 => "mmap",
         91 => "munmap",
+        120 => "clone",
         122 => "uname",
         125 => "mprotect",
         140 => "_llseek",
@@ -519,6 +655,7 @@ pub fn name_of(nr: u64) -> &'static str {
         252 => "exit_group",
         258 => "set_tid_address",
         265 => "clock_gettime",
+        267 => "clock_nanosleep",
         295 => "openat",
         300 => "fstatat64",
         311 => "set_robust_list",

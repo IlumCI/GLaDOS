@@ -400,6 +400,59 @@ impl Volume {
         Ok(current)
     }
 
+    /// Every cluster of a chain, in order, reading each FAT sector once.
+    ///
+    /// For ranged reads of a large file: walking `next_cluster` costs a sector
+    /// read *per cluster*, and a 130 MB archive at 32 KiB clusters is four
+    /// thousand of them before the first byte is served. A FAT sector holds
+    /// 128 entries, so caching the last one read takes that to about thirty.
+    pub fn chain(&self, start: u32) -> Result<Vec<u32>, Error> {
+        let entry_bytes = if self.kind == Kind::Fat32 { 4u64 } else { 2 };
+        let eoc = if self.kind == Kind::Fat32 { 0x0FFF_FFF8 } else { 0xFFF8 };
+        let bps = self.bytes_per_sector as u64;
+        let mut out = Vec::new();
+        let mut buf = vec![0u8; self.bytes_per_sector as usize];
+        let mut have: Option<u64> = None;
+        let mut cluster = start;
+        loop {
+            if cluster < 2 || cluster - 2 >= self.total_clusters {
+                return Err(Error::Io);
+            }
+            out.push(cluster);
+            if out.len() as u32 > self.total_clusters + 1 {
+                return Err(Error::Io);
+            }
+            let off = cluster as u64 * entry_bytes;
+            let sector = self.fat_start + off / bps;
+            if sector >= self.fat_start + self.sectors_per_fat as u64 {
+                return Err(Error::Io);
+            }
+            if have != Some(sector) {
+                block::read(sector, 1, &mut buf).map_err(|_| Error::Io)?;
+                have = Some(sector);
+            }
+            let within = (off % bps) as usize;
+            let next = match self.kind {
+                Kind::Fat32 => u32_at(&buf, within) & 0x0FFF_FFFF,
+                Kind::Fat16 => u16_at(&buf, within) as u32,
+            };
+            if next >= eoc || next < 2 {
+                return Ok(out);
+            }
+            cluster = next;
+        }
+    }
+
+    /// Read `count` clusters starting at `first`, which the caller has checked
+    /// are consecutive on disk, into `buf`.
+    pub fn read_run(&self, first: u32, count: u32, buf: &mut [u8]) -> Result<(), Error> {
+        if first < 2 || first - 2 + count > self.total_clusters {
+            return Err(Error::Io);
+        }
+        block::read(self.cluster_lba(first), self.sectors_per_cluster * count, buf)
+            .map_err(|_| Error::Io)
+    }
+
     pub fn read_file(&self, entry: &DirEntry) -> Result<Vec<u8>, Error> {
         if entry.is_dir {
             return Err(Error::NotFound);

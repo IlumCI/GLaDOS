@@ -92,6 +92,8 @@ pub fn ready(fd: &Fd) -> u16 {
             }
         }
         Fd::Dir(_) => POLLIN,
+        // A file on disk is read in place and never waits.
+        Fd::Disk(_) => POLLIN,
         // Always ready both ways, like a regular file: there is nothing to
         // wait for in memory that is already there.
         Fd::Memfd(_) => POLLIN | POLLOUT,

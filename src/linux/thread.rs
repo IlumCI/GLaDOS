@@ -108,6 +108,33 @@ pub struct Work {
     /// entry and walk the same tables; `run_thread` installs both.
     pub guest: usize,
     pub session: usize,
+    /// A 32-bit thread: every register it resumes with, its TLS descriptors
+    /// and its `%gs`. `None` for a 64-bit one, which resumes with registers
+    /// cleared at `rip`/`rsp` as it always has.
+    pub regs32: Option<Regs32>,
+    pub tls32: [u64; 3],
+    pub gs: u16,
+}
+
+/// What a 32-bit thread resumes with. On i386 a clone's child gets *every*
+/// register its parent had at the `int 0x80`, except `eax` (zero, which is
+/// how it knows it is the child) and `esp` (its new stack) -- glibc's
+/// `clone.S` pops the thread function off the new stack through registers it
+/// expects to find intact. Widened to u64 so the entry stub reads them with
+/// plain loads; offsets are fixed by `glados_enter_guest32_regs`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Regs32 {
+    pub eip: u64,
+    pub esp: u64,
+    pub eflags: u64,
+    pub eax: u64,
+    pub ebx: u64,
+    pub ecx: u64,
+    pub edx: u64,
+    pub esi: u64,
+    pub edi: u64,
+    pub ebp: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -190,7 +217,6 @@ pub fn is_thread(flags: u64) -> bool {
 
 /// Start a thread. Answers its tid, or an errno.
 pub fn spawn(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64, rip: u64) -> Result<u64, u64> {
-    const EAGAIN: u64 = (-11i64) as u64;
     const EINVAL: u64 = (-22i64) as u64;
     if stack == 0 || stack % 16 != 0 {
         // Linux does not check this and a misaligned stack is a `movaps` fault
@@ -208,7 +234,35 @@ pub fn spawn(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64, rip: u64) -
         ctid: if flags & CLONE_CHILD_CLEARTID != 0 { ctid } else { 0 },
         guest: super::syscall::current_guest(),
         session: super::session::current().unwrap_or(usize::MAX),
+        regs32: None,
+        tls32: [0; 3],
+        gs: 0,
     };
+    start(work, flags, ptid)
+}
+
+/// A 32-bit thread, for `linux::i386`'s `clone`.
+pub fn spawn32(flags: u64, ptid: u64, ctid: u64, regs: Regs32, tls32: [u64; 3], gs: u16) -> Result<u64, u64> {
+    let tid = super::fork::next_id();
+    let work = Work {
+        rip: regs.eip,
+        rsp: regs.esp,
+        fs: 0,
+        tid,
+        ctid: if flags & CLONE_CHILD_CLEARTID != 0 { ctid } else { 0 },
+        guest: super::syscall::current_guest(),
+        session: super::session::current().unwrap_or(usize::MAX),
+        regs32: Some(regs),
+        tls32,
+        gs,
+    };
+    start(work, flags, ptid)
+}
+
+/// Give `work` a pool slot and a task, whichever width it is.
+fn start(work: Work, flags: u64, ptid: u64) -> Result<u64, u64> {
+    const EAGAIN: u64 = (-11i64) as u64;
+    let tid = work.tid;
 
     let idx = {
         let s = unsafe { &mut *SLOTS.get() };

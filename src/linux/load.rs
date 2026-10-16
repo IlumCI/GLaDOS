@@ -486,7 +486,7 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
     let interp = match img.interp.as_deref() {
         None => None,
         Some(path) => {
-            let bytes = crate::sysbox::read_blob(path)
+            let bytes = super::disk::program_bytes(path)
                 .ok_or("the interpreter this binary names is not in the namespace")?;
             let p = place(&bytes, virt.then_some(lay.interp))?;
             // Both halves of one process speak one ABI.

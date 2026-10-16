@@ -47,8 +47,24 @@ use alloc::vec::Vec;
 /// and both spellings would be the same thing said twice. `self` is what
 /// programs actually use.
 pub fn is_dir(path: &str) -> bool {
-    matches!(path, "/proc" | "/proc/self")
+    matches!(
+        path,
+        "/proc" | "/proc/self" | "/sys" | "/sys/devices" | "/sys/devices/system"
+            | "/sys/devices/system/cpu" | "/sys/devices/system/cpu/cpu0"
+            | "/sys/devices/system/cpu/cpu0/cpufreq"
+    )
 }
+
+/// The one `/sys` file there is: the rate the timestamp counter runs at.
+///
+/// **A fact this machine measured**, which is what earns it a file under the
+/// rule above. Boot calibrates the TSC against the PIT, and a program reading
+/// `cpuinfo_max_freq` is almost always doing what Source's `tier0` does with
+/// it -- scaling `rdtsc` into seconds -- for which the TSC's own rate is the
+/// right answer and a turbo ceiling would be the wrong one. Found as the file
+/// the engine asked for immediately before "Unable to determine CPU
+/// Frequency" and exiting.
+const CPU_MAX_FREQ: &str = "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq";
 
 /// Whether this path is one this module answers at all.
 ///
@@ -71,6 +87,7 @@ pub fn is_file(path: &str) -> bool {
     matches!(
         path,
         "/proc/self/exe" | "/proc/self/cmdline" | "/proc/self/environ" | "/proc/self/maps"
+            | CPU_MAX_FREQ
     )
 }
 
@@ -95,7 +112,11 @@ pub fn read(path: &str) -> Option<Vec<u8>> {
         // and what a program expecting to read its own image relies on.
         "/proc/self/exe" => {
             let real = syscall::guest_image()?;
-            crate::sysbox::read_blob(&real)
+            super::disk::program_bytes(&real)
+        }
+        CPU_MAX_FREQ => {
+            let mhz = crate::time::tsc_mhz();
+            (mhz != 0).then(|| format!("{}\n", mhz * 1000).into_bytes())
         }
         // Both of these are NUL-separated with a trailing NUL, which is the
         // detail that matters: a reader splits on the separator and a missing
