@@ -45,9 +45,8 @@ import { textChunks, loadText } from "./chunks.js";
 import { Treasury } from "./runner.js";
 import { rewardOf, DEFAULT as DEFAULT_REWARD } from "./rewards.js";
 
-// For refusals a person reads on a miner's screen: 0x6ef4...527d, 1,000,000.
+// For refusals a person reads on a miner's screen: 0x6ef4...527d.
 const short = (a) => `${a.slice(0, 6)}...${a.slice(-4)}`;
-const grouped = (n) => n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 import wasmModule from "../target/wasm32-unknown-unknown/release/glados_edge.wasm";
 import { bind, imports } from "../boundary.mjs";
 
@@ -402,16 +401,17 @@ export class Pool {
     return this.keys;
   }
 
-  // **The holding gate, enforced where a miner connects.** The distributor has
-  // a gate of its own at claim time, and the second review (audit-2 F1) showed
-  // it can be shared: GLADOS moves between wallets untaxed, so one gate-sized
-  // balance can be handed from claimant to claimant. The operator's decision
-  // is to refuse at the door instead -- a miner whose payout address does not
-  // hold the minimum is not mining here at all.
+  // **The door check, where a miner connects.** It turns away only what can
+  // never be paid: a worker name that is not a wallet, and a contract address
+  // (a transfer to the WETH/GLADOS pair reverts the whole payout for everyone).
+  // The holding minimum is *not* a door check any more -- a wallet under it
+  // mines and is paid in $GLaDOS; holding GATE_MIN only unlocks the RWA reward
+  // choices, which the epoch build decides on the balance at payout time.
   //
-  // Answers a refusal to send, or null. An unreadable balance admits: the gate
-  // that pays (epoch.js, at build time) is the one that must not be walked
-  // through, and it refuses an unreadable balance by carrying the work.
+  // Answers a refusal to send, or null. An unreadable balance admits: the read
+  // here only spares a contract from mining for nothing, and the one read that
+  // decides both pay and reward runs again at every epoch, on the balance as it
+  // is then.
   // **A wallet's reward choice, per address, in this shard's storage.** Every
   // worker of one address lands on this shard (shardFor hashes the address),
   // so the choice lives beside the work it pays for. The latest greeting wins:
@@ -462,16 +462,14 @@ export class Pool {
         return null;
       }
     }
-    const wei = hit.wei;
     // A contract is never paid (the payout would revert for everyone if it
     // were the pair), so it is refused at the door rather than mined for nothing.
     if (hit.contract || addr === PAIR_ADDR) {
       return `${short(head)} is a smart contract, not a wallet: use the address of a wallet you hold the keys to`;
     }
-    if (wei < this.gateMin) {
-      const have = wei / 10n ** 18n;
-      return `${short(head)} holds ${grouped(have)} $GLaDOS; mining needs ${grouped(this.gateMin / 10n ** 18n)} or more. Top it up and the miner retries by itself`;
-    }
+    // Under GATE_MIN is no longer refused: the wallet mines and is paid in
+    // $GLaDOS, and the holding only decides whether it may be paid in an RWA,
+    // settled at payout time. So `hit.wei` is read but never a reason to close.
     return null;
   }
 

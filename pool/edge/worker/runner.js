@@ -654,7 +654,10 @@ export class Treasury {
         if (v.balance === undefined) continue;
         if (v.code === "contract") ineligible.add(a);
         balances.set(a, v.balance);
-        if (v.code !== "contract" && v.balance >= gateMin) eligible += 1;
+        // Everyone payable counts toward the read budget now, not only holders:
+        // a wallet under the gate is still paid (in $GLaDOS), so it fills a
+        // recipient slot the same as a holder does.
+        if (v.code !== "contract") eligible += 1;
       }
     }
     // Weighed by what each wallet chose: a basket wallet costs a send per
@@ -663,10 +666,19 @@ export class Treasury {
     const choices = this.choices || new Map();
     const cfg = this.cfg;
     const legReserve = Object.values(MENU).reduce((g, m) => g + (m.tokens.length ? m.tokens.length * cfg.v3LegGas : cfg.v2LegGas), 0);
-    const e = build({ now, prev, balances, gateMin, ineligible, maxRecipients: MAX_RECIPIENTS, considered,
-                      weigh: (a) => legsOf(rewardOf(choices.get(a))) * cfg.perRecipientGas,
+    // A wallet's legs are its *effective* reward: under the gate it is paid in
+    // $GLaDOS (one leg) however many its chosen basket would have cost, so the
+    // gas budget is neither over- nor under-reserved for it.
+    const effective = (a) => ((balances.get(a) ?? 0n) >= gateMin ? rewardOf(choices.get(a)) : DEFAULT_REWARD);
+    const e = build({ now, prev, balances, ineligible, maxRecipients: MAX_RECIPIENTS, considered,
+                      weigh: (a) => legsOf(effective(a)) * cfg.perRecipientGas,
                       capacity: cfg.maxTxGas - cfg.baseGas - legReserve });
-    e.choices = new Map(e.recipients.filter((a) => choices.has(a)).map((a) => [a, choices.get(a)]));
+    // The RWA choice is honoured only for a wallet holding GATE_MIN; under it,
+    // the recipient is paid in $GLaDOS whatever it asked for. The stored choice
+    // is kept, so reaching the minimum restores it next epoch with no reconnect.
+    e.choices = new Map(e.recipients
+      .filter((a) => choices.has(a) && (balances.get(a) ?? 0n) >= gateMin)
+      .map((a) => [a, choices.get(a)]));
     e.blocked = await this.blocked(e.recipients.filter((a) => rewardOf(e.choices.get(a)) !== DEFAULT_REWARD));
     return e;
   }
