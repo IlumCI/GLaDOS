@@ -200,6 +200,7 @@ export class Pool {
     this.ctx = ctx;
     this.env = env;
     this.conns = new Map(); // WebSocket -> connection id in the core
+    this.connAddr = new Map(); // WebSocket -> the miner's payout address, for the revenue push
     this.core = null;
     this.ups = [];          // { i, where, sock, writer, running }
     this.gateMin = BigInt(env.GATE_MIN || "0") * 10n ** 18n;
@@ -314,8 +315,10 @@ export class Pool {
       }
       const lines = text.split("\n").filter((l) => l.trim());
       // What this wallet chose to be paid in, recorded from every greeting,
-      // gated or not: the latest hello for an address is its choice.
-      for (const l of lines) if (l.includes("glados.hello")) this.noteReward(l);
+      // gated or not: the latest hello for an address is its choice. The same
+      // greeting names the address this socket is for, so the revenue push
+      // knows where to send.
+      for (const l of lines) if (l.includes("glados.hello")) { this.noteReward(l); this.noteConn(server, l); }
       if (!gate.passed) {
         gate.queue.push(...lines);
         if (gate.checking) return;
@@ -440,6 +443,36 @@ export class Pool {
     this.log(`[reward] ${addr} is paid in ${code}`);
   }
 
+  noteConn(ws, hello) {
+    try {
+      const head = ((JSON.parse(hello).params || {}).worker || "").split(".")[0];
+      if (/^0x[0-9a-fA-F]{40}$/.test(head)) this.connAddr.set(ws, head.toLowerCase());
+    } catch {}
+  }
+
+  // The live revenue figure, pushed to each connected miner. Priced on the
+  // treasury shard (SHARDS=1 keeps every miner here); a wallet is shown the
+  // amount for the asset it is actually paid in -- its choice at or over the
+  // gate, else $GLaDOS -- so the page's line matches the payout. Best-effort:
+  // a socket that will not take it is dropped, never retried into a loop.
+  async pushEarn() {
+    if (!this.runsTreasury || this.conns.size === 0) return;
+    const earn = await this.treasurer.earnQuote().catch(() => null);
+    if (!earn || !earn.byCode) return;
+    const rewards = await this.rewards();
+    for (const [ws] of this.conns) {
+      const addr = this.connAddr.get(ws);
+      if (!addr) continue;
+      const held = (this.balances.get(addr)?.wei ?? 0n) >= this.gateMin;
+      const code = held ? (rewards.get(addr) || DEFAULT_REWARD) : DEFAULT_REWARD;
+      const value = earn.byCode[code];
+      if (typeof value === "number" && value >= 0) {
+        try { ws.send(JSON.stringify({ method: "glados.earn", params: { asset: code, value } }) + "\n"); }
+        catch { this.drop(ws); }
+      }
+    }
+  }
+
   async gate(hello) {
     let worker = "";
     try { worker = JSON.parse(hello).params.worker || ""; } catch {}
@@ -519,6 +552,7 @@ export class Pool {
 
   drop(ws) {
     const id = this.conns.get(ws);
+    this.connAddr.delete(ws);
     if (id !== undefined) {
       this.core.close(id);
       this.conns.delete(ws);
@@ -669,6 +703,7 @@ export class Pool {
     }
     await this.save();
     if (this.runsTreasury) await this.treasurer.tick();
+    await this.pushEarn();
     if (this.conns.size > 0) await this.ctx.storage.setAlarm(Date.now() + JOB_PERIOD_MS);
     else if (this.runsTreasury) await this.ctx.storage.setAlarm(Date.now() + 5 * 60_000);
   }
