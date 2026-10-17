@@ -924,6 +924,7 @@ export class Treasury {
       const snapshot = whole || (await getBig(this.storage, "treasury.snapshot")) || {};
       for (const [k, v] of Object.entries(updates || {})) if (!(snapshot[k] !== undefined && big(snapshot[k]) >= big(v))) snapshot[k] = v;
       next.lastRecipients = paid.recipients.length;
+      next.lastEpochAt = this.now(); // when a distribution last paid, for the page's payout line
       this.epochCache = null;
       await this.save(next, { ...chunked(`treasury.epoch.${next.epochs}`, paid), ...chunked("treasury.snapshot", snapshot) });
       this.log(`epoch ${paid.id} paid ${paid.recipients.length} miner(s) in ${a.hash}`);
@@ -1033,8 +1034,14 @@ export class Treasury {
     const now = this.now();
     if (this.earn && now - this.earn.at < this.cfg.earnEveryMs) return this.earn;
     let byCode = {};
+    // Shared payout facts the page shows alongside the per-wallet figure: how
+    // many miners the last distribution split between, the distribution
+    // cadence, and when the last one paid (null before the first). Read-only.
+    let meta = { recipients: 0, epochMs: this.cfg.epochEveryMs, lastAt: null };
     try {
       const state = await this.state();
+      meta.recipients = state.lastRecipients || 0;
+      meta.lastAt = state.lastEpochAt || null;
       if (state.contract) {
         const keys = await this.pool.treasury();
         const [bal, gp] = await Promise.all([
@@ -1059,9 +1066,9 @@ export class Treasury {
       }
     } catch (e) {
       this.log(`earn estimate skipped this tick: ${e && e.message ? e.message : e}`);
-      return this.earn || { at: now, byCode: {} };
+      return this.earn || { at: now, byCode: {}, ...meta };
     }
-    this.earn = { at: now, byCode };
+    this.earn = { at: now, byCode, ...meta };
     return this.earn;
   }
 
