@@ -61,10 +61,12 @@ pub enum Node {
     /// what it is. Naming them `keyboard` and `mouse` would be friendlier and
     /// would mean nothing enumerated them.
     Input(super::input::Dev),
+    /// The ALSA control and playback devices -- see `snd`.
+    Snd(super::snd::Node),
 }
 
 pub fn is_dir(path: &str) -> bool {
-    matches!(path, "/dev" | "/dev/input")
+    matches!(path, "/dev" | "/dev/input" | "/dev/snd")
 }
 
 /// Which node a path names, as a pure function of the path.
@@ -81,6 +83,8 @@ pub fn node(path: &str) -> Option<Node> {
         "/dev/fb0" => Some(Node::Fb),
         "/dev/input/event0" => Some(Node::Input(super::input::Dev::Keyboard)),
         "/dev/input/event1" => Some(Node::Input(super::input::Dev::Pointer)),
+        "/dev/snd/controlC0" => Some(Node::Snd(super::snd::Node::Control)),
+        "/dev/snd/pcmC0D0p" => Some(Node::Snd(super::snd::Node::Playback)),
         _ => None,
     }
 }
@@ -97,9 +101,11 @@ pub fn entries(dir: &str) -> Vec<(String, bool, usize)> {
             let mut v: Vec<_> =
                 ["fb0", "null", "random", "urandom", "zero"].iter().map(|n| file(n)).collect();
             v.insert(2, ("input".to_string(), true, 0usize));
+            v.push(("snd".to_string(), true, 0usize));
             v
         }
         "/dev/input" => alloc::vec![file("event0"), file("event1")],
+        "/dev/snd" => alloc::vec![file("controlC0"), file("pcmC0D0p")],
         _ => Vec::new(),
     }
 }
@@ -311,7 +317,7 @@ pub fn read(n: Node, at: usize, buf: &mut [u8]) -> usize {
         // Read through `sys_read` rather than here, because an event stream
         // needs the descriptor's own cursor advanced and a blocking caller put
         // to sleep, neither of which fits a call that takes an offset.
-        Node::Input(_) => 0,
+        Node::Input(_) | Node::Snd(_) => 0,
     }
 }
 
@@ -331,6 +337,7 @@ pub fn write(n: Node, at: usize, buf: &[u8]) -> usize {
         // taken and discarded rather than refused, because a refusal makes a
         // library conclude the device is broken and stop reading it.
         Node::Input(_) => buf.len(),
+        Node::Snd(_) => 0,
         Node::Fb => {
             let Some((base, _, _, len, _, _)) = fb() else { return 0 };
             if at >= len {

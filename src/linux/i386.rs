@@ -90,7 +90,13 @@ glados_enter_guest32:
     push r13
     push r14
     push r15
-    mov [rip + GLADOS_HOST_RSP], rsp
+    mov rax, rsp
+    pushfq
+    cli
+    swapgs
+    mov gs:[16], rax
+    swapgs
+    popfq
     mov ax, 0x33
     mov ds, ax
     mov es, ax
@@ -136,7 +142,13 @@ glados_enter_guest32_regs:
     push r13
     push r14
     push r15
-    mov [rip + GLADOS_HOST_RSP], rsp
+    mov rax, rsp
+    pushfq
+    cli
+    swapgs
+    mov gs:[16], rax
+    swapgs
+    popfq
     mov ax, 0x33
     mov ds, ax
     mov es, ax
@@ -208,15 +220,22 @@ pub fn arm() {
 /// at all. Globals swapped per task, the pattern `GLADOS_GUEST_RSP` and its
 /// neighbours use: a value only read while its own task runs *is* per task as
 /// long as the scheduler swaps it.
-static mut TLS: [u64; gdt::TLS_SLOTS] = [0; gdt::TLS_SLOTS];
-static mut BITS32: bool = false;
+///
+/// Per core, for the reason `syscall::CoreEntry` is: swapped per task only
+/// works while one core runs guests.
+static mut TLS_CORE: [[u64; gdt::TLS_SLOTS]; crate::task::MAX_CPUS] = [[0; gdt::TLS_SLOTS]; crate::task::MAX_CPUS];
+static mut BITS32_CORE: [bool; crate::task::MAX_CPUS] = [false; crate::task::MAX_CPUS];
+
+fn cpu() -> usize {
+    (crate::smp::this_cpu() as usize).min(crate::task::MAX_CPUS - 1)
+}
 
 /// Begin or end carrying 32-bit state on the running task.
 pub fn begin(on: bool) {
     unsafe {
-        BITS32 = on;
-        TLS = [0; gdt::TLS_SLOTS];
-        gdt::set_tls(&*core::ptr::addr_of!(TLS));
+        BITS32_CORE[cpu()] = on;
+        TLS_CORE[cpu()] = [0; gdt::TLS_SLOTS];
+        gdt::set_tls(&*core::ptr::addr_of!(TLS_CORE[cpu()]));
     }
 }
 
@@ -224,7 +243,7 @@ pub fn begin(on: bool) {
 pub fn save() -> ([u64; gdt::TLS_SLOTS], u16, bool) {
     let gs: u16;
     unsafe { core::arch::asm!("mov {0:x}, gs", out(reg) gs, options(nomem, nostack, preserves_flags)) };
-    unsafe { (*core::ptr::addr_of!(TLS), gs, BITS32) }
+    unsafe { (*core::ptr::addr_of!(TLS_CORE[cpu()]), gs, BITS32_CORE[cpu()]) }
 }
 
 /// Put the incoming task's back: its descriptors into this core's GDT, and its
@@ -235,8 +254,8 @@ pub fn save() -> ([u64; gdt::TLS_SLOTS], u16, bool) {
 /// in the scheduler, which is a halted machine rather than a confused guest.
 pub fn load(tls: [u64; gdt::TLS_SLOTS], gs: u16, bits32: bool) {
     unsafe {
-        BITS32 = bits32;
-        TLS = tls;
+        BITS32_CORE[cpu()] = bits32;
+        TLS_CORE[cpu()] = tls;
     }
     if !bits32 {
         return;
@@ -281,7 +300,7 @@ fn set_thread_area(at: u64) -> u64 {
     let contents = (bits >> 1) & 3;
     let not_present = bits & (1 << 5) != 0;
     let pages = bits & (1 << 4) != 0;
-    let tls = unsafe { &mut *core::ptr::addr_of_mut!(TLS) };
+    let tls = unsafe { &mut *core::ptr::addr_of_mut!(TLS_CORE[cpu()]) };
     let slot = if entry == -1 {
         match tls.iter().position(|d| *d == 0) {
             Some(i) => i,
@@ -340,7 +359,7 @@ fn clone(f: &Frame32, flags: u64, newsp: u64, ptid: u64, tls_desc: u64, ctid: u6
     }
     // The child's thread-local storage: the parent's descriptors, with the
     // one `CLONE_SETTLS` names replaced by the new thread's own.
-    let mut tls = unsafe { *core::ptr::addr_of!(TLS) };
+    let mut tls = unsafe { *core::ptr::addr_of!(TLS_CORE[cpu()]) };
     if flags & super::thread::CLONE_SETTLS != 0 {
         if !sc::reachable(tls_desc, 16, false) {
             return sc::EFAULT;
@@ -411,8 +430,10 @@ fn put_ts32(at: u64, sec: u64, nsec: u64) -> u64 {
 
 #[no_mangle]
 pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
+    sc::big_lock();
     unsafe { sc::die_if_doomed() };
     let nr = f.rax as u32 as u64;
+    let t0 = super::prof::start();
     let a = [
         f.rbx as u32 as u64,
         f.rcx as u32 as u64,
@@ -422,6 +443,7 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
         f.rbp as u32 as u64,
     ];
     let [b, c, d, si, di, bp] = a;
+    super::prof::enter(nr | TAG, &a);
     const AT_FDCWD: u64 = super::fs::AT_FDCWD as u64;
 
     let (ret, served) = match nr {
@@ -552,6 +574,13 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
             (r, true)
         }
         195 | 196 => (sc::sys_statat(AT_FDCWD, b, c, 0), true),
+        // The old ones, with the old structure: see `STAT_OLD`.
+        106 | 107 | 108 => {
+            sc::STAT_OLD.store(true, core::sync::atomic::Ordering::Relaxed);
+            let r = if nr == 108 { sc::sys_fstat(b, c) } else { sc::sys_statat(AT_FDCWD, b, c, 0) };
+            sc::STAT_OLD.store(false, core::sync::atomic::Ordering::Relaxed);
+            (r, true)
+        }
         197 => (sc::sys_fstat(b, c), true),
         218 => (sc::sys_mincore(b, c, d), true),
         219 => (sc::sys_madvise(b, c, d), true),
@@ -645,13 +674,29 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
         256 => (sc::sys_epoll_wait(b, c, d, si), true),
         403 => (sc::sys_clock_gettime(b, c), true),
         407 => (sc::sys_nanosleep(d), true),
-        240 => (sc::futex(b, c, d, si, di, bp, true), true),
+        240 => {
+            if c & 0x7f == 0 || c & 0x7f == 9 {
+                super::prof::note_stack(f.rsp as u32 as u64, f.rip as u32 as u64);
+            }
+            (sc::futex(b, c, d, si, di, bp, true), true)
+        }
         422 => (sc::futex(b, c, d, si, di, bp, false), true),
         _ => (sc::ENOSYS, false),
     };
     sc::record(Call { nr: nr | TAG, args: a, ret, served, path: [0; PATH_SNIP], path_len: 0 });
+    super::prof::bill(super::prof::row(nr, true), t0);
+    let t1 = super::prof::start();
     crate::sky::server::pump();
+    super::prof::bill(super::prof::PUMP, t1);
     f.rax = ret as u32 as u64;
+    // mmap, mmap2, munmap, mprotect, brk, mremap: anything that may have
+    // removed or narrowed a translation another core is still holding.
+    if matches!(nr, 90 | 192 | 91 | 125 | 45 | 163) {
+        sc::tlb_shootdown();
+    }
+    super::prof::leave();
+    sc::wake_nappers();
+    sc::big_unlock();
     unsafe { sc::die_if_doomed() };
 }
 
@@ -694,6 +739,9 @@ pub fn name_of(nr: u64) -> &'static str {
         183 => "getcwd",
         191 => "ugetrlimit",
         192 => "mmap2",
+        106 => "stat",
+        107 => "lstat",
+        108 => "fstat",
         195 => "stat64",
         196 => "lstat64",
         197 => "fstat64",

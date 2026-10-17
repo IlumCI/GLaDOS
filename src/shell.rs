@@ -2537,7 +2537,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
     // twenty more arms across this match.
     // A sentence that happens to start with a command's name is still a
     // sentence: "help me find the big files" is not the `help` command.
-    if crate::ai::intent::verb_first_language(cmd, rest) {
+    // Not for a subcommand of `linux` the shell owns: `linux feat all off`
+    // carries "all", a function word, and was handed to the chat model as a
+    // sentence.
+    if !shell_owns && crate::ai::intent::verb_first_language(cmd, rest) {
         run_decision(crate::ai::intent::decide(line), boot, acpi, interp);
         return;
     }
@@ -2638,6 +2641,17 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         }
         "mine" => mine_cmd(rest),
         "wlan" | "wifi" => wifi_cmd(rest),
+        "services" => match rest.trim() {
+            "reload" => {
+                crate::linux::services::load();
+                crate::linux::services::report();
+            }
+            "stop" => {
+                crate::linux::services::stop();
+                kprintln!("  every service ended, and none restarts until 'services reload'");
+            }
+            _ => crate::linux::services::report(),
+        },
         "trust" => match rest.trim() {
             "verify" => crate::net::trust::verify_roots(),
             _ => crate::net::trust::report(),
@@ -7405,6 +7419,76 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     linux::syscall::MEMLOG.store(on, core::sync::atomic::Ordering::Relaxed);
                     kprintln!("  memory-map calls are {} as they happen", if on { "printed" } else { "not printed" });
                 }
+                "snd" => linux::snd::report(),
+                "waits" => linux::prof::inflight(),
+                "feat" => {
+                    use core::sync::atomic::Ordering::Relaxed;
+                    let name = words.next().unwrap_or("");
+                    let on = words.next() != Some("off");
+                    let flags: [(&str, &core::sync::atomic::AtomicBool); 9] = [
+                        ("idle", &crate::sky::server::FEAT_IDLE),
+                        ("desk", &crate::sky::server::FEAT_DESK),
+                        ("big", &linux::syscall::FEAT_BIG),
+                        ("shoot", &linux::syscall::FEAT_SHOOT),
+                        ("nap", &linux::syscall::NAP),
+                        ("spread", &linux::syscall::SPREAD),
+                        ("lock", &crate::sky::server::FEAT_LOCK),
+                        ("hover", &crate::sky::server::FEAT_HOVER),
+                        ("netctl", &crate::sky::server::FEAT_NETCTL),
+                    ];
+                    for (n, f) in flags.iter() {
+                        if name == "all" || name == *n {
+                            f.store(on, Relaxed);
+                        }
+                    }
+                    for (n, f) in flags.iter() {
+                        kprintln!("  {:<8} {}", n, if f.load(Relaxed) { "on" } else { "off" });
+                    }
+                }
+                "nap" => {
+                    let on = words.next() != Some("off");
+                    linux::syscall::NAP.store(on, core::sync::atomic::Ordering::Relaxed);
+                    kprintln!("  a guest's waits {}", if on { "nap until woken or a tick passes" } else { "yield and come straight back" });
+                }
+                // The last calls of every live session, as they stand: what a
+                // guest that has stopped making progress was last asking for.
+                "tail" => {
+                    let n = words.next().and_then(|w| w.parse::<usize>().ok()).unwrap_or(60);
+                    for sid in 0..linux::session::MAX {
+                        let calls = linux::session::take_tail(sid);
+                        if calls.is_empty() {
+                            continue;
+                        }
+                        kprintln!("  session {}: last {} of {}", sid, n.min(calls.len()), calls.len());
+                        for c in calls.iter().rev().take(n).rev() {
+                            kprintln!(
+                                "  {:>3} {:<16} {:#x} {:#x} {:#x} {:#x} {:#x} -> {}",
+                                c.nr & !linux::i386::TAG, linux::syscall::name_of(c.nr),
+                                c.args[0], c.args[1], c.args[2], c.args[3], c.args[4], c.ret as i64
+                            );
+                        }
+                    }
+                }
+                "cores" => {
+                    match words.next() {
+                        Some("one") => linux::syscall::SPREAD.store(false, core::sync::atomic::Ordering::Relaxed),
+                        Some("all") => linux::syscall::SPREAD.store(true, core::sync::atomic::Ordering::Relaxed),
+                        _ => {}
+                    }
+                    kprintln!(
+                        "  guests run on {}",
+                        if linux::syscall::SPREAD.load(core::sync::atomic::Ordering::Relaxed) { "every core" } else { "the core that started them" }
+                    );
+                }
+                "prof" => match words.next() {
+                    Some("on") => {
+                        linux::prof::reset();
+                        linux::prof::ON.store(true, core::sync::atomic::Ordering::Relaxed);
+                        kprintln!("  profiling guests: kernel time per call, ring-3 samples per core");
+                    }
+                    Some("off") => linux::prof::ON.store(false, core::sync::atomic::Ordering::Relaxed),
+                    _ => linux::prof::report(),
+                },
                 "misses" => {
                     let on = words.next() != Some("off");
                     linux::syscall::MISSES.store(on, core::sync::atomic::Ordering::Relaxed);
@@ -9943,6 +10027,37 @@ fn wifi_cmd(rest: &str) {
             crate::net::ccmp::dump();
             crate::net::wpa2::dump();
         }
+        // The record both managers read: the kernel's own auto-join and
+        // `netd` at ring 3 (see `linux::netctl`).
+        "remember" => {
+            if a.is_empty() {
+                kprintln!("  usage: wifi remember <ssid> [passphrase]");
+            } else if crate::linux::netctl::remember(a, b) {
+                kprintln!("  remembered {} -- joined on its own whenever it is heard", a);
+            } else {
+                kprintln!("  could not write {}", crate::linux::netctl::KNOWN);
+            }
+        }
+        "forget" => {
+            if crate::linux::netctl::forget(a) {
+                kprintln!("  forgot {}", a);
+            } else {
+                kprintln!("  {} was not known", a);
+            }
+        }
+        "known" => {
+            let k = crate::linux::netctl::known();
+            if k.is_empty() {
+                kprintln!("  no known networks. 'wifi remember <ssid> [pass]'");
+            }
+            for (ssid, pass) in k {
+                kprintln!("  {}  {}", ssid, if pass.is_empty() { "open" } else { "with a passphrase" });
+            }
+            kprintln!(
+                "  {}",
+                if crate::linux::netctl::managed() { "netd is deciding (ring 3)" } else { "the kernel decides on its own" }
+            );
+        }
         "leave" => match crate::net::wlan() {
             None => kprintln!("  no wireless driver."),
             Some(w) => {
@@ -9952,6 +10067,7 @@ fn wifi_cmd(rest: &str) {
         },
         _ => {
             kprintln!("  usage: wifi [status] | scan | join <ssid> [pass] | leave");
+            kprintln!("         wifi remember <ssid> [pass] | forget <ssid> | known");
             kprintln!("         wifi rehearse [off]   a synthetic room, for when there is no radio");
             kprintln!("         wifi frames           every frame as hex, for tools/dot11check.py");
         }

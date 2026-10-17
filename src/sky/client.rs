@@ -534,10 +534,11 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push((
         "and an object of an interface nothing answers for yet is refused, rather than accepting requests silently",
         {
-            // wl_seat: published, bound, and not yet served. wl_compositor was
-            // this claim's subject until it was served.
-            let seat = c.publish("wl_seat", 7);
-            let _ = try_send(&mut c, &bind(seat, "wl_seat", 1, 47));
+            // wp_viewporter: published, bound, and not yet served.
+            // wl_compositor and then wl_seat were this claim's subject until
+            // each was served, and it went on failing for the seat afterwards.
+            let vp = c.publish("wp_viewporter", 1);
+            let _ = try_send(&mut c, &bind(vp, "wp_viewporter", 1, 47));
             try_send(&mut c, &req(47, 0, |w| { w.new_id(48); })) == Err(Error::NoMethod)
         },
     ));

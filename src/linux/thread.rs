@@ -56,11 +56,13 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// How many guest threads may exist at once.
 ///
-/// Eight against `MAX_TASKS` of 24, leaving room for the shell, the clock, the
-/// resident mind and the agent. A ninth `clone` is `EAGAIN`, which is what
-/// Linux answers when it is out of task structures and what every threading
-/// library already handles.
-pub const MAX_THREADS: usize = 8;
+/// Forty-eight. It was eight, and a GL program on four cores needs that many
+/// before it has started one of its own: llvmpipe runs a rasterizer per core.
+/// See `task::MAX_TASKS` for what that cost. Past the limit `clone` is
+/// `EAGAIN`, which is what Linux answers when it is out of task structures --
+/// and which a library that waits for its new thread to report in does not
+/// always handle, so the limit has to be one a real program does not reach.
+pub const MAX_THREADS: usize = 48;
 
 /// Sixteen KiB, the same as the main guest's, and for the same reason: the
 /// dispatcher is ordinary Rust that formats and prints, so a stack sized for
@@ -363,7 +365,11 @@ pub fn current_tid() -> u64 {
 /// Where a guest thread's `clone` is answered and its life is spent.
 fn body() {
     loop {
+        // Under the guest lock: `clone` fills this slot from a syscall,
+        // possibly on another core.
+        crate::linux::syscall::big_lock();
         let work = my_slot().and_then(|i| unsafe { (*SLOTS.get())[i].work });
+        crate::linux::syscall::big_unlock();
         let Some(w) = work else {
             // Parked. `hlt` rather than a spin, so an idle pool costs one
             // wake-up per timer tick instead of every scheduler round.

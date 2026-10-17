@@ -792,6 +792,14 @@ impl Client {
         self.scene.xdg.get(&tl.xdg).map(|x| x.surface)
     }
 
+    /// The desktop window a `wl_surface` is the content of, if any.
+    pub fn key_of(&self, surface: u32) -> Option<u64> {
+        self.scene.toplevels.values().find_map(|t| {
+            let (k, _) = t.window.as_ref()?;
+            (self.scene.xdg.get(&t.xdg)?.surface == surface).then_some(*k)
+        })
+    }
+
     pub fn take_effects(&mut self) -> Vec<Effect> {
         core::mem::take(&mut self.scene.effects)
     }

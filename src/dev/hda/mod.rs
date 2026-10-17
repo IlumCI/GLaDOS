@@ -32,6 +32,7 @@
 
 pub mod codec;
 pub mod verb;
+pub mod pcm;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -513,6 +514,12 @@ impl Hda {
         let addr = self.codecs[ci].addr;
         self.stream = Some(Stream { sd, codec: addr, path, _bdl: bdl, _buf: buf });
         Ok(())
+    }
+
+    /// The running stream's buffer, for a writer filling it ahead of the
+    /// controller -- `pcm` -- rather than handing over a whole sound at once.
+    pub fn ring(&mut self) -> Option<&mut [u8]> {
+        self.stream.as_mut().map(|s| s._buf.as_mut_slice())
     }
 
     /// Where the stream is in its buffer, in bytes.

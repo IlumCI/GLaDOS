@@ -164,6 +164,18 @@ pub fn record(c: Call, cap: usize) {
 }
 
 /// The last calls past the trace's cap, oldest first, emptied.
+/// The tail as it stands, leaving it in place: what a crash report prints.
+pub fn peek_tail(s: usize) -> Vec<Call> {
+    let (ring, head) = unsafe { &(*TAIL.get())[s] };
+    let mut out = Vec::with_capacity(ring.len());
+    out.extend_from_slice(&ring[*head..]);
+    out.extend_from_slice(&ring[..*head]);
+    if out.is_empty() {
+        out.extend_from_slice(unsafe { &(*TRACE.get())[s] });
+    }
+    out
+}
+
 pub fn take_tail(s: usize) -> Vec<Call> {
     let (ring, head) = core::mem::take(unsafe { &mut (*TAIL.get())[s] });
     let mut out = Vec::with_capacity(ring.len());

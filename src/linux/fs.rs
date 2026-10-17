@@ -260,6 +260,16 @@ pub struct DevFile {
     pub nonblock: bool,
 }
 
+impl Drop for DevFile {
+    /// The last descriptor on a sound device stops the stream, which is what
+    /// a program that exits without draining expects.
+    fn drop(&mut self) {
+        if let super::dev::Node::Snd(k) = self.node {
+            super::snd::closed(k);
+        }
+    }
+}
+
 impl Fd {
     pub fn is_dir(&self) -> bool {
         matches!(self, Fd::Dir(_))
@@ -515,10 +525,19 @@ pub fn dirent(out: &mut Vec<u8>, room: usize, ino: u64, next: u64, is_dir: bool,
 /// to spot hard links, so a hash of the path answers both: distinct paths get
 /// distinct numbers, and the same path gets the same number twice running.
 /// Zero is avoided because some callers treat it as absent.
+///
+/// **Thirty-one bits, not sixty-four.** A 32-bit program's `stat` goes
+/// through glibc's compatibility path: the kernel answers `statx`, and glibc
+/// narrows the result into the old `struct stat` -- answering `EOVERFLOW` if
+/// the inode does not fit. The kernel saw success and the program saw a file
+/// it "cannot access": libasound, reading its own configuration, left Portal
+/// silent that way. Real Linux inode numbers fit, so these must too; at 31 bits
+/// two paths collide once in about forty thousand files, and a collision only
+/// makes two files look like hard links.
 pub fn ino_of(path: &str) -> u64 {
     let h = crate::store::sha256::hash(path.as_bytes());
-    let n = u64::from_le_bytes([h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]]);
-    n | 1
+    let n = u32::from_le_bytes([h[0], h[1], h[2], h[3]]) as u64;
+    (n & 0x7FFF_FFFF) | 1
 }
 
 /// What `diag linux` asks of the projection.

@@ -426,8 +426,29 @@ fn index_walk(st: &cas::Store, r: &cas::ChunkRef, kind: u8, depth: usize, w: &mu
     }
 }
 
+/// **Under the guest lock, with interrupts off**, because the namespace is
+/// reached from two kinds of task: a guest's syscalls -- `/tmp` writes, a
+/// library opened -- and every kernel task. A guest syscall runs with
+/// interrupts off and holds the guest lock, so it is atomic against other
+/// guests; a kernel task walking the tree was not atomic against anything. The
+/// timer preempted the shell halfway down a path, a guest's `close` committed
+/// a file into the same directory, and the shell resumed walking freed
+/// memory -- found as Portal hanging or faulting in LLVM, one run in one, as
+/// soon as the shell's idle loop started reading `/etc/net/known` every tick.
+/// Taking both here closes it for every caller at once, on one core or many.
 fn with<R>(f: impl FnOnce(&mut Sysbox) -> R) -> Option<R> {
-    unsafe { BOX.get().as_mut().map(f) }
+    let took = crate::linux::syscall::big_take();
+    let flags: u64;
+    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags)) };
+    crate::cpu::disable_interrupts();
+    let r = unsafe { BOX.get().as_mut().map(f) };
+    if flags & (1 << 9) != 0 {
+        crate::cpu::enable_interrupts();
+    }
+    if took {
+        crate::linux::syscall::big_unlock();
+    }
+    r
 }
 
 fn path_of(s: &str) -> Vec<String> {

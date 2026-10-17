@@ -57,6 +57,9 @@ struct Session {
     /// Each window's commit count as last shown, so only a new picture
     /// repaints the desktop.
     shown: Vec<(u64, u64)>,
+    /// Each window's buffer size as last shown, so a client that changes
+    /// resolution gets a window of the new size.
+    sizes: Vec<(u64, (u32, u32))>,
     /// Where this connection is in the keyboard's evdev ring, and which of its
     /// windows last had the focus.
     kbd: u64,
@@ -74,6 +77,7 @@ static SESSIONS: Racy<Vec<Session>> = Racy::new(Vec::new());
 /// Bind the name, once. Called whenever a guest is installed, so a client
 /// started first thing finds a server already listening.
 pub fn serve() {
+    crate::linux::netctl::serve();
     let l = unsafe { LISTENER.get() };
     if l.is_some() {
         return;
@@ -90,7 +94,18 @@ pub fn clients() -> usize {
 }
 
 /// One turn: accept, read, answer, show. Cheap when nobody is connected.
+/// Bisecting switches (`linux feat lock|hover|netctl`).
+pub static FEAT_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+pub static FEAT_HOVER: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+pub static FEAT_NETCTL: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+pub static FEAT_IDLE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+pub static FEAT_DESK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
 pub fn pump() {
+    // The network endpoint, served on the same turn for the same reason.
+    if FEAT_NETCTL.load(core::sync::atomic::Ordering::Relaxed) {
+        crate::linux::netctl::pump();
+    }
     let Some(listener) = unsafe { LISTENER.get() }.clone() else { return };
     let sessions = unsafe { SESSIONS.get() };
     while let Ok(Some((pipe, side))) = unix::accept(&listener) {
@@ -100,6 +115,10 @@ pub fn pump() {
         client.publish(surface::XDG_WM_BASE, 1);
         client.publish(super::seat::WL_OUTPUT, 3);
         client.publish(super::seat::WL_SEAT, 5);
+        if FEAT_LOCK.load(core::sync::atomic::Ordering::Relaxed) {
+            client.publish(super::seat::RELATIVE_MANAGER, 1);
+            client.publish(super::seat::CONSTRAINTS, 1);
+        }
         sessions.push(Session {
             pipe,
             side,
@@ -109,6 +128,7 @@ pub fn pump() {
             last_frame: 0,
             asked: Vec::new(),
             shown: Vec::new(),
+            sizes: Vec::new(),
             kbd: crate::linux::input::now_at(crate::linux::input::Dev::Keyboard),
             focused: None,
         });
@@ -188,7 +208,20 @@ fn turn(s: &mut Session, now: u64, changed: &mut bool) -> bool {
             s.asked.push(key);
             s.client.ask_close(key);
         }
-        let commits = frame.lock_irq().commits;
+        let (commits, size) = {
+            let f = frame.lock_irq();
+            (f.commits, (f.w, f.h))
+        };
+        if size.0 > 0 && size.1 > 0 {
+            match s.sizes.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, z)) if *z == size => {}
+                Some((_, z)) => {
+                    *z = size;
+                    crate::gfx::desk::post(crate::gfx::desk::Op::Resize { tag: key, w: size.0, h: size.1 });
+                }
+                None => s.sizes.push((key, size)),
+            }
+        }
         match s.shown.iter_mut().find(|(k, _)| *k == key) {
             Some((_, c)) if *c == commits => {}
             Some((_, c)) => {
@@ -228,6 +261,20 @@ fn turn(s: &mut Session, now: u64, changed: &mut bool) -> bool {
         // Keys pressed while somebody else had the focus are not this
         // window's.
         s.kbd = crate::linux::input::now_at(crate::linux::input::Dev::Keyboard);
+    }
+    // The pointer lock: while it holds, the desktop routes buttons to this
+    // window wherever the cursor is, and motion arrives as relative counts
+    // rather than a position -- a cursor would stop at the screen's edge.
+    match s.client.lock_turn(focused) {
+        Some(key) => {
+            crate::gfx::desk::grab_pointer(key);
+            let (dx, dy) = crate::dev::mouse::take_relative();
+            if dx != 0 || dy != 0 {
+                // The mouse counts y upward; the protocol, downward.
+                s.client.relative_motion(dx, -dy);
+            }
+        }
+        None => crate::gfx::desk::release_pointer_of(&windows.iter().map(|(k, _)| *k).collect::<Vec<_>>()),
     }
     if let Some(surf) = focused.and_then(|k| s.client.surface_of(k)) {
         while let Some(e) = crate::linux::input::next_key(&mut s.kbd) {
@@ -394,6 +441,20 @@ impl crate::gfx::DeskApp for Window {
         self.point(client, x, y, None)
     }
 
+    fn hover(&mut self, client: crate::gfx::theme::Rect, x: i32, y: i32) -> bool {
+        // Motion with nothing held, deduplicated: the desktop calls this for
+        // every packet over the window and a client wants positions, not
+        // repeats.
+        let at = (x - client.x as i32, y - client.y as i32);
+        if !FEAT_HOVER.load(core::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        if at != self.last || self.held != 0 {
+            self.point(client, x, y, None);
+        }
+        false
+    }
+
     fn release(&mut self) -> bool {
         let (x, y) = self.last;
         let b = core::mem::take(&mut self.held);
@@ -403,6 +464,13 @@ impl crate::gfx::DeskApp for Window {
 
     fn min_size(&self) -> (u32, u32) {
         (120, 60)
+    }
+
+    /// At its own size: nothing here sends `xdg_toplevel.configure` with a
+    /// new one yet, so a tiled slot larger than the picture is black margin
+    /// -- Portal's 800x600 in a 1280x700 slot was three quarters void.
+    fn floats(&self) -> bool {
+        true
     }
 
     fn tag(&self) -> u64 {

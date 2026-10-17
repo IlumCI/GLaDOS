@@ -518,10 +518,12 @@ fn body() {
         // which reads as a hung `wait4` rather than as a dead scheduler.
         crate::cpu::enable_interrupts();
         let me = crate::task::current();
+        crate::linux::syscall::big_lock();
         let found = {
             let s = unsafe { SLOTS.get() };
             s.iter().position(|x| x.task == Some(me) && x.work.is_some())
         };
+        crate::linux::syscall::big_unlock();
         let Some(i) = found else {
             // `hlt` rather than a spin, so an idle pool costs one wake per
             // timer tick instead of one per scheduler round -- `thread`'s

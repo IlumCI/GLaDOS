@@ -33,11 +33,19 @@ pub const WL_SEAT: &str = "wl_seat";
 pub const WL_POINTER: &str = "wl_pointer";
 pub const WL_KEYBOARD: &str = "wl_keyboard";
 pub const WL_TOUCH: &str = "wl_touch";
+pub const RELATIVE_MANAGER: &str = "zwp_relative_pointer_manager_v1";
+pub const RELATIVE: &str = "zwp_relative_pointer_v1";
+pub const CONSTRAINTS: &str = "zwp_pointer_constraints_v1";
+pub const LOCKED: &str = "zwp_locked_pointer_v1";
+pub const CONFINED: &str = "zwp_confined_pointer_v1";
 
 const KEYMAP: &[u8] = include_bytes!("../../assets/xkb/us.xkb");
 
 pub fn handles(iface: &str) -> bool {
-    matches!(iface, WL_OUTPUT | WL_SEAT | WL_POINTER | WL_KEYBOARD | WL_TOUCH)
+    matches!(
+        iface,
+        WL_OUTPUT | WL_SEAT | WL_POINTER | WL_KEYBOARD | WL_TOUCH | RELATIVE_MANAGER | RELATIVE | CONSTRAINTS | LOCKED | CONFINED
+    )
 }
 
 /// Input for one window, as the desktop saw it.
@@ -60,6 +68,12 @@ pub struct Seat {
     over: Option<u32>,
     /// The surface holding the keyboard, once told.
     focus: Option<u32>,
+    /// `zwp_relative_pointer_v1` objects: where unaccelerated motion goes.
+    relative: Vec<u32>,
+    /// A `zwp_locked_pointer_v1` asked for: (object, surface, oneshot), and
+    /// whether it is in force now.
+    pub(super) lock: Option<(u32, u32, bool)>,
+    pub(super) locked: bool,
 }
 
 impl Client {
@@ -127,7 +141,86 @@ impl Client {
             }
             // set_cursor: the desktop draws its own pointer.
             (WL_POINTER, 0) => Ok(()),
+            // Relative motion and pointer lock: what a game turns with. Both
+            // managers' destroy, and the objects' own.
+            (RELATIVE_MANAGER, 0) | (CONSTRAINTS, 0) | (RELATIVE, 0) | (LOCKED, 0) | (CONFINED, 0) => {
+                self.seat.relative.retain(|p| *p != msg.object);
+                if self.seat.lock.is_some_and(|(o, _, _)| o == msg.object) {
+                    self.seat.lock = None;
+                    self.seat.locked = false;
+                }
+                self.objects.destroy(msg.object)?;
+                let mut w = Writer::new(super::object::DISPLAY, 1);
+                w.uint(msg.object);
+                self.post(w);
+                Ok(())
+            }
+            (RELATIVE_MANAGER, 1) => {
+                let id = r.new_id()?;
+                let _pointer = r.object()?;
+                self.objects.create(id, RELATIVE, version)?;
+                self.seat.relative.push(id);
+                Ok(())
+            }
+            // lock_pointer(id, surface, pointer, region, lifetime), and
+            // confine_pointer with the same arguments: a confined pointer is
+            // taken as a lock, which is stricter and is what a game confining
+            // its cursor wants anyway.
+            (CONSTRAINTS, 1) | (CONSTRAINTS, 2) => {
+                let id = r.new_id()?;
+                let surface = r.object()?;
+                let _pointer = r.object()?;
+                let _region = r.object()?;
+                let lifetime = r.uint()?;
+                self.objects.create(id, if msg.opcode == 1 { LOCKED } else { CONFINED }, version)?;
+                self.seat.lock = Some((id, surface, lifetime == 1));
+                self.seat.locked = false;
+                Ok(())
+            }
+            // set_cursor_position_hint, set_region: nothing to do with either.
+            (LOCKED, 1) | (LOCKED, 2) | (CONFINED, 1) => Ok(()),
             _ => Err(Error::NoMethod),
+        }
+    }
+
+    /// Whether the lock asked for should be in force now, given which
+    /// window has the keyboard; sends `locked` or `unlocked` on a change and
+    /// answers the window key holding the pointer.
+    pub fn lock_turn(&mut self, focused: Option<u64>) -> Option<u64> {
+        let (obj, surface, oneshot) = self.seat.lock?;
+        let key = self.key_of(surface);
+        let want = key.is_some() && key == focused;
+        if want && !self.seat.locked {
+            self.seat.locked = true;
+            // Motion from before the lock is not this window's.
+            let _ = crate::dev::mouse::take_relative();
+            self.post(Writer::new(obj, 0));
+        } else if !want && self.seat.locked {
+            self.seat.locked = false;
+            self.post(Writer::new(obj, 1));
+            if oneshot {
+                // A one-shot lock is spent once lifted; the client asks again.
+                self.seat.lock = None;
+            }
+        }
+        if self.seat.locked { key } else { None }
+    }
+
+    /// Relative motion while the pointer is locked, in mouse counts with y
+    /// downward, which is the sense `zwp_relative_pointer_v1` reports.
+    pub fn relative_motion(&mut self, dx: i32, dy: i32) {
+        let us = crate::net::now_ms().wrapping_mul(1000);
+        for p in self.seat.relative.clone() {
+            let mut w = Writer::new(p, 0);
+            w.uint((us >> 32) as u32).uint(us as u32);
+            w.fixed(Fixed::from_int(dx)).fixed(Fixed::from_int(dy));
+            w.fixed(Fixed::from_int(dx)).fixed(Fixed::from_int(dy));
+            self.post(w);
+        }
+        for p in self.seat.pointers.clone() {
+            if self.objects.get(p).is_some_and(|e| e.version >= 5) {
+                self.post(Writer::new(p, 5));
+            }
         }
     }
 
