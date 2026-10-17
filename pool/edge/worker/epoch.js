@@ -6,9 +6,11 @@
 //
 // - **Per payout address, never per worker.** `0xabc.rig1` and `0xabc.rig2`
 //   are one address and one share.
-// - **The holding gate, at build time.** The address must hold `gateMin` GLADOS
-//   *now*; one balance moved between addresses between connections passes a
-//   connection-time gate, but at one instant it is in one address.
+// - **Everyone over the floor is paid; the holding only gates the reward.** A
+//   wallet under `gateMin` GLADOS is still a recipient, paid in $GLaDOS; what
+//   holding the minimum buys is the right to be paid in an RWA, which runner
+//   decides on the balance *now* (one balance cannot be in two addresses at
+//   once, so it cannot unlock two wallets' choices at the same instant).
 // - **A floor of `minFrac` of the work-weighted median address's work.** Under
 //   an equal split a payout rewards addresses, so each extra address has to
 //   cost burned compute; weighting by work is what stops a hundred sybils
@@ -98,8 +100,9 @@ export function candidates(delta, floor, ineligible = new Set()) {
 }
 
 // Build an epoch. `now` and `prev` are cumulative work per address (Maps);
-// `balances` answers GLADOS wei per address (a Map; absent means unknown and
-// is refused, since a gate that opens on a failed read opens for anybody).
+// `balances` answers GLADOS wei per address (a Map; absent means the balance
+// was not read, so the work carries rather than being paid in the dark -- an
+// unread address might be a contract, and its reward tier is unknown too).
 // `ineligible` is a Set of addresses that may never be paid: contracts, and
 // above all the WETH/GLADOS pair -- paying it is a taxed sell, the payout
 // reverts, and one miner naming it as their address would stop every payout
@@ -110,7 +113,7 @@ export function candidates(delta, floor, ineligible = new Set()) {
 //
 // The snapshot is what the next epoch counts from, and it is chosen per
 // address so work is neither paid twice nor lost:
-//   paid, under the gate, a contract   -> now   (the work is spent)
+//   paid, or a contract                -> now   (the work is spent)
 //   unreadable, under floor, not reached,
 //   or past the recipient cap           -> prev  (it carries, and carried
 //                                                 work only grows, so it is
@@ -131,25 +134,28 @@ export function candidates(delta, floor, ineligible = new Set()) {
 // treasury weighs each wallet by its choice's legs and admits, most work
 // waiting first, until one transaction's gas is spent. The rest carry like any
 // wallet past the cap, nearer the front next time.
-export function build({ now, prev, balances, gateMin, minWork = 1n, minFrac = 0.25, ineligible = new Set(), maxRecipients = Infinity, considered = null, weigh = null, capacity = Infinity }) {
+export function build({ now, prev, balances, minWork = 1n, minFrac = 0.25, ineligible = new Set(), maxRecipients = Infinity, considered = null, weigh = null, capacity = Infinity }) {
   const delta = deltas(now, prev);
   const floor = floorOf(delta, minWork, minFrac);
   const excluded = {};
   const carry = new Set();
-  const gated = new Map();
+  const payable = new Map();
   let notReached = 0;
   for (const [a, d] of delta) {
     const b = balances.get(a);
+    // The holding minimum no longer decides who is paid, only what they are
+    // paid in (runner reads the same balance and pays $GLaDOS under it). So
+    // every address over the floor with a readable, non-contract balance is a
+    // recipient.
     if (ineligible.has(a)) excluded[a] = "a contract or the pool's own plumbing, which cannot be paid";
     else if (d < floor) { excluded[a] = `did ${d} work against a floor of ${floor}; it carries to the next epoch`; carry.add(a); }
     else if (considered && !considered.has(a)) { notReached += 1; carry.add(a); }
     else if (b === undefined) { excluded[a] = "balance unreadable; the work carries to the next epoch"; carry.add(a); }
-    else if (b < gateMin) excluded[a] = `holds ${b / 10n ** 18n} of ${gateMin / 10n ** 18n} GLADOS`;
-    else gated.set(a, d);
+    else payable.set(a, d);
   }
-  let recipients = [...gated.keys()];
+  let recipients = [...payable.keys()];
   if (recipients.length > maxRecipients || weigh) {
-    recipients.sort((a, b) => (gated.get(b) > gated.get(a) ? 1 : gated.get(b) < gated.get(a) ? -1 : a < b ? -1 : 1));
+    recipients.sort((a, b) => (payable.get(b) > payable.get(a) ? 1 : payable.get(b) < payable.get(a) ? -1 : a < b ? -1 : 1));
     let used = 0;
     let fit = 0;
     for (const a of recipients) {

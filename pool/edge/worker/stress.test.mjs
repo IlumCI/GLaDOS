@@ -15,8 +15,8 @@
 //             payout contract, at most one contract ever deployed
 //   payouts   every payout mined is recorded as exactly what it paid, at most
 //             one mined payout is ever unrecorded (the one in flight), never a
-//             contract, the pair or an address under the gate, and no address
-//             credited more work than it did
+//             contract or the pair, and no address credited more work than it
+//             did (an address under the holding minimum is paid, in $GLaDOS)
 //   ledger    the snapshot never moves backwards
 //   secrets   no private key in any log line
 //   dry       dry mode writes nothing, sends nothing, creates nothing
@@ -956,7 +956,10 @@ async function choiceScenario(name, faults, ticks = 3 * DAY) {
   for (let i = 1; i <= (res.st.epochs || 0); i++) recs.push(await getBig(res.storage, `treasury.epoch.${i}`));
   let stockPaid = 0, wrong = 0, blockedStock = 0;
   for (const r of recs) for (const g of r.groups || []) for (const a of g.to) {
-    const want = res.w.blockedSet.has(a) ? "glados" : res.w.choices.get(a) || "glados";
+    // A wallet gets its choice only while it holds the gate minimum; under it,
+    // or blocklisted, it is paid in $GLaDOS.
+    const held = (res.w.tok.get(a) || 0n) >= 1_000_000n * G;
+    const want = (!held || res.w.blockedSet.has(a)) ? "glados" : res.w.choices.get(a) || "glados";
     if (g.code !== "glados") stockPaid += 1;
     if (g.code !== "glados" && res.w.blockedSet.has(a)) blockedStock += 1;
     if (faults.quoteFail ? !(g.code === want || g.code === "glados") : g.code !== want) wrong += 1;
