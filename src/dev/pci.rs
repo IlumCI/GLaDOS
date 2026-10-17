@@ -145,6 +145,30 @@ pub fn bars32(ecam: u64) -> alloc::vec::Vec<u64> {
     out
 }
 
+/// Every memory BAR below 4 GiB as a range, its size bounded rather than
+/// probed.
+///
+/// Probing a BAR's size means writing all ones to it with decode off, which
+/// on a device a driver is using -- the NVMe a guest is reading its game from
+/// -- is a window in which that driver's accesses go nowhere. The bound needs
+/// no write: a BAR is naturally aligned to its size, so it is no larger than
+/// its base's lowest set bit allows, and BARs never overlap, so it ends by the
+/// next one up. Generous on purpose: a gap called occupied costs a guest some
+/// address space, and a device called free costs the machine.
+pub fn bars32_ranges(ecam: u64) -> alloc::vec::Vec<(u64, u64)> {
+    let mut bases = bars32(ecam);
+    bases.sort_unstable();
+    bases.dedup();
+    let mut out = alloc::vec::Vec::with_capacity(bases.len());
+    for (i, &b) in bases.iter().enumerate() {
+        let align = 1u64 << b.trailing_zeros().min(32);
+        let next = bases.get(i + 1).copied().unwrap_or(1 << 32);
+        let end = b.saturating_add(align).min(next).max(b + 0x1000);
+        out.push((b, end));
+    }
+    out
+}
+
 /// Set the bus-master and memory-space enable bits in the command register.
 ///
 /// Without bus-master a device cannot DMA, so an NVMe controller will accept

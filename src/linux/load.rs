@@ -116,6 +116,8 @@ pub struct Layout {
     /// The `mmap` arena, and where it must stop.
     pub mmap: u64,
     pub mmap_end: u64,
+    /// Further holes, handed to the arena's free list as they are.
+    pub extra: [(u64, u64); 7],
 }
 
 const LAYOUT64: Layout = Layout {
@@ -125,6 +127,7 @@ const LAYOUT64: Layout = Layout {
     stack: GUEST_STACK_AT,
     mmap: syscall::GUEST_MMAP_AT,
     mmap_end: crate::mem::space::WINDOW * 2,
+    extra: [(0, 0); 7],
 };
 
 /// A 32-bit guest's layout, inside the hole below 4 GiB.
@@ -139,10 +142,20 @@ const LAYOUT64: Layout = Layout {
 /// megabyte of nothing above and below it, and the arena between them.
 fn layout32() -> Result<Layout, &'static str> {
     let ecam = crate::net::ecam().ok_or("no PCI configuration space, so devices cannot be avoided")?;
-    let mut devs = crate::dev::pci::bars32(ecam);
-    devs.push(ecam);
-    let hole = crate::mem::fixed::hole32(&devs);
-    crate::mem::fixed::set_hole32(hole);
+    let mut devs = crate::dev::pci::bars32_ranges(ecam);
+    // Configuration space, a megabyte a bus.
+    devs.push((ecam, ecam + 256 * 0x10_0000));
+    if let Some((base, _, _, len, _, _)) = super::dev::fb() {
+        devs.push((base, base + len as u64));
+    }
+    let holes = crate::mem::fixed::holes32(&devs);
+    crate::mem::fixed::set_holes32(&holes);
+    let total: u64 = holes.iter().map(|(a, e)| e - a).sum();
+    crate::kprintln!(
+        "  32-bit address space: {} hole(s) below 4 GiB, {} MiB, largest {} MiB",
+        holes.len(), total >> 20, holes.first().map(|(a, e)| (e - a) >> 20).unwrap_or(0)
+    );
+    let hole = holes.first().copied();
     let (lo, hi) = hole.ok_or(
         "nothing below 4 GiB is free of memory and devices -- under QEMU, \
          -machine max-ram-below-4g=1G leaves a hole a 32-bit guest can use",
@@ -158,6 +171,13 @@ fn layout32() -> Result<Layout, &'static str> {
         stack,
         mmap: lo + 0x0900_0000,
         mmap_end: stack - 0x10_0000,
+        extra: {
+            let mut e = [(0u64, 0u64); 7];
+            for (i, h) in holes.iter().skip(1).take(7).enumerate() {
+                e[i] = *h;
+            }
+            e
+        },
     })
 }
 const GUEST_INTERP_AT: u64 = crate::mem::space::WINDOW + 0x2000_0000;
@@ -607,6 +627,7 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
             bits32,
             mmap_at: lay.mmap,
             mmap_end: lay.mmap_end,
+            arena_extra: lay.extra,
         },
         space,
         _image: prog.hold,

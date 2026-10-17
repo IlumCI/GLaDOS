@@ -772,6 +772,8 @@ pub struct Regions {
     pub bits32: bool,
     pub mmap_at: u64,
     pub mmap_end: u64,
+    /// More arena, below 4 GiB for a 32-bit guest: holes past the first.
+    pub arena_extra: [(u64, u64); 7],
 }
 
 /// What a guest owns.
@@ -1338,7 +1340,12 @@ pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
             owned: alloc::vec::Vec::new(),
             mmap_next: r.mmap_at,
             mmap_end: r.mmap_end,
-            arena_free: Vec::new(),
+            arena_free: {
+                let mut v: Vec<(u64, u64)> =
+                    r.arena_extra.iter().filter(|&&(a, e)| e > a).map(|&(a, e)| (a, e - a)).collect();
+                v.sort_unstable();
+                v
+            },
             bits32: r.bits32,
             stack: r.stack,
             brk_start: brk.at,
@@ -7538,7 +7545,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // with no message at all.
     if let Some(region) = alloc_pages(4096 * 4) {
         let fake = Region { at: region, len: 4096 * 4 };
-        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         let first = sys_brk(0);
         let grown = sys_brk(region + 8192);
         let refused = sys_brk(region + 1_000_000);
@@ -7564,7 +7571,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // than about the call, which is why they went the way `ET_EXEC` went.
     {
         let fake = Region { at: 0x10_0000, len: 4096 };
-        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         out.push((
             "a zero-length mapping is EINVAL, as Linux has it",
             sys_mmap(0, 0, 3, MAP_ANONYMOUS, u64::MAX, 0) == EINVAL,
@@ -7608,7 +7615,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; SYSINFO_LEN];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: SYSINFO_LEN };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
 
         let bare = sys_time(0);
         let through = sys_time(at);
@@ -7664,7 +7671,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; 64];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 64 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         out.push((
             "pread on a stream is ESPIPE, the same answer lseek gives it",
             sys_pread64(0, at, 8, 0) == ESPIPE,
@@ -7693,7 +7700,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0xAAu8; 160];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 160 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         name_guest(&["/tmp/g/bb"], "/tmp/g/bb", None);
         // Three separate strings rather than one rewritten in place: the last
         // time claims here shared a buffer, the first one's write took the NUL
@@ -7755,7 +7762,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // on its own code.
     if let Some(two) = alloc_pages(8192) {
         let mine = Region { at: two, len: 8192 };
-        install(Regions { image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         let reserved =
             sys_mmap(two, 8192, 0, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0) == two;
         let gone = crate::mem::paging::query(two).is_some_and(|p| !p.present);
@@ -7781,7 +7788,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; 144];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 144 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         // The empty path has to live *inside* what the guest owns, because
         // `read_cstr` bounds-checks it like any other guest pointer. Pointing
         // at a local outside the region answered `EFAULT` before any of the
@@ -7819,7 +7826,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; 512];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 512 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
 
         // Three disjoint slices of the one region: the paths have to live
         // inside what the guest owns, because `read_cstr` bounds-checks them
@@ -7894,7 +7901,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; 32];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 32 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
 
         // 50 ms as a timespec, which at TIMER_HZ is five ticks.
         buf[0..8].copy_from_slice(&0u64.to_le_bytes());
@@ -7926,7 +7933,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     if let Some(two) = alloc_pages(8192) {
         let img = Region { at: two, len: 4096 };
         let interp = Region { at: two + 4096, len: 4096 };
-        install(Regions { image: img, stack: img, brk: img, interp: Some(interp), image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: img, stack: img, brk: img, interp: Some(interp), image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         // PROT_READ. A real `ld.so` does exactly this to its own RELRO, which
         // is how the page that halted the machine got its rights.
         let asked = sys_mprotect(two + 4096, 4096, 1) == 0;
@@ -7947,7 +7954,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // pointing at 0x100000 would mark the low megabyte.
     if let Some(own) = alloc_pages(8192) {
         let mine = Region { at: own, len: 8192 };
-        install(Regions { image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         unsafe { core::ptr::write_bytes(own as *mut u8, 0xA5, 8192) };
         out.push((
             "MAP_FIXED over memory the guest already holds answers that address",
@@ -7982,7 +7989,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 
     {
         let fake = Region { at: 0x10_0000, len: 4096 };
-        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
 
         let at = sys_mmap(0, 8192, 3, MAP_ANONYMOUS, u64::MAX, 0);
         let got = (at as i64) > 0 && at % 4096 == 0;
@@ -8009,7 +8016,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         // GET_FS writes eight bytes through a guest pointer, so it is bounds
         // checked now, so the destination has to be a range the guest owns.
         let owned = Region { at, len: 8 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         let was = unsafe { crate::cpu::rdmsr(IA32_FS_BASE) };
         let set = sys_arch_prctl(ARCH_SET_FS, 0xDEAD_0000);
         let got = sys_arch_prctl(ARCH_GET_FS, at);
@@ -8041,7 +8048,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut backing = [0u64; 64];
         let at = backing.as_mut_ptr() as u64;
         let one = Region { at, len: 512 };
-        install(Regions { image: one, stack: one, brk: one, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: one, stack: one, brk: one, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         out.push(("a range inside what the loader gave out is owned", owns(at, 8)));
         out.push(("a range that runs off the end is not", !owns(at + 508, 8)));
         out.push(("a range below it is not", !owns(at - 8, 8)));
@@ -8077,7 +8084,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             if !mem.is_null() {
                 let at = mem as u64;
                 let owned = Region { at, len: 4096 };
-                install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
+                install(Regions { arena_extra: [(0, 0); 7], image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
                 out.push(("a page the guest owns starts reachable", reachable(at, 8, true)));
                 out.push((
                     "mprotect to PROT_NONE is accepted",
