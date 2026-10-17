@@ -248,6 +248,49 @@ impl Space {
         self.map_at(at, phys, writable, user)
     }
 
+    /// The physical page behind `at` in this space, if a 4 KiB leaf maps it.
+    pub fn phys_of(&self, at: u64) -> Option<u64> {
+        let walk = |t: u64, i: usize| -> Option<u64> {
+            let e = unsafe { (&*(t as *const [u64; ENTRIES]))[i] };
+            (e & PRESENT != 0 && e & HUGE == 0).then_some(e & ADDR_MASK)
+        };
+        let pdpt = walk(self.root, ((at >> 39) & 511) as usize)?;
+        let pd = walk(pdpt, ((at >> 30) & 511) as usize)?;
+        let pt = walk(pd, ((at >> 21) & 511) as usize)?;
+        let e = unsafe { (&*(pt as *const [u64; ENTRIES]))[((at >> 12) & 511) as usize] };
+        (e & PRESENT != 0).then_some(e & ADDR_MASK)
+    }
+
+    /// Remove one page's translation from this space, if it has one, and
+    /// flush it.
+    ///
+    /// Only the leaf is cleared and only in a table this space owns -- the
+    /// arena's tables are always its own, being built by `map_page` -- and
+    /// the flush is unconditional, since this runs while the guest's root is
+    /// the one installed and a stale entry would keep the old page reachable.
+    pub fn unmap_page(&mut self, at: u64) {
+        let walk = |t: u64, i: usize| -> Option<u64> {
+            let e = unsafe { (&*(t as *const [u64; ENTRIES]))[i] };
+            (e & PRESENT != 0 && e & HUGE == 0).then_some(e & ADDR_MASK)
+        };
+        let (i4, i3, i2, i1) = (
+            ((at >> 39) & 511) as usize,
+            ((at >> 30) & 511) as usize,
+            ((at >> 21) & 511) as usize,
+            ((at >> 12) & 511) as usize,
+        );
+        let Some(pdpt) = walk(self.root, i4) else { return };
+        let Some(pd) = walk(pdpt, i3) else { return };
+        let Some(pt) = walk(pd, i2) else { return };
+        if !self.owns_table(pt) {
+            return;
+        }
+        unsafe {
+            (&mut *(pt as *mut [u64; ENTRIES]))[i1] = 0;
+            core::arch::asm!("invlpg [{}]", in(reg) at, options(nostack, preserves_flags));
+        }
+    }
+
     /// Map one page at a *low* address, the way a process needs.
     ///
     /// This is the placement half of `fork`, and the guard is the whole of it.

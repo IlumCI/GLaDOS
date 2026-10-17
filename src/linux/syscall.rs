@@ -158,6 +158,7 @@ pub const SYS_BRK: u64 = 12;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_MMAP: u64 = 9;
 pub const SYS_MPROTECT: u64 = 10;
+pub const SYS_MADVISE: u64 = 28;
 pub const SYS_MUNMAP: u64 = 11;
 pub const SYS_ARCH_PRCTL: u64 = 158;
 pub const SYS_EXIT_GROUP: u64 = 231;
@@ -628,6 +629,15 @@ pub enum Source {
     /// something it never owned. The pages to release are the backing's, and
     /// this is the only place that still knows which they were.
     Backed(u64),
+    /// Arena memory built from separate heap pages, because no contiguous run
+    /// of the size asked for was free. The pages are found again through the
+    /// guest's own tables when they go back -- which is why `give_back` alone
+    /// cannot free them, and `free_paged` does.
+    ///
+    /// Linux never needs a physically contiguous run for `mmap`; this kernel
+    /// did, and after enough churn a 50 MB request failed against a heap with
+    /// far more than 50 MB free. Portal reported it as `std::bad_alloc`.
+    Paged,
     /// A forked child's inherited record of one of its parent's mappings.
     ///
     /// **A sixth way back, and it is to do nothing.** The record was cloned
@@ -768,15 +778,22 @@ pub struct Space {
     pub owned: alloc::vec::Vec<(u64, usize)>,
     /// The next free address in the guest's mmap arena.
     ///
-    /// A bump cursor and never reused, which is a real limitation with a
-    /// number on it: the arena is 510 GiB below the next slot, so a guest
-    /// would have to map and unmap that much before it wrapped. Reclaiming
-    /// means a free list, and a free list is worth building when something
-    /// runs out rather than before.
+    /// A bump cursor, with `arena_free` in front of it.
     pub mmap_next: u64,
     /// Where the arena must stop: the stack for a 32-bit guest, which has no
     /// room to spare below 4 GiB, and effectively nowhere for a 64-bit one.
     pub mmap_end: u64,
+    /// Arena ranges given back by `munmap`, sorted and coalesced, taken
+    /// first-fit before the cursor moves.
+    ///
+    /// This was "worth building when something runs out", and something did.
+    /// A 64-bit guest has 510 GiB of arena; a 32-bit one has the hole below
+    /// its stack, about 1.4 GiB. Portal maps and unmaps scratch buffers of tens
+    /// of megabytes on its way to the menu -- about 1,100 `munmap`s on the
+    /// host -- and with a bump cursor the hole was gone before the menu was:
+    /// `malloc` answered NULL, and Valve's GL layer `memcpy`d a texture to
+    /// address zero.
+    pub arena_free: Vec<(u64, u64)>,
     /// A 32-bit guest: `int 0x80`, a compatibility code segment, 4-byte
     /// pointers in every structure it hands over.
     pub bits32: bool,
@@ -971,6 +988,7 @@ pub fn replace_guest(
         owned: alloc::vec::Vec::new(),
         mmap_next: r.mmap_at,
         mmap_end: r.mmap_end,
+        arena_free: Vec::new(),
         bits32: r.bits32,
         image_path: String::new(),
         interp_path: None,
@@ -1063,6 +1081,7 @@ pub fn clone_guest(
         owned,
         mmap_next: p.mmap_next,
         mmap_end: p.mmap_end,
+        arena_free: p.arena_free.clone(),
         bits32: p.bits32,
         image_path: p.image_path.clone(),
         interp_path: p.interp_path.clone(),
@@ -1254,6 +1273,7 @@ pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
             owned: alloc::vec::Vec::new(),
             mmap_next: r.mmap_at,
             mmap_end: r.mmap_end,
+            arena_free: Vec::new(),
             bits32: r.bits32,
             stack: r.stack,
             brk_start: brk.at,
@@ -1311,13 +1331,18 @@ pub fn teardown() -> usize {
                     f.flush();
                 }
             }
-            for m in sp.maps.drain(..) {
+            let maps = core::mem::take(&mut sp.maps);
+            for m in maps {
                 // A guest is free to exit having mprotected its mappings to
                 // something the heap cannot reuse. Handing a read-only or
                 // absent page back to the allocator would poison it for
                 // whatever asks next, and the symptom would appear in an
                 // unrelated subsystem hours later.
-                give_back(m.at, m.len, Some(m.from));
+                if m.from == Source::Paged {
+                    free_paged(sp, m.at, page_up(m.len) as u64);
+                } else {
+                    give_back(m.at, m.len, Some(m.from));
+                }
                 freed += 1;
             }
             // The image, stack, interpreter and break came from `Exec`
@@ -1386,8 +1411,13 @@ pub fn release_guest(i: usize) {
             f.flush();
         }
     }
-    for m in sp.maps.drain(..) {
-        give_back(m.at, m.len, Some(m.from));
+    let maps = core::mem::take(&mut sp.maps);
+    for m in maps {
+        if m.from == Source::Paged {
+            free_paged(&mut sp, m.at, page_up(m.len) as u64);
+        } else {
+            give_back(m.at, m.len, Some(m.from));
+        }
     }
     for (at, len) in core::mem::take(&mut sp.owned) {
         free_pages(at, len);
@@ -1546,8 +1576,36 @@ pub(super) fn record(mut c: Call) {
             c.path_len = n as u8;
         }
     }
+    if MEMLOG.load(Ordering::Relaxed) {
+        // i386 numbers carry the tag; the 64-bit ones do not.
+        let n = c.nr;
+        let i386 = n & (1 << 31) != 0;
+        let base = n & !(1 << 31);
+        let mem = if i386 { matches!(base, 90 | 91 | 125 | 192 | 219 | 356 | 194 | 93) } else { matches!(base, 9 | 10 | 11 | 28 | 319 | 77) };
+        if mem {
+            crate::kprintln!(
+                "  [mem] {} {:#x} {:#x} {:#x} {:#x} {:#x} -> {:#x}",
+                name_of(n), c.args[0], c.args[1], c.args[2], c.args[3], c.args[4], c.ret
+            );
+        }
+    }
+    if MISSES.load(Ordering::Relaxed) && c.path_len > 0 && (c.ret as i64) < 0 {
+        let p = core::str::from_utf8(&c.path[..c.path_len as usize]).unwrap_or("?");
+        crate::kprintln!("  [miss] {} {} -> {}", name_of(c.nr), p, c.ret as i64);
+    }
     super::session::record(c, TRACE_CAP);
 }
+
+/// Print every path a guest named and was refused, as it happens.
+///
+/// The trace keeps the first thousand calls, and a game spends those loading
+/// libraries; the lookup that decides whether it starts comes thousands of
+/// calls later. A refused path is the one fact that question turns on, and
+/// printing it live costs nothing while the switch is off.
+pub static MISSES: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Print every memory-map call as it happens: which call made a page what it
+/// is, which no end-of-run report can say once the console may be wedged.
+pub static MEMLOG: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// The guest wrote something. Only the two standard descriptors, and every
 /// other fd is `-EBADF` rather than silently accepted -- a write to fd 7 that
@@ -2142,6 +2200,33 @@ pub(super) fn sys_nanosleep(req: u64) -> u64 {
 }
 
 /// The sleep itself, for any ABI's timespec.
+/// Give up the CPU from inside a guest's blocking wait, with interrupts on.
+///
+/// **A syscall arrives with interrupts off** -- `syscall` clears IF through
+/// FMASK and `int 0x80` is an interrupt gate -- and every wait loop here
+/// yielded without turning them back on. That was harmless while one guest
+/// waited and kernel tasks ran between its turns. A program with a dozen
+/// threads parked in futex waits found the other case: the run queue was
+/// nothing but those waiters, each handing the CPU to the next with IF clear,
+/// so no timer interrupt was ever taken, `ticks()` stopped, and every timeout
+/// and deadline -- all measured in ticks -- froze with it. The sleeping clock
+/// and compositor never woke, the screen stopped, and the run deadline that
+/// exists to end exactly this could not fire. Sampled from QEMU's monitor:
+/// core 0 cycling through `schedule` and `futex` with IF clear, for minutes.
+///
+/// Safe to open because everything a syscall leaves live across a switch is
+/// per task now -- the guest's stack pointer, the syscall stack, its TLS --
+/// and swapped by `schedule`. The caller's interrupt state is put back after.
+pub(super) fn wait_turn() {
+    let flags: u64;
+    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags)) };
+    crate::cpu::enable_interrupts();
+    crate::task::yield_now();
+    if flags & (1 << 9) == 0 {
+        crate::cpu::disable_interrupts();
+    }
+}
+
 pub(super) fn sleep_for(sec: u64, nsec: u64) -> u64 {
     if nsec >= 1_000_000_000 {
         return EINVAL;
@@ -2170,7 +2255,13 @@ pub(super) fn sleep_for(sec: u64, nsec: u64) -> u64 {
         // reason it does while one waits on a socket.
         crate::sky::server::pump();
         let now = crate::dev::lapic::ticks();
+        let flags: u64;
+        unsafe { core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags)) };
+        crate::cpu::enable_interrupts();
         let _ = crate::task::sleep_until(until.min(now.saturating_add(1)));
+        if flags & (1 << 9) == 0 {
+            crate::cpu::disable_interrupts();
+        }
     }
     0
 }
@@ -2568,7 +2659,7 @@ pub(super) fn sys_epoll_wait(epfd: u64, evs: u64, maxevents: u64, timeout: u64) 
         }
         // The display server answers while its client waits.
         crate::sky::server::pump();
-        crate::task::yield_now();
+        wait_turn();
     }
 }
 
@@ -2806,7 +2897,7 @@ pub(super) fn sys_accept4(fd: u64, addr: u64, alen: u64, flags: u64) -> u64 {
                 if unsafe { kill_if_overdue() } {
                     return EAGAIN;
                 }
-                crate::task::yield_now();
+                wait_turn();
             }
         }
     }
@@ -3172,7 +3263,7 @@ pub(super) fn sys_recvmsg(fd: u64, hdr: u64, flags: u64) -> u64 {
         }
         // The display server answers while its client waits.
         crate::sky::server::pump();
-        crate::task::yield_now();
+        wait_turn();
     };
     if let Err(e) = scatter(iov, cnt, &buf[..got]) {
         return e;
@@ -3412,6 +3503,25 @@ pub(super) fn sys_access(path_at: u64, mode: u64) -> u64 {
     }
     let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
     let Some(path) = found else { return ENOENT };
+    // **A mounted volume is not in the namespace**, so asking only `sysbox`
+    // answered `ENOENT` for every file on one. `open` and `stat` already ask
+    // the disk first; `access` was the call that did not, and the Source
+    // engine decides whether a game exists with `access("portal/gameinfo.txt")`
+    // -- so a game that could open its every file reported that it was not
+    // installed.
+    if let Some(on) = super::disk::lookup(&path) {
+        let Some(n) = on else { return ENOENT };
+        if mode & 2 != 0 {
+            return EROFS;
+        }
+        if mode & 1 != 0 && !n.is_dir {
+            return EACCES;
+        }
+        return 0;
+    }
+    if super::dev::node(&path).is_some() || super::dev::is_dir(&path) || super::proc::claims(&path) {
+        return 0;
+    }
     if !sysbox::is_dir(&path) && sysbox::blob_len(&path).is_none() {
         return ENOENT;
     }
@@ -3876,7 +3986,7 @@ fn futex_inner(uaddr: u64, op: u64, val: u64, timeout: u64, uaddr2: u64, val3: u
                 if overran(crate::dev::lapic::ticks()) {
                     unsafe { kill_blocked() }
                 }
-                crate::task::yield_now();
+                wait_turn();
             }
         }
         FUTEX_WAKE | FUTEX_WAKE_BITSET => {
@@ -4214,7 +4324,7 @@ pub(super) fn do_poll(fds: u64, nfds: u64, limit: Option<u64>) -> u64 {
         }
         // The display server answers while its client waits.
         crate::sky::server::pump();
-        crate::task::yield_now();
+        wait_turn();
     }
 }
 
@@ -4310,7 +4420,7 @@ fn do_select(nfds: u64, rp: u64, wp: u64, ep: u64, limit: Option<u64>) -> u64 {
         if overran(crate::dev::lapic::ticks()) {
             unsafe { kill_blocked() }
         }
-        crate::task::yield_now();
+        wait_turn();
     }
 }
 
@@ -4369,7 +4479,7 @@ pub(super) fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
             // touches the keyboard.
             // The display server answers while its client waits.
             crate::sky::server::pump();
-            crate::task::yield_now();
+            wait_turn();
         }
     }
     // A Unix socket waits the way an event device does and for the same
@@ -4397,7 +4507,7 @@ pub(super) fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
             }
             // The display server answers while its client waits.
             crate::sky::server::pump();
-            crate::task::yield_now();
+            wait_turn();
         }
     }
     // An anonymous file is memory that is already there, so nothing waits.
@@ -4438,7 +4548,7 @@ pub(super) fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
             }
             // The display server answers while its client waits.
             crate::sky::server::pump();
-            crate::task::yield_now();
+            wait_turn();
         }
     }
     with_fds(|fds, _| match fds.get_mut(fd as usize) {
@@ -4615,6 +4725,7 @@ pub(super) fn sys_readlinkat(dirfd: u64, path_at: u64, buf: u64, size: u64) -> u
         // one wrong value sending a correct program down a path that ends in
         // a crash it cannot explain.
         return if super::proc::claims(&path)
+            || matches!(super::disk::lookup(&path), Some(Some(_)))
             || sysbox::blob_len(&path).is_some()
             || sysbox::is_dir(&path)
         {
@@ -5228,6 +5339,25 @@ pub(super) fn sys_brk(want: u64) -> u64 {
     let sp = unsafe { guest_slot() };
     let Some(sp) = sp.as_mut() else { return 0 };
     if want >= sp.brk_start && want <= sp.brk_end {
+        // **Growing past where the break has been gives zeroed pages, as
+        // Linux's does.** Linux unmaps the pages a shrinking break leaves and
+        // maps fresh ones when it grows back; here the region is allocated
+        // once and the break is a number, so a trim followed by a grow handed
+        // glibc back its own freed chunks -- and glibc's `calloc` treats
+        // memory above the old top as fresh and does not clear it. Whole
+        // pages only: the bytes between the old break and the end of its page
+        // stay, because on Linux that page was never unmapped either.
+        let from = page_up(sp.brk_now as usize) as u64;
+        let to = (page_up(want as usize) as u64).min(sp.brk_end);
+        let mut page = from;
+        while page < to {
+            if let Some(p) = crate::mem::paging::query(page) {
+                if p.present && p.write {
+                    unsafe { core::ptr::write_bytes(page as *mut u8, 0, PAGE as usize) };
+                }
+            }
+            page += PAGE;
+        }
         sp.brk_now = want;
     }
     sp.brk_now
@@ -5336,10 +5466,54 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
             if want == 0 || f.at == 0 || want > page_up(f.len) {
                 return EINVAL;
             }
+            // **With a space, the memfd's pages go at an arena address**, the
+            // way anonymous memory already does. Handing back `f.at` -- the
+            // backing's own heap address -- is only an address the guest can
+            // hold when the heap happens to sit below 4 GiB, and for a 32-bit
+            // guest on a machine whose heap is above it the answer was
+            // `0x1479b0000`: the guest kept the low 32 bits, and Mesa drew
+            // every frame of Portal into whatever it owned at `0x479b0000` --
+            // malloc's chunks, a library's read-only page. glibc reported it
+            // as tcache corruption, as an invalid free, and as a fault on a
+            // page that was never the buffer, three symptoms with one cause.
+            //
+            // Each mapping is its own view, as on Linux; unmapping one frees
+            // nothing (`Copied`), because the pages are the memfd's.
+            let backing = f.at;
+            let arena = unsafe { guest_slot() }.as_mut().and_then(|sp| {
+                sp.tables.as_ref()?;
+                let at = arena_take(sp, want as u64)?;
+                let t = sp.tables.as_mut()?;
+                let mut off = 0u64;
+                while off < want as u64 {
+                    if !t.map_page(at + off, backing + off, prot & PROT_WRITE != 0, true) {
+                        return None;
+                    }
+                    off += 4096;
+                }
+                sp.maps.push(Mapping { at, len: want, from: Source::Copied });
+                Some(at)
+            });
+            if let Some(at) = arena {
+                f.maps += 1;
+                return at;
+            }
+            if guest_root() != 0 {
+                return ENOMEM;
+            }
             let at = f.at;
+            // **Every mapping of a memfd is the same pages**, so its rights are
+            // a property of those pages, not of one mapping. A second,
+            // read-only mapping must not take writing away from a first one
+            // that is still live -- on Linux they are independent views.
+            let already = unsafe { guest_slot() }.as_ref().is_some_and(|sp| {
+                sp.maps.iter().any(|m| {
+                    matches!(m.from, Source::Shared) && m.at < at + want as u64 && at < m.at + m.len as u64
+                })
+            });
             let perm = crate::mem::paging::Perm {
                 present: true,
-                write: prot & PROT_WRITE != 0,
+                write: prot & PROT_WRITE != 0 || already,
                 exec: false,
                 user: true,
             };
@@ -5409,6 +5583,27 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
             // Its own memory, laid out again. Nothing is claimed and nothing
             // is recorded, because whatever already holds these pages still
             // holds them and will still free them.
+            //
+            // **But an anonymous mapping laid over it is new memory, and new
+            // memory reads as zero.** Linux replaces the pages; these are the
+            // same pages, so the old contents survived -- and a `.bss` laid
+            // over a reservation, or an arena re-laid after a trim, then
+            // starts with whatever the last tenant left. glibc's `calloc`
+            // trusts fresh heap memory to be zero and skips clearing it, so
+            // the symptom is not here at all: it is a structure that came
+            // back from `calloc` holding stale pointers, freed thousands of
+            // calls later, and reported by the allocator as tcache
+            // corruption. Opened for writing first, since the pages may be
+            // read-only or absent by now and this kernel enforces that on
+            // itself too.
+            if anon {
+                let n = page_up(len as usize);
+                let rw = crate::mem::paging::Perm { present: true, write: true, exec: false, user: true };
+                if !crate::mem::paging::protect(addr, n, rw) {
+                    return ENOMEM;
+                }
+                unsafe { core::ptr::write_bytes(addr as *mut u8, 0, n) };
+            }
             (addr, None)
         } else if crate::mem::fixed::claim(addr, len as usize).is_ok() {
             // Whatever the last tenant left. `alloc_pages` zeroes and this
@@ -5423,7 +5618,59 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
         // A non-fixed `addr` is a hint, and this ignores it. Linux is entitled
         // to as well, every allocator copes, and honouring it would spend a
         // placement claim on a suggestion.
-        let Some(phys) = alloc_pages(len as usize) else { return ENOMEM };
+        let Some(phys) = alloc_pages(len as usize) else {
+            // No contiguous run that size. With a space the arena is mapped a
+            // page at a time anyway, so contiguity was never needed -- for
+            // anonymous memory. A file's bytes are copied in after this point,
+            // so a file mapping that cannot be had whole is refused instead.
+            if backing.is_some() {
+                crate::kprintln!("  [mmap] no contiguous run for a {:#x}-byte file mapping", len);
+                return ENOMEM;
+            }
+            let want = page_up(len as usize) as u64;
+            let paged = unsafe { guest_slot() }.as_mut().and_then(|sp| {
+                sp.tables.as_ref()?;
+                let at = arena_take(sp, want)?;
+                let mut off = 0u64;
+                while off < want {
+                    let ok = alloc_pages(4096).is_some_and(|p| {
+                        sp.tables.as_mut().is_some_and(|t| t.map_page(at + off, p, true, true))
+                            || {
+                                free_pages(p, 4096);
+                                false
+                            }
+                    });
+                    if !ok {
+                        free_paged(sp, at, off);
+                        arena_give(sp, at, want);
+                        return None;
+                    }
+                    off += 4096;
+                }
+                Some(at)
+            });
+            match paged {
+                Some(at) => {
+                    // Fresh pages from the heap carry what the last owner left.
+                    unsafe { core::ptr::write_bytes(at as *mut u8, 0, want as usize) };
+                    let perm = crate::mem::paging::Perm {
+                        present: prot != 0,
+                        write: prot & PROT_WRITE != 0,
+                        exec: prot & PROT_EXEC != 0,
+                        user: true,
+                    };
+                    let _ = crate::mem::paging::protect(at, want as usize, perm);
+                    if let Some(sp) = unsafe { guest_slot() }.as_mut() {
+                        sp.maps.push(Mapping { at, len: want as usize, from: Source::Paged });
+                    }
+                    return at;
+                }
+                None => {
+                    crate::kprintln!("  [mmap] out of memory for {:#x} bytes", len);
+                    return ENOMEM;
+                }
+            }
+        };
         // **With a space, the guest is told an arena address rather than the
         // heap address the pages actually have.** That is the last thing
         // standing between this and `fork`: a child gets its parent's mappings
@@ -5431,13 +5678,11 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
         // different number in each of them.
         let want = page_up(len as usize) as u64;
         let arena = unsafe { guest_slot() }.as_mut().and_then(|sp| {
-            let t = sp.tables.as_mut()?;
-            let at = sp.mmap_next;
+            sp.tables.as_ref()?;
             // Out of arena is out of memory, said as Linux says it, rather
             // than mapping over the stack a 32-bit guest keeps just above it.
-            if at.checked_add(want)? > sp.mmap_end {
-                return None;
-            }
+            let at = arena_take(sp, want)?;
+            let t = sp.tables.as_mut()?;
             let mut off = 0u64;
             while off < want {
                 if !t.map_page(at + off, phys + off, true, true) {
@@ -5448,7 +5693,6 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
                 }
                 off += 4096;
             }
-            sp.mmap_next = at + want;
             Some(at)
         });
         match arena {
@@ -5548,6 +5792,58 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
     }
 }
 
+/// `madvise`. Only `MADV_DONTNEED` changes anything a program can see.
+///
+/// **It is a promise about contents, not a hint.** On a private anonymous
+/// mapping Linux drops the pages, and the next touch reads zero. glibc shrinks
+/// a thread's arena with exactly this and, when the arena grows back over the
+/// same addresses, treats everything above its old top as fresh -- so `calloc`
+/// skips clearing it. Answering 0 and changing nothing (which this did for
+/// 32-bit guests) left that memory holding freed chunks' old links, handed
+/// out as zeroed structures; the program followed them much later and glibc
+/// reported `unaligned tcache chunk`, nowhere near the cause.
+///
+/// So the range is zeroed where it is anonymous memory the guest holds and can
+/// write. A memfd or the framebuffer is shared, and Linux keeps their contents
+/// across `DONTNEED`, so those are left alone; every other advice is a hint
+/// this kernel has no use for and is accepted.
+pub(super) fn sys_madvise(at: u64, len: u64, advice: u64) -> u64 {
+    const MADV_DONTNEED: u64 = 4;
+    if at % PAGE != 0 {
+        return EINVAL;
+    }
+    if advice != MADV_DONTNEED || len == 0 {
+        return 0;
+    }
+    let n = page_up(len as usize);
+    if !owns(at, n) {
+        return ENOMEM;
+    }
+    let shared = unsafe { guest_slot() }.as_ref().is_some_and(|sp| {
+        sp.maps.iter().any(|m| {
+            matches!(m.from, Source::Shared | Source::Device)
+                && at < m.at + page_up(m.len) as u64
+                && m.at < at + n as u64
+        })
+    });
+    if shared {
+        return 0;
+    }
+    let mut page = at;
+    while page < at + n as u64 {
+        // A page the guest has made read-only or absent keeps its contents:
+        // it cannot have been written since, and opening it to clear it
+        // would change rights the guest chose.
+        if let Some(p) = crate::mem::paging::query(page) {
+            if p.present && p.write {
+                unsafe { core::ptr::write_bytes(page as *mut u8, 0, PAGE as usize) };
+            }
+        }
+        page += PAGE;
+    }
+    0
+}
+
 /// Put a mapping's pages back where they came from, rights first.
 ///
 /// **Rights first, always.** A page handed back still carrying its U bit is
@@ -5581,6 +5877,8 @@ fn give_back(at: u64, len: usize, from: Option<Source>) {
             crate::mem::paging::protect(at, page_up(len), crate::mem::paging::Perm::RWX);
         }
         Some(Source::Copied) => {}
+        // Freed by `free_paged`, which can see the guest's tables; this cannot.
+        Some(Source::Paged) => {}
         // The backing, at its own address. Nothing is done about the guest's
         // mapping of it: those page tables belong to the guest's `Space` and
         // die with it, so unmapping here would be tidying something that is
@@ -5610,6 +5908,17 @@ pub(super) fn sys_munmap(at: u64, len: u64) -> u64 {
     match sp.maps.iter().position(|m| m.at == at && page_up(m.len) == want) {
         Some(i) => {
             let m = sp.maps.remove(i);
+            // Another mapping of the same memfd pages is still live: those
+            // pages keep their rights until the last view of them goes. Taking
+            // the U bit off here killed the survivor -- Mesa maps a Wayland
+            // buffer, and a page fault at its first write was the result.
+            if matches!(m.from, Source::Shared)
+                && sp.maps.iter().any(|o| {
+                    matches!(o.from, Source::Shared) && o.at < m.at + m.len as u64 && m.at < o.at + o.len as u64
+                })
+            {
+                return 0;
+            }
             // **Close it before giving it back.** `teardown` does this for a
             // guest that exits still holding mappings, and this path was
             // missed: an explicit unmap returned pages to the allocator with
@@ -5617,7 +5926,15 @@ pub(super) fn sys_munmap(at: u64, len: u64) -> u64 {
             // memory -- kernel or otherwise -- came with ring-3 access
             // attached. A `diag all` caught it and `diag paging` alone did
             // not, because it only shows up once something else has run.
-            give_back(m.at, m.len, Some(m.from));
+            if m.from == Source::Paged {
+                free_paged(sp, m.at, page_up(m.len) as u64);
+            } else {
+                give_back(m.at, m.len, Some(m.from));
+            }
+            // An arena address goes back on the free list once its pages have.
+            if matches!(m.from, Source::Backed(_) | Source::Copied | Source::Paged) && sp.tables.is_some() {
+                arena_give(sp, m.at, page_up(m.len) as u64);
+            }
             0
         }
         // **Part of a mapping: accepted, and the pages kept.** The heap cannot
@@ -5856,7 +6173,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         // which is unusual in this file: most scheduling calls are answered
         // with a shape rather than an action.
         SYS_SCHED_YIELD => {
-            crate::task::yield_now();
+            wait_turn();
             (0, true)
         }
         // One process, and it is the guest. Reporting a pid at all is what
@@ -5871,6 +6188,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_BRK => (sys_brk(f.rdi), true),
         SYS_MMAP => (sys_mmap(f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9), true),
         SYS_MPROTECT => (sys_mprotect(f.rdi, f.rsi, f.rdx), true),
+        SYS_MADVISE => (sys_madvise(f.rdi, f.rsi, f.rdx), true),
         SYS_MUNMAP => (sys_munmap(f.rdi, f.rsi), true),
         SYS_ARCH_PRCTL => (sys_arch_prctl(f.rdi, f.rsi), true),
         SYS_EXIT | SYS_EXIT_GROUP => {
@@ -6111,6 +6429,100 @@ pub fn fault_where() -> Option<(String, String, String)> {
 /// "inside the interpreter, at +0x2000", and that is the difference between a
 /// fault report and a diagnosis -- the same reason `cpu::code::locate` exists
 /// for the kernel's own faults.
+/// Which file each file-backed mapping came from: (address, length, file
+/// offset, path). For naming a crash site, and nothing else reads it.
+///
+/// A side table rather than a field on `Mapping`, because `Mapping` is copied
+/// by `fork` and compared by `munmap` and neither should care about a name.
+/// Never pruned while a guest runs, so a stale entry can name a library that
+/// has since been unmapped; the newest matching entry wins, which is the one
+/// that was there last.
+pub static MAP_NAMES: Racy<Vec<(u64, u64, u64, String)>> = Racy::new(Vec::new());
+
+/// Give back a `Paged` mapping's pages: each one looked up in the guest's
+/// tables, its rights restored and freed, then the translation removed.
+fn free_paged(sp: &mut Space, at: u64, len: u64) {
+    let Some(t) = sp.tables.as_mut() else { return };
+    let mut off = 0;
+    while off < len {
+        if let Some(phys) = t.phys_of(at + off) {
+            crate::mem::paging::release_to_heap(phys, 4096);
+            free_pages(phys, 4096);
+        }
+        t.unmap_page(at + off);
+        off += 4096;
+    }
+}
+
+/// Take `want` bytes of arena: first fit from what `munmap` gave back, then
+/// the cursor. `None` is out of arena, which the caller says as `ENOMEM`.
+fn arena_take(sp: &mut Space, want: u64) -> Option<u64> {
+    if let Some(i) = sp.arena_free.iter().position(|&(_, l)| l >= want) {
+        let (a, l) = sp.arena_free[i];
+        if l == want {
+            sp.arena_free.remove(i);
+        } else {
+            sp.arena_free[i] = (a + want, l - want);
+        }
+        return Some(a);
+    }
+    let at = sp.mmap_next;
+    if at.checked_add(want)? > sp.mmap_end {
+        return None;
+    }
+    sp.mmap_next = at + want;
+    Some(at)
+}
+
+/// Give an arena range back: its page-table entries cleared and flushed --
+/// a stale translation would hand the next tenant the last one's pages --
+/// and the range filed, merged with its neighbours.
+fn arena_give(sp: &mut Space, at: u64, len: u64) {
+    let Some(t) = sp.tables.as_mut() else { return };
+    let mut off = 0;
+    while off < len {
+        t.unmap_page(at + off);
+        off += 4096;
+    }
+    let i = sp.arena_free.partition_point(|&(a, _)| a < at);
+    sp.arena_free.insert(i, (at, len));
+    if i + 1 < sp.arena_free.len() && sp.arena_free[i].0 + sp.arena_free[i].1 == sp.arena_free[i + 1].0 {
+        sp.arena_free[i].1 += sp.arena_free[i + 1].1;
+        sp.arena_free.remove(i + 1);
+    }
+    if i > 0 && sp.arena_free[i - 1].0 + sp.arena_free[i - 1].1 == sp.arena_free[i].0 {
+        sp.arena_free[i - 1].1 += sp.arena_free[i].1;
+        sp.arena_free.remove(i);
+    }
+}
+
+/// Note a file mapping that succeeded.
+pub(super) fn note_map(at: u64, len: u64, fd: u64, off: u64) {
+    if (at as i64) < 0 {
+        return;
+    }
+    let name = unsafe { guest_slot() }.as_ref().and_then(|sp| match sp.fds.get(fd as usize)?.as_ref()? {
+        super::fs::Fd::Disk(b) => Some(b.borrow().path.clone()),
+        super::fs::Fd::File(b) => Some(b.borrow().path.clone()),
+        _ => None,
+    });
+    if let Some(n) = name {
+        let t = unsafe { &mut *MAP_NAMES.get() };
+        if t.len() < 4096 {
+            t.push((at, len, off, n));
+        }
+    }
+}
+
+/// A code address as `file+offset`, the form `addr2line` and `nm` take.
+pub fn name_code(v: u64) -> Option<String> {
+    let t = unsafe { &*MAP_NAMES.get() };
+    t.iter().rev().find(|(a, l, _, _)| v >= *a && v < a + l).map(|(a, _, off, n)| {
+        let short = n.rsplit('/').next().unwrap_or(n);
+        alloc::format!("{}+{:#x}", short, v - a + off)
+    })
+}
+
 pub fn locate(at: u64) -> alloc::string::String {
     let Some(sp) = (unsafe { guest_slot() }).as_ref() else {
         return alloc::string::String::from("no guest");
@@ -6128,8 +6540,21 @@ pub fn locate(at: u64) -> alloc::string::String {
         })
         .or_else(|| {
             sp.maps.iter().find_map(|m| {
-                (at >= m.at && at < m.at.saturating_add(m.len as u64))
-                    .then(|| alloc::format!("a mapping at {:#x} +{:#x}", m.at, at - m.at))
+                (at >= m.at && at < m.at.saturating_add(m.len as u64)).then(|| {
+                    let kind = match m.from {
+                        Source::Heap => "heap",
+                        Source::Fixed => "fixed",
+                        Source::Device => "device",
+                        Source::Shared => "memfd",
+                        Source::Copied => "copied",
+                        Source::Backed(_) => "backed",
+                        Source::Paged => "paged",
+                    };
+                    let rights = crate::mem::paging::query(at & !(PAGE - 1))
+                        .map(|p| alloc::format!("{}{}{}", if p.present { "p" } else { "-" }, if p.write { "w" } else { "-" }, if p.user { "u" } else { "-" }))
+                        .unwrap_or_else(|| alloc::string::String::from("unmapped"));
+                    alloc::format!("a {} mapping at {:#x} len {:#x} +{:#x} [{}]", kind, m.at, m.len, at - m.at, rights)
+                })
             })
         })
         .unwrap_or_else(|| alloc::string::String::from("nothing this guest owns"))
@@ -6293,8 +6718,28 @@ pub fn signal_of_vector(v: u8) -> u32 {
 ///
 /// # Safety
 /// Only from a fault handler, and only when `running` is true.
+/// The first crashing thread's stack, copied raw at the moment of the fault.
+///
+/// Raw because this is filled from the fault path, where allocating and
+/// printing are both off the table; `run` names the words afterwards. The
+/// first crash only, since the first is the cause and the rest are the
+/// process coming down around it.
+pub static CRASH: Racy<(bool, u64, usize, [u32; 4096])> = Racy::new((false, 0, 0, [0; 4096]));
+
 pub unsafe fn kill(f: Fault) -> ! {
     let vector = f.regs.vector;
+    {
+        let c = unsafe { &mut *CRASH.get() };
+        if !c.0 && abi32() {
+            let base = f.regs.rsp & !3;
+            let mut n = 0;
+            while n < c.3.len() && reachable(base + n as u64 * 4, 4, false) {
+                c.3[n] = unsafe { core::ptr::read_unaligned((base + n as u64 * 4) as *const u32) };
+                n += 1;
+            }
+            *c = (true, base, n, c.3);
+        }
+    }
     // Copied out before the longjmp, which abandons the stack this arrived on.
     // Into the faulting task's own cell: a child's crash is its parent's to
     // read through `wait4`, and writing it over the session's report would
@@ -6425,6 +6870,7 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64, bits32: bool) -> u64 {
         (*FAULT_AT.get())[me()] = None;
         (*FAULT_REGS.get())[me()] = None;
         (*FAULT_STACK.get())[me()] = None;
+        (*MAP_NAMES.get()).clear();
     }
     // Zero means no deadline, and `overran` already reads a zero `DEADLINE`
     // as "nothing to enforce", so the two agree without a second condition.
@@ -6482,7 +6928,7 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64, bits32: bool) -> u64 {
     while (super::thread::live_in(sess) > 0 || super::fork::live_in(sess) > 0)
         && crate::dev::lapic::ticks() < give_up
     {
-        crate::task::yield_now();
+        wait_turn();
     }
     super::session::set_deadline(sess, 0);
     if flags & (1 << 9) != 0 {
@@ -6508,24 +6954,70 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64, bits32: bool) -> u64 {
             .collect()
         });
         (*FAULT_STACK.get())[me()] = last_fault().and_then(|f| {
-            let base = f.regs.rsp & !7;
+            // A 32-bit guest's stack is 4-byte words, and reading it 8 at a
+            // time pairs every return address with its neighbour. Deep, and
+            // filtered to words that land in a mapped file: those are the
+            // candidate return addresses, which is the backtrace a program
+            // that called `abort` has no other way to leave behind.
+            let w = if abi32() { 4u64 } else { 8 };
+            let base = f.regs.rsp & !(w - 1);
             let mut out = Vec::new();
-            for i in 0..24u64 {
-                let at = base + i * 8;
-                // Read only what the guest actually owns and can be read: the
-                // stack pointer of a program that died badly is not
-                // necessarily a stack pointer.
-                if !reachable(at, 8, false) {
-                    continue;
+            for i in 0..2048u64 {
+                let at = base + i * w;
+                if !reachable(at, w as usize, false) {
+                    break;
                 }
-                let v = core::ptr::read_unaligned(at as *const u64);
-                out.push((at, v, locate(v)));
+                let v = if w == 4 {
+                    core::ptr::read_unaligned(at as *const u32) as u64
+                } else {
+                    core::ptr::read_unaligned(at as *const u64)
+                };
+                if let Some(n) = name_code(v) {
+                    out.push((at, v, n));
+                    if out.len() >= 48 {
+                        break;
+                    }
+                }
             }
             (!out.is_empty()).then_some(out)
         });
+        if let Some(ws) = (*FAULT_STACK.get())[me()].as_ref() {
+            crate::kprintln!("  return addresses on the stack:");
+            for (at, v, n) in ws {
+                crate::kprintln!("    {:#010x}: {:#010x} {}", at, v, n);
+            }
+        }
+        let c = &mut *CRASH.get();
+        if c.0 {
+            crate::kprintln!("  the first crash's stack, from {:#x}:", c.1);
+            let mut shown = 0;
+            for i in 0..c.2 {
+                if let Some(n) = name_code(c.3[i] as u64) {
+                    crate::kprintln!("    +{:#06x}: {:#010x} {}", i * 4, c.3[i], n);
+                    shown += 1;
+                    if shown >= 64 {
+                        break;
+                    }
+                }
+            }
+            c.0 = false;
+        }
     }
     teardown();
     // The session's trace becomes this task's, for whoever ran it to read.
+    let tail = super::session::take_tail(sess);
+    if MISSES.load(Ordering::Relaxed) && !tail.is_empty() {
+        crate::kprintln!("  the last {} call(s):", tail.len());
+        for c in &tail {
+            match c.path() {
+                Some(p) => crate::kprintln!("  {:>4} {:<16} {} -> {}", c.nr & !(1 << 31), name_of(c.nr), p, c.ret as i64),
+                None => crate::kprintln!(
+                    "  {:>4} {:<16} {:#x} {:#x} {:#x} {:#x} -> {}",
+                    c.nr & !(1 << 31), name_of(c.nr), c.args[0], c.args[1], c.args[2], c.args[3], c.ret as i64
+                ),
+            }
+        }
+    }
     unsafe { (*TASK_TRACE.get())[me()] = super::session::take_trace(sess) };
     super::session::leave();
     super::session::release(sess);
@@ -6637,8 +7129,13 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // claim that earns its place is the failure mode: Linux answers the
     // *unchanged* break rather than an error, and an implementation returning
     // -ENOMEM would hand libc 0xFFFFFFFFFFFFFFF4 as a heap address.
-    {
-        let region = 0x10_0000u64;
+    //
+    // **Real pages, because growing the break now writes.** A grown break
+    // reads as zero, as Linux's does, and this check's region used to be a
+    // fake at `0x100000` -- so the first `brk` past the old break zeroed 8 KiB
+    // of whatever the machine keeps there, and `diag linux` took QEMU down
+    // with no message at all.
+    if let Some(region) = alloc_pages(4096 * 4) {
         let fake = Region { at: region, len: 4096 * 4 };
         install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         let first = sys_brk(0);
@@ -6658,6 +7155,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         // Teardown would wrmsr FS from a Space whose saved value is zero, and
         // this check installed one by hand rather than through `run`.
         unsafe { *guest_slot() = None };
+        free_pages(region, 4096 * 4);
     }
 
     // mmap's refusals, and the two shapes that stopped being refusals. Two of
@@ -6962,13 +7460,22 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             "an absolute path ignores dirfd, so a closed one is not an error",
             sys_statat(99, abs_p, sbuf, 0) == 0,
         ));
-        // `..` is still refused, and that has to survive the new base: a tree
-        // with O(1) copies has no single parent to walk back to, so a relative
-        // path cannot be used to climb out of the directory it was opened on.
+        // `..` is lexical: it drops the previous component of the path as
+        // written. It was refused, on the grounds that a tree with O(1) copies
+        // has no single parent -- true of a node, and beside the point for a
+        // path, which names its parent in its own text. The refusal cost a
+        // real program its data directory: the Source engine resolves
+        // `bin/../portal` and reported its game as not installed.
         put(32, "../lib/geom.ai&xi", &mut buf);
         out.push((
-            "a relative path may not climb out with .. , as resolve refuses it",
-            sys_statat(fd, rel_p, sbuf, 0) == ENOENT,
+            "a relative path may step back with .. , which drops a component",
+            sys_statat(fd, rel_p, sbuf, 0) == 0,
+        ));
+        // And it cannot climb past the root, which is where Linux stops too.
+        put(32, "../../../../lib/geom.ai&xi", &mut buf);
+        out.push((
+            "and stepping back past the root stays at the root",
+            sys_statat(fd, rel_p, sbuf, 0) == 0,
         ));
         teardown();
     }
@@ -7040,9 +7547,26 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     if let Some(own) = alloc_pages(8192) {
         let mine = Region { at: own, len: 8192 };
         install(Regions { image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
+        unsafe { core::ptr::write_bytes(own as *mut u8, 0xA5, 8192) };
         out.push((
             "MAP_FIXED over memory the guest already holds answers that address",
             sys_mmap(own, 4096, 3, MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0) == own,
+        ));
+        // glibc's `calloc` trusts this: a `.bss` or a re-laid arena that kept
+        // its last tenant's bytes is a zeroed structure full of stale pointers.
+        let page = |at: u64| unsafe { core::slice::from_raw_parts(at as *const u8, 4096) };
+        out.push((
+            "and the anonymous memory laid there reads as zero, as Linux's would",
+            page(own).iter().all(|&b| b == 0) && page(own + 4096).iter().all(|&b| b == 0xA5),
+        ));
+        unsafe { core::ptr::write_bytes(own as *mut u8, 0x5A, 4096) };
+        out.push((
+            "MADV_DONTNEED on anonymous memory leaves it reading as zero",
+            sys_madvise(own, 4096, 4) == 0 && page(own).iter().all(|&b| b == 0),
+        ));
+        out.push((
+            "and every other advice is accepted and changes nothing",
+            sys_madvise(own + 4096, 4096, 3) == 0 && page(own + 4096).iter().all(|&b| b == 0xA5),
         ));
         out.push((
             "and records nothing, because something already holds those pages",
@@ -7199,16 +7723,21 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             build_stack(p, p as u64, 64, &["x"], Aux::default()).is_none()
         },
     ));
-    let mut big = [0u8; 512];
+    // Room for whatever `linux env` has added, which this frame carries: at
+    // 512 bytes these claims passed on a fresh boot and failed after a game's
+    // environment had been set, which is a claim about the shell's history
+    // rather than about the frame.
+    const BIG: usize = 8192;
+    let mut big = alloc::vec![0u8; BIG];
     let aux = Aux { phdr: 0x1000, phent: 56, phnum: 2, entry: 0x1078, base: 0 };
     let sp = {
         let p = big.as_mut_ptr();
-        build_stack(p, p as u64, 512, &["cat", "/ai/about"], aux)
+        build_stack(p, p as u64, BIG, &["cat", "/ai/about"], aux)
     };
     out.push((
         "and one large enough answers a 16-byte-aligned pointer inside itself",
         sp.is_some_and(|v| v % 16 == 0 && v >= big.as_ptr() as u64
-            && v < big.as_ptr() as u64 + 512),
+            && v < big.as_ptr() as u64 + BIG as u64),
     ));
     out.push((
         "argc and the argv pointers are where the ABI says, and the strings are real",
@@ -7274,17 +7803,17 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push((
         "AT_RANDOM points at sixteen bytes inside this stack, since libc reads its guard there",
         auxv(AT_RANDOM).is_some_and(|r| {
-            r >= big.as_ptr() as u64 && r + 16 <= big.as_ptr() as u64 + 512
+            r >= big.as_ptr() as u64 && r + 16 <= big.as_ptr() as u64 + BIG as u64
         }),
     ));
     out.push((
         "a header table no segment covers omits the whole group rather than pointing at nothing",
         {
-            let mut small = [0u8; 512];
+            let mut small = alloc::vec![0u8; BIG];
             let none = Aux { phdr: 0, phent: 56, phnum: 2, entry: 0, base: 0 };
             let s2 = {
                 let p = small.as_mut_ptr();
-                build_stack(p, p as u64, 512, &["x"], none)
+                build_stack(p, p as u64, BIG, &["x"], none)
             };
             s2.is_some_and(|v| unsafe {
                 let p = v as *const u64;
@@ -7731,6 +8260,7 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_BRK => "brk",
         SYS_MMAP => "mmap",
         SYS_MPROTECT => "mprotect",
+        SYS_MADVISE => "madvise",
         SYS_MUNMAP => "munmap",
         SYS_EXIT => "exit",
         SYS_ARCH_PRCTL => "arch_prctl",

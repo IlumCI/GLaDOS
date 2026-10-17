@@ -494,7 +494,7 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
         145 => (sc::sys_readv(b, c, d), true),
         146 => (sc::sys_writev(b, c, d), true),
         158 => {
-            crate::task::yield_now();
+            sc::wait_turn();
             (0, true)
         }
         162 => {
@@ -544,11 +544,17 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
             };
             (if put_u32(c, v) && put_u32(c + 4, v) { 0 } else { sc::EFAULT }, true)
         }
-        192 => (sc::sys_mmap(b, c, d, si, sx(di), bp.wrapping_mul(4096)), true),
+        192 => {
+            let r = sc::sys_mmap(b, c, d, si, sx(di), bp.wrapping_mul(4096));
+            if si & 0x20 == 0 {
+                sc::note_map(r, c, di, bp.wrapping_mul(4096));
+            }
+            (r, true)
+        }
         195 | 196 => (sc::sys_statat(AT_FDCWD, b, c, 0), true),
         197 => (sc::sys_fstat(b, c), true),
         218 => (sc::sys_mincore(b, c, d), true),
-        219 => (0, true),
+        219 => (sc::sys_madvise(b, c, d), true),
         220 => (sc::sys_getdents64(b, c, d), true),
         224 => (super::thread::current_tid(), true),
         242 => (sc::sys_sched_getaffinity(b, c, d), true),

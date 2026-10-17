@@ -368,14 +368,18 @@ impl Fd {
 
 /// Resolve a guest path against a working directory.
 ///
-/// Answers `None` for anything with a `..` in it. The tree has O(1) copies and
-/// no single parent, so walking back up is not a question it can answer, and
-/// silently normalising the path would resolve to somewhere the guest did not
-/// name.
+/// `..` is resolved lexically: it removes the component before it, and at the
+/// root it stays at the root, as Linux has it.
+///
+/// **This refused every `..` until a real program needed one.** The reason
+/// given was that the tree has O(1) copies and no single parent, so "up" is
+/// not a question it can answer -- true of the *store's* objects and not of a
+/// path, which is a string naming one place. With no symlinks anywhere here, a
+/// lexical walk up is exactly what Linux does. Source's engine finds its game
+/// directory as `bin/../portal`, and the refusal surfaced as "Setup file
+/// 'gameinfo.txt' doesn't exist" about a file that does. The `/tmp` write jail
+/// is unaffected: it is checked against the resolved path.
 pub fn resolve(cwd: &str, path: &str) -> Option<String> {
-    if path.split('/').any(|c| c == "..") {
-        return None;
-    }
     let joined = if path.starts_with('/') {
         path.to_string()
     } else {
@@ -386,17 +390,20 @@ pub fn resolve(cwd: &str, path: &str) -> Option<String> {
         s.push_str(path);
         s
     };
-    // Collapse `.` and empty components so `/a//./b` is `/a/b`.
-    let mut out = String::from("/");
+    // Collapse `.` and empty components so `/a//./b` is `/a/b`, and take
+    // `..` back one component.
+    let mut parts: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
     for c in joined.split('/') {
-        if c.is_empty() || c == "." {
-            continue;
+        match c {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            c => parts.push(c),
         }
-        if out.len() > 1 {
-            out.push('/');
-        }
-        out.push_str(c);
     }
+    let mut out = String::from("/");
+    out.push_str(&parts.join("/"));
     Some(out)
 }
 
@@ -531,8 +538,11 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         resolve("/", "/a//./b/").as_deref() == Some("/a/b"),
     ));
     out.push((
-        "a path that walks upwards is refused rather than normalised",
-        resolve("/ai", "../etc/passwd").is_none() && resolve("/", "a/../b").is_none(),
+        "a path that walks upwards is resolved lexically, and stops at the root",
+        resolve("/ai", "../etc/passwd").as_deref() == Some("/etc/passwd")
+            && resolve("/", "a/../b").as_deref() == Some("/b")
+            && resolve("/", "../../x").as_deref() == Some("/x")
+            && resolve("/mnt/portal/bin", "../portal").as_deref() == Some("/mnt/portal/portal"),
     ));
     out.push((
         "the root resolves to itself",

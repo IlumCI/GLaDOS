@@ -729,6 +729,6 @@ pub fn wait(pid: i64, status: u64, options: u64) -> u64 {
             // harder to read in a trace than one that refuses.
             return ECHILD;
         }
-        crate::task::yield_now();
+        syscall::wait_turn();
     }
 }

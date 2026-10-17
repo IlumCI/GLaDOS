@@ -7400,6 +7400,16 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         kprintln!("  off -- guests run on the kernel's root, as they always have");
                     }
                 }
+                "memlog" => {
+                    let on = words.next() != Some("off");
+                    linux::syscall::MEMLOG.store(on, core::sync::atomic::Ordering::Relaxed);
+                    kprintln!("  memory-map calls are {} as they happen", if on { "printed" } else { "not printed" });
+                }
+                "misses" => {
+                    let on = words.next() != Some("off");
+                    linux::syscall::MISSES.store(on, core::sync::atomic::Ordering::Relaxed);
+                    kprintln!("  refused paths are {} as they happen", if on { "printed" } else { "not printed" });
+                }
                 "deadline" => {
                     let arg = words.next().unwrap_or("");
                     console::set_color(YELLOW);

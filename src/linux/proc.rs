@@ -87,7 +87,7 @@ pub fn is_file(path: &str) -> bool {
     matches!(
         path,
         "/proc/self/exe" | "/proc/self/cmdline" | "/proc/self/environ" | "/proc/self/maps"
-            | CPU_MAX_FREQ
+            | "/proc/meminfo" | CPU_MAX_FREQ
     )
 }
 
@@ -124,6 +124,30 @@ pub fn read(path: &str) -> Option<Vec<u8>> {
         "/proc/self/cmdline" => Some(joined(&syscall::guest_argv())),
         "/proc/self/environ" => Some(joined(&syscall::environ())),
         "/proc/self/maps" => Some(maps().into_bytes()),
+        // **Every field here is one this machine knows**, which is what
+        // admits the file under the rule above: total and free are the
+        // kernel heap's, the same figures `sysinfo` already answers, and
+        // buffers, cache and swap are zero because there is no page cache and
+        // no swap -- zero is the true value, not a placeholder. The Source
+        // engine reads this file to size its caches and does not check that
+        // the open worked; without it, it parsed a stream that was never
+        // opened and faulted.
+        "/proc/meminfo" => {
+            let (used, total) = crate::mem::heap::HEAP.stats();
+            let kib = |b: usize| b / 1024;
+            let free = total.saturating_sub(used);
+            Some(
+                format!(
+                    "MemTotal:       {:>8} kB\nMemFree:        {:>8} kB\nMemAvailable:   {:>8} kB\n\
+                     Buffers:               0 kB\nCached:                0 kB\n\
+                     SwapTotal:             0 kB\nSwapFree:              0 kB\n",
+                    kib(total),
+                    kib(free),
+                    kib(free)
+                )
+                .into_bytes(),
+            )
+        }
         _ => None,
     }
 }
@@ -211,7 +235,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     ));
     out.push((
         "and nothing outside them is claimed, so the store still answers for every other path",
-        !claims("/proc/meminfo") && !claims("/proc/stat") && !claims("/tmp/x") && !claims("/"),
+        !claims("/proc/stat") && !claims("/tmp/x") && !claims("/"),
     ));
     // The rule the module exists to hold. `/proc/cpuinfo` and friends are
     // formats whose honest content is mostly "I do not know", and a text file

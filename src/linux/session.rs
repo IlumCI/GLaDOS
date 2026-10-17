@@ -46,6 +46,14 @@ static DEADLINE: [AtomicU64; MAX] = [const { AtomicU64::new(0) }; MAX];
 static EXITING: [AtomicBool; MAX] = [const { AtomicBool::new(false) }; MAX];
 static QUARANTINED: [AtomicBool; MAX] = [const { AtomicBool::new(false) }; MAX];
 static TRACE: Racy<[Vec<Call>; MAX]> = Racy::new([const { Vec::new() }; MAX]);
+/// The most recent calls once the trace above is full, as a ring.
+///
+/// The trace keeps the *first* calls because those are where a program asks
+/// for what it needs; a program that dies of corruption dies thousands of
+/// calls later, and what it did just before is the only lead. So the two
+/// halves answer different questions and both are kept.
+static TAIL: Racy<[(Vec<Call>, usize); MAX]> = Racy::new([const { (Vec::new(), 0) }; MAX]);
+const TAIL_CAP: usize = 256;
 
 /// Take a free session number, or `None` when all are in use.
 pub fn claim() -> Option<usize> {
@@ -57,6 +65,7 @@ pub fn claim() -> Option<usize> {
             EXITING[i].store(false, Ordering::Release);
             QUARANTINED[i].store(false, Ordering::Release);
             unsafe { (*TRACE.get())[i].clear() };
+            unsafe { (*TAIL.get())[i] = (Vec::new(), 0) };
             return Some(i);
         }
     }
@@ -142,8 +151,25 @@ pub fn record(c: Call, cap: usize) {
         let t = unsafe { &mut (*TRACE.get())[s] };
         if t.len() < cap {
             t.push(c);
+            return;
+        }
+        let (ring, head) = unsafe { &mut (*TAIL.get())[s] };
+        if ring.len() < TAIL_CAP {
+            ring.push(c);
+        } else {
+            ring[*head] = c;
+            *head = (*head + 1) % TAIL_CAP;
         }
     }
+}
+
+/// The last calls past the trace's cap, oldest first, emptied.
+pub fn take_tail(s: usize) -> Vec<Call> {
+    let (ring, head) = core::mem::take(unsafe { &mut (*TAIL.get())[s] });
+    let mut out = Vec::with_capacity(ring.len());
+    out.extend_from_slice(&ring[head..]);
+    out.extend_from_slice(&ring[..head]);
+    out
 }
 
 /// The session's trace, emptied.
