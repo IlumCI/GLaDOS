@@ -1,0 +1,8 @@
+looprung 1
+seq 3
+goal ce93af35a0b0364e0b918caaa96c0e6e685347d9b390091d2a3bd5430253be4f
+kind feature
+target src/fmt/pixel_format.rs
+title a pixel format that represents a 4x4 block of pixels as a 4x4 block of bytes
+witness a claim in `diag fmt` that a pixel format with width 4 and height 4 reads back the same data when written to, which fails today because the struct does not exist
+why nothing can be measured until there is a value to hold one, and this is one file of about forty lines
