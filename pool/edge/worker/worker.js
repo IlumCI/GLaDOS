@@ -460,6 +460,9 @@ export class Pool {
     const earn = await this.treasurer.earnQuote().catch(() => null);
     if (!earn || !earn.byCode) return;
     const rewards = await this.rewards();
+    // The same payout facts ride on every miner's message: the last
+    // distribution's recipient count, the cadence, and when it last paid.
+    const recipients = earn.recipients || 0, epochMs = earn.epochMs || 0, lastAt = earn.lastAt ?? null;
     for (const [ws] of this.conns) {
       const addr = this.connAddr.get(ws);
       if (!addr) continue;
@@ -467,7 +470,7 @@ export class Pool {
       const code = held ? (rewards.get(addr) || DEFAULT_REWARD) : DEFAULT_REWARD;
       const value = earn.byCode[code];
       if (typeof value === "number" && value >= 0) {
-        try { ws.send(JSON.stringify({ method: "glados.earn", params: { asset: code, value } }) + "\n"); }
+        try { ws.send(JSON.stringify({ method: "glados.earn", params: { asset: code, value, recipients, epochMs, lastAt } }) + "\n"); }
         catch { this.drop(ws); }
       }
     }
