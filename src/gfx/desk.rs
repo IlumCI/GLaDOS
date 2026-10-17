@@ -68,6 +68,11 @@ pub enum WinState {
     Normal,
     Maximised,
     Minimised,
+    /// The whole screen, taskbar included, with no border or caption: what a
+    /// program asks for with `xdg_toplevel.set_fullscreen`. The one state
+    /// allowed to cover the taskbar, because a game asking for the screen is
+    /// asking for exactly that; Super-Tab and the Super key still work.
+    Fullscreen,
 }
 
 pub struct MenuItem {
@@ -329,6 +334,9 @@ impl Window {
     fn frame(&self, screen: Rect) -> Rect {
         match self.state {
             WinState::Maximised => screen,
+            WinState::Fullscreen => super::primary()
+                .map(|fb| Rect::new(0, 0, fb.width(), fb.height()))
+                .unwrap_or(screen),
             _ => self.rect,
         }
     }
@@ -486,6 +494,7 @@ pub enum Op {
     /// committed a buffer of a new size, which a fixed-size window has no
     /// other way to say.
     Resize { tag: u64, w: u32, h: u32 },
+    Fullscreen { tag: u64, on: bool },
     Close { tag: u64 },
 }
 
@@ -551,6 +560,7 @@ pub fn drain_ops() {
             Op::OpenTagged { title, icon, app, w, h } => open_app(&title, icon, app, w, h),
             Op::Retitle { tag, title } => retitle_tagged(tag, &title),
             Op::Resize { tag, w, h } => resize_tagged(tag, w, h),
+            Op::Fullscreen { tag, on } => fullscreen_tagged(tag, on),
             Op::Close { tag } => {
                 close_tagged(tag);
             }
@@ -2483,6 +2493,11 @@ pub fn poll_mouse() {
     }))
     .flatten() };
     if grab != 0 && focus_tag == Some(grab) {
+        crate::cpu::without_interrupts(|| {
+            if let Some(_claim) = Claim::take() {
+                super::compose::hide_cursor();
+            }
+        });
         let was = unsafe { *BUTTONS.get() };
         unsafe { *BUTTONS.get() = (s.left, s.right) };
         if s.left != was.0 {
@@ -3194,6 +3209,18 @@ pub fn close_tagged(tag: u64) -> usize {
 }
 
 /// Retitle the window whose program carries this tag.
+/// Put a tagged window on the whole screen, or take it back off.
+pub fn fullscreen_tagged(tag: u64, on: bool) {
+    with(|d| {
+        for w in d.windows.iter_mut() {
+            if matches!(&w.content, Content::App(a) if a.tag() == tag) {
+                w.state = if on { WinState::Fullscreen } else { WinState::Normal };
+            }
+        }
+    });
+    super::render::invalidate();
+}
+
 /// Fit a floating tagged window around a client area of `w` by `h`, kept on
 /// screen. A tiled one keeps its slot; that is the layout's to decide.
 pub fn resize_tagged(tag: u64, w: u32, h: u32) {
@@ -6402,7 +6429,7 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
                 with_window_shape(&fb, win, frame, || paint_window_body(&fb, d, i, win, frame, active, hot));
             }
             with_window_shape(&fb, win, frame, || console_over(&fb, win));
-            if active {
+            if active && win.state != WinState::Fullscreen {
                 let maxed = win.state == WinState::Maximised;
                 let alpha = unsafe { (*FOCUS_RING.get()).2 };
                 focus_ring(&fb, frame, if maxed { 0 } else { win.round }, alpha, !maxed);
@@ -6616,6 +6643,7 @@ pub fn trace(event: &str) {
                 WinState::Normal => "normal",
                 WinState::Maximised => "max",
                 WinState::Minimised => "min",
+                WinState::Fullscreen => "full",
             };
             crate::serial_println!(
                 "[desk] {} {} {} {}x{}+{}+{}",

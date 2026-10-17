@@ -122,6 +122,7 @@ pub type Shared = Arc<Spin<Frame>>;
 pub enum Effect {
     Open { key: u64, title: String, frame: Shared },
     Retitle { key: u64, title: String },
+    Fullscreen { key: u64, on: bool },
     Close { key: u64 },
 }
 
@@ -193,6 +194,9 @@ struct Toplevel {
     title: String,
     /// The desktop window, once the first buffer made one.
     window: Option<(u64, Shared)>,
+    /// Asked for full screen, possibly before there was a window to put
+    /// there -- SDL asks before its first commit.
+    full: bool,
 }
 
 /// Everything below `wl_registry`, on one connection.
@@ -453,7 +457,11 @@ impl Client {
                     focused: false,
                 }));
                 tl.window = Some((key, Arc::clone(&frame)));
+                let full = tl.full;
                 self.scene.effects.push(Effect::Open { key, title: tl.title.clone(), frame });
+                if full {
+                    self.scene.effects.push(Effect::Fullscreen { key, on: true });
+                }
             }
         }
         // Copied, so the client may have its buffer back now.
@@ -668,7 +676,7 @@ impl Client {
                 }
                 x.toplevel = Some(tid);
                 self.objects.create(tid, XDG_TOPLEVEL, 1)?;
-                self.scene.toplevels.insert(tid, Toplevel { xdg: id, title: String::from("Linux"), window: None });
+                self.scene.toplevels.insert(tid, Toplevel { xdg: id, title: String::from("Linux"), window: None, full: false });
                 // Zero by zero is "choose your own size", and no states.
                 let mut w = Writer::new(tid, 0);
                 w.int(0);
@@ -745,11 +753,41 @@ impl Client {
                 }
                 Ok(())
             }
+            // set_fullscreen (11) and unset_fullscreen (12): the desktop
+            // gives the window the screen, and the client is told the
+            // screen's size in a configure, which is what it renders at.
+            11 | 12 => {
+                let on = msg.opcode == 11;
+                if on {
+                    let _output = r.object()?;
+                }
+                done(&r)?;
+                let t = self.scene.toplevels.get_mut(&id).ok_or(Error::NoObject)?;
+                t.full = on;
+                let xdg = t.xdg;
+                if let Some((key, _)) = &t.window {
+                    self.scene.effects.push(Effect::Fullscreen { key: *key, on });
+                }
+                let (w, h) = if on {
+                    crate::gfx::primary().map(|f| (f.width() as i32, f.height() as i32)).unwrap_or((0, 0))
+                } else {
+                    (0, 0)
+                };
+                // xdg_toplevel states: 2 fullscreen, 4 activated.
+                let mut c = Writer::new(id, 0);
+                c.int(w);
+                c.int(h);
+                let states: &[u8] = if on { &[2, 0, 0, 0, 4, 0, 0, 0] } else { &[4, 0, 0, 0] };
+                c.array(states);
+                self.post(c);
+                self.configure(xdg);
+                Ok(())
+            }
             // set_parent, set_app_id, show_window_menu, move, resize, the size
             // hints, and the state requests: accepted. The desktop's own frame
             // moves and sizes a window, and the states it has no way to take
             // are states a client asking for them can live without.
-            1 | 3..=13 => Ok(()),
+            1 | 3..=10 | 13 => Ok(()),
             _ => Err(Error::NoMethod),
         }
     }

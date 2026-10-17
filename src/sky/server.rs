@@ -356,6 +356,7 @@ fn apply(e: Effect) {
             });
         }
         Effect::Retitle { key, title } => desk::post(desk::Op::Retitle { tag: key, title }),
+        Effect::Fullscreen { key, on } => desk::post(desk::Op::Fullscreen { tag: key, on }),
         Effect::Close { key } => desk::post(desk::Op::Close { tag: key }),
     }
 }
