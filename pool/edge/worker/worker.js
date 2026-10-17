@@ -67,6 +67,35 @@ const GATE_CACHE_MS = 10 * 60_000;
 // switch costs every miner its current job, so faster buys nothing.
 const RATES_MS = 5 * 60_000;
 
+// --- Per-wallet progress, synced across a miner's devices --------------------
+// The miner page keeps a small, always-climbing tally (an estimated-earnings
+// line, plus lifetime shares, hashes and time) in the browser. This stores it
+// per wallet and asset so the same line shows on every device. It is a
+// cosmetic estimate the client computes, not pool accounting (the real payout
+// record is /payouts.json), so it is sanitised and merged by the maximum of
+// each counter: a device can only raise the line, never lower it, every value
+// is capped, and the series is bounded. Read and written at /progress.
+const PROG_CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,OPTIONS", "access-control-allow-headers": "content-type" };
+const progNum = (v, max) => { v = Number(v); return Number.isFinite(v) && v >= 0 ? Math.min(v, max) : 0; };
+function sanitizeProg(r) {
+  if (!r || typeof r !== "object") return null;
+  const series = Array.isArray(r.series)
+    ? r.series.filter((p) => p && Number.isFinite(p.t) && Number.isFinite(p.v) && p.v >= 0)
+        .slice(-200).map((p) => ({ t: Math.floor(p.t), v: Math.min(Number(p.v), 1e15) }))
+    : [];
+  return { est: progNum(r.est, 1e15), shares: progNum(r.shares, 1e12), hashes: progNum(r.hashes, 1e18),
+           seconds: progNum(r.seconds, 1e10), rate: progNum(r.rate, 1e9), series };
+}
+function mergeProg(prev, next) {
+  if (!prev) return next;
+  // The series from whichever is further along, so the stored line stays
+  // monotonic with the number it shows.
+  const series = next.est >= prev.est ? next.series : prev.series;
+  return { est: Math.max(prev.est, next.est), shares: Math.max(prev.shares, next.shares),
+           hashes: Math.max(prev.hashes, next.hashes), seconds: Math.max(prev.seconds, next.seconds),
+           rate: Math.max(prev.rate, next.rate), series: (series && series.length ? series : (prev.series || [])) };
+}
+
 // ### Shards
 //
 // **Many objects, one record.** A single Durable Object is single-threaded and
@@ -140,6 +169,13 @@ export default {
     // before sharding -- so there is exactly one place the keys are.
     if (url.pathname === "/treasury" || url.pathname === "/payouts.json") {
       return stub(0).fetch(request);
+    }
+    // Progress goes to a Durable Object of its own, not shard 0. Shard 0 is held
+    // alive by every miner's live socket, so a deploy cannot restart it onto new
+    // code; a dedicated object has no sockets and picks up new code at once. It
+    // is the one place a wallet's cross-device line is stored.
+    if (url.pathname === "/progress") {
+      return env.POOL.get(env.POOL.idFromName("progress")).fetch(request);
     }
     if (url.pathname === "/mine/gpu") {
       if (!gpu) return new Response("no GPU coins on this pool", { status: 404 });
@@ -282,6 +318,27 @@ export class Pool {
       // with tools/distribute.py --split equal against the ledgers.
       const epochs = await this.treasurer.epochs();
       return Response.json({ epochs }, { headers: { "access-control-allow-origin": "*" } });
+    }
+    if (url.pathname === "/progress") {
+      // A wallet's saved progress line, the same on every device it mines from.
+      if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: PROG_CORS });
+      const addr = (url.searchParams.get("address") || "").toLowerCase();
+      const asset = (url.searchParams.get("asset") || "glados").toLowerCase();
+      if (!/^0x[0-9a-f]{40}$/.test(addr)) return Response.json({ error: "address" }, { status: 400, headers: PROG_CORS });
+      if (!/^[a-z0-9]{1,12}$/.test(asset)) return Response.json({ error: "asset" }, { status: 400, headers: PROG_CORS });
+      const key = `progress.${addr}.${asset}`;
+      if (request.method === "GET") {
+        return Response.json({ rec: (await this.ctx.storage.get(key)) || null }, { headers: PROG_CORS });
+      }
+      if (request.method === "POST") {
+        let body = null; try { body = await request.json(); } catch {}
+        const clean = sanitizeProg(body && body.rec);
+        if (!clean) return Response.json({ error: "rec" }, { status: 400, headers: PROG_CORS });
+        const merged = mergeProg((await this.ctx.storage.get(key)) || null, clean);
+        await this.ctx.storage.put(key, merged);
+        return Response.json({ rec: merged }, { headers: PROG_CORS });
+      }
+      return new Response("method", { status: 405, headers: PROG_CORS });
     }
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected a WebSocket upgrade", { status: 426 });
