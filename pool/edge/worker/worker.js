@@ -55,6 +55,12 @@ import { bind, imports } from "../boundary.mjs";
 
 // `server::JOB_PERIOD`. A quiet period is when a connection gets fresh work.
 const JOB_PERIOD_MS = 30_000;
+// A connection silent this long is reaped. Cloudflare does not fire a socket's
+// "close" when a client drops ungracefully (a laptop sleeps, a network blips),
+// so a half-open socket lingers, stays counted, and every reconnect looks like
+// another miner. vardiff targets a share every ~10 s and force-retargets by
+// 60 s, so a live miner is never silent for minutes; three is dead.
+const IDLE_MAX_MS = 3 * 60_000;
 // `mine::stratum::MAX_LINE`. A longer line is a desynchronised peer.
 const MAX_LINE = 131072;
 // The holding gate: a miner must hold GATE_MIN whole GLADOS on chain 4663 to
@@ -308,6 +314,7 @@ export class Pool {
     this.env = env;
     this.conns = new Map(); // WebSocket -> connection id in the core
     this.connAddr = new Map(); // WebSocket -> the miner's payout address, for the revenue push
+    this.lastSeen = new Map(); // WebSocket -> when it last sent anything, for reaping half-open sockets
     this.core = null;
     this.ups = [];          // { i, where, sock, writer, running }
     this.gateMin = BigInt(env.GATE_MIN || "0") * 10n ** 18n;
@@ -433,6 +440,7 @@ export class Pool {
     const peer = request.headers.get("CF-Connecting-IP") || "?";
     const id = this.core.open(peer);
     this.conns.set(server, id);
+    this.lastSeen.set(server, Date.now());
 
     const deliver = (r) => {
       for (const l of r.log) this.log(l);
@@ -449,6 +457,7 @@ export class Pool {
     const feed = (line) => deliver(this.core.line(id, line));
     server.addEventListener("message", async (ev) => {
       const text = typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data);
+      this.lastSeen.set(server, Date.now()); // proof the socket is alive; only inbound traffic is
       if (text.length > MAX_LINE) {
         server.close(1009, "line too long");
         this.drop(server);
@@ -699,9 +708,23 @@ export class Pool {
     }
   }
 
+  // A connection no longer OPEN, or silent past IDLE_MAX_MS, is closed and
+  // dropped so it stops being counted and the upstreams are released when the
+  // last real miner leaves. Run at the top of every alarm.
+  reap() {
+    const now = Date.now(), max = Number(this.env.IDLE_MAX_MS) || IDLE_MAX_MS;
+    for (const [ws] of this.conns) {
+      const open = ws.readyState === undefined || ws.readyState === 1;
+      if (open && now - (this.lastSeen.get(ws) ?? now) <= max) continue;
+      try { ws.close(1001, "idle"); } catch {}
+      this.drop(ws);
+    }
+  }
+
   drop(ws) {
     const id = this.conns.get(ws);
     this.connAddr.delete(ws);
+    this.lastSeen.delete(ws);
     if (id !== undefined) {
       this.core.close(id);
       this.conns.delete(ws);
@@ -797,7 +820,7 @@ export class Pool {
 
   async arm() {
     if ((await this.ctx.storage.getAlarm()) === null) {
-      await this.ctx.storage.setAlarm(Date.now() + JOB_PERIOD_MS);
+      await this.ctx.storage.setAlarm(Date.now() + (Number(this.env.JOB_PERIOD_MS) || JOB_PERIOD_MS));
     }
   }
 
@@ -859,6 +882,7 @@ export class Pool {
     const t0 = Date.now(), lap = {};
     const mark = (k, at) => { lap[k] = Date.now() - at; };
     try {
+      this.reap(); // drop half-open sockets before anything counts or iterates them
       let at = Date.now();
       await this.refreshRates();
       mark("rates", at);
@@ -891,7 +915,7 @@ export class Pool {
       const total = Date.now() - t0;
       if (total > 1000) this.log(`[edge] slow alarm ${total} ms: ${Object.entries(lap).map(([k, v]) => k + " " + v).join(", ")}; ${this.conns.size} conn(s), ${this.tallies ?? "?"} tallies`);
       try {
-        if (this.conns.size > 0) await this.ctx.storage.setAlarm(Date.now() + JOB_PERIOD_MS);
+        if (this.conns.size > 0) await this.ctx.storage.setAlarm(Date.now() + (Number(this.env.JOB_PERIOD_MS) || JOB_PERIOD_MS));
         else if (this.runsTreasury) await this.ctx.storage.setAlarm(Date.now() + 5 * 60_000);
       } catch (e) {
         this.log(`[edge] next alarm not set (${e && e.message ? e.message : e}); the next connection sets one`);
