@@ -72,6 +72,10 @@ RVN_BATCH = "200"
 TREASURY_MAX_PAY_WEI = "50000000000000000"
 # Change this (any new value) and redeploy to resume a halted treasury, once.
 TREASURY_RESUME = ""
+# The 4663 RPC endpoints are an ordered list in rpc.js -- Robinhood's own
+# first, five measured public fallbacks after it. RPC_URLS (whitespace-
+# separated) replaces the list. A keyed provider's URL carries its key, so it
+# goes in as a secret, never here: `npx wrangler secret put RPC_URLS`.
 
 [[rules]]
 type = "CompiledWasm"

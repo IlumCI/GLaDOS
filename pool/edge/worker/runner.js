@@ -44,11 +44,13 @@ import { parseLedger, workByAddress, build, deltas, floorOf, candidates } from "
 import { worthPaying } from "./cadence.js";
 import { readerData, readerDecode, READ_MAX } from "./reader.js";
 import { textChunks, loadText } from "./chunks.js";
+import { Transient, RpcError, Endpoints, rpcList, attempt, hostOf } from "./rpc.js";
+export { Transient, RpcError };
 // GladosPayout2 pays each miner in what they chose: $GLADOS on its V2 pair, or
 // tokenized stock through Uniswap V3 (contracts/src/GladosPayout2.sol).
 import payoutArtifact from "./GladosPayout2.json" with { type: "json" };
 
-const RPC = "https://rpc.mainnet.chain.robinhood.com";
+// The 4663 RPC is a list now (rpc.js), and `RPC_URLS` replaces it.
 const CHAIN_ID = 4663;
 const BLOCKBOOK = "https://blockbook.ravencoin.org/api/v2";
 const CHANGENOW = "https://api.changenow.io/v2";
@@ -124,13 +126,15 @@ function quoteData(sym, amountIn) {
 export const parseWork = (text) => new Map(Object.entries(JSON.parse(text).work || {}).map(([a, w]) => [a.toLowerCase(), BigInt(w)]));
 const toJSON = (v) => JSON.parse(JSON.stringify(v, (_, x) => (typeof x === "bigint" ? x.toString() : x)));
 
-// A read that did not get an answer. Retried; never counted as a refusal.
-export class Transient extends Error {}
-// A definite answer from a node: a revert, an invalid transaction.
-export class RpcError extends Error {
-  constructor(message, code) { super(message); this.code = code; }
+// Transient and RpcError live in rpc.js, beside the rule that tells them apart,
+// and are re-exported above for everything that imported them from here.
+
+const isDown = (h) => !!(h && h.fail && h.fail > (h.ok || 0));
+// Every 4663 endpoint the record knows of failed last time it was asked.
+function rpcAllDown(health) {
+  const rpc = Object.entries(health || {}).filter(([d]) => d === "rpc" || d.startsWith("rpc:"));
+  return rpc.length > 0 && rpc.every(([, h]) => isDown(h));
 }
-const TRANSIENT_RPC = /rate|limit|too many|timeout|timed out|temporar|busy|unavailable|header not found|try again|overload/i;
 
 // Large values are chunked (chunks.js) and written atomically with the state.
 const chunked = (key, value) => textChunks(key, JSON.stringify(toJSON(value)));
@@ -159,6 +163,17 @@ export class Treasury {
     this.lastTick = -Infinity;
     this.lastNote = "";
     this.running = false;
+    // Shared with the Pool's door check when there is one, so both learn the
+    // same endpoint is down; its own (on this clock) under test.
+    this.rpcs = pool.rpcs || new Endpoints(rpcList(pool.env), this.now);
+    this.rpcPost = async (url, payload) => (await this.once(url, this.rpcBody(payload))).body;
+  }
+
+  // The health name of an RPC endpoint. The first keeps the name it always had,
+  // so a stored record of it carries on; the others are named by host.
+  rpcDep(url) {
+    const i = this.rpcs.urls.indexOf(url);
+    return i === 0 ? "rpc" : i > 0 ? `rpc:${hostOf(url)}` : null;
   }
 
   get mode() {
@@ -251,15 +266,25 @@ export class Treasury {
   // nothing but failures from a dependency is one alert, its recovery is
   // another, and a ChangeNOW that refuses the key says so at once -- that is
   // the one failure here only the operator can fix.
+  //
+  // A fallback endpoint is not an outage on its own: it is asked only while
+  // the primary is down, so one that failed once can sit unasked with a failure
+  // as its last word for days while payouts flow. The 4663 RPC is out when
+  // every endpoint is, and the primary keeps its own alert, since it is the one
+  // the operator would chase.
   watchHealth(s) {
+    const rpcOut = rpcAllDown(this.health);
     for (const [dep, h] of Object.entries(this.health || {})) {
+      if (dep.startsWith("rpc:") && !rpcOut && !h.alerted) continue;
       const down = h.fail && h.fail > (h.ok || 0);
       const keyRefused = dep === "changenow" && down && /HTTP 40[13]/.test(h.why || "");
       if (down && !h.alerted && (keyRefused || this.now() - h.since >= this.cfg.outageAlertMs)) {
         h.alerted = this.now();
         this.incident(s, keyRefused
           ? `ChangeNOW refuses the API key (${h.why}); RVN is held until CHANGENOW_KEY is replaced`
-          : `${dep} has not answered for ${Math.round((this.now() - h.since) / 60_000)} min (${h.why}); everything behind it waits and resumes by itself`);
+          : `${dep} has not answered for ${Math.round((this.now() - h.since) / 60_000)} min (${h.why}); ` +
+            (dep.startsWith("rpc") && !rpcOut ? "the other 4663 endpoints carry the payouts meanwhile"
+                                              : "everything behind it waits and resumes by itself"));
       } else if (!down && h.alerted) {
         this.incident(s, `${dep} is answering again after ${Math.round((this.now() - h.since) / 60_000)} min`);
         delete h.alerted;
@@ -362,7 +387,7 @@ export class Treasury {
   // One attempt. A missing answer is Transient; any answer is returned.
   async once(url, init = {}) {
     const where = url.split("?")[0];
-    const dep = url.startsWith(RPC) ? "rpc" : url.startsWith(BLOCKBOOK) ? "blockbook" : url.startsWith(CHANGENOW) ? "changenow" : "other";
+    const dep = this.rpcDep(url) || (url.startsWith(BLOCKBOOK) ? "blockbook" : url.startsWith(CHANGENOW) ? "changenow" : "other");
     try {
       const r = await this.onceRaw(url, init, where);
       this.seen(dep, r.status < 400, r.status >= 400 ? `HTTP ${r.status}` : "");
@@ -411,16 +436,14 @@ export class Treasury {
     return { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) };
   }
 
+  // A call that went unanswered is retried on the next endpoint (rpc.js), so
+  // the four tries `retry` makes walk four endpoints rather than knocking on
+  // one; a definite answer from any of them is final.
   rpc(method, params) {
     return this.retry(async () => {
-      const { body } = await this.once(RPC, this.rpcBody({ jsonrpc: "2.0", id: 1, method, params }));
-      if (body && body.error) {
-        const msg = `${method}: ${body.error.message || JSON.stringify(body.error)}`;
-        if (body.error.code === -32005 || TRANSIENT_RPC.test(msg)) throw new Transient(msg);
-        throw new RpcError(msg, body.error.code);
-      }
-      if (!body || !("result" in body)) throw new Transient(`${method}: no result`);
-      return body.result;
+      const v = await attempt(this.rpcs, { jsonrpc: "2.0", id: 1, method, params }, this.rpcPost, method);
+      if (v.error !== undefined) throw new RpcError(`${method}: ${v.error}`, v.code);
+      return v.result;
     });
   }
 
@@ -428,10 +451,9 @@ export class Treasury {
   // call errored. A batch that did not come back at all is Transient.
   batch(calls) {
     return this.retry(async () => {
-      const { body } = await this.once(RPC, this.rpcBody(calls.map((c, id) => ({ jsonrpc: "2.0", id, ...c }))));
-      if (!Array.isArray(body)) throw new Transient(`batch: ${JSON.stringify(body).slice(0, 120)}`);
+      const { result } = await attempt(this.rpcs, calls.map((c, id) => ({ jsonrpc: "2.0", id, ...c })), this.rpcPost, "batch");
       const m = new Map();
-      for (const r of body) if (r && r.result !== undefined && r.result !== null) m.set(r.id, r.result);
+      for (const r of result) if (r && r.result !== undefined && r.result !== null) m.set(r.id, r.result);
       return m;
     });
   }
@@ -1042,10 +1064,11 @@ export class Treasury {
     // One word for an uptime monitor: "ok", "degraded" (a dependency is down
     // and everything behind it waits), or "paused" (a backoff is running).
     const health = this.health || s.health || {};
-    const down = Object.entries(health).filter(([, h]) => h.fail && h.fail > (h.ok || 0)).map(([d]) => d);
+    const rpcOut = rpcAllDown(health);
+    const down = Object.entries(health).filter(([d, h]) => isDown(h) && (rpcOut || !d.startsWith("rpc:"))).map(([d]) => d);
     const status = s.paused && s.paused.until > this.now() ? "paused" : down.length ? "degraded" : "ok";
     return { status, down, mode: this.mode, phase: s.phase, paused: s.paused || null, epochs: s.epochs, contract: s.contract,
-             health, incidents: (s.incidents || []).slice(-10),
+             rpc: this.rpcs.describe(), health, incidents: (s.incidents || []).slice(-10),
              orphans: (s.orphans || []).map((o) => ({ id: o.id, rvn: Number(o.sats) / 1e8, status: o.status })),
              exchange: s.exchange && { id: s.exchange.id, sent: s.exchange.sent || null },
              pending: s.pending && { kind: s.pending.kind, hash: s.pending.hash, rejected: s.pending.rejected || null } };

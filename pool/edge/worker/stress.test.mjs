@@ -398,6 +398,7 @@ class World {
     const me = this.keys.evm;
     const err = (message, code = -32000) => ({ error: { code, message } });
     switch (m) {
+      case "eth_chainId": return { result: "0x1237" };
       case "eth_blockNumber": return { result: "0x" + this.block.toString(16) };
       case "eth_gasPrice": return { result: "0x" + this.baseFee.toString(16) };
       case "eth_getBalance": return { result: "0x" + (this.eth.get(params[0].toLowerCase()) || 0n).toString(16) };
@@ -661,6 +662,8 @@ async function run({ seed, faults, ticks, calm = 600, mode = "live", env = {} })
   const logs = [];
   const pool = {
     env: { TREASURY: mode, RVN_BATCH: "200", GATE_MIN: "1000000", SHARDS: String(w.shards), TREASURY_RESUME: "", CHANGENOW_KEY: "k",
+           // The simulated chain is one endpoint; failover is rpc.test.mjs's subject.
+           RPC_URLS: RPC,
            ALERT_WEBHOOK: "https://alerts.example/hook", ...env,
            POOL: { idFromName: (n) => n, get: (n) => ({ fetch: async (req) => {
              if (w.shardDown) return new Response("down", { status: 503 });

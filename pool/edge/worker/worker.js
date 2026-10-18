@@ -43,6 +43,8 @@ import { parseLedger, workByAddress } from "./epoch.js";
 import { readerData, readerDecode, READ_MAX } from "./reader.js";
 import { textChunks, loadText } from "./chunks.js";
 import { Treasury } from "./runner.js";
+import { Endpoints, rpcList, attempt, plainPost } from "./rpc.js";
+import { classifyFailure, unavailable } from "./guard.js";
 import { rewardOf, DEFAULT as DEFAULT_REWARD } from "./rewards.js";
 
 // For refusals a person reads on a miner's screen: 0x6ef4...527d.
@@ -60,7 +62,7 @@ const GLADOS = "0x3d609ecafc6aa7dba67dd7ad1d10b49c52d57777";
 const PAIR_ADDR = "0x93f777932d98d15b351d1bce8c76b34381eede5b";
 // How long the gate gathers connections before one read answers them all.
 const GATE_BATCH_MS = 300;
-const RPC_4663 = "https://rpc.mainnet.chain.robinhood.com";
+// The 4663 RPC is rpc.js's ordered list, shared with the treasury.
 const GATE_CACHE_MS = 10 * 60_000;
 
 // How often zpool's rates are re-read. Its figures move over minutes, and a
@@ -120,15 +122,66 @@ function shardFor(request, n) {
   return n > 1 ? h % n : 0;
 }
 
+// ### When the pool itself fails
+//
+// Every route below hands the request to a Durable Object, and a call into one
+// throws when the object cannot run: its constructor refused (a ledger that
+// would not load), its code was just replaced, it is overloaded, or the
+// account's daily Durable Object allowance is spent -- on Workers Free that is
+// 13,000 GB-s and 100,000 requests a day, reset at 00:00 UTC. Uncaught, each of
+// those is Cloudflare's bare "error code: 1101" on every route at once, which
+// tells a miner nothing and tells the operator only that something threw.
+//
+// So the router is wrapped: a failure is logged whole (`wrangler tail` shows
+// it) and answered 503 with a reason a person can act on. Miners already back
+// off from a failed connect, doubling to a minute, so a 503 is not a reconnect
+// storm. The message of an unknown error is not echoed, since it can name
+// internals; the classes that are known are said plainly.
+
+// A call that Cloudflare marks retryable and not overloaded -- typically an
+// object reset by a deploy -- is retried once on a fresh stub, which is what
+// Cloudflare's own guidance prescribes. Only a GET: nothing here sends a body
+// to an object, and a retried body could be half-consumed.
+async function ask(env, name, request) {
+  const get = () => env.POOL.get(env.POOL.idFromName(name));
+  try {
+    return await get().fetch(request);
+  } catch (e) {
+    if (!e || !e.retryable || e.overloaded || request.method !== "GET") throw e;
+    return await get().fetch(request);
+  }
+}
+
+// The daily allowance does not come back within a request, so once one
+// request has seen it spent this isolate stops asking for BREAK_MS: every miner
+// retrying would otherwise be another failed object call to say the same thing.
+const BREAK_MS = 30_000;
+let brokenUntil = 0;
+let brokenWhy = "";
+
 export default {
   async fetch(request, env) {
+    if (Date.now() < brokenUntil) return unavailable(brokenWhy, Math.ceil((brokenUntil - Date.now()) / 1000));
+    try {
+      return await route(request, env);
+    } catch (e) {
+      const c = classifyFailure(e);
+      console.error(`[edge] ${new URL(request.url).pathname} failed (retryable=${!!(e && e.retryable)}, ` +
+                    `overloaded=${!!(e && e.overloaded)}): ${(e && (e.stack || e.message)) || e}`);
+      if (c.quota) { brokenUntil = Date.now() + BREAK_MS; brokenWhy = c.why; }
+      return unavailable(c.why, c.retry);
+    }
+  },
+};
+
+async function route(request, env) {
     const url = new URL(request.url);
     const n = Math.max(1, Number(env.SHARDS || 1));
     // GPU miners get shards of their own, with their own coin list, so CPU and
     // GPU switching are independent -- a card and a CPU never compete for one
     // slot choice, and neither drags the other onto an algorithm it hashes badly.
     const gpu = env.GPU_COINS ? Math.max(1, Number(env.GPU_SHARDS || 1)) : 0;
-    const stub = (i, g = false) => env.POOL.get(env.POOL.idFromName(shardName(i, g)));
+    const stub = (i, g = false) => ({ name: shardName(i, g), fetch: (req) => ask(env, shardName(i, g), req) });
     const everyShard = () => [
       ...[...Array(n).keys()].map((i) => stub(i)),
       ...[...Array(gpu).keys()].map((i) => stub(i, true)),
@@ -147,14 +200,27 @@ export default {
     }
     if (url.pathname === "/status") {
       return cached(request, 30, async () => {
-        const all = await Promise.all(everyShard().map((s) => s.fetch(new Request(`${url.origin}/status`)).then((r) => r.json())));
+        // One shard down is a pool partly down, and said as that: the shards
+        // that answer are counted and the ones that did not are named. Only
+        // all of them failing is a failure of /status.
+        const shards = everyShard();
+        const settled = await Promise.allSettled(shards.map((s) => s.fetch(new Request(`${url.origin}/status`)).then((r) => {
+          if (!r.ok) throw new Error(`answered ${r.status}`);
+          return r.json();
+        })));
+        const all = settled.map((r) => (r.status === "fulfilled" ? r.value : null));
+        const down = settled.flatMap((r, i) => (r.status === "rejected" ? [`${shards[i].name}: ${classifyFailure(r.reason).why}`] : []));
+        const up = all.filter(Boolean);
+        if (!up.length) throw settled[0].reason;
+        if (down.length) console.error(`[edge] /status: ${down.join("; ")}`);
         return Response.json({
-          shards: n, gpuShards: gpu, slots: all[0].slots,
-          connections: all.reduce((a, s) => a + s.connections, 0),
-          perShard: all.map((s) => s.connections),
+          shards: n, gpuShards: gpu, slots: up[0].slots,
+          connections: up.reduce((a, s) => a + s.connections, 0),
+          perShard: all.map((s) => (s ? s.connections : null)),
           // The fullest shard's tallies against the core's cap: past ~90%,
           // new miners' shares go uncredited and SHARDS should be raised.
-          tallies: Math.max(0, ...all.map((s) => s.tallies || 0)), maxTallies: all[0].maxTallies ?? null,
+          tallies: Math.max(0, ...up.map((s) => s.tallies || 0)), maxTallies: up[0].maxTallies ?? null,
+          ...(down.length ? { down } : {}),
         }, { headers: { "access-control-allow-origin": "*" } }); // the site's /pool/ page reads the miner count
       });
     }
@@ -165,7 +231,7 @@ export default {
       if (one !== null) {
         const names = [...[...Array(n).keys()].map((i) => shardName(i)), ...[...Array(gpu).keys()].map((i) => shardName(i, true))];
         if (!names.includes(one)) return new Response(`no shard ${one}; they are ${names.join(", ")}`, { status: 404 });
-        return env.POOL.get(env.POOL.idFromName(one)).fetch(new Request(`${url.origin}/ledger.json`));
+        return ask(env, one, new Request(`${url.origin}/ledger.json`));
       }
       // **Past eight shards the merged ledger is an index.** Merging means
       // every shard's rows in one Worker's memory -- tens of megabytes at
@@ -192,8 +258,7 @@ export default {
         "protocol; the share log is at /ledger.json.\n",
       { headers: { "content-type": "text/plain; charset=utf-8" } },
     );
-  },
-};
+}
 
 export class Pool {
   constructor(ctx, env) {
@@ -203,6 +268,9 @@ export class Pool {
     this.core = null;
     this.ups = [];          // { i, where, sock, writer, running }
     this.gateMin = BigInt(env.GATE_MIN || "0") * 10n ** 18n;
+    // Before the treasurer, which takes the same list: an endpoint the door
+    // check found down is one the payout does not try first.
+    this.rpcs = new Endpoints(rpcList(env));
     // Only shard 0 ("main") holds the keys and runs the treasury.
     this.treasurer = new Treasury(this);
     this.balances = new Map(); // address -> { wei, at }
@@ -315,7 +383,9 @@ export class Pool {
       const lines = text.split("\n").filter((l) => l.trim());
       // What this wallet chose to be paid in, recorded from every greeting,
       // gated or not: the latest hello for an address is its choice.
-      for (const l of lines) if (l.includes("glados.hello")) this.noteReward(l);
+      for (const l of lines) if (l.includes("glados.hello")) {
+        this.noteReward(l).catch((e) => this.log(`[reward] choice not stored (${e && e.message ? e.message : e}); the next greeting tries again`));
+      }
       if (!gate.passed) {
         gate.queue.push(...lines);
         if (gate.checking) return;
@@ -497,14 +567,16 @@ export class Pool {
     const who = [...batch.keys()];
     if (!who.length) return;
     try {
-      const res = await fetch(RPC_4663, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ data: readerData(GLADOS, who) }, "latest"] }),
-      });
-      const j = await res.json();
-      if (!j || !j.result) throw new Error(j && j.error ? j.error.message : `HTTP ${res.status}`);
-      const m = readerDecode(who, j.result);
+      // Each endpoint once, without waiting between them: a door check that
+      // stalls holds a miner's first job, and one that fails admits anyway.
+      const payload = { jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ data: readerData(GLADOS, who) }, "latest"] };
+      let v, last;
+      for (let k = 0; k < this.rpcs.size && !v; k++) {
+        try { v = await attempt(this.rpcs, payload, plainPost, "door check"); } catch (e) { last = e; }
+      }
+      if (!v) throw last || new Error("no endpoint answered");
+      if (v.error !== undefined) throw new Error(v.error);
+      const m = readerDecode(who, v.result);
       for (const [a, waiters] of batch) {
         const v = m.get(a);
         if (v.balance === undefined) { for (const w of waiters) w.reject(new Error("balanceOf failed")); continue; }
@@ -522,7 +594,7 @@ export class Pool {
     if (id !== undefined) {
       this.core.close(id);
       this.conns.delete(ws);
-      this.ctx.waitUntil(this.save());
+      this.ctx.waitUntil(this.save().catch((e) => this.log(`[edge] ledger not saved on disconnect, the alarm tries again: ${e && e.message ? e.message : e}`)));
       if (this.conns.size === 0) {
         for (const u of this.ups) this.closeUp(u);
       }
@@ -655,21 +727,41 @@ export class Pool {
     }
   }
 
+  // **The next alarm is set however this one went.** It is the only clock the
+  // object has: a save that threw used to end the handler before the next
+  // alarm was set, so one refused write -- storage at its daily allowance --
+  // stopped idle work for every miner and stopped the treasury, until somebody
+  // happened to connect. A failed save is logged and left to the next period,
+  // which saves the whole ledger again; nothing is rethrown, since a thrown
+  // alarm is retried by Cloudflare and each retry is more of the same refusal.
   async alarm() {
-    await this.refreshRates();
-    this.tickUps();
-    for (const [ws, id] of this.conns) {
-      const r = this.core.idle(id);
-      for (const l of r.log) this.log(l);
+    try {
+      await this.refreshRates();
+      this.tickUps();
+      for (const [ws, id] of this.conns) {
+        const r = this.core.idle(id);
+        for (const l of r.log) this.log(l);
+        try {
+          for (const m of r.send) ws.send(m);
+        } catch {
+          this.drop(ws);
+        }
+      }
       try {
-        for (const m of r.send) ws.send(m);
-      } catch {
-        this.drop(ws);
+        await this.save();
+      } catch (e) {
+        this.log(`[edge] ledger not saved this period, the next one tries again: ${e && e.message ? e.message : e}`);
+      }
+      if (this.runsTreasury) await this.treasurer.tick();
+    } catch (e) {
+      this.log(`[edge] alarm failed: ${e && e.message ? e.message : e}`);
+    } finally {
+      try {
+        if (this.conns.size > 0) await this.ctx.storage.setAlarm(Date.now() + JOB_PERIOD_MS);
+        else if (this.runsTreasury) await this.ctx.storage.setAlarm(Date.now() + 5 * 60_000);
+      } catch (e) {
+        this.log(`[edge] next alarm not set (${e && e.message ? e.message : e}); the next connection sets one`);
       }
     }
-    await this.save();
-    if (this.runsTreasury) await this.treasurer.tick();
-    if (this.conns.size > 0) await this.ctx.storage.setAlarm(Date.now() + JOB_PERIOD_MS);
-    else if (this.runsTreasury) await this.ctx.storage.setAlarm(Date.now() + 5 * 60_000);
   }
 }
