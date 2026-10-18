@@ -64,9 +64,13 @@ GATE_MIN = "1000000"
 SHARDS = "1"
 # GPU miners connect at /mine/gpu and are served by shards of their own
 # ("gpu-N"), so CPU and GPU switching never compete for one slot choice.
-# HeavyHash is the one GPU algorithm in our stack (cuda/heavyhash.cuh, OBTC);
-# zpool accepted 11/11 of its forwarded shares when it was first driven.
-GPU_COINS = "heavyhash:heavyhash:24@heavyhash.mine.zpool.ca:5138,RCmy8SHUHnACVobxf8vpzum5ms7nPXFU4f,c=RVN"
+# NeoScrypt since 2026-10-18, replacing HeavyHash: a browser GPU earns about
+# 118 times as much on it (zpool's realized rates; 110k H/s of NeoScrypt
+# against 79k of HeavyHash on an RTX 3050, and HeavyHash is ASIC country). The
+# miner's kernel is checked against two Feathercoin blocks and every hit is
+# re-hashed on the CPU before it is sent; 18 bits is a first share in seconds,
+# and vardiff takes it from there.
+GPU_COINS = "neoscrypt:neoscrypt:18@neoscrypt.mine.zpool.ca:4233,RCmy8SHUHnACVobxf8vpzum5ms7nPXFU4f,c=RVN"
 GPU_SHARDS = "1"
 # The payout treasury (runner.js): "off", "dry" -- reads balances, decides,
 # logs what it would do, moves nothing -- or "live". RVN_BATCH is how much RVN
