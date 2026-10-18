@@ -45,6 +45,7 @@ import { textChunks, loadText } from "./chunks.js";
 import { Treasury } from "./runner.js";
 import { Endpoints, rpcList, attempt, plainPost } from "./rpc.js";
 import { classifyFailure, unavailable } from "./guard.js";
+import { statusTick, STATUS_EVERY_MS } from "./statusprobe.js";
 import { rewardOf, DEFAULT as DEFAULT_REWARD } from "./rewards.js";
 
 // For refusals a person reads on a miner's screen: 0x6ef4...527d.
@@ -230,6 +231,11 @@ async function route(request, env) {
     if (url.pathname === "/progress") {
       return env.POOL.get(env.POOL.idFromName("progress")).fetch(request);
     }
+    // The public status page's feed, from an object of its own for the same
+    // reason: it has to answer exactly when a mining shard cannot.
+    if (url.pathname === "/health.json") {
+      return env.POOL.get(env.POOL.idFromName("status")).fetch(request);
+    }
     if (url.pathname === "/mine/gpu") {
       if (!gpu) return new Response("no GPU coins on this pool", { status: 404 });
       return stub(shardFor(request, gpu), true).fetch(request);
@@ -358,6 +364,13 @@ export class Pool {
 
   async fetch(request) {
     const url = new URL(request.url);
+    if (url.pathname === "/health.json") {
+      if (String(this.ctx.id.name || "") !== "status") return new Response("not here", { status: 404 });
+      let snap = await this.ctx.storage.get("status.snapshot");
+      if (!snap || Date.now() - snap.generatedAt > 3 * STATUS_EVERY_MS) snap = await statusTick(this.env, this.ctx.storage);
+      if (!(await this.ctx.storage.getAlarm())) await this.ctx.storage.setAlarm(Date.now() + STATUS_EVERY_MS);
+      return Response.json(snap, { headers: { "access-control-allow-origin": "*", "cache-control": "no-store" } });
+    }
     if (url.pathname === "/ledger.json") {
       return new Response(this.core.ledger(1, Math.floor(Date.now() / 1000)), {
         headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
@@ -833,6 +846,13 @@ export class Pool {
   // which saves the whole ledger again; nothing is rethrown, since a thrown
   // alarm is retried by Cloudflare and each retry is more of the same refusal.
   async alarm() {
+    // The status object only probes; it never runs a mining period.
+    if (String(this.ctx.id.name || "") === "status") {
+      try { await statusTick(this.env, this.ctx.storage); }
+      catch (e) { this.log(`[status] probe failed: ${e && e.message ? e.message : e}`); }
+      finally { await this.ctx.storage.setAlarm(Date.now() + STATUS_EVERY_MS); }
+      return;
+    }
     // Each phase is timed, and any period over a second says which phase took
     // it: the object was being reset for exceeding its CPU limit and nothing
     // said where the time went.
