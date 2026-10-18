@@ -61,15 +61,28 @@ async function refreshFacts(env, prev) {
     take("rvnHeld", async () => Number((await getJSON(`https://blockbook.ravencoin.org/api/v2/address/${rvn}?details=basic`)).balance) / 1e8),
     take("cnMin", async () => Number((await getJSON("https://api.changenow.io/v2/exchange/min-amount?fromCurrency=rvn&fromNetwork=rvn&toCurrency=eth&toNetwork=hood&flow=standard")).minAmount)),
     take("prices", async () => {
+      // From Cloudflare's network CoinGecko and Binance both refuse a Worker, so:
+      // ETH and BTC from Coinbase (Kraken if it fails), and RVN at ChangeNOW's
+      // own RVN -> ETH rate, which is what the treasury actually gets (Gate.io
+      // if that quote is unavailable).
+      const coinbase = async (sym) => Number((await getJSON(`https://api.coinbase.com/v2/prices/${sym}-USD/spot`)).data.amount);
+      const kraken = async () => {
+        const r = (await getJSON("https://api.kraken.com/0/public/Ticker?pair=ETHUSD,XBTUSD")).result;
+        return { eth: Number(r.XETHZUSD.c[0]), btc: Number(r.XXBTZUSD.c[0]) };
+      };
+      let eth, btc, source;
+      try { [eth, btc] = await Promise.all([coinbase("ETH"), coinbase("BTC")]); source = "coinbase"; }
+      catch { ({ eth, btc } = await kraken()); source = "kraken"; }
+      let rvn = null;
       try {
-        const p = await getJSON("https://api.coingecko.com/api/v3/simple/price?ids=ravencoin,ethereum,bitcoin&vs_currencies=usd");
-        return { rvn: p.ravencoin.usd, eth: p.ethereum.usd, btc: p.bitcoin.usd, source: "coingecko" };
-      } catch {
-        // Binance as the fallback: USDT pairs, close enough to USD for a status page.
-        const one = async (sym) => Number((await getJSON(`https://api.binance.com/api/v3/ticker/price?symbol=${sym}USDT`)).price);
-        const [rvn, eth, btc] = await Promise.all([one("RVN"), one("ETH"), one("BTC")]);
-        return { rvn, eth, btc, source: "binance" };
-      }
+        const r = await within(fetch("https://api.changenow.io/v2/exchange/estimated-amount?fromCurrency=rvn&fromNetwork=rvn&toCurrency=eth&toNetwork=hood&flow=standard&fromAmount=1000",
+          { headers: { accept: "application/json", "x-changenow-api-key": env.CHANGENOW_KEY || "" } }), 10_000, "api.changenow.io");
+        const q = r.ok ? await r.json() : null;
+        if (q && Number(q.toAmount) > 0) rvn = (Number(q.toAmount) / 1000) * eth;
+      } catch {}
+      if (!(rvn > 0)) rvn = Number((await getJSON("https://api.gateio.ws/api/v4/spot/tickers?currency_pair=RVN_USDT"))[0].last);
+      if (![eth, btc, rvn].every((v) => v > 0)) throw new Error("a price came back empty");
+      return { rvn, eth, btc, source };
     }),
     take("ethHeld", async () => {
       for (const url of rpcList(env)) {
