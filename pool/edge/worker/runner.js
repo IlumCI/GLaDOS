@@ -660,7 +660,11 @@ export class Treasury {
     const ineligible = new Set([PAIR, TOKEN, WETH, keys.evm, state.contract].filter(Boolean).map((a) => a.toLowerCase()));
     const gateMin = big(this.pool.env.GATE_MIN || "0") * 10n ** 18n;
     const delta = deltas(now, prev);
-    const order = candidates(delta, floorOf(delta), ineligible);
+    // The payout floor, as a fraction of the work-weighted median: MIN_FRAC,
+    // "0" by default since 2026-10-18 -- any wallet that did any work in the
+    // round is paid. Raise it (the old value was 0.25) to keep slivers out.
+    const minFrac = Math.min(0.99, Math.max(0, Number(this.pool.env.MIN_FRAC ?? "0") || 0));
+    const order = candidates(delta, floorOf(delta, 1n, minFrac), ineligible);
     const balances = new Map();
     const considered = new Set();
     let eligible = 0;
@@ -696,7 +700,7 @@ export class Treasury {
     // $GLaDOS (one leg) however many its chosen basket would have cost, so the
     // gas budget is neither over- nor under-reserved for it.
     const effective = (a) => ((balances.get(a) ?? 0n) >= gateMin ? rewardOf(choices.get(a)) : DEFAULT_REWARD);
-    const e = build({ now, prev, balances, ineligible, maxRecipients: MAX_RECIPIENTS, considered,
+    const e = build({ now, prev, balances, ineligible, maxRecipients: MAX_RECIPIENTS, considered, minFrac,
                       weigh: (a) => legsOf(effective(a)) * cfg.perRecipientGas,
                       capacity: cfg.maxTxGas - cfg.baseGas - legReserve });
     // The RWA choice is honoured only for a wallet holding GATE_MIN; under it,
