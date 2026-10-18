@@ -660,9 +660,9 @@ export class Treasury {
     const ineligible = new Set([PAIR, TOKEN, WETH, keys.evm, state.contract].filter(Boolean).map((a) => a.toLowerCase()));
     const gateMin = big(this.pool.env.GATE_MIN || "0") * 10n ** 18n;
     const delta = deltas(now, prev);
-    // The payout floor, as a fraction of the work-weighted median: MIN_FRAC,
-    // "0" by default since 2026-10-18 -- any wallet that did any work in the
-    // round is paid. Raise it (the old value was 0.25) to keep slivers out.
+    // The payout floor, as a fraction of the work-weighted median: MIN_FRAC from
+    // wrangler.toml (0.05 since 2026-10-18; it was 0.25). "0" pays any wallet
+    // that did any work in the round.
     const minFrac = Math.min(0.99, Math.max(0, Number(this.pool.env.MIN_FRAC ?? "0") || 0));
     const order = candidates(delta, floorOf(delta, 1n, minFrac), ineligible);
     const balances = new Map();

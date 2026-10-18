@@ -70,18 +70,21 @@ GPU_COINS = "heavyhash:heavyhash:24@heavyhash.mine.zpool.ca:5138,RCmy8SHUHnACVob
 GPU_SHARDS = "1"
 # The payout treasury (runner.js): "off", "dry" -- reads balances, decides,
 # logs what it would do, moves nothing -- or "live". RVN_BATCH is how much RVN
-# accumulates before a swap (ChangeNOW's minimum is ~151); TREASURY_MAX_PAY_WEI
+# accumulates before a swap; the swap waits for the larger of it and ChangeNOW's
+# live minimum (300.49 RVN on 2026-10-18, ~151 before), so a batch under that
+# minimum lets swaps follow ChangeNOW down if it lowers it. TREASURY_MAX_PAY_WEI
 # caps one payout, and a payout over it halts the treasury instead of going out.
 TREASURY = "live"
 TREASURY_RVN = "RCmy8SHUHnACVobxf8vpzum5ms7nPXFU4f"
 TREASURY_EVM = "0xfaE492EA62AA2250E0Ab2d1a6331E3c991443Cc5"
-RVN_BATCH = "200"
+RVN_BATCH = "150"
 TREASURY_MAX_PAY_WEI = "50000000000000000"
 # Change this (any new value) and redeploy to resume a halted treasury, once.
 TREASURY_RESUME = ""
 # The payout floor as a fraction of the work-weighted median miner's work in a
-# round. "0" pays every wallet that did any work; the old value was "0.25".
-MIN_FRAC = "0"
+# round: a wallet under it carries its work to the next round. "0.05" since
+# 2026-10-18 (was "0.25"); "0" would pay every wallet that did any work.
+MIN_FRAC = "0.05"
 # The 4663 RPC endpoints are an ordered list in rpc.js -- Robinhood's own
 # first, five measured public fallbacks after it. RPC_URLS (whitespace-
 # separated) replaces the list. A keyed provider's URL carries its key, so it
