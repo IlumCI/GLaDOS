@@ -17,6 +17,13 @@ routes = [{ pattern = "pool.aperture.institute", custom_domain = true }]
 # images already running and already cut dial glados-pool.*.workers.dev.
 workers_dev = true
 
+# Paid plan: allow a single invocation up to 5 minutes of CPU. On the default
+# limit the main shard was being reset mid-alarm ("exceeded its CPU time limit")
+# and every route queued behind it answered "overloaded". The alarm now logs
+# which phase is slow when one runs over a second, so this can come back down.
+[limits]
+cpu_ms = 300000
+
 [[durable_objects.bindings]]
 name = "POOL"
 class_name = "Pool"

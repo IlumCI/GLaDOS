@@ -331,8 +331,11 @@ export class Pool {
       // and is then overwritten by the next job period is the share log erased
       // by a cold start, with nothing anywhere saying it happened. Throwing here
       // fails every request loudly instead, which is a problem somebody sees.
+      const lt = Date.now();
       const saved = await loadText(ctx.storage, "ledger");
       const restored = saved ? this.core.loadLedger(saved) : 0;
+      const loadMs = Date.now() - lt;
+      if (loadMs > 1000) this.log(`[edge] slow start: the ledger (${saved ? saved.length : 0} bytes) took ${loadMs} ms to load`);
       // SWITCH=1: miners are shown one slot, the one that pays best per unit of
       // their work, chosen from zpool's live rates. Coin labels must be zpool's
       // algorithm names for the rates to find them.
@@ -830,8 +833,15 @@ export class Pool {
   // which saves the whole ledger again; nothing is rethrown, since a thrown
   // alarm is retried by Cloudflare and each retry is more of the same refusal.
   async alarm() {
+    // Each phase is timed, and any period over a second says which phase took
+    // it: the object was being reset for exceeding its CPU limit and nothing
+    // said where the time went.
+    const t0 = Date.now(), lap = {};
+    const mark = (k, at) => { lap[k] = Date.now() - at; };
     try {
+      let at = Date.now();
       await this.refreshRates();
+      mark("rates", at);
       this.tickUps();
       for (const [ws, id] of this.conns) {
         const r = this.core.idle(id);
@@ -842,16 +852,24 @@ export class Pool {
           this.drop(ws);
         }
       }
+      at = Date.now();
       try {
         await this.save();
       } catch (e) {
         this.log(`[edge] ledger not saved this period, the next one tries again: ${e && e.message ? e.message : e}`);
       }
+      mark("save", at);
+      at = Date.now();
       if (this.runsTreasury) await this.treasurer.tick();
+      mark("treasury", at);
+      at = Date.now();
       await this.pushEarn();
+      mark("earn", at);
     } catch (e) {
       this.log(`[edge] alarm failed: ${e && e.message ? e.message : e}`);
     } finally {
+      const total = Date.now() - t0;
+      if (total > 1000) this.log(`[edge] slow alarm ${total} ms: ${Object.entries(lap).map(([k, v]) => k + " " + v).join(", ")}; ${this.conns.size} conn(s), ${this.tallies ?? "?"} tallies`);
       try {
         if (this.conns.size > 0) await this.ctx.storage.setAlarm(Date.now() + JOB_PERIOD_MS);
         else if (this.runsTreasury) await this.ctx.storage.setAlarm(Date.now() + 5 * 60_000);
