@@ -16,6 +16,9 @@ name: native miner
 on:
   push:
     tags: ['miner-v*']
+    # Built, not published, on every change to what goes into it.
+    branches: [native-miner, main]
+    paths: ['miner/**', 'cuda/**', 'pool/**', 'src/mine/**', '.github/workflows/native-miner.yml']
   workflow_dispatch:
 
 permissions:
