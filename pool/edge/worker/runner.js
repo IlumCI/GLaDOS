@@ -46,6 +46,7 @@ import { worthPaying } from "./cadence.js";
 import { readerData, readerDecode, READ_MAX } from "./reader.js";
 import { textChunks, loadText } from "./chunks.js";
 import { Transient, RpcError, Endpoints, rpcList, attempt, hostOf } from "./rpc.js";
+import { PrlLeg } from "./prl-leg.js";
 import { pearlOn, pearlStub } from "./pearl-env.js";
 export { Transient, RpcError };
 // GladosPayout2 pays each miner in what they chose: $GLADOS on its V2 pair, or
@@ -173,6 +174,8 @@ export class Treasury {
     // same endpoint is down; its own (on this clock) under test.
     this.rpcs = pool.rpcs || new Endpoints(rpcList(pool.env), this.now);
     this.rpcPost = async (url, payload) => (await this.once(url, this.rpcBody(payload))).body;
+    // The Pearl leg (prl-leg.js): WPRL on mainnet to ETH here. Off unless PRL_LEG says.
+    this.prl = new PrlLeg(this);
   }
 
   // The health name of an RPC endpoint. The first keeps the name it always had,
@@ -313,6 +316,12 @@ export class Treasury {
       await this.step();
     } catch (e) {
       this.log(`step failed, nothing sent: ${e && e.message ? e.message : e}`);
+    }
+    // Its own state and its own chain; a failure there is not the payout's.
+    try {
+      if (this.prl.mode !== "off") await this.prl.tick(await this.pool.treasury());
+    } catch (e) {
+      this.log(`prl: step failed, nothing sent: ${e && e.message ? e.message : e}`);
     } finally {
       this.running = false;
     }

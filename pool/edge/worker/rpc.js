@@ -106,9 +106,13 @@ export function batchVerdict(body) {
 
 // The ordered list and where in it we are.
 export class Endpoints {
-  constructor(urls, now = () => Date.now()) {
+  // `chainId`: the chain every endpoint must prove it is (4663 unless said;
+  // the Pearl leg's list is Ethereum mainnet's, 0x1).
+  constructor(urls, now = () => Date.now(), chainId = CHAIN_ID_HEX) {
     this.urls = urls;
     this.now = now;
+    this.chainId = String(chainId).toLowerCase();
+    this.chainName = this.chainId === CHAIN_ID_HEX ? "chain 4663" : `chain ${Number(this.chainId)}`;
     this.at = 0;
     this.since = 0;
     this.chain = new Map(); // url -> true (4663) | false (another chain)
@@ -151,14 +155,14 @@ export class Endpoints {
 // the endpoint along and is thrown as Transient for the caller's retry.
 export async function attempt(eps, payload, post, label = "rpc") {
   const url = eps.current();
-  if (!url) throw new Transient(`${label}: no endpoint on chain 4663 is left`);
+  if (!url) throw new Transient(`${label}: no endpoint on ${eps.chainName || "chain 4663"} is left`);
   try {
     if (!eps.chain.has(url)) {
       const c = verdict(await post(url, { jsonrpc: "2.0", id: 1, method: "eth_chainId", params: [] }));
       if (c.transient) throw new Transient(`${hostOf(url)} did not say which chain it is (${c.transient})`);
-      const ok = c.error === undefined && String(c.result).toLowerCase() === CHAIN_ID_HEX;
+      const ok = c.error === undefined && String(c.result).toLowerCase() === (eps.chainId || CHAIN_ID_HEX);
       eps.chain.set(url, ok);
-      if (!ok) throw new Transient(`${hostOf(url)} is not chain 4663 (${c.error || c.result}); it will not be used`);
+      if (!ok) throw new Transient(`${hostOf(url)} is not ${eps.chainName || "chain 4663"} (${c.error || c.result}); it will not be used`);
     }
     const v = (Array.isArray(payload) ? batchVerdict : verdict)(await post(url, payload));
     if (v.transient) throw new Transient(`${label} at ${hostOf(url)}: ${v.transient}`);
