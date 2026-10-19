@@ -163,6 +163,67 @@ ok(easier && vd.conns.get(1).bits === b0 - 1, "a miner silent for a minute gets 
   ok(!lowClosed, "twelve 'low' shares do not close a connection");
 }
 
+// ------------------------------------------------------------ pinned to the bit
+// Found by mutation testing: nothing checked a share right at the bound, so a
+// bound twice as loose -- every share credited at half its difficulty -- passed.
+{
+  const jh = BigInt("0x" + Buffer.from(v.jackpot_hash, "hex").reverse().toString("hex"));
+  const L = jh.toString(2).length; // the hash's bit length: it meets 2^(256-bits) - 1 iff 256 - bits >= L
+  const at = (bits) => {
+    const r = new PearlRoom({ wallet: "w", now: () => 5000, minBits: 0, startBits: 0 });
+    r.upLine(notify("b1", v.header.bytes, EASY));
+    r.open(1);
+    r.line(1, JSON.stringify({ id: 1, method: "glados.hello", params: { worker: A } }));
+    r.conns.get(1).bits = bits;
+    const o = r.line(1, JSON.stringify({ id: 9, method: "glados.pearl.submit", params: { job: "b1", proof: v.plain_proof_b64 } }));
+    return { verdict: one(o).result.verdict, credited: r.work.get(A) };
+  };
+  const easy = at(256 - L), hard = at(257 - L);
+  ok(easy.verdict === "accepted" && easy.credited === 1n << BigInt(256 - L), `at ${256 - L} bits the share is accepted and credited 2^${256 - L} tiles`);
+  ok(hard.verdict === "low" && hard.credited === undefined, `at ${257 - L} bits, one harder, the same share is low and credited nothing`);
+}
+{
+  // VarDiff raises the bound after a share that came fast.
+  let clock = 10_000;
+  const r = new PearlRoom({ wallet: "w", now: () => clock, minBits: 0, startBits: 0 });
+  // The easy job held, upstream's real one current: the bound may rise to upstream's.
+  r.upLine(notify("vd", v.header.bytes, EASY));
+  r.upLine(notify(upJob.params.job_id, upJob.params.header, upJob.params.target));
+  r.open(1);
+  r.line(1, JSON.stringify({ id: 1, method: "glados.hello", params: { worker: A } }));
+  clock += 100; // a tenth of a second after the job: far faster than the target
+  const o = r.line(1, JSON.stringify({ id: 9, method: "glados.pearl.submit", params: { job: "vd", proof: v.plain_proof_b64 } }));
+  const sentJob = o.send.slice(1).map((s) => JSON.parse(s)).find((m) => m.method === "glados.pearl.job");
+  ok(r.conns.get(1).bits > 0 && sentJob && sentJob.params.bits === r.conns.get(1).bits, `a share a tenth of a second in raises the bound, and the miner is sent the harder job (bits ${r.conns.get(1).bits})`);
+}
+{
+  // The ration, exactly: a burst of ten, then two a second.
+  let clock = 20_000;
+  const r = new PearlRoom({ wallet: "w", now: () => clock, minBits: 0, startBits: 0 });
+  r.open(1);
+  r.line(1, JSON.stringify({ id: 1, method: "glados.hello", params: { worker: A } }));
+  const sub = () => one(r.line(1, JSON.stringify({ id: 5, method: "glados.pearl.submit", params: { job: "none", proof: "AAAA" } }))).result.verdict;
+  for (let i = 0; i < 10; i++) sub();
+  ok(sub() === "rate", "after the burst of ten: rate");
+  clock += 1000;
+  const after = [sub(), sub(), sub()];
+  ok(after[0] !== "rate" && after[1] !== "rate" && after[2] === "rate", `a second later, exactly two more (${after.join(",")})`);
+}
+{
+  // A connection id the room does not know, or one with no hello yet: answered with nothing, never a throw.
+  const r = new PearlRoom({ wallet: "w" });
+  r.upLine(notify("x", v.header.bytes, EASY));
+  r.open(3);
+  let threw = false;
+  try { ok(r.jobLine(99) === null && r.jobLine(3) === null && r.idle(99) === null && r.idle(3) === null, "jobLine and idle for an unknown connection, or one not yet greeted: null"); }
+  catch { threw = true; }
+  ok(!threw, "and no throw");
+  const empty = new PearlRoom({ wallet: "w" });
+  empty.open(1);
+  empty.line(1, JSON.stringify({ id: 1, method: "glados.hello", params: { worker: A } }));
+  ok(empty.jobLine(1) === null, "a greeted miner before upstream's first job: no job, no throw");
+}
+
 // Save and load.
 const back = new PearlRoom({ wallet: "w" });
 ok(back.load(room.save()) === 1 && back.work.get(A) === room.work.get(A), "work survives save and load");
