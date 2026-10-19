@@ -353,6 +353,32 @@ fn frame(b: &[u8]) -> Result<Option<(bool, u8, Vec<u8>, usize)>, String> {
 mod tests {
     use super::*;
 
+    // A pool that refuses the upgrade: its reason is the error, and its
+    // Retry-After the wait -- capped, so "an hour" still looks every two minutes.
+    // The body arrives in a second write, as it may on a real connection.
+    #[test]
+    fn a_refused_upgrade_says_why_and_how_long() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let t = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut b = [0u8; 2048];
+            let _ = s.read(&mut b);
+            let body = r#"{"error":"maintenance","why":"the pool is down for maintenance: moving the treasury","retryAfter":1800}"#;
+            let head = format!("HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1800\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", body.len());
+            s.write_all(head.as_bytes()).unwrap();
+            s.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+            s.write_all(body.as_bytes()).unwrap();
+        });
+        take_hold();
+        let e = Ws::connect(&format!("ws://127.0.0.1:{port}/mine"), "test").err().unwrap();
+        t.join().unwrap();
+        assert!(e.contains("down for maintenance: moving the treasury"), "{e}");
+        assert_eq!(take_hold(), HOLD_MAX);
+        assert_eq!(take_hold(), 0, "taken once");
+    }
+
     #[test]
     fn base64_matches_the_rfc_4648_vectors() {
         for (i, o) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foob", "Zm9vYg=="), ("fooba", "Zm9vYmE="), ("foobar", "Zm9vYmFy")] {
