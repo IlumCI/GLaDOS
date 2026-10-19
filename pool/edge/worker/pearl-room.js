@@ -82,7 +82,7 @@ export class PearlRoom {
 
   /** One line from upstream. Answers { newJob, log: [] }. */
   upLine(line) {
-    const out = { newJob: false, log: [] };
+    const out = { newJob: false, authorized: false, log: [] };
     let m;
     try { m = JSON.parse(line); } catch { m = null; }
     // JSON, and an object: `null`, `42` and `[]` parse but are not messages.
@@ -101,13 +101,14 @@ export class PearlRoom {
       return out;
     }
     if (m.id === 1) {
-      if (m.result === true) out.log.push(`[pearl up] authorized as ${this.wallet.slice(0, 10)}...`);
+      if (m.result === true) { out.authorized = true; out.log.push(`[pearl up] authorized as ${this.wallet.slice(0, 10)}...`); }
       else out.log.push(`[pearl up] authorize refused: ${JSON.stringify(m.error)}`);
       return out;
     }
     if (this.pendingUp.has(m.id)) {
       const s = this.pendingUp.get(m.id);
       this.pendingUp.delete(m.id);
+      out.answered = m.id;
       if (m.result && !m.error) { this.stats.upAccepted++; out.log.push(`[pearl up] share from ${s.addr.slice(0, 10)}... accepted upstream`); }
       else { this.stats.upRejected++; out.log.push(`[pearl up] share from ${s.addr.slice(0, 10)}... rejected upstream: ${JSON.stringify(m.error ?? m.result)}`); }
     }
