@@ -543,6 +543,7 @@ fn main() {
     let mut batch: Option<u32> = None;
     let mut weights: Vec<(String, u32)> = Vec::new();
     let mut reward: Option<String> = None;
+    let mut duty = 1.0f64;
     // Every core but one by default, so the machine it runs on stays usable --
     // the browser miner's 75% default makes the same trade for the same reason.
     let mut threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).saturating_sub(1).max(1);
@@ -570,6 +571,16 @@ fn main() {
             // "nvda", ...). Sent in the greeting exactly as the browser sends
             // it, so a native miner is paid the way its owner chose.
             "--reward" => reward = it.next().cloned(),
+            // Percent of the time the device works, as the browser miner's load
+            // slider: the rest is spent idle after each scan. A laptop GPU at
+            // 100% went from 64 C to 78 C in about thirty-five seconds here.
+            "--duty" => match it.next().and_then(|v| v.trim_end_matches('%').parse::<u32>().ok()) {
+                Some(p) if (10..=100).contains(&p) => duty = p as f64 / 100.0,
+                _ => {
+                    eprintln!("--duty wants a percentage from 10 to 100");
+                    std::process::exit(2);
+                }
+            },
             // Repeatable, `COIN:N`, matched on the coin label the pool sends.
             // By label rather than by slot number because a slot is the pool's
             // own index into a table an operator may reorder, and a share-out
@@ -593,7 +604,8 @@ fn main() {
             "-h" | "--help" => {
                 println!(
                     "glados-miner --pool HOST:PORT|wss://HOST/PATH --worker ADDRESS [--reward ASSET]\n\
-                     \x20            [--cpu [--threads N] | --gpu [--xpu PATH] [--batch N]] [--weight COIN:N]..."
+                     \x20            [--cpu [--threads N] | --gpu [--xpu PATH] [--batch N]] [--duty PERCENT]\n\
+                     \x20            [--weight COIN:N]..."
                 );
                 return;
             }
@@ -649,7 +661,7 @@ fn main() {
     let mut backoff = std::time::Duration::from_secs(2);
     loop {
         let began = std::time::Instant::now();
-        match run(&pool, &worker, reward.as_deref(), backend.as_mut(), &weights) {
+        match run(&pool, &worker, reward.as_deref(), duty, backend.as_mut(), &weights) {
             Ok(()) => eprintln!("[miner] disconnected; reconnecting in {}s", backoff.as_secs()),
             Err(e) => eprintln!("[miner] {e}; retrying in {}s", backoff.as_secs()),
         }
@@ -665,6 +677,7 @@ fn run(
     pool: &str,
     worker: &str,
     reward: Option<&str>,
+    duty: f64,
     backend: &mut dyn Backend,
     weights: &[(String, u32)],
 ) -> Result<(), String> {
@@ -861,6 +874,12 @@ fn run(
         let t0 = Instant::now();
         let hit = backend.scan(base, count);
         let dt = t0.elapsed();
+        // The rest that makes `--duty`: idle in proportion to the work just
+        // done, so the device averages the asked-for share of its time. After
+        // the timing, so the measured rate stays the device's working rate.
+        if duty < 1.0 {
+            std::thread::sleep(dt.mul_f64((1.0 - duty) / duty));
+        }
 
         // Below a millisecond the pipe round trip is most of what was measured,
         // so the figure would describe this process rather than the device. The
