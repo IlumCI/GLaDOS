@@ -655,6 +655,20 @@ fn main() {
         println!("[pearl] helper ready: {}", helper.what);
         let mut backoff = Duration::from_secs(2);
         loop {
+            if !helper.alive() {
+                match pearl::Helper::start(&pearl_path) {
+                    Ok(h) => {
+                        println!("[pearl] helper restarted: {}", h.what);
+                        helper = h;
+                    }
+                    Err(e) => {
+                        eprintln!("[pearl] the helper stopped and will not start again ({e}); retrying in {}s", backoff.as_secs());
+                        std::thread::sleep(backoff);
+                        backoff = (backoff * 2).min(Duration::from_secs(60));
+                        continue;
+                    }
+                }
+            }
             let began = Instant::now();
             if let Err(e) = pearl::run(&pool, &worker, reward.as_deref(), duty, &mut helper) {
                 eprintln!("[pearl] {e}; retrying in {}s", backoff.as_secs());
@@ -764,7 +778,9 @@ fn run(
             return Err(String::from("the pool closed the connection"));
         }
 
-        while let Ok(Some(line)) = take_line(&mut buf) {
+        // An overlong line ends the session: left in the buffer it would grow
+        // with every read and stop every later line from being seen.
+        while let Some(line) = take_line(&mut buf).map_err(|_| String::from("the pool sent an overlong line"))? {
             let Some(v) = Json::parse(line.trim()) else { continue };
             if v.get("method").and_then(|m| m.as_str()) == Some("glados.job") {
                 let Some(p) = v.get("params").and_then(proto::parse_job) else {

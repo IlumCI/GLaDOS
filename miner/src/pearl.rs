@@ -32,6 +32,10 @@ pub struct Helper {
     stdout: BufReader<ChildStdout>,
     pub what: String,
     job: Option<(String, String, i64)>,
+    /// A round asked for and not yet read back. Kept across sessions: a round
+    /// in flight when the pool goes is read by the next session, so the pipe
+    /// never gets a round ahead of its reader.
+    busy: bool,
 }
 
 impl Helper {
@@ -49,7 +53,7 @@ impl Helper {
         let Some(what) = first.strip_prefix("ready ") else {
             return Err(format!("{path} said {first:?} rather than ready"));
         };
-        Ok(Helper { child, stdin, stdout, what: what.to_string(), job: None })
+        Ok(Helper { child, stdin, stdout, what: what.to_string(), job: None, busy: false })
     }
 
     fn say(&mut self, line: &str) -> Result<(), String> {
@@ -67,13 +71,32 @@ impl Helper {
         Ok(())
     }
 
+    /// Whether the helper process is still running: a GPU reset or a crash
+    /// ends it, and the miner starts another rather than retrying a dead pipe.
+    pub fn alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
     pub fn has_job(&self) -> bool {
         self.job.is_some()
     }
 
-    /// One round: the shares found (job, proof), the tiles searched, the milliseconds it took.
-    pub fn round(&mut self) -> Result<(Vec<(String, String)>, u64, f64), String> {
-        self.say("round\n")?;
+    /// Start a round, unless one is already running. The GPU works on it while
+    /// this side reads the pool; `finish` collects it.
+    pub fn begin(&mut self) -> Result<(), String> {
+        if !self.busy {
+            self.say("round\n")?;
+            self.busy = true;
+        }
+        Ok(())
+    }
+
+    pub fn busy(&self) -> bool {
+        self.busy
+    }
+
+    /// The round started: the shares found (job, proof), the tiles searched, the milliseconds it took.
+    pub fn finish(&mut self) -> Result<(Vec<(String, String)>, u64, f64), String> {
         let mut shares = Vec::new();
         loop {
             let mut l = String::new();
@@ -88,6 +111,7 @@ impl Helper {
                     }
                 }
                 Some("done") => {
+                    self.busy = false;
                     let tiles = w.next().and_then(|x| x.parse().ok()).unwrap_or(0);
                     let ms = w.next().and_then(|x| x.parse().ok()).unwrap_or(0.0);
                     return Ok((shares, tiles, ms));
@@ -103,6 +127,15 @@ impl Drop for Helper {
     fn drop(&mut self) {
         let _ = self.stdin.write_all(b"quit\n");
         let _ = self.child.wait();
+    }
+}
+
+/// A share bound in bits: a JSON number written as a plain integer. `as_i64`
+/// reads 3.5 as 3 and 1e2 as 1, which for a bound is a different job.
+fn whole(v: &Json) -> Option<i64> {
+    match v {
+        Json::Num(t) if !t.is_empty() && t.len() <= 3 && t.bytes().all(|c| c.is_ascii_digit()) => t.parse().ok(),
+        _ => None,
     }
 }
 
@@ -122,20 +155,36 @@ pub fn run(pool: &str, worker: &str, reward: Option<&str>, duty: f64, h: &mut He
     let mut pending: Vec<u64> = Vec::new();
     let (mut macs, mut since) = (0u64, Instant::now());
     loop {
+        // The next round goes to the GPU first; reading the pool -- a short
+        // timed wait -- then overlaps it instead of idling the device. A job
+        // that arrives meanwhile reaches the helper after this round, whose
+        // shares name the job they were found on.
+        if h.has_job() {
+            h.begin()?;
+        }
         if !sock.recv(&mut buf, &mut chunk)? {
             return Err(String::from("the pool closed the connection"));
         }
-        while let Ok(Some(line)) = take_line(&mut buf) {
+        // An overlong line ends the session: left in the buffer it would grow
+        // with every read and stop every later line from being seen.
+        while let Some(line) = take_line(&mut buf).map_err(|_| String::from("the pool sent an overlong line"))? {
             let Some(v) = Json::parse(line.trim()) else { continue };
             if v.get("method").and_then(|m| m.as_str()) == Some("glados.pearl.job") {
                 let Some(p) = v.get("params") else { continue };
                 let (Some(id), Some(header), Some(bits)) = (
                     p.get("job").and_then(|x| x.as_str()),
                     p.get("header").and_then(|x| x.as_str()),
-                    p.get("bits").and_then(|x| x.as_i64()),
+                    p.get("bits").and_then(whole),
                 ) else {
                     continue;
                 };
+                // The id goes to the helper as one word of a line and back to the
+                // pool inside a JSON string, so it is held to characters that are
+                // safe in both: no space, newline, quote or backslash.
+                if id.is_empty() || id.len() > 128 || !id.bytes().all(|c| c.is_ascii_graphic() && c != b'"' && c != b'\\') {
+                    eprintln!("[pearl] a job id this miner will not pass on; ignored");
+                    continue;
+                }
                 if header.len() != 152 || !header.bytes().all(|c| c.is_ascii_hexdigit()) || !(0..256).contains(&bits) {
                     eprintln!("[pearl] a job this miner cannot read; ignored");
                     continue;
@@ -159,11 +208,11 @@ pub fn run(pool: &str, worker: &str, reward: Option<&str>, duty: f64, h: &mut He
             }
         }
 
-        if !h.has_job() {
+        if !h.busy() {
             std::thread::sleep(PARK);
             continue;
         }
-        let (shares, tiles, ms) = h.round()?;
+        let (shares, tiles, ms) = h.finish()?;
         macs += tiles * MAC_PER_TILE;
         for (job, proof) in shares {
             found += 1;
