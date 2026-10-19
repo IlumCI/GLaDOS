@@ -20,5 +20,11 @@ ok(threw, "a missing chunk refuses to load rather than returning part of a ledge
 // A shorter save after a longer one leaves stale chunks behind; the head decides.
 await s.put(textChunks("ledger", ledger)); await s.put(textChunks("ledger", "short"));
 ok((await loadText(s, "ledger")) === "short", "a shorter save after a longer one reads as the shorter one");
+// One put holds at most 128 keys; a ledger needing more must refuse loudly,
+// not be written half by one put and half by another.
+const atLimit = "x".repeat(127 * CHUNK);
+ok(Object.keys(textChunks("ledger", atLimit)).length === 128, "127 chunks and the head: one atomic put");
+let tooBig = false; try { textChunks("ledger", atLimit + "x"); } catch (e) { tooBig = /past what one atomic write can hold/.test(e.message); }
+ok(tooBig, "one byte more refuses, saying why");
 console.log(`${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
