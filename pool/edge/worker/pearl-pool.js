@@ -81,11 +81,15 @@ export class PearlPool {
         if (!line.trim()) continue;
         if (line.includes("glados.rate")) { this.noteRate(server, line); continue; }
         if (line.includes("glados.hello")) this.noteReward(line).catch((e) => console.log(`[reward] not stored: ${e && e.message}`));
-        const out = this.room.line(id, line);
+        // The room is tested never to throw; this is so that, if it ever does,
+        // one bad line costs one line and not the connection's handler.
+        let out;
+        try { out = this.room.line(id, line); } catch (e) { console.log(`[pearl] a line the room could not take: ${e && e.message}`); continue; }
         for (const l of out.log) console.log(l);
         for (const s of out.send) { try { server.send(s); } catch {} }
         for (const u of out.up) this.upSend(u);
         if (out.credited) this.dirty = true;
+        if (out.close) { try { server.close(1008, "too many invalid proofs"); } catch {} this.drop(server); return; }
       }
     });
     server.addEventListener("close", () => this.drop(server));

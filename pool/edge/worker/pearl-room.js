@@ -32,7 +32,7 @@
 // never trusted. A share that also meets upstream's bound is forwarded, which
 // is the only thing that earns the pool anything.
 
-import { verifyShare, adjustmentFactor, scaleTarget, fromBase64 } from "./pearlproof.js";
+import { verifyShare, adjustmentFactor, scaleTarget, fromBase64, toBase64, decodeProof, encodeProof } from "./pearlproof.js";
 
 export const K = 2048;
 export const RANK = 128;
@@ -41,7 +41,14 @@ const FACTOR = adjustmentFactor(K, RANK); // tile x (k / rank) x 128 = 2^19, wha
 const TARGET_S = 20;      // a share this often per miner
 const MIN_BITS = 16, START_BITS = 24; // defaults; PEARL_MIN_BITS / PEARL_START_BITS lower them for tests
 const JOBS_KEPT = 4;      // upstream jobs a share may still be for
-const MAX_SEEN = 20000;   // duplicate memory, per job
+const MAX_SEEN = 50000;   // duplicate memory, across the jobs kept
+// A share costs ~9 ms of verification, so submits are rationed before any of
+// that is spent: a bucket of SUBMIT_BURST refilling at SUBMIT_RATE a second --
+// far above one share per TARGET_S, far below what would starve the shard.
+const SUBMIT_RATE = 2, SUBMIT_BURST = 10;
+// A connection whose proofs keep failing verification is closed: past
+// BAD_MIN failures, once they outnumber its accepted shares.
+const BAD_MIN = 10;
 
 const hexOk = (s, n) => typeof s === "string" && s.length === n && /^[0-9a-fA-F]+$/.test(s);
 const toU8 = (h) => Uint8Array.from(h.match(/../g), (b) => parseInt(b, 16));
@@ -55,7 +62,12 @@ export class PearlRoom {
     this.startBits = Math.max(this.minBits, startBits);
     this.worker = worker;
     this.now = now;
-    this.jobs = [];            // newest first: { id, header (Uint8Array), headerHex, upBound (BigInt), height, seen: Set }
+    this.jobs = [];            // newest first: { id, header (Uint8Array), headerHex, upBound (BigInt), height }
+    // Jackpot hashes already credited, over every job kept. Not per job: an
+    // upstream that re-issues one header under a new job id (it does, on a
+    // difficulty change) would otherwise credit the same tile twice. The hash
+    // already depends on the header, so one set covers every job.
+    this.seen = new Set();
     this.conns = new Map();    // connId -> { addr, bits, last, ema, sent }
     this.work = new Map();     // address -> BigInt, all-time credited tiles
     this.stats = { accepted: 0, forwarded: 0, upAccepted: 0, upRejected: 0, rejected: 0 };
@@ -72,7 +84,9 @@ export class PearlRoom {
   upLine(line) {
     const out = { newJob: false, log: [] };
     let m;
-    try { m = JSON.parse(line); } catch { out.log.push(`[pearl up] unreadable line: ${line.slice(0, 120)}`); return out; }
+    try { m = JSON.parse(line); } catch { m = null; }
+    // JSON, and an object: `null`, `42` and `[]` parse but are not messages.
+    if (!m || typeof m !== "object" || Array.isArray(m)) { out.log.push(`[pearl up] unreadable line: ${String(line).slice(0, 120)}`); return out; }
     if (m.method === "mining.notify" && m.params && typeof m.params === "object") {
       const p = m.params;
       if (!hexOk(p.header, 152) || !hexOk(p.target, 64) || typeof p.job_id !== "string") {
@@ -81,7 +95,7 @@ export class PearlRoom {
       }
       if (this.jobs[0] && this.jobs[0].id === p.job_id) return out;
       const upBound = scaleTarget(BigInt("0x" + p.target), FACTOR);
-      this.jobs.unshift({ id: p.job_id, header: toU8(p.header), headerHex: p.header.toLowerCase(), upBound, height: p.height ?? null, seen: new Set() });
+      this.jobs.unshift({ id: p.job_id, header: toU8(p.header), headerHex: p.header.toLowerCase(), upBound, height: p.height ?? null });
       this.jobs.length = Math.min(this.jobs.length, JOBS_KEPT);
       out.newJob = true;
       return out;
@@ -101,7 +115,7 @@ export class PearlRoom {
   }
 
   // ------------------------------------------------------------------ miners
-  open(id) { this.conns.set(id, { addr: null, bits: this.startBits, last: this.now(), ema: TARGET_S, sent: null }); }
+  open(id) { this.conns.set(id, { addr: null, bits: this.startBits, last: this.now(), ema: TARGET_S, sent: null, tokens: SUBMIT_BURST, filled: this.now(), bad: 0, good: 0 }); }
   close(id) { this.conns.delete(id); }
   addresses() { return new Set([...this.conns.values()].map((c) => c.addr).filter(Boolean)); }
 
@@ -113,17 +127,21 @@ export class PearlRoom {
     return JSON.stringify({ method: "glados.pearl.job", params: { job: j.id, header: j.headerHex, bits: c.bits, k: K, rank: RANK, cert: 3 } }) + "\n";
   }
 
-  /** One line from a miner. Answers { send: [lines], up: [lines], credited, log: [] }. */
+  /** One line from a miner. Answers { send: [lines], up: [lines], credited, close, log: [] }. */
   line(id, text) {
-    const out = { send: [], up: [], credited: false, log: [] };
+    const out = { send: [], up: [], credited: false, close: false, log: [] };
     const c = this.conns.get(id);
     if (!c) return out;
     let m;
     try { m = JSON.parse(text); } catch { return out; }
+    if (!m || typeof m !== "object" || Array.isArray(m)) return out; // `null` parses too
     const rid = m.id ?? null;
     if (m.method === "glados.hello") {
       const head = String((m.params && m.params.worker) || "").split(".")[0];
       if (!/^0x[0-9a-fA-F]{40}$/.test(head)) { out.send.push(JSON.stringify({ id: rid, result: null, error: "the worker must be a 0x payout address" }) + "\n"); return out; }
+      // The first greeting names whom this connection's work pays; a later one
+      // cannot move it. A different wallet is a different connection.
+      if (c.addr && c.addr !== head.toLowerCase()) { out.send.push(JSON.stringify({ id: rid, result: null, error: "this connection already mines for another address" }) + "\n"); return out; }
       c.addr = head.toLowerCase();
       out.send.push(reply(rid, { pearl: { k: K, rank: RANK, tile: TILE } }));
       const j = this.jobLine(id);
@@ -132,6 +150,12 @@ export class PearlRoom {
     }
     if (m.method !== "glados.pearl.submit") return out;
     if (!c.addr) { out.send.push(verdict(rid, false, "invalid", "say glados.hello first")); return out; }
+    // The ration, before anything costs CPU.
+    const t = this.now();
+    c.tokens = Math.min(SUBMIT_BURST, c.tokens + ((t - c.filled) / 1000) * SUBMIT_RATE);
+    c.filled = t;
+    if (c.tokens < 1) { this.stats.rejected++; out.send.push(verdict(rid, false, "rate", "too many submits; slow down")); return out; }
+    c.tokens -= 1;
     const p = m.params || {};
     const job = this.jobs.find((j) => j.id === p.job);
     if (!job) { this.stats.rejected++; out.send.push(verdict(rid, false, "stale")); return out; }
@@ -146,12 +170,16 @@ export class PearlRoom {
       this.stats.rejected++;
       const low = /above the target/.test(v.why);
       out.send.push(verdict(rid, false, low ? "low" : "invalid", v.why));
+      // "low" can be honest -- a share found just before a harder job arrived;
+      // a proof that fails verification cannot.
+      if (!low && ++c.bad >= BAD_MIN && c.bad > c.good) { out.close = true; out.log.push(`[pearl] closing ${c.addr.slice(0, 10)}...: ${c.bad} invalid proofs`); }
       return out;
     }
     if (v.k !== K || v.rank !== RANK) { this.stats.rejected++; out.send.push(verdict(rid, false, "invalid", `this pool mines k=${K} rank=${RANK}`)); return out; }
-    if (job.seen.has(v.jackpotHash)) { this.stats.rejected++; out.send.push(verdict(rid, false, "duplicate")); return out; }
-    if (job.seen.size >= MAX_SEEN) job.seen.clear();
-    job.seen.add(v.jackpotHash);
+    if (this.seen.has(v.jackpotHash)) { this.stats.rejected++; out.send.push(verdict(rid, false, "duplicate")); return out; }
+    if (this.seen.size >= MAX_SEEN) this.seen.delete(this.seen.values().next().value); // oldest first
+    this.seen.add(v.jackpotHash);
+    c.good++;
 
     this.work.set(c.addr, (this.work.get(c.addr) || 0n) + (1n << BigInt(bits)));
     this.stats.accepted++;
@@ -164,14 +192,17 @@ export class PearlRoom {
       const uid = this.nextUpId++;
       this.pendingUp.set(uid, { addr: c.addr, at: this.now() });
       if (this.pendingUp.size > 256) this.pendingUp.delete(this.pendingUp.keys().next().value);
-      out.up.push(JSON.stringify({ id: uid, method: "mining.submit", params: { job_id: job.id, plain_proof: p.proof, jackpot: v.jackpotHash, adjustment_factor: v.adjustmentFactor } }) + "\n");
+      // Re-encoded in Pearl's current format: a miner may send the legacy one
+      // (Pearl's gateway reads both), and upstream need not.
+      const canonical = toBase64(encodeProof(decodeProof(bytes)));
+      out.up.push(JSON.stringify({ id: uid, method: "mining.submit", params: { job_id: job.id, plain_proof: canonical, jackpot: v.jackpotHash, adjustment_factor: v.adjustmentFactor } }) + "\n");
       this.stats.forwarded++;
       out.log.push(`[pearl] ${c.addr.slice(0, 10)}... found a share for upstream`);
     }
 
     // VarDiff: an exponential average of the interval, then whole bits up or
     // down -- one bit is a factor of two, so this settles in a few shares.
-    const t = this.now(), dt = Math.max(0.05, (t - c.last) / 1000);
+    const dt = Math.max(0.05, (t - c.last) / 1000);
     c.last = t;
     c.ema = 0.7 * c.ema + 0.3 * dt;
     const want = Math.round(Math.log2(TARGET_S / c.ema));
