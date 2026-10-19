@@ -369,6 +369,57 @@ const resetError = () => Object.assign(new Error("Durable Object reset because i
   c.close(); c2.close();
 }
 
+// ======================================================= the alarm, the object's only clock
+// On the live pool the mining object's alarm stopped after the 2026-10-18
+// outage and never came back: arm() only sets one when storage has none, so an
+// alarm stuck in storage meant no treasury, no saves on the clock, and every
+// miner's earnings at $0 -- for over a day, with nothing saying so.
+{
+  const edgeA = (await import(`./worker.js?alarm=${Math.random()}`)).default;
+  const env = world({ TREASURY: "live", JOB_PERIOD_MS: "30000", TICK_LIMIT_MS: "200", EARN_LIMIT_MS: "200" });
+  const g = (p) => edgeA.fetch(new Request(`https://pool.test${p}`), env);
+  const A = addr(0xa7);
+  const r = await edgeA.fetch(new Request(`https://pool.test/mine?w=${A}`, { headers: { Upgrade: "websocket" } }), env);
+  const c = r.webSocket;
+  c.send(JSON.stringify({ id: 1, method: "glados.hello", params: { v: 1, worker: A, agent: "edge.test" } }) + "\n");
+  await sim.sleep(5);
+  const o = env.POOL.live.get("main").obj;
+  const st = env.POOL.storage("main");
+
+  // The figure a miner sees comes from the alarm: with a pot, it arrives.
+  o.treasurer.tick = async () => {};
+  o.treasurer.earnQuote = async () => ({ byCode: {}, usd: 0.0322, recipients: 0, epochMs: 1_800_000, lastAt: null });
+  await env.POOL.alarm("main");
+  const earn = c.lines().filter((m) => m.method === "glados.earn").pop();
+  ok(earn && earn.params.usd === 0.0322 && earn.params.asset === "glados", `each alarm sends a connected miner its share of the pot (${earn && earn.params.usd})`);
+
+  // An alarm stuck in storage, far in the future, and none running.
+  st.alarm = Date.now() + 365 * 86_400_000;
+  o.lastAlarmAt = Date.now() - 5 * 30_000;
+  logs.length = 0;
+  await g("/status?alarm1");
+  ok(st.alarm !== null && st.alarm - Date.now() < 5_000, `no alarm for five periods: the next request sets one at once (in ${Math.round((st.alarm - Date.now()) / 1000)} s)`);
+  ok(logs.some((l) => /no alarm has run here for 150 s/.test(l)), "and says so");
+  const set = st.alarm;
+  st.alarm = Date.now() + 365 * 86_400_000;
+  await g("/status?alarm2");
+  ok(st.alarm !== set && st.alarm > Date.now() + 86_400_000, "once per stretch, not on every request");
+  const s = await (await g("/status?alarm3")).json();
+  ok(Array.isArray(s.alarmAgoS) && s.alarmAgoS[0] >= 150, `/status shows how long since each shard's alarm ran (${JSON.stringify(s.alarmAgoS)})`);
+
+  // A treasury step or an earnings quote that never returns: the alarm still ends and sets the next.
+  o.treasurer.tick = () => new Promise(() => {});
+  o.treasurer.earnQuote = () => new Promise(() => {});
+  st.alarm = null;
+  logs.length = 0;
+  const t0 = Date.now();
+  await env.POOL.alarm("main");
+  ok(Date.now() - t0 < 2_000 && st.alarm !== null, `a treasury step and an earnings quote that hang: the alarm ends within its limits and sets the next (${Date.now() - t0} ms)`);
+  ok(logs.some((l) => /the treasury step took over/.test(l)) && logs.some((l) => /the earnings push took over/.test(l)), "and says which phase it gave up waiting for");
+  ok(o.lastAlarmAt >= t0, "the alarm's run is recorded");
+  c.close();
+}
+
 // ======================================================= tripping the breaker from outside
 // The allowance break shuts every route for 30 s on an error whose message
 // names the allowance. If any client-controlled text could reach the router's

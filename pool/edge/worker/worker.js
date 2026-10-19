@@ -194,6 +194,17 @@ async function ask(env, name, request) {
   }
 }
 
+// The alarm's slow phases, bounded: a treasury step or an earnings quote that
+// hangs must not hold the alarm open, because the next alarm is only set once
+// this one finishes. The phase itself is not cancelled -- the treasury's own
+// lock keeps a second step from starting while it runs -- only waited for.
+const TICK_LIMIT_MS = 3 * 60_000;
+const EARN_LIMIT_MS = 45_000;
+const within = (p, ms, what) => {
+  let t;
+  return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`${what} took over ${ms / 1000} s; the alarm goes on without it`)), ms); })]).finally(() => clearTimeout(t));
+};
+
 // The daily allowance does not come back within a request, so once one
 // request has seen it spent this isolate stops asking for BREAK_MS: every miner
 // retrying would otherwise be another failed object call to say the same thing.
@@ -366,6 +377,8 @@ async function route(request, env) {
           // its own figure rather than added into the one above.
           ...(pearl ? { pearl: { hashrate: pearl.pearl.hashrate, connections: pearl.connections, accepted: pearl.pearl.accepted, forwarded: pearl.pearl.forwarded, sent: pearl.pearl.sent, answered: pearl.pearl.answered, waiting: pearl.pearl.waiting, lost: pearl.pearl.lost, upAccepted: pearl.pearl.upAccepted } } : {}),
           perShard: all.map((s) => (s ? s.connections : null)),
+          // Seconds since each shard's alarm last ran: its clock, visible.
+          alarmAgoS: all.map((s) => (s && Number.isFinite(s.alarmAgoS) ? s.alarmAgoS : null)),
           // The fullest shard's tallies against the core's cap: past ~90%,
           // new miners' shares go uncredited and SHARDS should be raised.
           tallies: Math.max(0, ...up.map((s) => s.tallies || 0)), maxTallies: up[0].maxTallies ?? null,
@@ -428,6 +441,7 @@ export class Pool {
     // Only shard 0 ("main") holds the keys and runs the treasury.
     this.treasurer = new Treasury(this);
     this.balances = new Map(); // address -> { wei, at }
+    this.lastAlarmAt = Date.now(); // when an alarm last began here; a fresh object counts from its start
     // Nothing is served until the core exists and the ledger is back, so a miner
     // arriving during a cold start cannot be credited into an empty record that
     // then overwrites the stored one.
@@ -479,6 +493,7 @@ export class Pool {
 
   async fetch(request) {
     const url = new URL(request.url);
+    try { await this.watchAlarm(); } catch (e) { this.log(`[edge] alarm watch failed: ${e && e.message ? e.message : e}`); }
     if (url.pathname === "/health.json") {
       if (String(this.ctx.id.name || "") !== "status") return new Response("not here", { status: 404 });
       let snap = await this.ctx.storage.get("status.snapshot");
@@ -506,7 +521,7 @@ export class Pool {
       return this.maintRoute(request, url.pathname);
     }
     if (url.pathname === "/status") {
-      return Response.json({ maintenance: this.maint && this.maint.on ? this.maint : undefined, slots: this.slots, connections: this.conns.size, addresses: new Set(this.connAddr.values()).size, hashrate: this.poolHashrate(), tallies: this.tallies ?? null, maxTallies: MAX_TALLIES });
+      return Response.json({ maintenance: this.maint && this.maint.on ? this.maint : undefined, alarmAgoS: Math.round((Date.now() - this.lastAlarmAt) / 1000), slots: this.slots, connections: this.conns.size, addresses: new Set(this.connAddr.values()).size, hashrate: this.poolHashrate(), tallies: this.tallies ?? null, maxTallies: MAX_TALLIES });
     }
     if (url.pathname === "/treasury") {
       const t = await this.treasury();
@@ -1036,6 +1051,27 @@ export class Pool {
     return true;
   }
 
+  // **An alarm that has stopped coming is set again.** The alarm is this
+  // object's only clock -- idle work, the period's save, the treasury, the
+  // earnings each miner sees -- and nothing else noticed when it stopped: arm()
+  // only sets one when storage says there is none. On the live pool it went
+  // quiet after the 2026-10-18 outage and stayed quiet for more than a day:
+  // treasury untouched, every miner's earnings stuck at $0. So every request
+  // checks the clock, and an alarm overdue by four periods (a quarter hour for
+  // the treasury alone) is replaced, once per such stretch, and said.
+  async watchAlarm() {
+    const name = String(this.ctx.id.name || "");
+    if (name === "status" || name === "control" || name === "progress") return;
+    const period = Number(this.env.JOB_PERIOD_MS) || JOB_PERIOD_MS;
+    const limit = this.conns.size > 0 ? 4 * period : this.runsTreasury ? 15 * 60_000 : 0;
+    const now = Date.now();
+    if (!limit || now - this.lastAlarmAt < limit || now - (this.rearmedAt || 0) < limit) return;
+    this.rearmedAt = now;
+    const at = await this.ctx.storage.getAlarm();
+    this.log(`[edge] no alarm has run here for ${Math.round((now - this.lastAlarmAt) / 1000)} s (storage says the next is ${at === null ? "none" : new Date(at).toISOString()}); setting one now`);
+    await this.ctx.storage.setAlarm(now + 1000);
+  }
+
   // **One save at a time, and a burst of reasons to save is one more save.**
   // Every disconnect saves, so a crowd leaving at once -- a deploy, a network
   // blip, a maintenance drain -- was one full write of the share log per miner:
@@ -1110,6 +1146,7 @@ export class Pool {
       finally { await this.ctx.storage.setAlarm(Date.now() + STATUS_EVERY_MS); }
       return;
     }
+    this.lastAlarmAt = Date.now();
     // Each phase is timed, and any period over a second says which phase took
     // it: the object was being reset for exceeding its CPU limit and nothing
     // said where the time went.
@@ -1142,10 +1179,10 @@ export class Pool {
       // must not skip the rest of the period -- above all the earnings push, so
       // a miner keeps seeing a figure even while a payout step is failing.
       if (this.runsTreasury && this.maint && this.maint.on) this.log(`[treasury] paused for maintenance: ${this.maint.reason}`);
-      else if (this.runsTreasury) { try { await this.treasurer.tick(); } catch (e) { this.log(`[edge] treasury tick failed this period: ${e && e.message ? e.message : e}`); } }
+      else if (this.runsTreasury) { try { await within(this.treasurer.tick(), Number(this.env.TICK_LIMIT_MS) || TICK_LIMIT_MS, "the treasury step"); } catch (e) { this.log(`[edge] treasury tick failed this period: ${e && e.message ? e.message : e}`); } }
       mark("treasury", at);
       at = Date.now();
-      try { await this.pushEarn(); } catch (e) { this.log(`[edge] earn push failed this period: ${e && e.message ? e.message : e}`); }
+      try { await within(this.pushEarn(), Number(this.env.EARN_LIMIT_MS) || EARN_LIMIT_MS, "the earnings push"); } catch (e) { this.log(`[edge] earn push failed this period: ${e && e.message ? e.message : e}`); }
       mark("earn", at);
     } catch (e) {
       this.log(`[edge] alarm failed: ${e && e.message ? e.message : e}`);

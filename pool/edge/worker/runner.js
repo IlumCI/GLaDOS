@@ -301,9 +301,14 @@ export class Treasury {
   // Once every `everyMs`, whatever calls it, and never twice at once: a step
   // slowed by retries must not overlap the next alarm's.
   async tick(everyMs = 5 * 60_000) {
+    // A step still running from an earlier tick is never doubled -- two could
+    // both sign -- but one running a quarter hour is said, every tick, rather
+    // than leaving the treasury silently stopped.
+    if (this.running && this.now() - this.runningSince > 15 * 60_000) this.log(`a step has been running ${Math.round((this.now() - this.runningSince) / 60_000)} min; no new step starts until it ends`);
     if (this.mode === "off" || this.running || this.now() - this.lastTick < everyMs) return;
     this.lastTick = this.now();
     this.running = true;
+    this.runningSince = this.now();
     try {
       await this.step();
     } catch (e) {
