@@ -37,7 +37,7 @@
 // posted to ALERT_WEBHOOK when one is configured, so the operator hears about
 // a written-off exchange from the treasury, not from a miner.
 import { decide, FRESH, MAX_RECIPIENTS, backoffMs } from "./flow.js";
-import { signRvnTx, rvnTxid, rvnScript, signLegacyTx, createdAddress, encodePayAll, encodeCtor2, amountOut } from "./treasury.js";
+import { signRvnTx, rvnTxid, rvnScript, signLegacyTx, createdAddress, encodePayAll, encodeCtor2, amountOut, payoutRecipients } from "./treasury.js";
 import { plan, planGas, legsOf } from "./plan.js";
 import { CHAIN as RWA, TOKENS, MENU, rewardOf, DEFAULT as DEFAULT_REWARD } from "./rewards.js";
 import { perRecipientEth, fromWei18 } from "./earn.js";
@@ -960,11 +960,17 @@ export class Treasury {
   // The chain has who was paid; everybody paid is counted as paid up to what
   // the ledger says now. That can under-credit work done in the minutes since
   // the payout was signed, and never pays anybody twice.
+  //
+  // **It read the old buyAndPay layout only**, while every payout since the
+  // reward choices is payAll -- so a lost record would have been rebuilt with
+  // a head offset as the recipient count and offsets, pools and amounts as the
+  // recipients: nobody really paid marked paid, and all of them paid again the
+  // next epoch. Found by mutation testing (nothing noticed the decoder change).
+  // Calldata it cannot read is no answer: tried again, never guessed.
   async reconstruct(hash, next) {
     const tx = await this.rpc("eth_getTransactionByHash", [hash]);
-    const d = String(tx && tx.input || "").slice(10);
-    const n = d.length >= 192 ? Number(BigInt("0x" + d.slice(128, 192))) : 0;
-    const recipients = [...Array(n).keys()].map((i) => "0x" + d.slice((3 + i) * 64 + 24, (4 + i) * 64));
+    const recipients = payoutRecipients(tx && tx.input);
+    if (!recipients) throw new Transient(`payout ${hash}: its calldata does not read as a payout; not rebuilding its record from a guess`);
     const now = await this.shardWork();
     const updates = {};
     for (const a of recipients) {

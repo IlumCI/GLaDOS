@@ -286,6 +286,47 @@ export function encodePayAll(groups) {
   return "0x" + selector("payAll(((address,address,uint256,uint256)[],address[])[])") + word(0x20) + word(groups.length) + heads.join("") + enc.join("");
 }
 
+// Who a payout transaction paid, from its calldata: `payAll` (every payout
+// since the reward choices) or the older `buyAndPay`. For rebuilding a record
+// that went missing -- the one place the chain is the only witness -- so it
+// refuses rather than guesses: an unknown selector, an offset or a length that
+// does not fit the data, or an address with high bits set answers null.
+export function payoutRecipients(input) {
+  const s = String(input || "").toLowerCase();
+  if (!/^0x[0-9a-f]*$/.test(s) || s.length < 10 || (s.length - 10) % 64) return null;
+  const sel = s.slice(2, 10), d = s.slice(10), words = d.length / 64;
+  const at = (byte) => {
+    if (byte % 32 || byte < 0 || byte / 32 >= words) throw new Error("out of range");
+    return BigInt("0x" + d.slice(byte * 2, byte * 2 + 64));
+  };
+  const small = (v, max) => { if (v > BigInt(max)) throw new Error("too large"); return Number(v); };
+  const addrAt = (byte) => {
+    const w = d.slice(byte * 2, byte * 2 + 64);
+    if (byte / 32 >= words || !/^0{24}/.test(w)) throw new Error("not an address");
+    return "0x" + w.slice(24);
+  };
+  try {
+    if (sel === selector("buyAndPay(address[],uint256)")) {
+      const n = small(at(64), words);
+      return [...Array(n).keys()].map((i) => addrAt(96 + 32 * i));
+    }
+    if (sel === selector("payAll(((address,address,uint256,uint256)[],address[])[])")) {
+      const arr = small(at(0), d.length / 2), n = small(at(arr), words);
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const g = arr + 32 + small(at(arr + 32 + 32 * i), d.length / 2);
+        const toAt = g + small(at(g + 32), d.length / 2);
+        const m = small(at(toAt), words);
+        for (let j = 0; j < m; j++) out.push(addrAt(toAt + 32 + 32 * j));
+      }
+      return [...new Set(out)];
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 // GladosPayout2's constructor: weth, glados, pair, usdg, V3 factory, WETH/USDG pool.
 export function encodeCtor2(weth, glados, pair, usdg, factory, wethUsdgPool) {
   return [weth, glados, pair, usdg, factory, wethUsdgPool].map(addrWord).join("");
