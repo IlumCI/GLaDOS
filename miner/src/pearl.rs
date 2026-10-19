@@ -169,6 +169,10 @@ pub fn run(pool: &str, worker: &str, reward: Option<&str>, duty: f64, h: &mut He
         // with every read and stop every later line from being seen.
         while let Some(line) = take_line(&mut buf).map_err(|_| String::from("the pool sent an overlong line"))? {
             let Some(v) = Json::parse(line.trim()) else { continue };
+            if v.get("method").and_then(|m| m.as_str()) == Some("glados.maintenance") {
+                crate::maintenance_notice(&v);
+                continue;
+            }
             if v.get("method").and_then(|m| m.as_str()) == Some("glados.pearl.job") {
                 let Some(p) = v.get("params") else { continue };
                 let (Some(id), Some(header), Some(bits)) = (

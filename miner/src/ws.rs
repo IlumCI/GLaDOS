@@ -14,8 +14,11 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+use glados_pool::json::Json;
 
 /// How long the TCP connect, the TLS handshake and the HTTP upgrade may take
 /// together. The caller shortens the read timeout to its poll interval after.
@@ -24,6 +27,23 @@ const HANDSHAKE: Duration = Duration::from_secs(15);
 /// The largest single message accepted. The pool's biggest is a job, which is
 /// a few hundred bytes; anything near this is not the pool.
 const MAX_MESSAGE: u64 = 1 << 20;
+
+/// Seconds the pool has asked this miner to wait before trying again: a 503's
+/// Retry-After (maintenance, or the pool over its allowance), a close with
+/// 1013, or a `glados.maintenance` notice. The reconnect loops take it in place
+/// of their own backoff. Capped, so a miner told "back in an hour" still looks
+/// every two minutes -- an attempt during maintenance is answered at the
+/// pool's edge and costs it nothing -- and is back soon after the pool is.
+static HOLD: AtomicU64 = AtomicU64::new(0);
+pub const HOLD_MAX: u64 = 120;
+
+pub fn hold(secs: u64) {
+    HOLD.fetch_max(secs.min(HOLD_MAX), Ordering::Relaxed);
+}
+
+pub fn take_hold() -> u64 {
+    HOLD.swap(0, Ordering::Relaxed)
+}
 
 /// The bytes under the WebSocket: plain TCP for `ws://`, TLS for `wss://`.
 pub enum Wire {
@@ -180,6 +200,26 @@ impl Ws {
         let text = String::from_utf8_lossy(&head[..end]).to_ascii_lowercase();
         let status = text.lines().next().unwrap_or("");
         if !status.contains(" 101 ") {
+            // A refusal carries its reason as JSON, and how long to stay away.
+            if let Some(s) = text.lines().find_map(|l| l.strip_prefix("retry-after:")).and_then(|v| v.trim().parse::<u64>().ok()) {
+                hold(s);
+            }
+            let want = text
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0)
+                .min(4096);
+            while head.len() < end + want {
+                match wire.read(&mut chunk) {
+                    Ok(n) if n > 0 => head.extend_from_slice(&chunk[..n]),
+                    _ => break,
+                }
+            }
+            let body = String::from_utf8_lossy(&head[end..]).to_string();
+            if let Some(why) = Json::parse(body.trim()).and_then(|v| v.get("why").and_then(|w| w.as_str()).map(String::from)) {
+                return Err(format!("{}: {}", status.trim(), why));
+            }
             return Err(format!("{url}: the pool answered {:?} rather than switching to WebSocket", status.trim()));
         }
         if !text.contains("upgrade: websocket") {
@@ -218,6 +258,11 @@ impl Ws {
                     }
                 }
                 0x8 => {
+                    // 1013, "try again later": the pool is going down on purpose.
+                    if payload.len() >= 2 && u16::from_be_bytes([payload[0], payload[1]]) == 1013 {
+                        hold(HOLD_MAX);
+                        eprintln!("[miner] the pool closed the connection: {}", String::from_utf8_lossy(&payload[2..]));
+                    }
                     let _ = self.frame_out(0x8, &payload);
                     return Ok(false);
                 }

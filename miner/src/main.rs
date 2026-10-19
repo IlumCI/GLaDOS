@@ -392,6 +392,31 @@ const POLL: Duration = Duration::from_millis(2);
 /// idle.
 const PARK: Duration = Duration::from_millis(50);
 
+/// The pool says it is going down for maintenance: say why, and wait as asked
+/// once it closes the connection. Mining continues until it does.
+pub(crate) fn maintenance_notice(v: &Json) {
+    let p = v.get("params");
+    let reason = p.and_then(|p| p.get("reason")).and_then(|r| r.as_str()).unwrap_or("no reason given");
+    let reason: String = reason.chars().filter(|c| !c.is_control()).take(200).collect();
+    let after = p.and_then(|p| p.get("retryAfter")).and_then(|r| r.as_i64()).unwrap_or(120).max(0) as u64;
+    let mins = p.and_then(|p| p.get("until")).and_then(|u| u.as_i64()).map(|u| {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+        (u - now).max(0) / 60_000
+    });
+    let back = mins.map(|m| format!("; expected back in about {m} min")).unwrap_or_default();
+    println!("[miner] the pool is going down for maintenance: {reason}{back}. This miner waits and reconnects by itself.");
+    ws::hold(after);
+}
+
+/// How long to wait before the next attempt: what the pool asked for, if it
+/// asked, else the loop's own backoff.
+fn next_wait(backoff: Duration) -> (Duration, bool) {
+    match ws::take_hold() {
+        0 => (backoff, false),
+        s => (Duration::from_secs(s), true),
+    }
+}
+
 /// Everything a job's nonce space holds. The nonce is four bytes at a fixed
 /// offset, so this is all the work one job can ever carry.
 const SPACE: u64 = 1u64 << 32;
@@ -670,14 +695,18 @@ fn main() {
                 }
             }
             let began = Instant::now();
-            if let Err(e) = pearl::run(&pool, &worker, reward.as_deref(), duty, &mut helper) {
-                eprintln!("[pearl] {e}; retrying in {}s", backoff.as_secs());
-            }
+            let r = pearl::run(&pool, &worker, reward.as_deref(), duty, &mut helper);
             if began.elapsed() > Duration::from_secs(60) {
                 backoff = Duration::from_secs(2);
             }
-            std::thread::sleep(backoff);
-            backoff = (backoff * 2).min(Duration::from_secs(60));
+            let (wait, asked) = next_wait(backoff);
+            if let Err(e) = r {
+                eprintln!("[pearl] {e}; retrying in {}s{}", wait.as_secs(), if asked { ", as the pool asked" } else { "" });
+            }
+            std::thread::sleep(wait);
+            if !asked {
+                backoff = (backoff * 2).min(Duration::from_secs(60));
+            }
         }
     }
 
@@ -716,15 +745,20 @@ fn main() {
     let mut backoff = std::time::Duration::from_secs(2);
     loop {
         let began = std::time::Instant::now();
-        match run(&pool, &worker, reward.as_deref(), duty, backend.as_mut(), &weights) {
-            Ok(()) => eprintln!("[miner] disconnected; reconnecting in {}s", backoff.as_secs()),
-            Err(e) => eprintln!("[miner] {e}; retrying in {}s", backoff.as_secs()),
-        }
+        let r = run(&pool, &worker, reward.as_deref(), duty, backend.as_mut(), &weights);
         if began.elapsed() > std::time::Duration::from_secs(60) {
             backoff = std::time::Duration::from_secs(2);
         }
-        std::thread::sleep(backoff);
-        backoff = (backoff * 2).min(std::time::Duration::from_secs(60));
+        let (wait, asked) = next_wait(backoff);
+        let how = if asked { ", as the pool asked" } else { "" };
+        match r {
+            Ok(()) => eprintln!("[miner] disconnected; reconnecting in {}s{how}", wait.as_secs()),
+            Err(e) => eprintln!("[miner] {e}; retrying in {}s{how}", wait.as_secs()),
+        }
+        std::thread::sleep(wait);
+        if !asked {
+            backoff = (backoff * 2).min(std::time::Duration::from_secs(60));
+        }
     }
 }
 
@@ -782,6 +816,10 @@ fn run(
         // with every read and stop every later line from being seen.
         while let Some(line) = take_line(&mut buf).map_err(|_| String::from("the pool sent an overlong line"))? {
             let Some(v) = Json::parse(line.trim()) else { continue };
+            if v.get("method").and_then(|m| m.as_str()) == Some("glados.maintenance") {
+                maintenance_notice(&v);
+                continue;
+            }
             if v.get("method").and_then(|m| m.as_str()) == Some("glados.job") {
                 let Some(p) = v.get("params").and_then(proto::parse_job) else {
                     continue;
