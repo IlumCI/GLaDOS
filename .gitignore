@@ -69,6 +69,7 @@ miner/target
 # checksums in miner/Cargo.lock by `cargo vendor vendor` (see miner/.cargo/config.toml).
 miner/vendor
 cuda/*.exe
+cuda/xpu
 cuda/*.exp
 cuda/*.lib
 cuda/*.pdb
