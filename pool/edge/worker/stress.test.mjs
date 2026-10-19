@@ -150,6 +150,7 @@ class World {
     this.now = 1_800_000_000_000;
     this.start = this.now;
     this.alerts = [];
+    this.held = new Map(); // nonce -> { tx, until }: transactions another mempool will mine late
     this.keys = (() => {
       const k = { rvnKey: newKey(), evmKey: newKey() };
       return { ...k, rvn: rvnAddress(k.rvnKey), evm: evmAddress(k.evmKey).toLowerCase() };
@@ -494,6 +495,9 @@ class World {
         if ((this.eth.get(me) || 0n) < tx.value + tx.gas * tx.gasPrice) return err("insufficient funds for gas * price + value");
         if (tx.to && tx.to !== (this.contracts[0] || "").toLowerCase() && tx.value > 0n) this.violations.push(`ETH sent to ${tx.to}`);
         this.mempool.set(tx.nonce, tx);
+        // Held by some other node's mempool past the point the treasury gives
+        // up on it (2 h), then mined there -- even if it was replaced here.
+        if (this.f.lateMine && !this.held.has(tx.nonce) && this.r.chance(this.f.lateMine)) this.held.set(tx.nonce, { tx, until: this.now + 3 * 3_600_000 });
         if (this.r.chance(this.p("ambiguous"))) return this.r.chance(0.5) ? err("internal error: upstream timed out", -32603) : err("internal error", -32603);
         return { result: tx.hash };
       }
@@ -558,6 +562,10 @@ class World {
     const me = this.keys.evm;
     for (;;) {
       const n = this.nonce.get(me) || 0;
+      // A held transaction blocks its nonce until it lands, then it is the one mined.
+      const h = this.held.get(n);
+      if (h && h.until > this.now) break;
+      if (h) { this.held.delete(n); this.mempool.set(n, h.tx); this.lateMined = (this.lateMined || 0) + 1; }
       const tx = this.mempool.get(n);
       if (!tx || tx.gasPrice < this.baseFee) break;
       const r = this.exec(tx, false);
@@ -571,6 +579,7 @@ class World {
       this.mempool.delete(n);
     }
     for (const k of [...this.mempool.keys()]) if (k < (this.nonce.get(me) || 0)) this.mempool.delete(k);
+    for (const k of [...this.held.keys()]) if (k < (this.nonce.get(me) || 0)) this.held.delete(k);
   }
 
   rpc(body) {
@@ -964,6 +973,16 @@ if (process.env.STORM) {
   ok((res.st.epochs || 0) >= 1, `ambiguous broadcasts never become two payouts: ${summary(res)}`);
 }
 {
+  // A transaction given up on (stuck past two hours) that another node mines
+  // anyway, after the treasury has moved on: it must be recorded as what it
+  // was, never paid again. Mutation testing found the code for this reached by
+  // no scenario at all.
+  const res = await run({ seed: 24, faults: { lateMine: 0.5 }, ticks: 6 * DAY });
+  clean(res, "transactions mined hours after they were given up");
+  const adopted = res.logs.filter((l) => /was mined after all|is the one mined/.test(l)).length;
+  ok(res.w.lateMined > 0 && adopted > 0 && (res.st.epochs || 0) >= 1, `late-mined transactions adopted as what they were (${res.w.lateMined} mined late, ${adopted} adopted): ${summary(res)}`);
+}
+{
   const res = await run({ seed: 13, faults: { evictAfterWrite: 0.4, evictBeforeWrite: 0.2, evict: 0.1 }, ticks: 6 * DAY });
   clean(res, "an object evicted at every turn");
   ok((res.st.epochs || 0) >= 1, `eviction mid-step never sends twice and still pays: ${summary(res)}`);
@@ -1006,7 +1025,12 @@ await choiceScenario("choices, calm", { choices: 0.7 });
 // Five days: under these faults a pot grows slowly, and one carrying stock
 // legs is only worth its gas after a while.
 await choiceScenario("choices, blocklisted wallets, harsh world", { choices: 0.7, blocked: 0.3, ...Object.fromEntries(Object.entries(HARSH).map(([k, v]) => [k, typeof v === "number" && k !== "receiptLag" ? v / 2 : v])) }, 5 * DAY);
-await choiceScenario("choices, quotes failing at random", { choices: 0.8, quoteFail: 0.3 });
+{
+  const res = await choiceScenario("choices, quotes failing at random", { choices: 0.8, quoteFail: 0.3 });
+  // A stock with no quote falls back to $GLADOS in the same attempt; it does
+  // not hold up everybody else's payout.
+  ok(res.logs.some((l) => /has no quote this epoch; its wallets are paid in \$GLADOS/.test(l)), "quotes failing: the stock without one falls back to $GLADOS within the same payout");
+}
 
 {
   // Many seeds, every fault at a random strength.
