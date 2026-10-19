@@ -6,14 +6,22 @@ description = "Mines into a GLaDOS pool, on a GPU or on this host's cores"
 
 [workspace]
 
-# The one dependency, and it is this repository. `glados-pool` is where the
-# kernel's mining core is already made available to host programs -- twelve of
-# `src/`'s own files reached by `#[path]`, including `proto.rs` -- so the miner
-# reuses that rather than opening a second seam onto the same files. Two
-# `#[path]` trees over one source directory is two places to keep a list
-# current, and the list is the thing that goes stale.
+# `glados-pool` is where the kernel's mining core is already made available to
+# host programs -- twelve of `src/`'s own files reached by `#[path]`, including
+# `proto.rs` -- so the miner reuses that rather than opening a second seam onto
+# the same files. Two `#[path]` trees over one source directory is two places to
+# keep a list current, and the list is the thing that goes stale.
+#
+# rustls and the webpki root set are the TLS under `wss://` (see src/ws.rs for
+# the WebSocket itself). The public pool is a Cloudflare Worker, which cannot
+# accept TCP, so a miner that speaks only TCP needed a Node bridge beside it.
+# rustls on ring is Rust plus ring's bundled C and assembly: no OpenSSL to find
+# on the host, and the same build on Linux, macOS and Windows, which is what a
+# one-line installer needs. Vendored in `vendor/` (see .cargo/config.toml).
 [dependencies]
 glados-pool = { path = "../pool" }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+webpki-roots = "0.26"
 
 [[bin]]
 name = "glados-miner"

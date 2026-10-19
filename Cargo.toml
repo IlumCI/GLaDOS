@@ -5,32 +5,9 @@ edition = "2021"
 description = "A from-scratch ring-0 operating system for the MSI MS-16R8"
 publish = false
 
-# One dependency, for fonts, and the reasons it is allowed are the policy.
-#
-# 1.4.x opens the tree to outside crates, on three conditions that hold for
-# every one of them and are checked rather than intended:
-#
-#   * **Vendored.** `vendor/` holds the exact sources and `.cargo/config.toml`
-#     replaces crates.io with it, so a build is offline and byte-for-byte the
-#     code that was read. Updating a crate is a diff someone can review.
-#   * **Audited.** `deny.toml` allows MIT, Apache-2.0, Zlib and the font
-#     licences and nothing else, and refuses advisories; `cargo deny check`
-#     runs in CI. A crate pulling in a GPL dependency fails the build rather
-#     than the release.
-#   * **Credited.** NOTICE.md names every crate and every font with its licence.
-#
-# Fonts are the only purpose so far, by decision: outline rasterising and its
-# table parser are a large, solved, correctness-critical piece of work with no
-# bearing on what makes this machine itself. Shapes, blur, glass and layout
-# stay this tree's own.
-#
-# **What the old version of this comment said was true on Windows and is not
-# on Arch.** It recorded that proc macros and build scripts failed for want of
-# an MSVC host linker. Re-measured on the Arch host, 2026-10-10: `paste` (a proc
-# macro) and `libm` (a build script) both compile for x86_64-unknown-uefi, and
-# so do fontdue and ab_glyph. fontdue was chosen over ab_glyph on the
-# measurement -- 0.65 us a glyph against 1.14-1.33 on Noto Sans and Cascadia
-# Code at 16 px -- and neither reads GPOS kerning, which is why
+# fontdue, for outline rasterising. Chosen over ab_glyph on the measurement
+# (Arch host, 2026-10-10) -- 0.65 us a glyph against 1.14-1.33 on Noto Sans and
+# Cascadia Code at 16 px -- and neither reads GPOS kerning, which is why
 # tools/fontsubset.py flattens it on the host.
 [dependencies]
 fontdue = { version = "0.9", default-features = false, features = ["hashbrown"] }

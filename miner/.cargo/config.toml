@@ -61,3 +61,16 @@ linker = "rust-lld"
 # rediscovery.
 [target.aarch64-unknown-linux-musl]
 linker = "rust-lld"
+
+# **The miner's crates come from `miner/vendor`**, not the kernel's `vendor/`.
+# The parent file replaces crates.io with a directory source; the directory is
+# a string, so the closest config wins and this points the same source at the
+# miner's own copy -- rustls, ring, webpki-roots and what they need.
+#
+# **Not committed**: it is 92 MB, mostly the Windows import libraries ring
+# needs, against a few hundred lines of miner. Cargo.lock pins every crate by
+# checksum, so `cargo vendor vendor` in this directory recreates it exactly,
+# and a build after that is offline. Run it once after a clone, and again after
+# changing Cargo.toml.
+[source.vendored-sources]
+directory = "vendor"

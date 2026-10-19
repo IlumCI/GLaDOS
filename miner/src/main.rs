@@ -37,9 +37,13 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+mod ws;
+
 use glados_pool::json::Json;
+use glados_pool::mine::addr;
 use glados_pool::mine::algo::{Algo, Hasher};
 use glados_pool::mine::hash::below_target;
 use glados_pool::mine::proto;
@@ -195,15 +199,29 @@ impl Backend for Xpu {
 
 // ------------------------------------------------------------------ the CPU
 
-/// One host core, using the kernel's own `Hasher`.
+/// The host's cores, each with its own copy of the kernel's `Hasher`.
 ///
 /// Not a fallback so much as the control: it computes every algorithm the
 /// kernel does, so a job the GPU refuses is still worked, and a disagreement
 /// between the two is visible on one machine.
+///
+/// **One core was a sixteenth of the machine.** The browser miner runs a
+/// worker per core, so a native miner on one core was the slower of the two on
+/// the same host -- the opposite of the reason to install it. A scan is now cut
+/// into one contiguous range per thread, and the answer is still the *lowest*
+/// qualifying nonce in the whole range, which is the contract `scan` has with
+/// the loop: a thread stops once something below its position has been found.
 struct Cpu {
-    hasher: Option<Hasher>,
+    threads: usize,
+    hashers: Vec<Hasher>,
     header: [u8; 80],
     target: U256,
+}
+
+impl Cpu {
+    fn new(threads: usize) -> Cpu {
+        Cpu { threads: threads.max(1), hashers: Vec::new(), header: [0u8; 80], target: U256::ZERO }
+    }
 }
 
 impl Backend for Cpu {
@@ -212,9 +230,12 @@ impl Backend for Cpu {
     }
 
     fn set_job(&mut self, algo: &Algo, header: &[u8; 80], target: &U256) -> bool {
-        match Hasher::new(algo, header) {
-            Some(h) => {
-                self.hasher = Some(h);
+        // Each thread its own hasher: yespower's is megabytes of scratch that
+        // two threads cannot share, and it is reused job to job rather than
+        // allocated per scan.
+        match (0..self.threads).map(|_| Hasher::new(algo, header)).collect::<Option<Vec<_>>>() {
+            Some(hs) => {
+                self.hashers = hs;
                 self.header = *header;
                 self.target = *target;
                 true
@@ -224,18 +245,109 @@ impl Backend for Cpu {
     }
 
     fn scan(&mut self, base: u32, count: u32) -> Option<u32> {
-        let h = self.hasher.as_mut()?;
-        for i in 0..count {
-            let n = base.wrapping_add(i);
-            if below_target(&h.hash(&self.header, n), &self.target) {
-                return Some(n);
-            }
+        if self.hashers.is_empty() || count == 0 {
+            return None;
         }
-        None
+        // Offsets into the range rather than nonces, so "nothing found" has a
+        // value no nonce can take: `count` is below 2^32.
+        let best = AtomicU32::new(u32::MAX);
+        let per = (count as u64).div_ceil(self.hashers.len() as u64);
+        let (header, target) = (&self.header, &self.target);
+        std::thread::scope(|s| {
+            for (k, h) in self.hashers.iter_mut().enumerate() {
+                let lo = (k as u64 * per).min(count as u64) as u32;
+                let hi = ((k as u64 + 1) * per).min(count as u64) as u32;
+                if lo >= hi {
+                    break;
+                }
+                let best = &best;
+                s.spawn(move || {
+                    for i in lo..hi {
+                        if i >= best.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        if below_target(&h.hash(header, base.wrapping_add(i)), target) {
+                            best.fetch_min(i, Ordering::Relaxed);
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        match best.into_inner() {
+            u32::MAX => None,
+            i => Some(base.wrapping_add(i)),
+        }
     }
 
     fn batch(&self) -> u32 {
         CPU_BATCH
+    }
+}
+
+// ------------------------------------------------------------ the transport
+
+/// The connection to the pool: plain TCP for a pool on this network, or a
+/// WebSocket for the public one (`wss://pool.aperture.institute/mine`), which
+/// is a Cloudflare Worker and cannot take TCP at all.
+///
+/// **One line is one message, both ways** -- what the edge worker, the browser
+/// miner and `bridge.mjs` already agree on. So the loop reads and writes
+/// newline-terminated lines and never learns which of the two it has.
+enum Link {
+    Tcp(TcpStream),
+    Ws(Box<ws::Ws>),
+}
+
+impl Link {
+    fn open(pool: &str) -> Result<Link, String> {
+        if pool.starts_with("ws://") || pool.starts_with("wss://") {
+            let w = ws::Ws::connect(pool, concat!("glados-miner/", env!("CARGO_PKG_VERSION")))?;
+            // The read timeout goes on the socket under the TLS, where the
+            // kernel can apply it; a timed-out read surfaces as WouldBlock,
+            // and `ws` keeps any partial frame for the next call.
+            w.tcp().set_read_timeout(Some(POLL)).map_err(|e| format!("{e}"))?;
+            Ok(Link::Ws(Box::new(w)))
+        } else {
+            let s = TcpStream::connect(pool).map_err(|e| format!("{pool}: {e}"))?;
+            s.set_read_timeout(Some(POLL)).map_err(|e| format!("{e}"))?;
+            Ok(Link::Tcp(s))
+        }
+    }
+
+    /// Whatever arrived within `POLL`, appended to `buf` as lines. `Ok(false)`
+    /// when the pool has closed the connection.
+    fn recv(&mut self, buf: &mut Vec<u8>, chunk: &mut [u8]) -> Result<bool, String> {
+        match self {
+            Link::Tcp(s) => match s.read(chunk) {
+                Ok(0) => Ok(false),
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    Ok(true)
+                }
+                Err(e) if ws::idle(&e) => Ok(true),
+                Err(e) => Err(format!("read: {e}")),
+            },
+            // A message may or may not carry its own newline; the line
+            // splitter needs one either way.
+            Link::Ws(w) => w.poll(&mut |m| {
+                buf.extend_from_slice(m);
+                if m.last() != Some(&b'\n') {
+                    buf.push(b'\n');
+                }
+            }),
+        }
+    }
+
+    fn send(&mut self, line: &str) -> Result<(), String> {
+        match self {
+            Link::Tcp(s) => s.write_all(line.as_bytes()).map_err(|e| format!("{e}")),
+            Link::Ws(w) => w.send(line),
+        }
+    }
+
+    fn is_edge(&self) -> bool {
+        matches!(self, Link::Ws(_))
     }
 }
 
@@ -400,6 +512,18 @@ impl Rates {
 /// Pure, and separate from the loop for that reason: what it does is
 /// arithmetic over a table, and arithmetic is the half that can be checked
 /// without a pool, a socket or a GPU.
+/// A hash rate in the unit that reads: yespower on a CPU is hundreds of H/s
+/// and sha256d on the GPU hundreds of MH/s, and one fixed unit shows one of
+/// them as zero.
+fn rate(hs: f64) -> String {
+    match hs {
+        h if h >= 1e9 => format!("{:.2} GH/s", h / 1e9),
+        h if h >= 1e6 => format!("{:.2} MH/s", h / 1e6),
+        h if h >= 1e3 => format!("{:.2} kH/s", h / 1e3),
+        h => format!("{h:.0} H/s"),
+    }
+}
+
 fn choose(slots: &[SlotState]) -> Option<usize> {
     slots
         .iter()
@@ -415,8 +539,13 @@ fn main() {
     let mut worker = String::from("glados-miner");
     let mut xpu_path = String::from("../cuda/xpu.exe");
     let mut force_cpu = false;
+    let mut gpu_only = false;
     let mut batch: Option<u32> = None;
     let mut weights: Vec<(String, u32)> = Vec::new();
+    let mut reward: Option<String> = None;
+    // Every core but one by default, so the machine it runs on stays usable --
+    // the browser miner's 75% default makes the same trade for the same reason.
+    let mut threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).saturating_sub(1).max(1);
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -425,7 +554,22 @@ fn main() {
             "--worker" => worker = it.next().cloned().unwrap_or(worker),
             "--xpu" => xpu_path = it.next().cloned().unwrap_or(xpu_path),
             "--cpu" => force_cpu = true,
+            // The GPU or nothing: for the second of two processes on one host,
+            // where falling back to the CPU would put a second miner on cores
+            // the first is already using.
+            "--gpu" => gpu_only = true,
             "--batch" => batch = it.next().and_then(|v| v.parse().ok()),
+            "--threads" => match it.next().and_then(|v| v.parse::<usize>().ok()) {
+                Some(n) if n > 0 => threads = n,
+                _ => {
+                    eprintln!("--threads wants a positive integer");
+                    std::process::exit(2);
+                }
+            },
+            // The payout asset, as the pool's reward menu names it ("glados",
+            // "nvda", ...). Sent in the greeting exactly as the browser sends
+            // it, so a native miner is paid the way its owner chose.
+            "--reward" => reward = it.next().cloned(),
             // Repeatable, `COIN:N`, matched on the coin label the pool sends.
             // By label rather than by slot number because a slot is the pool's
             // own index into a table an operator may reorder, and a share-out
@@ -448,8 +592,8 @@ fn main() {
             }
             "-h" | "--help" => {
                 println!(
-                    "glados-miner --pool HOST:PORT --worker NAME [--xpu PATH] [--cpu] \
-                     [--batch N] [--weight COIN:N]..."
+                    "glados-miner --pool HOST:PORT|wss://HOST/PATH --worker ADDRESS [--reward ASSET]\n\
+                     \x20            [--cpu [--threads N] | --gpu [--xpu PATH] [--batch N]] [--weight COIN:N]..."
                 );
                 return;
             }
@@ -460,8 +604,19 @@ fn main() {
         }
     }
 
+    // **Refuse a mistyped address before mining a single hash for it.** The
+    // same EIP-55 check the browser makes: a broken checksum pays nobody, and
+    // finding that out after a day of mining is the worst way to.
+    let payout = addr::judge(&worker);
+    if !payout.may_mine() {
+        eprintln!("[miner] {worker}: {}", payout.say());
+        std::process::exit(2);
+    }
+    println!("[miner] {}", payout.say());
+
     let mut backend: Box<dyn Backend> = if force_cpu {
-        Box::new(Cpu { hasher: None, header: [0u8; 80], target: U256::ZERO })
+        println!("[miner] {threads} cpu thread(s)");
+        Box::new(Cpu::new(threads))
     } else {
         match Xpu::start(&xpu_path) {
             Ok(mut x) => {
@@ -471,13 +626,17 @@ fn main() {
                 println!("[miner] gpu ready via {xpu_path}, up to {} nonces a scan", x.batch);
                 Box::new(x)
             }
+            Err(e) if gpu_only => {
+                eprintln!("[miner] no gpu ({e}), and --gpu was asked for; stopping");
+                std::process::exit(1);
+            }
             Err(e) => {
                 // Said out loud and then carried on. A miner that silently fell
-                // back to one core would report a rate three orders of
-                // magnitude below what was expected and look like a broken GPU
-                // rather than an absent one.
-                eprintln!("[miner] no gpu ({e}); hashing on this core instead");
-                Box::new(Cpu { hasher: None, header: [0u8; 80], target: U256::ZERO })
+                // back to the cores would report a rate orders of magnitude
+                // below what was expected and look like a broken GPU rather
+                // than an absent one.
+                eprintln!("[miner] no gpu ({e}); hashing on {threads} cpu thread(s) instead");
+                Box::new(Cpu::new(threads))
             }
         }
     };
@@ -490,7 +649,7 @@ fn main() {
     let mut backoff = std::time::Duration::from_secs(2);
     loop {
         let began = std::time::Instant::now();
-        match run(&pool, &worker, backend.as_mut(), &weights) {
+        match run(&pool, &worker, reward.as_deref(), backend.as_mut(), &weights) {
             Ok(()) => eprintln!("[miner] disconnected; reconnecting in {}s", backoff.as_secs()),
             Err(e) => eprintln!("[miner] {e}; retrying in {}s", backoff.as_secs()),
         }
@@ -505,10 +664,12 @@ fn main() {
 fn run(
     pool: &str,
     worker: &str,
+    reward: Option<&str>,
     backend: &mut dyn Backend,
     weights: &[(String, u32)],
 ) -> Result<(), String> {
-    let mut sock = TcpStream::connect(pool).map_err(|e| format!("{pool}: {e}"))?;
+    // `Link::open` sets the read timeout to `POLL`, and why it is that small:
+    //
     // **The read timeout is device time, and it was a fifth of the card.**
     // The loop reads the socket once per scan, so a fifty-millisecond timeout
     // against a two-hundred-and-fifty-millisecond slice is a sixth of the
@@ -519,14 +680,18 @@ fn run(
     // Two milliseconds instead, with `park` below covering the case the long
     // timeout was really there for. Writes are unaffected; only reads carry
     // this.
-    sock.set_read_timeout(Some(POLL))
-        .map_err(|e| format!("{e}"))?;
-    sock.write_all(
-        proto::encode_hello(1, worker, concat!("glados-miner/", env!("CARGO_PKG_VERSION")))
-            .as_bytes(),
-    )
-    .map_err(|e| format!("hello: {e}"))?;
-    println!("[miner] {worker} -> {pool}, hashing on the {}", backend.name());
+    let mut sock = Link::open(pool)?;
+    let agent = concat!("glados-miner/", env!("CARGO_PKG_VERSION"));
+    let hello = match reward {
+        Some(r) => proto::encode_hello_reward(1, worker, agent, r),
+        None => proto::encode_hello(1, worker, agent),
+    };
+    sock.send(&hello).map_err(|e| format!("hello: {e}"))?;
+    println!(
+        "[miner] {worker} -> {pool}, paid in {}, hashing on the {}",
+        reward.unwrap_or("the pool's default"),
+        backend.name()
+    );
 
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 16384];
@@ -541,13 +706,8 @@ fn run(
     let mut next_id = 2u64;
 
     loop {
-        match sock.read(&mut chunk) {
-            Ok(0) => return Err(String::from("the pool closed the connection")),
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
-            Err(e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(e) => return Err(format!("read: {e}")),
+        if !sock.recv(&mut buf, &mut chunk)? {
+            return Err(String::from("the pool closed the connection"));
         }
 
         while let Ok(Some(line)) = take_line(&mut buf) {
@@ -635,7 +795,7 @@ fn run(
         for i in 0..slots.len() {
             let st = &mut slots[i];
             if st.job.is_some() && !st.refused && st.left() == 0 && !st.asked {
-                sock.write_all(proto::encode_work(next_id, i as u32).as_bytes())
+                sock.send(&proto::encode_work(next_id, i as u32))
                     .map_err(|e| format!("work: {e}"))?;
                 next_id += 1;
                 st.asked = true;
@@ -724,7 +884,7 @@ fn run(
                 nonce: n,
                 echo: j.echo.clone(),
             };
-            sock.write_all(proto::encode_submit(next_id, &share).as_bytes())
+            sock.send(&proto::encode_submit(next_id, &share))
                 .map_err(|e| format!("submit: {e}"))?;
             next_id += 1;
             // Resume above it rather than past the batch: the device answers
@@ -741,6 +901,15 @@ fn run(
             println!(
                 "[miner] {total} hashes in {secs:.1}s, {accepted} accepted, {duplicate} duplicate"
             );
+            // This device's rate for the pool's combined figure, as the browser
+            // miner reports its own: a display line the edge worker keeps out
+            // of the mining core. Only to the edge -- a pool on this network is
+            // the bare core, which has no such method.
+            if sock.is_edge() {
+                let hs = (total as f64 / secs).round() as u64;
+                sock.send(&format!("{{\"method\":\"glados.rate\",\"params\":{{\"hs\":{hs}}}}}\n"))
+                    .map_err(|e| format!("rate: {e}"))?;
+            }
             // Per slot, because there is no meaningful aggregate rate across
             // algorithms -- adding a yespower hash to a sha256d hash is adding
             // two numbers a thousand times apart and calling the sum a speed.
@@ -750,11 +919,11 @@ fn run(
                     continue;
                 }
                 println!(
-                    "[miner]   slot {i} {} ({}) w{}: {:.3} MH/s over {} hashes, {:.0}% of the device, {} found",
+                    "[miner]   slot {i} {} ({}) w{}: {} over {} hashes, {:.0}% of the device, {} found",
                     j.coin,
                     j.algo.name(),
                     s.weight,
-                    s.hashes as f64 / s.spent.as_secs_f64() / 1e6,
+                    rate(s.hashes as f64 / s.spent.as_secs_f64()),
                     s.hashes,
                     s.spent.as_secs_f64() / secs * 100.0,
                     s.found

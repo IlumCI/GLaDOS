@@ -65,6 +65,9 @@ pool/target
 # to build: a source the tree depends on cannot be a file the tree ignores.
 # Only the artefacts nvcc emits are ignored now.
 miner/target
+# 92 MB, mostly Windows import libraries, and recreated byte-for-byte from the
+# checksums in miner/Cargo.lock by `cargo vendor vendor` (see miner/.cargo/config.toml).
+miner/vendor
 cuda/*.exe
 cuda/*.exp
 cuda/*.lib
