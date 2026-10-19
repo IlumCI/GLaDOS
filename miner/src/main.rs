@@ -40,6 +40,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+mod pearl;
 mod ws;
 
 use glados_pool::json::Json;
@@ -517,6 +518,7 @@ impl Rates {
 /// them as zero.
 fn rate(hs: f64) -> String {
     match hs {
+        h if h >= 1e12 => format!("{:.2} TH/s", h / 1e12), // Pearl, in multiply-accumulates
         h if h >= 1e9 => format!("{:.2} GH/s", h / 1e9),
         h if h >= 1e6 => format!("{:.2} MH/s", h / 1e6),
         h if h >= 1e3 => format!("{:.2} kH/s", h / 1e3),
@@ -544,6 +546,10 @@ fn main() {
     let mut weights: Vec<(String, u32)> = Vec::new();
     let mut reward: Option<String> = None;
     let mut duty = 1.0f64;
+    // What the GPU mines: the pool's nonce coins through `xpu`, or Pearl through
+    // the `pearl` helper (cuda/pearl.cu), at /mine/pearl.
+    let mut algo = String::from("nonce");
+    let mut pearl_path = String::from("pearl");
     // Every core but one by default, so the machine it runs on stays usable --
     // the browser miner's 75% default makes the same trade for the same reason.
     let mut threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).saturating_sub(1).max(1);
@@ -571,6 +577,15 @@ fn main() {
             // "nvda", ...). Sent in the greeting exactly as the browser sends
             // it, so a native miner is paid the way its owner chose.
             "--reward" => reward = it.next().cloned(),
+            "--algo" => match it.next().map(|v| v.as_str()) {
+                Some("pearl") => algo = String::from("pearl"),
+                Some("neoscrypt") | Some("nonce") => algo = String::from("nonce"),
+                other => {
+                    eprintln!("--algo wants pearl or neoscrypt, got {}", other.unwrap_or("nothing"));
+                    std::process::exit(2);
+                }
+            },
+            "--pearl" => pearl_path = it.next().cloned().unwrap_or(pearl_path),
             // Percent of the time the device works, as the browser miner's load
             // slider: the rest is spent idle after each scan. A laptop GPU at
             // 100% went from 64 C to 78 C in about thirty-five seconds here.
@@ -604,7 +619,8 @@ fn main() {
             "-h" | "--help" => {
                 println!(
                     "glados-miner --pool HOST:PORT|wss://HOST/PATH --worker ADDRESS [--reward ASSET]\n\
-                     \x20            [--cpu [--threads N] | --gpu [--xpu PATH] [--batch N]] [--duty PERCENT]\n\
+                     \x20            [--cpu [--threads N] | --gpu [--xpu PATH] [--batch N] | --algo pearl [--pearl PATH]]\n\
+                     \x20            [--duty PERCENT]\n\
                      \x20            [--weight COIN:N]..."
                 );
                 return;
@@ -625,6 +641,31 @@ fn main() {
         std::process::exit(2);
     }
     println!("[miner] {}", payout.say());
+
+    // Pearl is a loop of its own (pearl.rs): one helper process, kept across
+    // reconnects, and the same backoff as below.
+    if algo == "pearl" {
+        let mut helper = match pearl::Helper::start(&pearl_path) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("[pearl] no Pearl helper ({e}); stopping");
+                std::process::exit(1);
+            }
+        };
+        println!("[pearl] helper ready: {}", helper.what);
+        let mut backoff = Duration::from_secs(2);
+        loop {
+            let began = Instant::now();
+            if let Err(e) = pearl::run(&pool, &worker, reward.as_deref(), duty, &mut helper) {
+                eprintln!("[pearl] {e}; retrying in {}s", backoff.as_secs());
+            }
+            if began.elapsed() > Duration::from_secs(60) {
+                backoff = Duration::from_secs(2);
+            }
+            std::thread::sleep(backoff);
+            backoff = (backoff * 2).min(Duration::from_secs(60));
+        }
+    }
 
     let mut backend: Box<dyn Backend> = if force_cpu {
         println!("[miner] {threads} cpu thread(s)");

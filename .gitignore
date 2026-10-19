@@ -70,6 +70,7 @@ miner/target
 miner/vendor
 cuda/*.exe
 cuda/xpu
+cuda/pearl
 cuda/*.exp
 cuda/*.lib
 cuda/*.pdb

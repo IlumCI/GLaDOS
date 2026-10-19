@@ -1,9 +1,9 @@
 name: native miner
 
 # The downloadable native miner: `glados-miner` for Linux, Windows and macOS,
-# and `xpu` -- its NVIDIA GPU helper -- for Linux and Windows. What the
-# one-line installers on mine.aperture.institute fetch, by tag, and check
-# against the SHA256SUMS published beside them.
+# and its NVIDIA GPU helpers for Linux and Windows -- `xpu` for the nonce coins,
+# `pearl` for Pearl. What the one-line installers on mine.aperture.institute
+# fetch, by tag, and check against the SHA256SUMS published beside them.
 #
 # Separate from mining.yml on purpose: that one builds the bootable mining ISO,
 # which is retired. This is a program you run in a terminal and stop with
@@ -93,6 +93,12 @@ jobs:
             -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 \
             -gencode arch=compute_120,code=sm_120 -gencode arch=compute_89,code=compute_89 \
             xpu.cu -o ../dist-miner/xpu-linux-x86_64
+          # The Pearl helper: tensor cores on sm_80+, DP4A below, chosen at run time.
+          nvcc -O3 -std=c++17 \
+            -gencode arch=compute_61,code=sm_61 -gencode arch=compute_75,code=sm_75 \
+            -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 \
+            -gencode arch=compute_120,code=sm_120 -gencode arch=compute_89,code=compute_89 \
+            pearl.cu -o ../dist-miner/pearl-linux-x86_64
       - uses: actions/upload-artifact@v4
         with:
           name: xpu-linux
@@ -124,6 +130,11 @@ jobs:
             -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 `
             -gencode arch=compute_120,code=sm_120 -gencode arch=compute_89,code=compute_89 `
             xpu.cu -o ../dist-miner/xpu-windows-x86_64.exe
+          nvcc -O3 -std=c++17 `
+            -gencode arch=compute_61,code=sm_61 -gencode arch=compute_75,code=sm_75 `
+            -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 `
+            -gencode arch=compute_120,code=sm_120 -gencode arch=compute_89,code=compute_89 `
+            pearl.cu -o ../dist-miner/pearl-windows-x86_64.exe
           # The MSVC linker leaves an import library and export file beside
           # the exe; only the exe ships.
           Remove-Item -ErrorAction SilentlyContinue ../dist-miner/*.exp, ../dist-miner/*.lib
