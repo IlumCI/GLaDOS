@@ -34,7 +34,7 @@ jobs:
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, name: linux-arm64 }
           - { os: windows-latest,   target: x86_64-pc-windows-msvc,     name: windows-x86_64, ext: .exe }
           - { os: macos-latest,     target: aarch64-apple-darwin,       name: macos-arm64 }
-          - { os: macos-13,         target: x86_64-apple-darwin,        name: macos-x86_64 }
+          - { os: macos-15-intel,   target: x86_64-apple-darwin,        name: macos-x86_64 }
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -71,12 +71,12 @@ jobs:
           if readelf -l "$B" | grep -qi 'program interpreter'; then echo "::error::not static"; exit 1; fi
       - name: Package
         run: |
-          mkdir -p ../out
-          cp target/${{ matrix.target }}/release/glados-miner${{ matrix.ext }} ../out/glados-miner-${{ matrix.name }}${{ matrix.ext }}
+          mkdir -p ../dist-miner
+          cp target/${{ matrix.target }}/release/glados-miner${{ matrix.ext }} ../dist-miner/glados-miner-${{ matrix.name }}${{ matrix.ext }}
       - uses: actions/upload-artifact@v4
         with:
           name: miner-${{ matrix.name }}
-          path: out/*
+          path: dist-miner/*
 
   xpu-linux:
     runs-on: ubuntu-latest
@@ -87,19 +87,21 @@ jobs:
         working-directory: cuda
         run: |
           nvcc --version
-          mkdir -p ../out
+          mkdir -p ../dist-miner
           nvcc -O3 \
             -gencode arch=compute_61,code=sm_61 -gencode arch=compute_75,code=sm_75 \
             -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 \
             -gencode arch=compute_120,code=sm_120 -gencode arch=compute_89,code=compute_89 \
-            xpu.cu -o ../out/xpu-linux-x86_64
+            xpu.cu -o ../dist-miner/xpu-linux-x86_64
       - uses: actions/upload-artifact@v4
         with:
           name: xpu-linux
-          path: out/*
+          path: dist-miner/*
 
   xpu-windows:
-    runs-on: windows-latest
+    # windows-2022, not -latest: CUDA 12.9's nvcc refuses Visual Studio 2026,
+    # which -latest carries ("only the versions between 2017 and 2022").
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       # Pinned to the commit of v0.2.36 rather than the tag, so a moved tag
@@ -116,16 +118,16 @@ jobs:
         shell: pwsh
         run: |
           nvcc --version
-          New-Item -ItemType Directory -Force ../out | Out-Null
+          New-Item -ItemType Directory -Force ../dist-miner | Out-Null
           nvcc -O3 `
             -gencode arch=compute_61,code=sm_61 -gencode arch=compute_75,code=sm_75 `
             -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 `
             -gencode arch=compute_120,code=sm_120 -gencode arch=compute_89,code=compute_89 `
-            xpu.cu -o ../out/xpu-windows-x86_64.exe
+            xpu.cu -o ../dist-miner/xpu-windows-x86_64.exe
       - uses: actions/upload-artifact@v4
         with:
           name: xpu-windows
-          path: out/*
+          path: dist-miner/*
 
   release:
     needs: [miner, xpu-linux, xpu-windows]
