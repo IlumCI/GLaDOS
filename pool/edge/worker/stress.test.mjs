@@ -207,6 +207,9 @@ class World {
     const safe = addrLike(this.r); special(safe, "0x6080604052", 1_200_000n * G); // a contract wallet
     const d7702 = addrLike(this.r); special(d7702, "0xef0100" + addrLike(this.r).slice(2), 1_200_000n * G); // 7702: an ordinary account
     this.eligible7702 = d7702;
+    // A miner so small its rounds sit under the payout floor (MIN_FRAC of the
+    // median): its work carries over instead of being paid at a loss.
+    if (faults.tiny) { this.tiny = "0x" + "71".repeat(20); this.miners.push({ addr: this.tiny, rate: 20n, shard: 0 }); this.tok.set(this.tiny, 0n); }
     // Reward choices: some miners want stocks or baskets, and some of those
     // are on the stock beacon's blocklist (a payout to them would revert).
     this.choices = new Map();
@@ -220,6 +223,12 @@ class World {
         if (c !== "glados") this.choices.set(m.addr, c);
         if (c !== "glados" && this.r.chance(faults.blocked || 0)) this.blockedSet.add(m.addr);
       }
+      // A wallet holding exactly the minimum: it qualifies (>=), so it is paid
+      // in the stock it chose. A fixed address, so no seeded draw moves.
+      this.exactGate = "0x" + "e7".repeat(20);
+      this.miners.push({ addr: this.exactGate, rate: 20_000n, shard: 0 });
+      this.tok.set(this.exactGate, 1_000_000n * G);
+      this.choices.set(this.exactGate, "nvda");
     }
     this.work = new Map(this.miners.map((m) => [m.addr, 0n]));
     this.minerSet = new Set(this.miners.map((m) => m.addr));
@@ -661,7 +670,8 @@ async function run({ seed, faults, ticks, calm = 600, mode = "live", env = {}, c
   const storage = new Storage(w);
   const logs = [];
   const pool = {
-    env: { TREASURY: mode, RVN_BATCH: "200", GATE_MIN: "1000000", SHARDS: String(w.shards), TREASURY_RESUME: "", CHANGENOW_KEY: "k",
+    // MIN_FRAC as production has it (wrangler.toml): the payout floor is on.
+    env: { TREASURY: mode, RVN_BATCH: "200", GATE_MIN: "1000000", MIN_FRAC: "0.05", SHARDS: String(w.shards), TREASURY_RESUME: "", CHANGENOW_KEY: "k",
            // The simulated chain is one endpoint; failover is rpc.test.mjs's subject.
            RPC_URLS: RPC,
            ALERT_WEBHOOK: "https://alerts.example/hook", ...env,
@@ -825,10 +835,14 @@ if (process.env.STORM) {
 }
 
 {
-  const res = await run({ seed: 1, faults: {}, ticks: 6 * DAY });
+  const res = await run({ seed: 1, faults: { tiny: true }, ticks: 6 * DAY });
   clean(res, "a quiet world");
   ok((res.st.epochs || 0) >= 3 && !(res.st.incidents || []).length, `a quiet world pays, with no incidents: ${summary(res)}`);
   ok(res.w.payouts.some((p) => p.recipients.includes(res.w.eligible7702)), "an EIP-7702 account is paid like anyone (the pair and contract wallets never are: an invariant)");
+  // The floor at production's 5%: some round leaves a small miner's work to carry.
+  let floored = 0;
+  for (let i = 1; i <= (res.st.epochs || 0); i++) { const e = await getBig(res.storage, `treasury.epoch.${i}`); floored += Object.values(e.excluded || {}).filter((w) => /against a floor/.test(w)).length; }
+  ok(floored > 0, `the 5% payout floor carries small rounds over (${floored} time(s))`);
 }
 {
   const res = await run({ seed: 2, faults: {}, ticks: 3 * DAY, mode: "dry" });
@@ -984,10 +998,14 @@ async function choiceScenario(name, faults, ticks = 3 * DAY) {
   ok(recs.length > 0 && stockPaid > 0, `${name}: ${recs.length} epoch(s) paid, ${stockPaid} wallet-payout(s) in stocks or baskets`);
   ok(wrong === 0, `${name}: every wallet paid in its choice${faults.quoteFail ? ", or $GLaDOS when its quote failed" : ""} (${wrong} wrong)`);
   ok(blockedStock === 0, `${name}: no blocklisted wallet was ever sent a stock`);
+  const exact = recs.flatMap((r) => (r.groups || []).filter((g) => g.to.includes(res.w.exactGate)).map((g) => g.code));
+  ok(exact.length > 0 && exact.every((c) => c === "nvda" || (faults.quoteFail && c === "glados")), `${name}: a wallet holding exactly the minimum is paid in its choice (${exact.join(",") || "never paid"})`);
   return res;
 }
 await choiceScenario("choices, calm", { choices: 0.7 });
-await choiceScenario("choices, blocklisted wallets, harsh world", { choices: 0.7, blocked: 0.3, ...Object.fromEntries(Object.entries(HARSH).map(([k, v]) => [k, typeof v === "number" && k !== "receiptLag" ? v / 2 : v])) });
+// Five days: under these faults a pot grows slowly, and one carrying stock
+// legs is only worth its gas after a while.
+await choiceScenario("choices, blocklisted wallets, harsh world", { choices: 0.7, blocked: 0.3, ...Object.fromEntries(Object.entries(HARSH).map(([k, v]) => [k, typeof v === "number" && k !== "receiptLag" ? v / 2 : v])) }, 5 * DAY);
 await choiceScenario("choices, quotes failing at random", { choices: 0.8, quoteFail: 0.3 });
 
 {
