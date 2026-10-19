@@ -49,6 +49,7 @@ import { statusTick, STATUS_EVERY_MS } from "./statusprobe.js";
 import { rewardOf, DEFAULT as DEFAULT_REWARD } from "./rewards.js";
 import { PearlPool } from "./pearl-pool.js";
 import { pearlOn, pearlStub } from "./pearl-env.js";
+import { MAINT_KEY, parseMaint, validMaint, notice, refusal, closeReason, tokenOk } from "./maintenance.js";
 
 // The Pearl shard is a class of its own (pearl-pool.js), bound as PEARL_POOL.
 export { PearlPool };
@@ -200,6 +201,73 @@ const BREAK_MS = 30_000;
 let brokenUntil = 0;
 let brokenWhy = "";
 
+// ### Maintenance (the rules are in maintenance.js)
+//
+// The state lives in an object of its own, "control", and each shard keeps a
+// copy it acts on. The router reads it before handing a miner to a shard, from
+// this isolate's memory and Cloudflare's edge cache, so a crowd of old clients
+// retrying every minute during maintenance is answered here and costs no
+// object a request -- on Workers Free those are 100,000 a day. A read that
+// fails lets the miner through: the shard holds its own copy and refuses
+// there, and a control object that is down must not take mining with it.
+const MAINT_MEMO_MS = 5_000;
+const MAINT_EDGE_S = 15;
+let maintMemo = { at: 0, state: null };
+const control = (env) => env.POOL.get(env.POOL.idFromName("control"));
+const MAINT_CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,OPTIONS", "access-control-allow-headers": "content-type,authorization" };
+
+async function maintNow(env, origin) {
+  const memo = env.MAINT_MEMO_MS !== undefined ? Number(env.MAINT_MEMO_MS) : MAINT_MEMO_MS;
+  if (memo > 0 && Date.now() - maintMemo.at < memo) return maintMemo.state;
+  try {
+    const res = await cached(new Request(`${origin}/maintenance`), MAINT_EDGE_S, () => control(env).fetch(new Request(`${origin}/maintenance`)));
+    const s = validMaint(await res.json());
+    maintMemo = { at: Date.now(), state: s };
+    return s;
+  } catch (e) {
+    console.error(`[maint] state unreadable, letting the shard decide: ${(e && e.message) || e}`);
+    return null;
+  }
+}
+
+async function maintenanceRoute(request, env, url, names) {
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: MAINT_CORS });
+  if (request.method === "GET") {
+    const res = await cached(new Request(`${url.origin}/maintenance`), MAINT_EDGE_S, () => control(env).fetch(new Request(`${url.origin}/maintenance`)));
+    return new Response(res.body, { status: res.status, headers: { ...MAINT_CORS, "content-type": "application/json", "cache-control": `public, max-age=${MAINT_EDGE_S}` } });
+  }
+  if (request.method !== "POST") return new Response("GET or POST", { status: 405, headers: MAINT_CORS });
+  const say = (status, body) => Response.json(body, { status, headers: { ...MAINT_CORS, "cache-control": "no-store" } });
+  if (!env.MAINT_TOKEN) return say(403, { error: "maintenance control is not set up on this pool: npx wrangler secret put MAINT_TOKEN" });
+  if (!tokenOk(request.headers.get("authorization"), env.MAINT_TOKEN)) {
+    console.error(`[maint] refused a declaration with a wrong or missing token from ${request.headers.get("CF-Connecting-IP") || "?"}`);
+    return say(401, { error: "not authorised" });
+  }
+  let body = null;
+  try { body = await request.json(); } catch {}
+  const parsed = parseMaint(body, Date.now());
+  if (parsed.error) return say(400, { error: parsed.error });
+  // The record first: if it cannot be written, nothing is told anything.
+  const stored = await control(env).fetch(new Request(`${url.origin}/maintenance/set`, { method: "POST", body: JSON.stringify(parsed.state) }));
+  if (!stored.ok) return say(502, { error: `the state was not stored (${stored.status}); nothing was changed` });
+  const state = await stored.json();
+  maintMemo = { at: Date.now(), state };
+  const cache = typeof caches !== "undefined" ? caches.default : null;
+  if (cache) await cache.delete(new Request(`${url.origin}/maintenance`)).catch(() => {});
+  // Then every shard, at once. One that does not answer is named: it still
+  // refuses at the router, and picks the state up from "control" the next time
+  // anybody tries to connect to it.
+  const targets = names.map((n) => ({ name: n, fetch: (r) => ask(env, n, r) }));
+  if (pearlOn(env)) targets.push({ name: "pearl-0", fetch: (r) => pearlStub(env).fetch(r) });
+  const settled = await Promise.allSettled(targets.map((t) => t.fetch(new Request(`${url.origin}/maintenance/apply`, { method: "POST", body: JSON.stringify(state) })).then(async (r) => {
+    if (!r.ok) throw new Error(`answered ${r.status}`);
+    return r.json();
+  })));
+  const shards = settled.map((r, i) => (r.status === "fulfilled" ? { name: targets[i].name, ok: true, ...r.value } : { name: targets[i].name, ok: false, why: classifyFailure(r.reason).why }));
+  console.log(`[maint] ${state.on ? `ON: ${state.reason}` : "OFF"}; ${shards.map((s) => `${s.name} ${s.ok ? `${s.connections ?? 0} conn` : "UNREACHED"}`).join(", ")}`);
+  return say(200, { maintenance: state, shards });
+}
+
 export default {
   async fetch(request, env) {
     if (Date.now() < brokenUntil) return unavailable(brokenWhy, Math.ceil((brokenUntil - Date.now()) / 1000));
@@ -227,6 +295,13 @@ async function route(request, env) {
       ...[...Array(n).keys()].map((i) => stub(i)),
       ...[...Array(gpu).keys()].map((i) => stub(i, true)),
     ];
+    const names = [...[...Array(n).keys()].map((i) => shardName(i)), ...[...Array(gpu).keys()].map((i) => shardName(i, true))];
+    if (url.pathname === "/maintenance") return maintenanceRoute(request, env, url, names);
+    // A miner arriving during maintenance is answered here, by no object.
+    if (url.pathname === "/mine" || url.pathname === "/mine/gpu" || url.pathname === "/mine/pearl") {
+      const m = await maintNow(env, url.origin);
+      if (m && m.on) return refusal(m, Date.now());
+    }
     if (url.pathname === "/mine") {
       return stub(shardFor(request, n)).fetch(request);
     }
@@ -295,6 +370,8 @@ async function route(request, env) {
           // new miners' shares go uncredited and SHARDS should be raised.
           tallies: Math.max(0, ...up.map((s) => s.tallies || 0)), maxTallies: up[0].maxTallies ?? null,
           ...(down.length ? { down } : {}),
+          // Any shard that holds it on says so; the pool bar shows the reason.
+          maintenance: (up.find((s) => s.maintenance && s.maintenance.on) || {}).maintenance || null,
         }, { headers: { "access-control-allow-origin": "*" } }); // the site's /pool/ page reads the miner count
       });
     }
@@ -371,6 +448,10 @@ export class Pool {
       // and is then overwritten by the next job period is the share log erased
       // by a cold start, with nothing anywhere saying it happened. Throwing here
       // fails every request loudly instead, which is a problem somebody sees.
+      // Maintenance survives a restart: a shard evicted mid-maintenance comes
+      // back refusing miners, not taking them.
+      this.maint = validMaint(await ctx.storage.get(MAINT_KEY));
+      this.maintAt = Date.now();
       const lt = Date.now();
       const saved = await loadText(ctx.storage, "ledger");
       const restored = saved ? this.core.loadLedger(saved) : 0;
@@ -421,8 +502,11 @@ export class Pool {
       for (const a of work.keys()) if (m.has(a)) rewards[a] = m.get(a);
       return Response.json({ work: Object.fromEntries([...work].map(([a, w]) => [a, w.toString()])), rewards });
     }
+    if (url.pathname === "/maintenance" || url.pathname === "/maintenance/set" || url.pathname === "/maintenance/apply") {
+      return this.maintRoute(request, url.pathname);
+    }
     if (url.pathname === "/status") {
-      return Response.json({ slots: this.slots, connections: this.conns.size, addresses: new Set(this.connAddr.values()).size, hashrate: this.poolHashrate(), tallies: this.tallies ?? null, maxTallies: MAX_TALLIES });
+      return Response.json({ maintenance: this.maint && this.maint.on ? this.maint : undefined, slots: this.slots, connections: this.conns.size, addresses: new Set(this.connAddr.values()).size, hashrate: this.poolHashrate(), tallies: this.tallies ?? null, maxTallies: MAX_TALLIES });
     }
     if (url.pathname === "/treasury") {
       const t = await this.treasury();
@@ -461,6 +545,7 @@ export class Pool {
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected a WebSocket upgrade", { status: 426 });
     }
+    if (this.maint && this.maint.on && (await this.stillDown())) return refusal(this.maint, Date.now());
 
     const [client, server] = Object.values(new WebSocketPair());
     server.accept();
@@ -565,28 +650,40 @@ export class Pool {
     if (this.keys) return this.keys;
     // One at a time: two first requests racing would each generate keys, and
     // the second write would replace keys whose addresses were already shown.
-    await this.ctx.blockConcurrencyWhile(async () => {
-      if (this.keys) return;
-      let k = await this.ctx.storage.get("treasury.keys");
-      // **Pinned once published.** TREASURY_RVN and TREASURY_EVM name the
-      // addresses the operator has told zpool and ChangeNOW about. With them
-      // set, storage answering "no keys" is not a fresh start, it is keys lost
-      // -- and generating new ones would send every later payout to addresses
-      // nobody watches. So it refuses, and so does a mismatch.
-      const pinRvn = this.env.TREASURY_RVN || "", pinEvm = (this.env.TREASURY_EVM || "").toLowerCase();
-      if (k === undefined) {
-        if (pinRvn || pinEvm) throw new Error("the treasury's keys are missing from storage while its addresses are pinned; refusing to make new ones");
-        k = { rvnKey: newKey(), evmKey: newKey(), created: Date.now() };
-        await this.ctx.storage.put("treasury.keys", k);
-        this.log("[treasury] hot wallets created");
-      }
-      const keys = { ...k, rvn: rvnAddress(k.rvnKey), evm: evmAddress(k.evmKey) };
-      if ((pinRvn && pinRvn !== keys.rvn) || (pinEvm && pinEvm !== keys.evm.toLowerCase())) {
-        throw new Error(`the stored keys are ${keys.rvn} / ${keys.evm}, not the pinned ${pinRvn || "-"} / ${pinEvm || "-"}; refusing to use them`);
-      }
-      this.keys = keys;
-    });
-    return this.keys;
+    // **A shared promise, not blockConcurrencyWhile.** This read throws on
+    // purpose when it cannot be sure, and Cloudflare terminates an object whose
+    // blockConcurrencyWhile callback throws -- so one public GET /treasury
+    // during a storage blip (or with keys missing while pinned) dropped every
+    // miner on the shard and every share since the last save. Seen under
+    // `wrangler dev`: one request, 37 shares gone. Now the request fails and
+    // the next one tries again; the object, and its miners, carry on.
+    if (!this.keysLoading) {
+      this.keysLoading = this.loadKeys().finally(() => { this.keysLoading = null; });
+    }
+    return this.keysLoading;
+  }
+
+  async loadKeys() {
+    if (this.keys) return this.keys;
+    let k = await this.ctx.storage.get("treasury.keys");
+    // **Pinned once published.** TREASURY_RVN and TREASURY_EVM name the
+    // addresses the operator has told zpool and ChangeNOW about. With them
+    // set, storage answering "no keys" is not a fresh start, it is keys lost
+    // -- and generating new ones would send every later payout to addresses
+    // nobody watches. So it refuses, and so does a mismatch.
+    const pinRvn = this.env.TREASURY_RVN || "", pinEvm = (this.env.TREASURY_EVM || "").toLowerCase();
+    if (k === undefined) {
+      if (pinRvn || pinEvm) throw new Error("the treasury's keys are missing from storage while its addresses are pinned; refusing to make new ones");
+      k = { rvnKey: newKey(), evmKey: newKey(), created: Date.now() };
+      await this.ctx.storage.put("treasury.keys", k);
+      this.log("[treasury] hot wallets created");
+    }
+    const keys = { ...k, rvn: rvnAddress(k.rvnKey), evm: evmAddress(k.evmKey) };
+    if ((pinRvn && pinRvn !== keys.rvn) || (pinEvm && pinEvm !== keys.evm.toLowerCase())) {
+      throw new Error(`the stored keys are ${keys.rvn} / ${keys.evm}, not the pinned ${pinRvn || "-"} / ${pinEvm || "-"}; refusing to use them`);
+    }
+    this.keys = keys;
+    return keys;
   }
 
   // **The door check, where a miner connects.** It turns away only what can
@@ -867,6 +964,78 @@ export class Pool {
     return this.ctx.storage.put(textChunks("ledger", text));
   }
 
+  // ---------------------------------------------------------- maintenance
+  // "control" holds the state; every other object holds a copy and acts on it.
+  // Only the router reaches these paths, and only /maintenance from outside,
+  // after the token is checked.
+  async maintRoute(request, path) {
+    const name = String(this.ctx.id.name || "");
+    if (path === "/maintenance") {
+      if (name !== "control") return new Response("not here", { status: 404 });
+      return Response.json(this.maint || { on: false, since: 0 });
+    }
+    if (request.method !== "POST") return new Response("POST", { status: 405 });
+    let s = null;
+    try { s = validMaint(await request.json()); } catch {}
+    if (!s) return new Response("not a maintenance state", { status: 400 });
+    if (path === "/maintenance/set") {
+      if (name !== "control") return new Response("not here", { status: 404 });
+      // Declared again while already down -- a new reason, a later time -- it
+      // has been down since the first declaration.
+      if (s.on && this.maint && this.maint.on) s.since = this.maint.since;
+      await this.ctx.storage.put(MAINT_KEY, s);
+      this.maint = s;
+      return Response.json(s);
+    }
+    return Response.json(await this.applyMaint(s));
+  }
+
+  // On: tell everyone, keep crediting for the drain, then save once and close.
+  // Off: forget it; miners come back on their own.
+  async applyMaint(s) {
+    const was = this.maint && this.maint.on;
+    this.maint = s;
+    this.maintAt = Date.now();
+    await this.ctx.storage.put(MAINT_KEY, s);
+    const connections = this.conns.size;
+    if (!s.on) {
+      if (was) this.log(`[maint] off; ${connections} still connected`);
+      return { connections, draining: false };
+    }
+    this.log(`[maint] on: ${s.reason}; ${connections} miner(s) told, closing in ${s.drainMs / 1000} s`);
+    const line = notice(s, Date.now());
+    for (const [ws] of this.conns) { try { ws.send(line); } catch { this.drop(ws); } }
+    const drainId = (this.drainId || 0) + 1;
+    this.drainId = drainId;
+    this.ctx.waitUntil(this.drain(drainId, s.drainMs));
+    return { connections, draining: true };
+  }
+
+  async drain(drainId, ms) {
+    if (ms > 0) await new Promise((r) => setTimeout(r, ms));
+    // Declared off, or declared again, during the wait: that declaration decides.
+    if (this.drainId !== drainId || !(this.maint && this.maint.on)) return;
+    this.tickUps(); // a share that beat upstream's target goes out before the sockets do
+    const why = closeReason(this.maint);
+    let n = 0;
+    for (const [ws] of this.conns) { try { ws.close(1013, why); } catch {} this.drop(ws); n++; }
+    for (const u of this.ups) this.closeUp(u);
+    try { await this.saveSoon(); } catch (e) { this.log(`[maint] the record was not saved on the way down (${e && e.message ? e.message : e}); the alarm tries again`); }
+    this.log(`[maint] drained: ${n} miner(s) closed, record saved`);
+  }
+
+  // Whether this shard's copy still says down, asking "control" at most every
+  // half minute: a shard that missed the "off" must not refuse miners for ever.
+  async stillDown() {
+    if (String(this.ctx.id.name || "") === "control" || Date.now() - (this.maintAt || 0) < 30_000) return true;
+    this.maintAt = Date.now();
+    try {
+      const s = validMaint(await (await this.env.POOL.get(this.env.POOL.idFromName("control")).fetch(new Request("https://control/maintenance"))).json());
+      if (s && !s.on) { this.maint = s; await this.ctx.storage.put(MAINT_KEY, s); this.log("[maint] control says the pool is up; taking miners again"); return false; }
+    } catch (e) { this.log(`[maint] control unreadable, staying down: ${e && e.message ? e.message : e}`); }
+    return true;
+  }
+
   // **One save at a time, and a burst of reasons to save is one more save.**
   // Every disconnect saves, so a crowd leaving at once -- a deploy, a network
   // blip, a maintenance drain -- was one full write of the share log per miner:
@@ -972,7 +1141,8 @@ export class Pool {
       // The treasury is isolated: a throw here (a transient read, a missing key)
       // must not skip the rest of the period -- above all the earnings push, so
       // a miner keeps seeing a figure even while a payout step is failing.
-      if (this.runsTreasury) { try { await this.treasurer.tick(); } catch (e) { this.log(`[edge] treasury tick failed this period: ${e && e.message ? e.message : e}`); } }
+      if (this.runsTreasury && this.maint && this.maint.on) this.log(`[treasury] paused for maintenance: ${this.maint.reason}`);
+      else if (this.runsTreasury) { try { await this.treasurer.tick(); } catch (e) { this.log(`[edge] treasury tick failed this period: ${e && e.message ? e.message : e}`); } }
       mark("treasury", at);
       at = Date.now();
       try { await this.pushEarn(); } catch (e) { this.log(`[edge] earn push failed this period: ${e && e.message ? e.message : e}`); }

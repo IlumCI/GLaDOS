@@ -323,6 +323,85 @@ const resetError = () => Object.assign(new Error("Durable Object reset because i
   ok(bad.status === 404, "a shard name that is not one is refused");
 }
 
+// ======================================================= a public read that breaks the mining object
+// Cloudflare terminates an object whose blockConcurrencyWhile callback throws:
+// every miner on it drops and every share since the last save is gone. The
+// treasury's key read throws on purpose when it cannot be sure (keys missing
+// while pinned, storage unreadable) -- so it must not throw *there*.
+{
+  const edgeT = (await import(`./worker.js?treasury=${Math.random()}`)).default;
+  const g = (env, p) => edgeT.fetch(new Request(`https://pool.test${p}`), env);
+  const minerT = async (env, who) => {
+    const r = await edgeT.fetch(new Request(`https://pool.test/mine?w=${who}`, { headers: { Upgrade: "websocket" } }), env);
+    const c = r.webSocket;
+    c.send(JSON.stringify({ id: 1, method: "glados.hello", params: { v: 1, worker: who, agent: "edge.test" } }) + "\n");
+    await sim.sleep(5);
+    return c;
+  };
+  // Keys missing while the addresses are pinned.
+  const env = world({ TREASURY: "live", TREASURY_RVN: "RCmy8SHUHnACVobxf8vpzum5ms7nPXFU4f" });
+  const A = addr(0xf1);
+  const c = await minerT(env, A);
+  const job = jobOf(c);
+  await submit(c, job, mine(job, 3));
+  const r = await g(env, "/treasury");
+  await sim.sleep(10);
+  ok(r.status === 503, `GET /treasury with the keys missing while pinned answers 503 (${r.status})`);
+  ok((env.POOL.resets.get("main") || 0) === 0 && c.readyState === 1, `and does not reset the mining object: the miner stays connected (resets ${env.POOL.resets.get("main") || 0}, socket ${c.readyState === 1 ? "open" : "closed " + (c.closed && c.closed.code)})`);
+  const doc = JSON.parse(await (await g(env, "/ledger.json")).text());
+  const w = (doc.windows || []).flatMap((x) => x.shares).filter((s) => s.worker === A).reduce((a, s) => a + s.work, 0);
+  ok(w === 768, `and its unsaved shares are still there (${w})`);
+
+  // Keys present, storage failing for a moment.
+  const env2 = world({ TREASURY: "live" });
+  const ok1 = await g(env2, "/treasury");
+  ok(ok1.status === 200, "keys made on first use");
+  env2.POOL.evict("main");
+  const c2 = await minerT(env2, A);
+  const j2 = jobOf(c2);
+  await submit(c2, j2, mine(j2, 2));
+  env2.POOL.storage("main").fail("get", () => new Error("storage temporarily unavailable"), { times: 1, match: (k) => k === "treasury.keys" });
+  const r2 = await g(env2, "/treasury");
+  await sim.sleep(10);
+  ok(r2.status === 503 && (env2.POOL.resets.get("main") || 0) === 0 && c2.readyState === 1, `a storage blip during GET /treasury: 503, no reset, the miner stays (${r2.status}, resets ${env2.POOL.resets.get("main") || 0})`);
+  const r3 = await g(env2, "/treasury");
+  ok(r3.status === 200, "and the next request reads the keys");
+  c.close(); c2.close();
+}
+
+// ======================================================= tripping the breaker from outside
+// The allowance break shuts every route for 30 s on an error whose message
+// names the allowance. If any client-controlled text could reach the router's
+// catch inside an error message, one request every 30 s would keep the whole
+// pool down. Every input a client controls gets the phrase.
+{
+  const edgeB = (await import(`./worker.js?breaker=${Math.random()}`)).default;
+  const env = world({ MAINT_TOKEN: "x".repeat(32) });
+  const P = "Exceeded allowed duration in Durable Objects free tier quota daily limit";
+  const enc = encodeURIComponent(P);
+  const g = (p, i) => edgeB.fetch(new Request(`https://pool.test${p}`, i), env);
+  const json = { "content-type": "application/json" };
+  const attempts = [
+    () => g(`/${enc}`), () => g(`/status?${enc}=${enc}`), () => g(`/ledger.json?shard=${enc}`),
+    () => g(`/progress?address=${enc}&asset=${enc}`), () => g(`/progress?address=${addr(1)}&asset=glados`, { method: "POST", headers: json, body: `{"rec": ${P}}` }),
+    () => g(`/progress?address=${addr(1)}`, { method: "POST", headers: json, body: JSON.stringify({ rec: { est: P, series: [{ t: P, v: P }] } }) }),
+    () => g(`/maintenance`, { method: "POST", headers: { ...json, authorization: `Bearer ${P}` }, body: `{"on": ${P}` }),
+    () => g(`/maintenance`, { method: "POST", headers: { ...json, authorization: "Bearer " + "x".repeat(32) }, body: JSON.stringify({ on: true, reason: P, minutes: P }) }),
+    () => g(`/mine?w=${enc}`, { headers: { Upgrade: "websocket", "CF-Connecting-IP": P } }),
+    () => g(`/mine/gpu?w=${enc}`, { headers: { Upgrade: P } }),
+    () => g(`/treasury?${enc}`), () => g(`/payouts.json`, { method: "POST", body: P }), () => g(`/health.json?${enc}`, { method: "DELETE" }),
+  ];
+  for (const a of attempts) { try { await a(); } catch {} }
+  const ws = await edgeB.fetch(new Request(`https://pool.test/mine`, { headers: { Upgrade: "websocket" } }), env);
+  if (ws.webSocket) {
+    for (const m of [P, JSON.stringify({ id: 1, method: "glados.hello", params: { worker: P, reward: P } }), JSON.stringify({ id: 2, method: P, params: P })]) { try { ws.webSocket.send(m + "\n"); } catch {} }
+    await sim.sleep(10);
+  }
+  const after = await g("/status?after");
+  const doc = await after.json().catch(() => ({}));
+  ok(after.status === 200, `the allowance phrase in every path, query, header, body and socket message a client controls does not trip the break (${after.status}${doc.why ? ": " + doc.why : ""})`);
+}
+
 // ======================================================= /progress, from a hostile client
 {
   const edge4 = (await import(`./worker.js?fresh=${Math.random()}`)).default;

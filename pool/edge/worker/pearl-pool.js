@@ -20,6 +20,7 @@
 import { connect } from "cloudflare:sockets";
 import { PearlRoom } from "./pearl-room.js";
 import { rewardOf, DEFAULT as DEFAULT_REWARD } from "./rewards.js";
+import { MAINT_KEY, validMaint, notice, refusal, closeReason } from "./maintenance.js";
 
 const TICK_MS = 15_000;
 const IDLE_MAX_MS = 3 * 60_000; // as worker.js: a silent socket is a dead one
@@ -57,6 +58,8 @@ export class PearlPool {
     this.upCount = { sent: 0, answered: 0, queued: 0, lost: 0 };
     this.dirty = false;
     ctx.blockConcurrencyWhile(async () => {
+      this.maint = validMaint(await ctx.storage.get(MAINT_KEY));
+      this.maintAt = Date.now();
       const n = this.room.load(await ctx.storage.get("pearl.record"));
       console.log(`[pearl] ${n} address(es) of work restored`);
     });
@@ -71,10 +74,17 @@ export class PearlPool {
       for (const a of this.room.work.keys()) if (m.has(a)) rewards[a] = m.get(a);
       return Response.json({ work: Object.fromEntries([...this.room.work].map(([a, w]) => [a, w.toString()])), rewards });
     }
+    if (url.pathname === "/maintenance/apply" && request.method === "POST") {
+      let s = null;
+      try { s = validMaint(await request.json()); } catch {}
+      if (!s) return new Response("not a maintenance state", { status: 400 });
+      return Response.json(await this.applyMaint(s));
+    }
     if (url.pathname === "/status") {
       let mac = 0;
       for (const v of this.rate.values()) mac += v;
       return Response.json({
+        maintenance: this.maint && this.maint.on ? this.maint : undefined,
         slots: 1, connections: this.socks.size, addresses: this.room.addresses().size,
         hashrate: 0, // other shards' figure is hashes of their algorithm; Pearl's is MACs, so it is kept apart
         pearl: { hashrate: mac, ...this.room.stats, ...this.upCount, waiting: this.upQueue.length, inFlight: this.inFlight.size, height: this.room.jobs[0] ? this.room.jobs[0].height : null },
@@ -82,6 +92,7 @@ export class PearlPool {
     }
     if (request.headers.get("Upgrade") !== "websocket") return new Response("expected a WebSocket upgrade", { status: 426 });
     if (!this.configured()) return new Response("Pearl mining is not configured on this pool", { status: 503 });
+    if (this.maint && this.maint.on && (await this.stillDown())) return refusal(this.maint, Date.now());
 
     const [client, server] = Object.values(new WebSocketPair());
     server.accept();
@@ -172,6 +183,48 @@ export class PearlPool {
     }
     try { await this.save(); } catch (e) { console.log(`[pearl] save failed: ${e && e.message}`); }
     if (this.socks.size > 0) await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
+  }
+
+  // -------------------------------------------------------------- maintenance
+  // As worker.js's: tell, drain, close; and shares owed upstream still go --
+  // runUp keeps the upstream open after the last miner while upHeld() says so.
+  async applyMaint(s) {
+    const was = this.maint && this.maint.on;
+    this.maint = s;
+    this.maintAt = Date.now();
+    await this.ctx.storage.put(MAINT_KEY, s);
+    const connections = this.socks.size;
+    if (!s.on) {
+      if (was) console.log(`[pearl maint] off; ${connections} still connected`);
+      return { connections, draining: false };
+    }
+    console.log(`[pearl maint] on: ${s.reason}; ${connections} miner(s) told, closing in ${s.drainMs / 1000} s`);
+    const line = notice(s, Date.now());
+    for (const [ws] of this.socks) { try { ws.send(line); } catch { this.drop(ws); } }
+    const drainId = (this.drainId || 0) + 1;
+    this.drainId = drainId;
+    this.ctx.waitUntil(this.drain(drainId, s.drainMs));
+    return { connections, draining: true, owedUpstream: this.upQueue.length + this.inFlight.size };
+  }
+
+  async drain(drainId, ms) {
+    if (ms > 0) await new Promise((r) => setTimeout(r, ms));
+    if (this.drainId !== drainId || !(this.maint && this.maint.on)) return;
+    const why = closeReason(this.maint);
+    let n = 0;
+    for (const [ws] of this.socks) { try { ws.close(1013, why); } catch {} this.drop(ws); n++; }
+    try { await this.save(); } catch (e) { console.log(`[pearl maint] record not saved on the way down: ${e && e.message}`); }
+    console.log(`[pearl maint] drained: ${n} miner(s) closed; ${this.upQueue.length + this.inFlight.size} share(s) still owed upstream`);
+  }
+
+  async stillDown() {
+    if (Date.now() - (this.maintAt || 0) < 30_000 || !this.env.POOL) return true;
+    this.maintAt = Date.now();
+    try {
+      const s = validMaint(await (await this.env.POOL.get(this.env.POOL.idFromName("control")).fetch(new Request("https://control/maintenance"))).json());
+      if (s && !s.on) { this.maint = s; await this.ctx.storage.put(MAINT_KEY, s); return false; }
+    } catch (e) { console.log(`[pearl maint] control unreadable, staying down: ${e && e.message}`); }
+    return true;
   }
 
   // ----------------------------------------------------------------- upstream

@@ -6,7 +6,9 @@
 //   - an object's memory, which eviction throws away; the next request builds a
 //     fresh object from storage, running the constructor again
 //   - blockConcurrencyWhile: no request reaches an object before its constructor's
-//     block settles, and a block that throws resets the object and fails the call
+//     block settles, and a block that throws resets the object and fails the call.
+//     After construction too: Cloudflare terminates an object whose
+//     blockConcurrencyWhile callback throws, and every socket it held drops
 //   - alarms: one per object, run when the test says
 //   - WebSocket pairs, both ends, with close codes and reasons
 //   - faults: any storage operation, or any call into a named object, can be made
@@ -149,6 +151,21 @@ export class Namespace {
     this.callFaults = [];    // { name, error, times }
     this.calls = [];         // names called, in order
     this.created = new Map(); // name -> how many times constructed
+    this.resets = new Map();  // name -> how many times reset by a throw
+  }
+  // What Cloudflare does to an object that broke: memory gone, sockets dropped (1006).
+  reset(name, why) {
+    const o = this.live.get(name);
+    if (!o) return;
+    this.live.delete(name);
+    this.resets.set(name, (this.resets.get(name) || 0) + 1);
+    const held = [...((o.obj && o.obj.conns && o.obj.conns.keys()) || []), ...((o.obj && o.obj.socks && o.obj.socks.keys()) || [])];
+    for (const ws of held) {
+      if (ws.readyState === 3) continue;
+      ws.readyState = 3;
+      const p = ws.peer;
+      if (p && p.readyState !== 3) { p.readyState = 3; p.closed = { code: 1006, reason: `object reset: ${why}`, by: "peer" }; for (const f of p.listeners.close) f({ code: 1006, reason: "" }); }
+    }
   }
   idFromName(name) { return { name, toString: () => `id:${name}` }; }
   storage(name) {
@@ -162,13 +179,20 @@ export class Namespace {
     const ctx = {
       id: { name, toString: () => `id:${name}` },
       storage: this.storage(name),
-      blockConcurrencyWhile: (f) => { const p = Promise.resolve().then(f); o.ready = o.ready.then(() => p); return p; },
+      blockConcurrencyWhile: (f) => {
+        const p = Promise.resolve().then(f);
+        o.ready = o.ready.then(() => p);
+        o.ready.catch(() => {}); // seen by whoever awaits it; not an unhandled rejection meanwhile
+        if (o.built) p.catch((e) => this.reset(name, (e && e.message) || e));
+        return p;
+      },
       waitUntil: (p) => { waits.push(Promise.resolve(p).catch(() => {})); },
     };
     o = { obj: null, ready: Promise.resolve(), waits, ctx };
     this.live.set(name, o);
     this.created.set(name, (this.created.get(name) || 0) + 1);
     o.obj = new this.Class(ctx, this.env);
+    o.built = true;
     return o;
   }
   // Fails calls into `name` ("*" for any) with `error`, `times` times.

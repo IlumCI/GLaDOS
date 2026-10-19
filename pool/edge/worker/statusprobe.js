@@ -108,11 +108,15 @@ function rvnPerDay(samples, facts) {
 
 export async function statusTick(env, storage) {
   const now = Date.now();
-  const [cpuP, gpuP, trP] = await Promise.all([
+  const [cpuP, gpuP, trP, maintP] = await Promise.all([
     probeObject(env, "main", "/status"),
     env.GPU_COINS ? probeObject(env, "gpu-0", "/status") : Promise.resolve(null),
     probeObject(env, "main", "/treasury"),
+    probeObject(env, "control", "/maintenance"),
   ]);
+  // Declared maintenance is said as that, beside the components rather than
+  // as their state: a planned stop is not an outage in the uptime history.
+  const maintenance = maintP.ok && maintP.body && maintP.body.on ? maintP.body : null;
   const comps = {
     cpu: { ...judge(cpuP), ms: cpuP.ms, miners: cpuP.ok ? cpuP.body.addresses ?? cpuP.body.connections ?? null : null, hashrate: cpuP.ok ? cpuP.body.hashrate || 0 : 0 },
     gpu: gpuP ? { ...judge(gpuP), ms: gpuP.ms, miners: gpuP.ok ? gpuP.body.addresses ?? gpuP.body.connections ?? null : null, hashrate: gpuP.ok ? gpuP.body.hashrate || 0 : 0 }
@@ -162,6 +166,7 @@ export async function statusTick(env, storage) {
 
   const snapshot = {
     generatedAt: now,
+    maintenance,
     overall: rollup(COMPONENTS.map((c) => comps[c].state)),
     minersTotal: Math.max(comps.cpu.miners || 0, comps.gpu.miners || 0),
     hashrate: (comps.cpu.hashrate || 0) + (comps.gpu.hashrate || 0),
