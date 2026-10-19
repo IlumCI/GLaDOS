@@ -656,7 +656,7 @@ class Storage {
 
 // --- one run -------------------------------------------------------------------------------
 
-async function run({ seed, faults, ticks, calm = 600, mode = "live", env = {} }) {
+async function run({ seed, faults, ticks, calm = 600, mode = "live", env = {}, cfg = {} }) {
   const w = new World(seed, faults);
   const storage = new Storage(w);
   const logs = [];
@@ -678,7 +678,7 @@ async function run({ seed, faults, ticks, calm = 600, mode = "live", env = {} })
   };
   // Blocks here are five minutes apart, not 0.1 s, so the nonce depth is
   // scaled to the simulated lag (at most two blocks) rather than to 4663's.
-  const io = { fetch: (u, i) => w.fetch(u, i), now: () => w.now, sleep: async (ms) => { w.now += ms; }, cfg: { nonceDepth: 6 } };
+  const io = { fetch: (u, i) => w.fetch(u, i), now: () => w.now, sleep: async (ms) => { w.now += ms; }, cfg: { nonceDepth: 6, ...cfg } };
   let t = new Treasury(pool, io);
   let evictions = 0;
   const seenSnap = new Map();
@@ -724,6 +724,11 @@ async function run({ seed, faults, ticks, calm = 600, mode = "live", env = {} })
         if (seenSnap.has(a) && BigInt(v) < seenSnap.get(a)) w.violations.push(`tick ${tickNo}: snapshot for ${a} fell`);
         seenSnap.set(a, BigInt(v));
       }
+      // To the unit: what every recorded epoch paid an address adds up to the
+      // work the snapshot says it has been paid for. "Credited <= done" alone
+      // misses a double payment whenever work has grown past it -- in a steady
+      // world, always.
+      for (const [a, c] of credited) if (snap[a] === undefined || BigInt(snap[a]) !== c) w.violations.push(`tick ${tickNo}: ${a} credited ${c} across epochs, the snapshot says ${snap[a] ?? "nothing"}`);
     }
     if (st.halted) w.violations.push(`tick ${tickNo}: halted, waiting for a person: ${st.halted}`);
     if (st.paused && st.paused.until - w.now > 24 * 3_600_000 + TICK) w.violations.push(`tick ${tickNo}: paused for more than a day`);
@@ -948,6 +953,15 @@ if (process.env.STORM) {
   const res = await run({ seed: 13, faults: { evictAfterWrite: 0.4, evictBeforeWrite: 0.2, evict: 0.1 }, ticks: 6 * DAY });
   clean(res, "an object evicted at every turn");
   ok((res.st.epochs || 0) >= 1, `eviction mid-step never sends twice and still pays: ${summary(res)}`);
+}
+{
+  // A cached epoch that outlives its payout would pay the same work again. Two
+  // things prevent it -- recording a payout clears the cache, and the cache
+  // names the epoch number it was built for -- and at the default half hour
+  // neither was ever exercised. Here the cache lives a month.
+  const res = await run({ seed: 23, faults: {}, ticks: 5 * DAY, cfg: { epochEveryMs: 30 * 86_400_000 } });
+  clean(res, "an epoch cache that outlives payouts");
+  ok((res.st.epochs || 0) >= 2, `with the epoch cached for a month, payouts still pay only new work: ${summary(res)}`);
 }
 // Reward choices: miners paid in what they chose, a blocklisted wallet never
 // sent a stock, and a stock whose quote fails falling back to $GLADOS, never
