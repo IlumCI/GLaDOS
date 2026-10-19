@@ -264,6 +264,11 @@ async function route(request, env) {
         return Response.json({
           shards: n, gpuShards: gpu, slots: up[0].slots,
           connections: up.reduce((a, s) => a + s.connections, 0),
+          // Every miner has a CPU socket, so the shard with the most distinct
+          // addresses holds them all: that is the real miner count, not the
+          // socket sum (a miner opens a CPU and a GPU socket).
+          miners: Math.max(0, ...up.map((s) => s.addresses || 0)),
+          hashrate: up.reduce((a, s) => a + (s.hashrate || 0), 0),
           perShard: all.map((s) => (s ? s.connections : null)),
           // The fullest shard's tallies against the core's cap: past ~90%,
           // new miners' shares go uncredited and SHARDS should be raised.
@@ -315,6 +320,7 @@ export class Pool {
     this.conns = new Map(); // WebSocket -> connection id in the core
     this.connAddr = new Map(); // WebSocket -> the miner's payout address, for the revenue push
     this.lastSeen = new Map(); // WebSocket -> when it last sent anything, for reaping half-open sockets
+    this.connRate = new Map(); // WebSocket -> the miner's self-reported H/s, summed for the combined pool rate
     this.core = null;
     this.ups = [];          // { i, where, sock, writer, running }
     this.gateMin = BigInt(env.GATE_MIN || "0") * 10n ** 18n;
@@ -395,7 +401,7 @@ export class Pool {
       return Response.json({ work: Object.fromEntries([...work].map(([a, w]) => [a, w.toString()])), rewards });
     }
     if (url.pathname === "/status") {
-      return Response.json({ slots: this.slots, connections: this.conns.size, tallies: this.tallies ?? null, maxTallies: MAX_TALLIES });
+      return Response.json({ slots: this.slots, connections: this.conns.size, addresses: new Set(this.connAddr.values()).size, hashrate: this.poolHashrate(), tallies: this.tallies ?? null, maxTallies: MAX_TALLIES });
     }
     if (url.pathname === "/treasury") {
       const t = await this.treasury();
@@ -472,8 +478,13 @@ export class Pool {
         this.noteReward(l).catch((e) => this.log(`[reward] choice not stored (${e && e.message ? e.message : e}); the next greeting tries again`));
         this.noteConn(server, l);
       }
+      // A miner reports its own hashrate for the combined-pool figure; this is a
+      // display line, not mining work, so it is recorded and kept out of the core.
+      for (const l of lines) if (l.includes("glados.rate")) this.noteRate(server, l);
+      const lines2 = lines.filter((l) => !l.includes("glados.rate"));
+      if (!lines2.length) return;
       if (!gate.passed) {
-        gate.queue.push(...lines);
+        gate.queue.push(...lines2);
         if (gate.checking) return;
         const hello = gate.queue.find((l) => l.includes("glados.hello"));
         if (!hello) return;
@@ -494,7 +505,7 @@ export class Pool {
         this.tickUps();
         return;
       }
-      for (const line of lines) {
+      for (const line of lines2) {
         if (feed(line)) return;
       }
       // A share may have beaten upstream's target: forward it now, not at the
@@ -603,6 +614,19 @@ export class Pool {
     } catch {}
   }
 
+  // A miner's self-reported hashrate, for the combined-pool figure only. Capped
+  // at 100 MH/s a socket so one cannot inflate the number to something absurd;
+  // a real browser is orders of magnitude under that.
+  noteRate(ws, line) {
+    try {
+      const hs = Number((JSON.parse(line).params || {}).hs);
+      this.connRate.set(ws, Number.isFinite(hs) && hs > 0 ? Math.min(hs, 1e8) : 0);
+    } catch {}
+  }
+
+  // The combined hashrate of every connection on this shard.
+  poolHashrate() { let s = 0; for (const v of this.connRate.values()) s += v; return s; }
+
   // The live revenue figure, pushed to each connected miner. Priced on the
   // treasury shard (SHARDS=1 keeps every miner here); a wallet is shown the
   // amount for the asset it is actually paid in -- its choice at or over the
@@ -615,15 +639,18 @@ export class Pool {
     const rewards = await this.rewards();
     // The same payout facts ride on every miner's message: the last
     // distribution's recipient count, the cadence, and when it last paid.
-    const recipients = earn.recipients || 0, epochMs = earn.epochMs || 0, lastAt = earn.lastAt ?? null;
+    const recipients = earn.recipients || 0, epochMs = earn.epochMs || 0, lastAt = earn.lastAt ?? null, usd = earn.usd || 0;
     for (const [ws] of this.conns) {
       const addr = this.connAddr.get(ws);
       if (!addr) continue;
       const held = (this.balances.get(addr)?.wei ?? 0n) >= this.gateMin;
       const code = held ? (rewards.get(addr) || DEFAULT_REWARD) : DEFAULT_REWARD;
-      const value = earn.byCode[code];
-      if (typeof value === "number" && value >= 0) {
-        try { ws.send(JSON.stringify({ method: "glados.earn", params: { asset: code, value, recipients, epochMs, lastAt } }) + "\n"); }
+      const raw = earn.byCode[code];
+      const value = typeof raw === "number" && raw >= 0 ? raw : 0; // the token amount, 0 before a payout contract exists
+      // Sent as soon as there is a dollar figure, even with no contract yet, so
+      // a miner's earned-so-far shows while the pool is still accruing RVN.
+      if (usd > 0 || value > 0) {
+        try { ws.send(JSON.stringify({ method: "glados.earn", params: { asset: code, value, usd, recipients, epochMs, lastAt } }) + "\n"); }
         catch { this.drop(ws); }
       }
     }
@@ -725,6 +752,7 @@ export class Pool {
     const id = this.conns.get(ws);
     this.connAddr.delete(ws);
     this.lastSeen.delete(ws);
+    this.connRate.delete(ws);
     if (id !== undefined) {
       this.core.close(id);
       this.conns.delete(ws);
@@ -904,10 +932,13 @@ export class Pool {
       }
       mark("save", at);
       at = Date.now();
-      if (this.runsTreasury) await this.treasurer.tick();
+      // The treasury is isolated: a throw here (a transient read, a missing key)
+      // must not skip the rest of the period -- above all the earnings push, so
+      // a miner keeps seeing a figure even while a payout step is failing.
+      if (this.runsTreasury) { try { await this.treasurer.tick(); } catch (e) { this.log(`[edge] treasury tick failed this period: ${e && e.message ? e.message : e}`); } }
       mark("treasury", at);
       at = Date.now();
-      await this.pushEarn();
+      try { await this.pushEarn(); } catch (e) { this.log(`[edge] earn push failed this period: ${e && e.message ? e.message : e}`); }
       mark("earn", at);
     } catch (e) {
       this.log(`[edge] alarm failed: ${e && e.message ? e.message : e}`);

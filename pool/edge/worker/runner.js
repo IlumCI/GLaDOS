@@ -126,6 +126,7 @@ function quoteData(sym, amountIn) {
   const w = (v) => BigInt(v).toString(16).padStart(64, "0");
   return "0xcdca1753" + w(64) + w(amountIn) + w(path.length / 2) + path + "0".repeat((64 - (path.length % 64)) % 64);
 }
+
 // A shard's /work.json, {"work": {"0xaddr": "123", ...}}, as address -> BigInt.
 export const parseWork = (text) => new Map(Object.entries(JSON.parse(text).work || {}).map(([a, w]) => [a.toLowerCase(), BigInt(w)]));
 const toJSON = (v) => JSON.parse(JSON.stringify(v, (_, x) => (typeof x === "bigint" ? x.toString() : x)));
@@ -1041,11 +1042,25 @@ export class Treasury {
     // Shared payout facts the page shows alongside the per-wallet figure: how
     // many miners the last distribution split between, the distribution
     // cadence, and when the last one paid (null before the first). Read-only.
-    let meta = { recipients: 0, epochMs: this.cfg.epochEveryMs, lastAt: null };
+    let meta = { recipients: 0, epochMs: this.cfg.epochEveryMs, lastAt: null, usd: 0 };
     try {
       const state = await this.state();
       meta.recipients = state.lastRecipients || 0;
       meta.lastAt = state.lastEpochAt || null;
+      // The honest "earned so far": this wallet's equal share of the pool's
+      // whole accrued value -- RVN already earned (even before it is swapped to
+      // ETH) plus any ETH it holds -- in dollars. The status object already
+      // prices it (pot.valueUsd), so read it from there. Independent of a payout
+      // contract, so a miner sees a real, growing figure the moment the pool
+      // earns, not zero until the first swap.
+      try {
+        const h = await this.pool.env.POOL.get(this.pool.env.POOL.idFromName("status"))
+          .fetch(new Request("https://pool.aperture.institute/health.json")).then((r) => (r.ok ? r.json() : null));
+        const poolUsd = h && h.pot ? Number(h.pot.valueUsd) || 0 : 0;
+        const miners = h ? Number(h.minersTotal) || 0 : 0;
+        const recips = Math.max(1, state.lastRecipients || miners || 1);
+        if (poolUsd > 0) meta.usd = poolUsd / recips;
+      } catch {}
       if (state.contract) {
         const keys = await this.pool.treasury();
         const [bal, gp] = await Promise.all([

@@ -114,9 +114,9 @@ export async function statusTick(env, storage) {
     probeObject(env, "main", "/treasury"),
   ]);
   const comps = {
-    cpu: { ...judge(cpuP), ms: cpuP.ms, miners: cpuP.ok ? cpuP.body.connections ?? null : null },
-    gpu: gpuP ? { ...judge(gpuP), ms: gpuP.ms, miners: gpuP.ok ? gpuP.body.connections ?? null : null }
-              : { state: "operational", why: "no GPU coins configured", ms: 0, miners: null },
+    cpu: { ...judge(cpuP), ms: cpuP.ms, miners: cpuP.ok ? cpuP.body.addresses ?? cpuP.body.connections ?? null : null, hashrate: cpuP.ok ? cpuP.body.hashrate || 0 : 0 },
+    gpu: gpuP ? { ...judge(gpuP), ms: gpuP.ms, miners: gpuP.ok ? gpuP.body.addresses ?? gpuP.body.connections ?? null : null, hashrate: gpuP.ok ? gpuP.body.hashrate || 0 : 0 }
+              : { state: "operational", why: "no GPU coins configured", ms: 0, miners: null, hashrate: 0 },
     payouts: { ...judgeTreasury(trP), ms: trP.ms },
   };
 
@@ -163,6 +163,8 @@ export async function statusTick(env, storage) {
   const snapshot = {
     generatedAt: now,
     overall: rollup(COMPONENTS.map((c) => comps[c].state)),
+    minersTotal: Math.max(comps.cpu.miners || 0, comps.gpu.miners || 0),
+    hashrate: (comps.cpu.hashrate || 0) + (comps.gpu.hashrate || 0),
     components: Object.fromEntries(COMPONENTS.map((c) => [c, { name: NAMES[c], ...comps[c], days: series(history, c, now) }])),
     pot: {
       rvnHeld: held, rvnUnpaid: unpaid, rvnEarnedTotal: facts && facts.zpool ? facts.zpool.total : null,
