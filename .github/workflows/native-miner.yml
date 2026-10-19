@@ -124,6 +124,10 @@ jobs:
             -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 `
             -gencode arch=compute_120,code=sm_120 -gencode arch=compute_89,code=compute_89 `
             xpu.cu -o ../dist-miner/xpu-windows-x86_64.exe
+          # The MSVC linker leaves an import library and export file beside
+          # the exe; only the exe ships.
+          Remove-Item -ErrorAction SilentlyContinue ../dist-miner/*.exp, ../dist-miner/*.lib
+          Get-ChildItem ../dist-miner
       - uses: actions/upload-artifact@v4
         with:
           name: xpu-windows
