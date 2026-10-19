@@ -777,7 +777,7 @@ export class Pool {
     if (id !== undefined) {
       this.core.close(id);
       this.conns.delete(ws);
-      this.ctx.waitUntil(this.save().catch((e) => this.log(`[edge] ledger not saved on disconnect, the alarm tries again: ${e && e.message ? e.message : e}`)));
+      this.ctx.waitUntil(this.saveSoon().catch((e) => this.log(`[edge] ledger not saved on disconnect, the alarm tries again: ${e && e.message ? e.message : e}`)));
       if (this.conns.size === 0) {
         for (const u of this.ups) this.closeUp(u);
       }
@@ -865,6 +865,22 @@ export class Pool {
       this.log(`[edge] ${this.tallies} of ${MAX_TALLIES} tallies: past the cap, new miners' shares are counted but credited to nobody -- raise SHARDS`);
     }
     return this.ctx.storage.put(textChunks("ledger", text));
+  }
+
+  // **One save at a time, and a burst of reasons to save is one more save.**
+  // Every disconnect saves, so a crowd leaving at once -- a deploy, a network
+  // blip, a maintenance drain -- was one full write of the share log per miner:
+  // measured, 300 disconnects, 300 writes, each the whole ledger in chunks,
+  // which is the daily write allowance spent in seconds. Now a save in flight
+  // absorbs every request behind it into a single follow-up that sees them all.
+  saveSoon() {
+    if (this.saving) { this.saveAgain = true; return this.saving; }
+    this.saving = (async () => {
+      try {
+        do { this.saveAgain = false; await this.save(); } while (this.saveAgain);
+      } finally { this.saving = null; }
+    })();
+    return this.saving;
   }
 
   async arm() {

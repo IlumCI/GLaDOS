@@ -15,7 +15,9 @@ export function classifyFailure(e) {
   if (e && e.overloaded) return { retry: 30, why: "the pool is overloaded; back off and retry" };
   // chunks.js's refusal to load a partial share log, raised in the object's
   // constructor on purpose: serving from an empty record would overwrite it.
-  if (/missing a chunk|refusing to read a partial/i.test(msg)) {
+  // The core's own refusal -- a log whole in storage but unreadable or failing
+  // its digest -- is the same situation and gets the same answer.
+  if (/missing a chunk|refusing to read a partial|edge_load_ledger/i.test(msg)) {
     return { retry: 300, why: "the pool's stored share log did not load, so it will not serve until the operator restores it" };
   }
   return { retry: 30, why: "the pool hit an internal error; it has been logged" };
