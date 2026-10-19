@@ -1,0 +1,146 @@
+name: native miner
+
+# The downloadable native miner: `glados-miner` for Linux, Windows and macOS,
+# and `xpu` -- its NVIDIA GPU helper -- for Linux and Windows. What the
+# one-line installers on mine.aperture.institute fetch, by tag, and check
+# against the SHA256SUMS published beside them.
+#
+# Separate from mining.yml on purpose: that one builds the bootable mining ISO,
+# which is retired. This is a program you run in a terminal and stop with
+# Ctrl+C, nothing to boot.
+#
+# CUDA 12.9 rather than 13: 13 dropped Pascal, and GTX 10-series cards are
+# common on exactly the machines this is for. One fat binary per OS covers
+# Pascal (sm_61) to Blackwell (sm_120), with compute_89 PTX for anything newer.
+
+on:
+  push:
+    tags: ['miner-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  miner:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,    target: x86_64-unknown-linux-musl,  name: linux-x86_64 }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, name: linux-arm64 }
+          - { os: windows-latest,   target: x86_64-pc-windows-msvc,     name: windows-x86_64, ext: .exe }
+          - { os: macos-latest,     target: aarch64-apple-darwin,       name: macos-arm64 }
+          - { os: macos-13,         target: x86_64-apple-darwin,        name: macos-x86_64 }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: miner
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add ${{ matrix.target }}
+      # ring compiles C and assembly; for a static musl binary that C has to
+      # be compiled against musl too.
+      - name: musl C compiler
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update -q && sudo apt-get install -yq musl-tools
+          T=$(echo '${{ matrix.target }}' | tr - _)
+          echo "CC_${T}=musl-gcc" >> "$GITHUB_ENV"
+      # miner/vendor is not committed; Cargo.lock pins every crate by checksum,
+      # so this recreates exactly the sources that were reviewed.
+      - name: Vendor, from the lockfile
+        run: cargo vendor --locked vendor > /dev/null
+      - name: Test
+        if: "!contains(matrix.target, 'aarch64-unknown-linux')"
+        run: cargo test --release --locked --target ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Static, where it should be
+        if: contains(matrix.target, 'musl')
+        run: |
+          B=target/${{ matrix.target }}/release/glados-miner
+          file "$B"
+          if readelf -l "$B" | grep -qi 'program interpreter'; then echo "::error::not static"; exit 1; fi
+      - name: Package
+        run: |
+          mkdir -p ../out
+          cp target/${{ matrix.target }}/release/glados-miner${{ matrix.ext }} ../out/glados-miner-${{ matrix.name }}${{ matrix.ext }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: miner-${{ matrix.name }}
+          path: out/*
+
+  xpu-linux:
+    runs-on: ubuntu-latest
+    container: nvidia/cuda:12.9.1-devel-ubuntu22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        working-directory: cuda
+        run: |
+          nvcc --version
+          mkdir -p ../out
+          nvcc -O3 \
+            -gencode arch=compute_61,code=sm_61 -gencode arch=compute_75,code=sm_75 \
+            -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 \
+            -gencode arch=compute_120,code=sm_120 -gencode arch=compute_89,code=compute_89 \
+            xpu.cu -o ../out/xpu-linux-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xpu-linux
+          path: out/*
+
+  xpu-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned to the commit of v0.2.36 rather than the tag, so a moved tag
+      # cannot change what installs the compiler.
+      - uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d
+        with:
+          cuda: '12.9.1'
+          method: network
+          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+      # nvcc on Windows needs cl.exe on the PATH. Pinned to v1.13.0's commit.
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
+      - name: Build
+        working-directory: cuda
+        shell: pwsh
+        run: |
+          nvcc --version
+          New-Item -ItemType Directory -Force ../out | Out-Null
+          nvcc -O3 `
+            -gencode arch=compute_61,code=sm_61 -gencode arch=compute_75,code=sm_75 `
+            -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 `
+            -gencode arch=compute_120,code=sm_120 -gencode arch=compute_89,code=compute_89 `
+            xpu.cu -o ../out/xpu-windows-x86_64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xpu-windows
+          path: out/*
+
+  release:
+    needs: [miner, xpu-linux, xpu-windows]
+    if: startsWith(github.ref, 'refs/tags/miner-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dl
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dl
+        run: |
+          sha256sum * | tee SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dl/* --repo "$GITHUB_REPOSITORY" \
+            --title "glados-miner ${GITHUB_REF_NAME#miner-v}" \
+            --notes "The native GLaDOS pool miner. Install with the one-line command on https://mine.aperture.institute -- it downloads the file for your system from here and checks it against SHA256SUMS."
