@@ -1,5 +1,6 @@
 // node pool/edge/worker/rpc.test.mjs
-import { verdict, batchVerdict, Endpoints, attempt, rpcList, DEFAULT_RPCS, RETURN_MS, Transient, RpcError } from "./rpc.js";
+import { verdict, batchVerdict, Endpoints, attempt, rpcList, DEFAULT_RPCS, RETURN_MS, Transient, RpcError, plainPost } from "./rpc.js";
+import http from "node:http";
 import { Treasury, Transient as RunnerTransient, RpcError as RunnerRpcError } from "./runner.js";
 import { classifyFailure } from "./guard.js";
 
@@ -177,6 +178,32 @@ ok(classifyFailure(Object.assign(new Error("x"), { overloaded: true })).why.incl
 ok(classifyFailure(new Error("ledger is missing a chunk; refusing to read a partial value")).why.includes("share log"),
    "a share log that would not load is named, not called an internal error");
 ok(!/secret|key/i.test(classifyFailure(new Error("secret key 0xabc leaked")).why), "an unknown error's message is never echoed");
+
+// --- found loose by mutation testing ---------------------------------------------------
+
+// An error object whose code is not a number is not a JSON-RPC error: no answer, try another.
+ok(verdict({ error: { code: "x", message: "m" } }).transient && !verdict({ error: { code: "x", message: "m" } }).error, "an error with a non-numeric code is transient, not the chain refusing");
+// A batch answered with one error carries that error's own words.
+ok(/Invalid request/.test(batchVerdict({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid request" } }).transient || ""), "a batch answered with a single error says which error");
+
+// plainPost, the door check's transport, against a server answering each status.
+{
+  const answers = { "/429": [429, "slow down"], "/500": [500, "oops"], "/503": [503, "busy"], "/400": [400, '{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"bad"}}'],
+                    "/200": [200, '{"jsonrpc":"2.0","id":1,"result":"0x1"}'], "/html": [200, "<html>login</html>"] };
+  const srv = http.createServer((q, r) => { const [s, b] = answers[q.url] || [404, ""]; r.writeHead(s); r.end(b); });
+  await new Promise((res) => srv.listen(0, "127.0.0.1", res));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  const kind = async (path) => { try { return await plainPost(base + path, { id: 1 }, 2000); } catch (e) { return e instanceof Transient ? "Transient" : `other: ${e.message}`; } };
+  ok((await kind("/429")) === "Transient", "429, rate limited: transient");
+  ok((await kind("/500")) === "Transient" && (await kind("/503")) === "Transient", "500 and 503: transient");
+  const four = await kind("/400");
+  ok(four && four.error && four.error.message === "bad", "400 with a JSON-RPC body: the body, for verdict to read -- not transient");
+  const two = await kind("/200");
+  ok(two && two.result === "0x1", "200: the answer");
+  ok(typeof (await kind("/html")) === "string" && verdict(await kind("/html")).transient, "a 200 that is not JSON: a string, which verdict calls no answer");
+  srv.close();
+  ok((await kind("/200")) === "Transient", "nobody listening: transient");
+}
 
 console.log(`${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
