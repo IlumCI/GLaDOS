@@ -5,7 +5,7 @@
 //   - rebuilding a lost payout record from the chain (it decoded the wrong
 //     layout: everybody paid would have been paid again)
 //   - the price guard's median
-import { Treasury } from "./runner.js";
+import { Treasury, RpcError } from "./runner.js";
 import { encodePayAll, encodeBuyAndPay, payoutRecipients } from "./treasury.js";
 
 let passed = 0, failed = 0;
@@ -65,6 +65,23 @@ ok(threw && /does not read as a payout/.test(threw.message), "calldata that is n
   ok(at(eleven, 1000) === null && /off its recent median/.test(at(eleven, 5000) || ""), "eleven interleaved readings: the median is 1000, so 1000 passes and 5000 is refused");
   ok(at([1000, 1010, 990, 1005], 1100) === null && /off its recent median/.test(at([1000, 1010, 990, 1005], 1200) || ""), "a 10% move passes, a 20% one does not (the limit is 15%)");
   ok(/before the first buy/.test(at([1000], 1000) || ""), "too few readings: wait for more");
+}
+
+// ---------------------------------------------------------- what a refused send means
+// "Already known" is the node saying it has the transaction: success, so it
+// waits the full stuck time. Any other refusal is marked, and given up on
+// sooner. Inverted, the two waits swap -- caught by nothing until now.
+{
+  const b = new Treasury(pool, { now: () => 5 });
+  const send = async (msg) => {
+    b.rpc = async () => { throw new RpcError(msg, -32000); };
+    const s = { pending: { chain: "evm", kind: "payout", hash: "0x01", raw: "0x02", at: 1 } };
+    await b.broadcast(s);
+    return s.pending.rejected;
+  };
+  ok((await send("already known")) === undefined && (await send("nonce too low")) === undefined, "'already known' and 'nonce too low': the node has it, not a refusal");
+  ok((await send("replacement transaction underpriced")) === "replacement transaction underpriced", "'underpriced': a refusal, marked");
+  ok(/insufficient funds/.test((await send("insufficient funds for gas * price + value")) || ""), "'insufficient funds': a refusal, marked");
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
