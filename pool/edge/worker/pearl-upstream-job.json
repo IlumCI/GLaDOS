@@ -1,0 +1,17 @@
+[
+ {
+  "id": 1,
+  "result": true,
+  "error": null
+ },
+ {
+  "id": null,
+  "method": "mining.notify",
+  "params": {
+   "header": "000000207fa0a7e3d4aa7fb49674c8c9d87332859e620959ffc90862194915942fc534d1661c655d72cbdff8e4ccc643508b12d02853f80197471ec4daa57a908814168f8e51d66a887a6d17",
+   "height": 130324,
+   "job_id": "17aca_17179869184",
+   "target": "0000000000000800000000000000000000000000000000000000000000000000"
+  }
+ }
+]

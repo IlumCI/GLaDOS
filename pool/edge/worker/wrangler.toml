@@ -35,7 +35,24 @@ class_name = "Pool"
 tag = "v1"
 new_sqlite_classes = ["Pool"]
 
+# The Pearl shard (pearl-pool.js): a class of its own, since its shares are
+# proofs checked in JavaScript rather than nonces the core checks.
+[[durable_objects.bindings]]
+name = "PEARL_POOL"
+class_name = "PearlPool"
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["PearlPool"]
+
 [vars]
+# Pearl: the GPU's other choice. Shares go to 2Miners (1%, PPLNS, 1 PRL minimum,
+# paid every two hours) as `mining.authorize {wallet}`, paying TREASURY_PRL -- a
+# wallet the operator holds; PRL is bridged and swapped by hand from there.
+# Miners are paid from the same epochs as every other shard, in the asset each
+# chose. Unset either variable to turn Pearl off.
+PEARL_UPSTREAM = "prl.2miners.com:1818"
+TREASURY_PRL = "prl1pl27hxsfd2yd4lfyflfe0n38t2v8rhce9wp9fl6w4m036q88ev6esh0jvdc"
 # Four zpool upstreams -- yescrypt, yespowerR16, yespowerURX, yescryptR16 --
 # each checked against zpool acceptance with a burn address before it went in
 # (URX 6/7 and yescryptR16 24/30 accepted; every refusal "Invalid job id").

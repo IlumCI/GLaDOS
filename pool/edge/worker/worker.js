@@ -47,6 +47,11 @@ import { Endpoints, rpcList, attempt, plainPost } from "./rpc.js";
 import { classifyFailure, unavailable } from "./guard.js";
 import { statusTick, STATUS_EVERY_MS } from "./statusprobe.js";
 import { rewardOf, DEFAULT as DEFAULT_REWARD } from "./rewards.js";
+import { PearlPool } from "./pearl-pool.js";
+import { pearlOn, pearlStub } from "./pearl-env.js";
+
+// The Pearl shard is a class of its own (pearl-pool.js), bound as PEARL_POOL.
+export { PearlPool };
 
 // For refusals a person reads on a miner's screen: 0x6ef4...527d.
 const short = (a) => `${a.slice(0, 6)}...${a.slice(-4)}`;
@@ -246,6 +251,12 @@ async function route(request, env) {
       if (!gpu) return new Response("no GPU coins on this pool", { status: 404 });
       return stub(shardFor(request, gpu), true).fetch(request);
     }
+    // Pearl, the GPU's other choice: one shard of its own class, since its
+    // shares are proofs a JavaScript verifier checks rather than nonces the core does.
+    if (url.pathname === "/mine/pearl") {
+      if (!pearlOn(env)) return new Response("no Pearl mining on this pool", { status: 404 });
+      return pearlStub(env).fetch(request);
+    }
     if (url.pathname === "/status") {
       return cached(request, 30, async () => {
         // One shard down is a pool partly down, and said as that: the shards
@@ -260,6 +271,13 @@ async function route(request, env) {
         const down = settled.flatMap((r, i) => (r.status === "rejected" ? [`${shards[i].name}: ${classifyFailure(r.reason).why}`] : []));
         const up = all.filter(Boolean);
         if (!up.length) throw settled[0].reason;
+        // Pearl answers apart: a shard that cannot answer leaves the rest standing.
+        let pearl = null;
+        if (pearlOn(env)) {
+          try { pearl = await (await pearlStub(env).fetch(new Request(`${url.origin}/status`))).json(); }
+          catch (e) { down.push(`pearl-0: ${classifyFailure(e).why}`); }
+        }
+        if (pearl) up.push({ ...pearl, slots: up[0].slots });
         if (down.length) console.error(`[edge] /status: ${down.join("; ")}`);
         return Response.json({
           shards: n, gpuShards: gpu, slots: up[0].slots,
@@ -269,6 +287,9 @@ async function route(request, env) {
           // socket sum (a miner opens a CPU and a GPU socket).
           miners: Math.max(0, ...up.map((s) => s.addresses || 0)),
           hashrate: up.reduce((a, s) => a + (s.hashrate || 0), 0),
+          // Pearl's rate is multiply-accumulates a second, not hashes, so it is
+          // its own figure rather than added into the one above.
+          ...(pearl ? { pearl: { hashrate: pearl.pearl.hashrate, connections: pearl.connections, accepted: pearl.pearl.accepted, forwarded: pearl.pearl.forwarded, upAccepted: pearl.pearl.upAccepted } } : {}),
           perShard: all.map((s) => (s ? s.connections : null)),
           // The fullest shard's tallies against the core's cap: past ~90%,
           // new miners' shares go uncredited and SHARDS should be raised.

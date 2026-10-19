@@ -46,6 +46,7 @@ import { worthPaying } from "./cadence.js";
 import { readerData, readerDecode, READ_MAX } from "./reader.js";
 import { textChunks, loadText } from "./chunks.js";
 import { Transient, RpcError, Endpoints, rpcList, attempt, hostOf } from "./rpc.js";
+import { pearlOn, pearlStub } from "./pearl-env.js";
 export { Transient, RpcError };
 // GladosPayout2 pays each miner in what they chose: $GLADOS on its V2 pair, or
 // tokenized stock through Uniswap V3 (contracts/src/GladosPayout2.sol).
@@ -645,6 +646,15 @@ export class Treasury {
       add(parseWork(text));
       try { choose(JSON.parse(text).rewards); } catch {}
     }));
+    // Pearl miners' work, from their shard's own class, paid in the same epochs
+    // and in each wallet's chosen asset -- PRL itself goes only to the treasury.
+    if (pearlOn(env)) {
+      const r = await pearlStub(env).fetch(new Request("https://pool/work.json"));
+      if (!r.ok) throw new Transient(`shard pearl-0 answered ${r.status}`);
+      const text = await r.text();
+      add(parseWork(text));
+      try { choose(JSON.parse(text).rewards); } catch {}
+    }
     this.choices = choices;
     return total;
   }
