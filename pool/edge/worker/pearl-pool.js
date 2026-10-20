@@ -33,6 +33,12 @@ const MAX_LINE = 262_144;       // a share is ~90 KB of base64
 // into a connection that has just died succeeds locally and arrives nowhere,
 // so whatever is unanswered when the connection goes is queued again.
 const UP_QUEUE = 64, UP_QUEUE_MS = 60_000;
+// **And they survive the object.** A restart -- a deploy rolling out, an
+// eviction -- used to take every owed share with it: the first live test lost
+// its one share for 2Miners exactly so. Each owed share is kept under its own
+// key (one is ~90 KB, and a value holds 128 KiB), deleted once upstream answers
+// it or it is too old to send, and restored oldest first when the object starts.
+const OWED = "owed.";
 
 // The id of a line this pool wrote upstream, without parsing ~90 KB of proof.
 function upId(line) {
@@ -62,6 +68,20 @@ export class PearlPool {
       this.maintAt = Date.now();
       const n = this.room.load(await ctx.storage.get("pearl.record"));
       console.log(`[pearl] ${n} address(es) of work restored`);
+      const owed = await ctx.storage.list({ prefix: OWED });
+      for (const [key, v] of owed) {
+        if (!v || typeof v.line !== "string") continue;
+        const id = upId(v.line);
+        this.upQueue.push({ line: v.line, at: Number(v.at) || 0, key });
+        // The room matches upstream's answers by id: it knows these again, and
+        // never hands out one of their ids to a new share.
+        if (id !== null) { this.room.pendingUp.set(id, { addr: "(restored)", at: Number(v.at) || 0 }); this.room.nextUpId = Math.max(this.room.nextUpId, id + 1); }
+        this.owedSeq = Math.max(this.owedSeq || 0, Number(key.slice(OWED.length)) + 1);
+      }
+      if (this.upQueue.length) {
+        console.log(`[pearl] ${this.upQueue.length} share(s) owed upstream restored; sending them`);
+        await ctx.storage.setAlarm(Date.now() + 1000);
+      }
     });
   }
 
@@ -182,7 +202,21 @@ export class PearlPool {
       if (easier) { try { ws.send(easier); } catch {} }
     }
     try { await this.save(); } catch (e) { console.log(`[pearl] save failed: ${e && e.message}`); }
-    if (this.socks.size > 0) await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
+    // Shares owed with nobody connected (a restart, say): the upstream opens for them alone.
+    if (!this.up.running && this.upHeld()) this.ctx.waitUntil(this.runUp());
+    if (this.socks.size > 0 || this.upHeld()) await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
+  }
+
+  // The storage side of the owed shares. Failures are logged and left: the
+  // share is still held in memory and goes out regardless.
+  owe(entry) {
+    if (entry.key || entry.line.length > 120_000) return;
+    entry.key = OWED + String(this.owedSeq = (this.owedSeq || 0) + 1).padStart(12, "0");
+    this.ctx.waitUntil(this.ctx.storage.put(entry.key, { line: entry.line, at: entry.at }).catch((e) => console.log(`[pearl] an owed share was not stored: ${e && e.message}`)));
+  }
+  paid(entry) {
+    if (!entry || !entry.key) return;
+    this.ctx.waitUntil(this.ctx.storage.delete(entry.key).catch(() => {}));
   }
 
   // -------------------------------------------------------------- maintenance
@@ -228,21 +262,24 @@ export class PearlPool {
   }
 
   // ----------------------------------------------------------------- upstream
-  upSend(line) {
+  // `entry` is a share already owed (its storage key carried along); a bare
+  // line is a new one, stored before anything else happens to it.
+  upSend(line, entry = null) {
+    const e = entry || { line, at: Date.now() };
+    this.owe(e);
     if (this.up.writer && this.up.authorized) {
-      const at = Date.now();
-      this.up.writer.write(new TextEncoder().encode(line)).catch(() => {});
-      const id = upId(line);
+      this.up.writer.write(new TextEncoder().encode(e.line)).catch(() => {});
+      const id = upId(e.line);
       if (id !== null) {
-        this.inFlight.set(id, { line, at });
-        if (this.inFlight.size > 256) this.inFlight.delete(this.inFlight.keys().next().value); // an upstream that answers nothing
-      }
+        this.inFlight.set(id, { line: e.line, at: Date.now(), key: e.key });
+        if (this.inFlight.size > 256) { const [, old] = this.inFlight.entries().next().value; this.inFlight.delete(this.inFlight.keys().next().value); this.paid(old); } // an upstream that answers nothing
+      } else this.paid(e); // no id to be answered by: sent is all it can be
       this.upCount.sent++;
       return;
     }
-    this.upQueue.push({ line, at: Date.now() });
-    this.upCount.queued++;
-    if (this.upQueue.length > UP_QUEUE) { this.upQueue.shift(); this.upCount.lost++; console.log("[pearl] upstream queue full; the oldest waiting share is lost"); }
+    this.upQueue.push(e);
+    if (!entry) this.upCount.queued++;
+    if (this.upQueue.length > UP_QUEUE) { this.paid(this.upQueue.shift()); this.upCount.lost++; console.log("[pearl] upstream queue full; the oldest waiting share is lost"); }
   }
 
   // Shares still owed to upstream and young enough to be worth sending.
@@ -255,9 +292,9 @@ export class PearlPool {
   flushUp() {
     const now = Date.now(), waiting = this.upQueue.splice(0);
     let sent = 0;
-    for (const { line, at } of waiting) {
-      if (now - at > UP_QUEUE_MS) { this.upCount.lost++; continue; }
-      this.upSend(line);
+    for (const e of waiting) {
+      if (now - e.at > UP_QUEUE_MS) { this.upCount.lost++; this.paid(e); continue; }
+      this.upSend(e.line, e);
       sent++;
     }
     if (waiting.length) console.log(`[pearl up] ${sent} share(s) that waited for upstream sent, ${waiting.length - sent} too old`);
@@ -287,7 +324,7 @@ export class PearlPool {
             for (const l of out.log) console.log(l);
             // A job counts as a yes too: an upstream that sends work has taken us.
             if (!this.up.authorized && (out.authorized || out.newJob)) { this.up.authorized = true; this.flushUp(); }
-            if (out.answered !== undefined) { this.inFlight.delete(out.answered); this.upCount.answered++; }
+            if (out.answered !== undefined) { this.paid(this.inFlight.get(out.answered)); this.inFlight.delete(out.answered); this.upCount.answered++; }
             if (out.newJob) this.broadcast();
             if (this.socks.size === 0 && !this.upHeld()) break read; // owed nothing, and no one to mine for
           }
@@ -319,7 +356,7 @@ export class PearlPool {
       this.inFlight.clear();
       this.upCount.sent -= back.length;
       this.upQueue.unshift(...back);
-      while (this.upQueue.length > UP_QUEUE) { this.upQueue.shift(); this.upCount.lost++; }
+      while (this.upQueue.length > UP_QUEUE) { this.paid(this.upQueue.shift()); this.upCount.lost++; }
       console.log(`[pearl up] ${back.length} share(s) upstream never answered, queued again`);
     }
     try { this.up.writer && this.up.writer.releaseLock(); } catch {}

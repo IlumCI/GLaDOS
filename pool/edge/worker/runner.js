@@ -1168,8 +1168,15 @@ export class Treasury {
     // and everything behind it waits), or "paused" (a backoff is running).
     const health = this.health || s.health || {};
     const rpcOut = rpcAllDown(health);
+    // `down` names every dependency refusing, the primary 4663 endpoint ("rpc",
+    // its old name) included, for the operator. The status word is the payouts'
+    // own, and the 4663 endpoints are one dependency for it: one refusing while
+    // another answers is not degraded -- the status page called it "rpc
+    // unreachable" on 2026-10-20 while the fallback paid as ever.
+    const isRpc = (d) => d === "rpc" || d.startsWith("rpc:");
     const down = Object.entries(health).filter(([d, h]) => isDown(h) && (rpcOut || !d.startsWith("rpc:"))).map(([d]) => d);
-    const status = s.paused && s.paused.until > this.now() ? "paused" : down.length ? "degraded" : "ok";
+    const hurt = down.filter((d) => rpcOut || !isRpc(d));
+    const status = s.paused && s.paused.until > this.now() ? "paused" : hurt.length ? "degraded" : "ok";
     return { status, down, mode: this.mode, phase: s.phase, paused: s.paused || null, epochs: s.epochs, contract: s.contract,
              rpc: this.rpcs.describe(), health, incidents: (s.incidents || []).slice(-10),
              orphans: (s.orphans || []).map((o) => ({ id: o.id, rvn: Number(o.sats) / 1e8, status: o.status })),

@@ -144,6 +144,59 @@ const A = "0x" + "a1".repeat(20), B = "0x" + "b2".repeat(20);
   c.close();
 }
 
+// ================================================================ a restart with a share owed
+// The first live test lost its one share for 2Miners to exactly this: the
+// shard restarted (a deploy rolling out) while the share was owed.
+{
+  const up = upstream();
+  const s = shard();
+  const { c, job } = await miner(s, A);
+  up.up = false;
+  up.sockets.at(-1).kill();
+  await sim.sleep(30);
+  const r = await submit(c, job.job, v.plain_proof_b64);
+  await sim.sleep(50);
+  const st = s.env.PEARL_POOL.storage("pearl-0");
+  const keys = () => [...st.data.keys()].filter((k) => k.startsWith("owed."));
+  ok(r && r.verdict === "accepted" && keys().length === 1, `a share owed while upstream is down is stored (${keys().length} key)`);
+  // The object goes, its miner with it; a fresh one starts with nobody connected.
+  s.env.PEARL_POOL.evict("pearl-0");
+  c.vanish();
+  up.up = true;
+  // Restored, and the alarm opens the upstream for it alone. (Not awaited to the
+  // end: the upstream loop runs until nothing is owed, by design.)
+  const o = s.env.PEARL_POOL.instance("pearl-0");
+  await o.ready;
+  await o.obj.alarm();
+  for (let i = 0; i < 80 && up.submits.length === 0; i++) await sim.sleep(50);
+  for (let i = 0; i < 40 && keys().length; i++) await sim.sleep(50);
+  ok(up.submits.length === 1 && up.submits[0].params.plain_proof === v.plain_proof_b64, `after the restart, with no miner connected, the owed share reaches upstream once (${up.submits.length})`);
+  ok(keys().length === 0, `and once answered its stored copy is gone (${keys().length} left)`);
+  const st2 = await s.status();
+  ok(st2.pearl.upAccepted === 1 || st2.pearl.answered === 1, `upstream's answer is matched to it after the restart (${JSON.stringify({ answered: st2.pearl.answered, upAccepted: st2.pearl.upAccepted })})`);
+}
+{
+  // Too old by the time it could go: dropped, and its stored copy with it.
+  const up = upstream();
+  const s = shard();
+  const { c, job } = await miner(s, B);
+  up.up = false;
+  up.sockets.at(-1).kill();
+  await sim.sleep(30);
+  await submit(c, job.job, later.plain_proof_b64);
+  await sim.sleep(50);
+  const st = s.env.PEARL_POOL.storage("pearl-0");
+  for (const [k, val] of st.data) if (k.startsWith("owed.")) st.data.set(k, { ...val, at: val.at - 120_000 });
+  s.env.PEARL_POOL.evict("pearl-0");
+  c.vanish();
+  up.up = true;
+  const o2 = s.env.PEARL_POOL.instance("pearl-0");
+  await o2.ready;
+  await o2.obj.alarm();
+  for (let i = 0; i < 60 && [...st.data.keys()].some((k) => k.startsWith("owed.")); i++) await sim.sleep(50);
+  ok(up.submits.length === 0 && ![...st.data.keys()].some((k) => k.startsWith("owed.")), "a restored share too old to send is not sent, and its stored copy is deleted");
+}
+
 // ================================================================ clients
 {
   upstream();

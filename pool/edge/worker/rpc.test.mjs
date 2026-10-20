@@ -127,8 +127,8 @@ const chainId = (body) => !Array.isArray(body) && body.method === "eth_chainId";
   const s = await t.summary().catch(() => null);
   ok(t.health && t.health.rpc && t.health.rpc.fail && t.health["rpc:b.test"] && t.health["rpc:b.test"].ok,
      "health records the primary under its old name and the fallback by host");
-  ok(s && s.rpc.using === "b.test" && s.status === "degraded" && s.down.includes("rpc"),
-     "/treasury says which endpoint is in use, and that the primary is down while the fallback pays");
+  ok(s && s.rpc.using === "b.test" && s.status === "ok" && s.down.includes("rpc"),
+     "/treasury says which endpoint is in use and that the primary is down -- and, the fallback paying, the payouts are ok");
 }
 
 {
@@ -178,6 +178,20 @@ ok(classifyFailure(Object.assign(new Error("x"), { overloaded: true })).why.incl
 ok(classifyFailure(new Error("ledger is missing a chunk; refusing to read a partial value")).why.includes("share log"),
    "a share log that would not load is named, not called an internal error");
 ok(!/secret|key/i.test(classifyFailure(new Error("secret key 0xabc leaked")).why), "an unknown error's message is never echoed");
+
+// --- the status word, with one endpoint refusing --------------------------------------------
+{
+  // Live 2026-10-20: the first endpoint rate-limited, the second answering, and
+  // the status page called the payouts degraded ("rpc unreachable").
+  const st = new Map();
+  const t = new Treasury({ env: {}, ctx: { storage: { get: async (k) => st.get(k), put: async () => {}, delete: async () => {} } } }, { now: () => 2000 });
+  t.health = { rpc: { ok: 1000, fail: 1500, why: "answered 429", since: 1500 }, "rpc:robinhood-rpc.publicnode.com": { ok: 1900 }, changenow: { ok: 1900 } };
+  const s1 = await t.summary();
+  ok(s1.status === "ok" && s1.down.includes("rpc"), `the first 4663 endpoint refusing while another answers: ok, the refusing one still named (${s1.status}, ${JSON.stringify(s1.down)})`);
+  t.health = { rpc: { ok: 1000, fail: 1500, since: 1500 }, "rpc:robinhood-rpc.publicnode.com": { ok: 1000, fail: 1600, since: 1600 } };
+  const s2 = await t.summary();
+  ok(s2.status === "degraded" && s2.down.includes("rpc"), "every 4663 endpoint refusing: degraded");
+}
 
 // --- found loose by mutation testing ---------------------------------------------------
 
