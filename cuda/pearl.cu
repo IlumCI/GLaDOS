@@ -355,10 +355,268 @@ __global__ void __launch_bounds__(256) k_jackpot_tc(const uint32_t *__restrict__
     }
 }
 
+// The same jackpot, fed better (v2). The sums, the fold and the tile layout
+// are k_jackpot_tc's exactly; what changes is how the operands reach the
+// tensor cores, where the first version left them waiting:
+//
+//   - k is staged 64 values at a time, two stages in flight: the next stage's
+//     copy from global memory (cp.async, no registers on the way) runs while
+//     this one multiplies. The fold still comes every 128 values, every other
+//     stage. Two 20 KB stages fit two blocks on an Ampere SM.
+//   - fragments come out of shared memory by ldmatrix, four 8 x 16-byte pieces
+//     an instruction, instead of one 32-bit load per register; rows padded to
+//     80 bytes, so the eight rows of a piece land in distinct banks.
+//   - blocks are numbered in groups of eight block-rows, so the blocks running
+//     at once share their A and B in L2 instead of each streaming its own B
+//     (a round read B from memory once per block-row before).
+__device__ inline uint32_t smem_u32(const void *p) { return (uint32_t)__cvta_generic_to_shared(p); }
+__device__ inline void cp_async16(void *dst, const void *src) {
+#if __CUDA_ARCH__ >= 800
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(smem_u32(dst)), "l"(src));
+#endif
+}
+__device__ inline void cp_commit() {
+#if __CUDA_ARCH__ >= 800
+    asm volatile("cp.async.commit_group;\n" ::);
+#endif
+}
+template <int N> __device__ inline void cp_wait() {
+#if __CUDA_ARCH__ >= 800
+    asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
+#endif
+}
+__device__ inline void ldsm_x4(uint32_t &r0, uint32_t &r1, uint32_t &r2, uint32_t &r3, const void *p) {
+#if __CUDA_ARCH__ >= 800
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n" : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3) : "r"(smem_u32(p)));
+#endif
+}
+
+__global__ void __launch_bounds__(256, 2) k_jackpot_tc2(const uint32_t *__restrict__ A, const uint32_t *__restrict__ B, int m, int n, int kw,
+                                                       W8 key, W8 bound, uint32_t *hits, uint32_t *dbg) {
+    constexpr int BM = 128, BN = 128, SK = 16, RS = 20, GROUP = 8; // SK words = 64 values a stage; RS = padded row stride in words
+    __shared__ __align__(16) uint32_t sA[2][BM * RS], sB[2][BN * RS];
+    __shared__ uint32_t jack[64 * 16];
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int wm = warp >> 1, wn = warp & 1;
+    // Grouped block order: GROUP block-rows walked column by column.
+    const int nbm = m / BM, nbn = n / BN, pid = blockIdx.x;
+    const int first = (pid / (GROUP * nbn)) * GROUP, gsz = min(nbm - first, GROUP);
+    const int by = first + (pid % (GROUP * nbn)) % gsz, bx = (pid % (GROUP * nbn)) / gsz;
+    const int row0 = by * BM, col0 = bx * BN;
+    for (int i = threadIdx.x; i < 64 * 16; i += 256) jack[i] = 0;
+    int c[2][8][4];
+#pragma unroll
+    for (int a = 0; a < 2; a++)
+#pragma unroll
+        for (int b = 0; b < 8; b++) c[a][b][0] = c[a][b][1] = c[a][b][2] = c[a][b][3] = 0;
+    // A stage: 128 rows x 64 bytes of each matrix, four 16-byte copies a row; two a thread a matrix.
+    auto stage = [&](int buf, int st) {
+#pragma unroll
+        for (int j = 0; j < 2; j++) {
+            const int i = threadIdx.x + j * 256, r = i >> 2, q = (i & 3) * 4;
+            cp_async16(&sA[buf][r * RS + q], &A[(size_t)(row0 + r) * kw + st * SK + q]);
+            cp_async16(&sB[buf][r * RS + q], &B[(size_t)(col0 + r) * kw + st * SK + q]);
+        }
+        cp_commit();
+    };
+    const int stages = kw / SK;
+    stage(0, 0);
+    for (int st = 0; st < stages; st++) {
+        const int buf = st & 1;
+        // One barrier a stage: this stage landed for every thread, and every
+        // thread is done reading the other buffer, which the next copy refills.
+        cp_wait<0>();
+        __syncthreads();
+        if (st + 1 < stages) stage(buf ^ 1, st + 1);
+        const uint32_t *As = sA[buf], *Bs = sB[buf];
+        const int mi = lane & 7, mj = lane >> 3; // this lane's row of piece mj for ldmatrix
+#pragma unroll
+        for (int s = 0; s < SK / 8; s++) { // two k32 steps a stage
+            const int kb = s * 8;          // word offset of this k32 step in the row
+            uint32_t a[2][4], b[8][2];
+#pragma unroll
+            for (int mb = 0; mb < 2; mb++) {
+                const int r = wm * 32 + mb * 16 + (mj & 1) * 8 + mi;
+                ldsm_x4(a[mb][0], a[mb][1], a[mb][2], a[mb][3], &As[r * RS + kb + (mj >> 1) * 4]);
+            }
+#pragma unroll
+            for (int nb = 0; nb < 8; nb += 2) {
+                const int col = wn * 64 + (nb + (mj >> 1)) * 8 + mi;
+                ldsm_x4(b[nb][0], b[nb][1], b[nb + 1][0], b[nb + 1][1], &Bs[col * RS + kb + (mj & 1) * 4]);
+            }
+#pragma unroll
+            for (int mb = 0; mb < 2; mb++)
+#pragma unroll
+                for (int nb = 0; nb < 8; nb++) mma_s8(c[mb][nb], a[mb][0], a[mb][1], a[mb][2], a[mb][3], b[nb][0], b[nb][1]);
+        }
+        if (st & 1) {    // 128 values since the last fold: the rank
+            const int tid = (st >> 1) % 16;
+#pragma unroll
+            for (int mb = 0; mb < 2; mb++)
+#pragma unroll
+                for (int tc = 0; tc < 4; tc++) {
+                    uint32_t x = 0;
+#pragma unroll
+                    for (int e = 0; e < 4; e++) x ^= (uint32_t)c[mb][2 * tc][e] ^ (uint32_t)c[mb][2 * tc + 1][e];
+#pragma unroll
+                    for (int o = 16; o > 0; o >>= 1) x ^= __shfl_xor_sync(0xffffffffu, x, o);
+                    if (lane == 0) {
+                        const int tile = (wm * 2 + mb) * 8 + (wn * 4 + tc);
+                        const uint32_t j0 = jack[tile * 16 + tid];
+                        jack[tile * 16 + tid] = ((j0 << 13) | (j0 >> 19)) ^ x;
+                    }
+                }
+        }
+    }
+    __syncthreads();
+    if (threadIdx.x < 64) {
+        const int tile = threadIdx.x;
+        uint32_t h[8];
+        compress(key.w, &jack[tile * 16], 0, 64, CHUNK_START | CHUNK_END | ROOT | KEYED, h);
+        const uint32_t tr = by * 8 + tile / 8, tc = bx * 8 + tile % 8;
+        if (dbg) for (int i = 0; i < 8; i++) dbg[(tr * (n / 16) + tc) * 8 + i] = h[i];
+        bool under = true;
+        for (int i = 7; i >= 0; i--) {
+            if (h[i] < bound.w[i]) { under = true; break; }
+            if (h[i] > bound.w[i]) { under = false; break; }
+        }
+        if (under) {
+            uint32_t at = atomicAdd(&hits[0], 1u);
+            if (at < HIT_CAP) { hits[2 + 2 * at] = tr; hits[3 + 2 * at] = tc; }
+        }
+    }
+}
+
+// The same product with three stages in flight and one barrier a stage. The
+// rows are 64 bytes with no padding: each 16-byte piece q of row r sits at
+// q ^ ((r >> 1) & 3), so the eight rows an ldmatrix reads fall in eight banks.
+// The jackpot words live in registers -- after the shuffle every lane holds a
+// fold's value, and lane L keeps word L % 16 of the tiles of its half-warp --
+// and go to shared memory once, at the end, over the stage buffers. Three
+// 16 KB stages are 48 KB, so two blocks still fit an SM.
+__device__ __forceinline__ int swz(int r, int q) { return r * 16 + ((q ^ ((r >> 1) & 3)) << 2); }
+
+__global__ void __launch_bounds__(256, 2) k_jackpot_tc3(const uint32_t *__restrict__ A, const uint32_t *__restrict__ B, int m, int n, int kw,
+                                                       W8 key, W8 bound, uint32_t *hits, uint32_t *dbg) {
+    constexpr int BM = 128, BN = 128, SK = 16, NS = 3, GROUP = 8;
+    __shared__ __align__(128) uint32_t sA[NS][BM * SK], sB[NS][BN * SK];
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int wm = warp >> 1, wn = warp & 1;
+    const int nbm = m / BM, nbn = n / BN, pid = blockIdx.x;
+    const int first = (pid / (GROUP * nbn)) * GROUP, gsz = min(nbm - first, GROUP);
+    const int by = first + (pid % (GROUP * nbn)) % gsz, bx = (pid % (GROUP * nbn)) / gsz;
+    const int row0 = by * BM, col0 = bx * BN;
+    int c[2][8][4];
+#pragma unroll
+    for (int a = 0; a < 2; a++)
+#pragma unroll
+        for (int b = 0; b < 8; b++) c[a][b][0] = c[a][b][1] = c[a][b][2] = c[a][b][3] = 0;
+    uint32_t jr[4] = {0, 0, 0, 0}; // word lane % 16 of this half-warp's four tiles
+    auto stage = [&](int buf, int st) {
+#pragma unroll
+        for (int j = 0; j < 2; j++) {
+            const int i = threadIdx.x + j * 256, r = i >> 2, q = i & 3;
+            cp_async16(&sA[buf][swz(r, q)], &A[(size_t)(row0 + r) * kw + st * SK + q * 4]);
+            cp_async16(&sB[buf][swz(r, q)], &B[(size_t)(col0 + r) * kw + st * SK + q * 4]);
+        }
+        cp_commit();
+    };
+    const int stages = kw / SK;
+    stage(0, 0);
+    if (stages > 1) stage(1, 1); else cp_commit();
+    for (int st = 0; st < stages; st++) {
+        const int buf = st % NS;
+        cp_wait<1>();     // stage st is here; st + 1 may still be on its way
+        __syncthreads();  // for every thread, and the buffer of st - 1 is free
+        if (st + 2 < stages) stage((st + 2) % NS, st + 2); else cp_commit();
+        const uint32_t *As = sA[buf], *Bs = sB[buf];
+        const int mi = lane & 7, mj = lane >> 3;
+#pragma unroll
+        for (int s = 0; s < SK / 8; s++) {
+            uint32_t a[2][4], b[8][2];
+#pragma unroll
+            for (int mb = 0; mb < 2; mb++) {
+                const int r = wm * 32 + mb * 16 + (mj & 1) * 8 + mi;
+                ldsm_x4(a[mb][0], a[mb][1], a[mb][2], a[mb][3], &As[swz(r, 2 * s + (mj >> 1))]);
+            }
+#pragma unroll
+            for (int nb = 0; nb < 8; nb += 2) {
+                const int col = wn * 64 + (nb + (mj >> 1)) * 8 + mi;
+                ldsm_x4(b[nb][0], b[nb][1], b[nb + 1][0], b[nb + 1][1], &Bs[swz(col, 2 * s + (mj & 1))]);
+            }
+#pragma unroll
+            for (int mb = 0; mb < 2; mb++)
+#pragma unroll
+                for (int nb = 0; nb < 8; nb++) mma_s8(c[mb][nb], a[mb][0], a[mb][1], a[mb][2], a[mb][3], b[nb][0], b[nb][1]);
+        }
+        if (st & 1) { // 128 values since the last fold: the rank
+            const int tid = (st >> 1) % 16;
+#pragma unroll
+            for (int mb = 0; mb < 2; mb++)
+#pragma unroll
+                for (int tc = 0; tc < 4; tc++) {
+                    uint32_t x = 0;
+#pragma unroll
+                    for (int e = 0; e < 4; e++) x ^= (uint32_t)c[mb][2 * tc][e] ^ (uint32_t)c[mb][2 * tc + 1][e];
+#pragma unroll
+                    for (int o = 16; o > 0; o >>= 1) x ^= __shfl_xor_sync(0xffffffffu, x, o);
+                    const int tt = mb * 4 + tc;
+                    if ((lane & 15) == tid && (lane >> 4) == (tt & 1)) jr[tt >> 1] = ((jr[tt >> 1] << 13) | (jr[tt >> 1] >> 19)) ^ x;
+                }
+        }
+    }
+    cp_wait<0>();
+    __syncthreads(); // the stage buffers are free: the jackpot words go there
+    uint32_t *jack = sA[0];
+#pragma unroll
+    for (int tt = 0; tt < 8; tt++)
+        if ((lane >> 4) == (tt & 1)) {
+            const int mb = tt >> 2, tc = tt & 3;
+            jack[((wm * 2 + mb) * 8 + (wn * 4 + tc)) * 16 + (lane & 15)] = jr[tt >> 1];
+        }
+    __syncthreads();
+    if (threadIdx.x < 64) {
+        const int tile = threadIdx.x;
+        uint32_t h[8];
+        compress(key.w, &jack[tile * 16], 0, 64, CHUNK_START | CHUNK_END | ROOT | KEYED, h);
+        const uint32_t tr = by * 8 + tile / 8, tc = bx * 8 + tile % 8;
+        if (dbg) for (int i = 0; i < 8; i++) dbg[(tr * (n / 16) + tc) * 8 + i] = h[i];
+        bool under = true;
+        for (int i = 7; i >= 0; i--) {
+            if (h[i] < bound.w[i]) { under = true; break; }
+            if (h[i] > bound.w[i]) { under = false; break; }
+        }
+        if (under) {
+            uint32_t at = atomicAdd(&hits[0], 1u);
+            if (at < HIT_CAP) { hits[2 + 2 * at] = tr; hits[3 + 2 * at] = tc; }
+        }
+    }
+}
+
 // --------------------------------------------------------------------- host --
 // Tensor cores where there are int8 mma's of this shape (sm_80+); DP4A
-// everywhere else. PEARL_KERNEL=dp4a forces the fallback, for comparing them.
+// everywhere else. PEARL_KERNEL=dp4a forces the fallback, and PEARL_KERNEL=tc1 or
+// tc2 an earlier tensor-core kernel, for comparing them. On an RTX 3050 laptop
+// a round's product took 13.2 ms with tc1, 12.9 with tc2 as first written,
+// and 10.2 with tc3 (three stages, one barrier each); the round, 15.8 -> 12.6.
 static bool use_tc = false;
+static int tc_version = 3;
+// PEARL_PROFILE=1: each round's phases timed on the device, to stderr, for
+// tuning. Off, it costs nothing: no events are recorded.
+static bool profiling = false;
+struct Phases {
+    cudaEvent_t e[6];
+    void init() { for (auto &x : e) cudaEventCreate(&x); }
+    void mark(int i) { if (profiling) cudaEventRecord(e[i]); }
+    void report() {
+        if (!profiling) return;
+        cudaEventSynchronize(e[5]);
+        float ms[5];
+        for (int i = 0; i < 5; i++) cudaEventElapsedTime(&ms[i], e[i], e[i + 1]);
+        fprintf(stderr, "profile draw %.2f commit %.2f host %.2f noise %.2f jackpot %.2f ms\n", ms[0], ms[1], ms[2], ms[3], ms[4]);
+    }
+};
+static Phases phases;
 #define CK(x) do { cudaError_t e_ = (x); if (e_ != cudaSuccess) { printf("error %s at %s:%d\n", cudaGetErrorString(e_), __FILE__, __LINE__); fflush(stdout); exit(2); } } while (0)
 
 struct Level { uint32_t off, len; };
@@ -424,10 +682,13 @@ struct Ctx {
         blake3_small(nullptr, hc, 128, jobKey);
         W8 jk; le_words(jobKey, jk.w, 8);
         uint32_t na = (uint32_t)((size_t)m * kw), nb = (uint32_t)((size_t)n * kw);
+        phases.mark(0);
         k_draw<<<(na + 255) / 256, 256>>>(Araw, na, s0, s1);
         k_draw<<<(nb + 255) / 256, 256>>>(Braw, nb, s0 ^ 0x9e3779b9u, s1 ^ 0x7f4a7c15u);
+        phases.mark(1);
         commit(Araw, treeA, tA, jk, rootA);
         commit(Braw, treeB, tB, jk, rootB);
+        phases.mark(2);
         // The v3 seed chain: each root bound to its dimension, then chained.
         auto bind = [](const uint8_t root[32], uint32_t dim, const uint8_t salt[32], uint8_t out[32]) {
             uint8_t b[64] = {0}; memcpy(b, root, 32); b[32] = dim; b[33] = dim >> 8; b[34] = dim >> 16; b[35] = dim >> 24;
@@ -441,6 +702,7 @@ struct Ctx {
         perms(LABEL_A, aSeed, k, rank, pa); perms(LABEL_B, bSeed, k, rank, pb);
         CK(cudaMemcpy(permA, pa.data(), k * 4, cudaMemcpyHostToDevice));
         CK(cudaMemcpy(permB, pb.data(), k * 4, cudaMemcpyHostToDevice));
+        phases.mark(3);
         W8 ka, kb, la, lb; le_words(aSeed, ka.w, 8); le_words(bSeed, kb.w, 8); le_words(LABEL_A, la.w, 8); le_words(LABEL_B, lb.w, 8);
         k_noise_rows<<<(m * rank / 32 + 63) / 64, 64>>>(EA, m * rank / 32, ka, la);
         k_noise_rows<<<(n * rank / 32 + 63) / 64, 64>>>(EB, n * rank / 32, kb, lb);
@@ -449,13 +711,20 @@ struct Ctx {
         W8 bound; for (int i = 0; i < 8; i++) bound.w[i] = 0xffffffffu;
         for (int b = 0; b < bits; b++) { int bit = 255 - b; bound.w[bit >> 5] &= ~(1u << (bit & 31)); }
         CK(cudaMemset(hits, 0, 8));
+        phases.mark(4);
         if (use_tc && m % 128 == 0 && n % 128 == 0 && rank == 128)
-            k_jackpot_tc<<<dim3(n / 128, m / 128), 256>>>(Anz, Bnz, n, kw, ka, bound, hits, dbg);
+        {
+            if (tc_version == 3) k_jackpot_tc3<<<(m / 128) * (n / 128), 256>>>(Anz, Bnz, m, n, kw, ka, bound, hits, dbg);
+            else if (tc_version == 2) k_jackpot_tc2<<<(m / 128) * (n / 128), 256>>>(Anz, Bnz, m, n, kw, ka, bound, hits, dbg);
+            else k_jackpot_tc<<<dim3(n / 128, m / 128), 256>>>(Anz, Bnz, n, kw, ka, bound, hits, dbg);
+        }
         else
             k_jackpot<4, 4><<<dim3(n / 64, m / 64), 256>>>(Anz, Bnz, n, kw, rank / 4, ka, bound, hits, dbg);
         CK(cudaGetLastError());
+        phases.mark(5);
         uint32_t count = 0;
         CK(cudaMemcpy(&count, hits, 4, cudaMemcpyDeviceToHost));
+        phases.report();
         return count;
     }
 
@@ -535,8 +804,12 @@ int main() {
     CK(cudaGetDeviceProperties(&prop, 0));
     const char *force = getenv("PEARL_KERNEL");
     use_tc = prop.major >= 8 && !(force && !strcmp(force, "dp4a"));
+    if (force && !strcmp(force, "tc1")) tc_version = 1;
+    if (force && !strcmp(force, "tc2")) tc_version = 2;
+    profiling = getenv("PEARL_PROFILE") != nullptr;
+    phases.init();
     for (char *p = prop.name; *p; p++) if (*p == ' ') *p = '_'; // one word on the ready line
-    printf("ready %d %d %d %d %s %s sm_%d%d\n", ctx.m, ctx.n, K, RANK, use_tc ? "tensor" : "dp4a", prop.name, prop.major, prop.minor);
+    printf("ready %d %d %d %d %s %s sm_%d%d\n", ctx.m, ctx.n, K, RANK, use_tc ? (tc_version == 3 ? "tensor3" : tc_version == 2 ? "tensor2" : "tensor") : "dp4a", prop.name, prop.major, prop.minor);
     fflush(stdout);
 
     std::random_device rd;
