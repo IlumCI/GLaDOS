@@ -37,17 +37,22 @@ function upstream() {
         while ((nl = buf.indexOf("\n")) >= 0) {
           const m = JSON.parse(buf.slice(0, nl)); buf = buf.slice(nl + 1);
           if (m.method === "mining.authorize") {
+            if (up.mode === "mute") continue;
             if (up.mode === "junk") { raw("}{\nnull\n[1,2]\n" + JSON.stringify({ method: "mining.notify", params: { job_id: 5, header: "zz" } }) + "\n"); }
             say({ id: m.id, result: true, error: null });
             say({ id: null, method: "mining.notify", params: { job_id: "u1", header: up.header, target: EASY, height: 7 } });
           } else if (m.method === "mining.submit") {
             up.submits.push(m);
-            if (up.mode !== "silent") say({ id: m.id, result: true, error: null });
+            if (up.mode !== "silent" && up.mode !== "mute") say({ id: m.id, result: true, error: null });
           }
         }
       },
     });
-    const s = { readable, writable, raw, close() { try { ctrl.close(); } catch {} }, kill() { try { ctrl.error(new Error("Network connection lost.")); } catch {} } };
+    // "halfclose": our close() ends only our side, and upstream keeps talking --
+    // as 2Miners does: it goes on sending jobs to a connection we have closed.
+    // "mute": the line stays up and nothing comes down it, ever.
+    let n = 0;
+    const s = { readable, writable, raw, notify() { say({ id: null, method: "mining.notify", params: { job_id: `u${++n + 1}`, header: up.header, target: EASY, height: 7 } }); }, close() { if (up.mode !== "halfclose") { try { ctrl.close(); } catch {} } }, kill() { try { ctrl.error(new Error("Network connection lost.")); } catch {} } };
     up.sockets.push(s);
     return s;
   };
@@ -95,6 +100,77 @@ const A = "0x" + "a1".repeat(20), B = "0x" + "b2".repeat(20);
   const st2 = await s.status();
   ok(up.submits.length === 2 && up.submits[1].params.plain_proof === up.submits[0].params.plain_proof && st2.pearl.inFlight === 0 && st2.pearl.answered === 1, `the connection drops: the unanswered share is sent again on the next one, and answered (${up.submits.length} sends, answered ${st2.pearl.answered})`);
   ok(st2.pearl.sent === 1, `and it is counted sent once, not twice (${st2.pearl.sent})`);
+  c.close();
+}
+
+// ================================================================ an upstream that talks on after we close
+// The live acceptance test's three shares for 2Miners never left the shard:
+// the last miner of an earlier test left, the shard closed its upstream, and
+// 2Miners went on sending jobs down it. The loop reading that connection lived
+// on with no writer behind it; it took each job as a fresh authorize, so new
+// miners mined real jobs, and every share for upstream waited for a writer
+// that was never coming.
+{
+  const up = upstream();
+  up.mode = "halfclose";
+  const s = shard();
+  const a = await miner(s, A);
+  a.c.close();
+  await sim.sleep(20);
+  const b = await miner(s, B);
+  up.sockets[0].notify(); // the closed connection's upstream, still talking
+  await sim.sleep(20);
+  const r = await submit(b.c, b.job.job, v.plain_proof_b64);
+  for (let i = 0; i < 60 && up.submits.length === 0; i++) await sim.sleep(100);
+  const st = await s.status();
+  ok(r && r.verdict === "accepted" && up.submits.length === 1, `the last miner leaves, upstream talks on, a new miner's share still reaches it (${up.submits.length} sent, waiting ${st.pearl.waiting})`);
+  ok(st.pearl.upstream === "authorized", `and /status says the upstream is authorized (${st.pearl.upstream})`);
+  b.c.close();
+}
+{
+  // A line that goes quiet without closing: 2Miners sends a job every few
+  // seconds, so a minute and a half of nothing is a dead line. Here the
+  // shard's patience is cut to 300 ms.
+  const up = upstream();
+  const s = shard({ PEARL_UP_SILENCE_MS: "300" });
+  const { c, job } = await miner(s, A);
+  up.mode = "mute";
+  const before = up.sockets.length;
+  for (let i = 0; i < 100 && up.sockets.length === before; i++) await sim.sleep(50);
+  ok(up.sockets.length > before && logs.some((l) => /upstream silent/.test(l)), `an upstream that goes quiet is dropped and called again (${up.sockets.length - before} new)`);
+  const r = await submit(c, job.job, v.plain_proof_b64);
+  await sim.sleep(50);
+  ok(r && r.verdict === "accepted" && (await s.status()).pearl.upstream !== "authorized", "a share while it will not authorize is held, and /status does not call it authorized");
+  up.mode = "ok";
+  for (let i = 0; i < 300 && up.submits.length === 0; i++) await sim.sleep(50);
+  for (let i = 0; i < 40 && (await s.status()).pearl.inFlight; i++) await sim.sleep(50);
+  ok(up.submits.length === 1 && up.submits[0].params.plain_proof === v.plain_proof_b64, `once it answers again the held share goes (${up.submits.length})`);
+  c.close();
+}
+{
+  // A share's age is from when it was found: sending it again does not make it
+  // younger. Found 58.5 s ago while upstream was down, sent when it came back,
+  // never answered, the line dies: by the next connection it is past a minute.
+  const up = upstream();
+  const s = shard();
+  const { c, job } = await miner(s, A);
+  up.up = false;
+  up.sockets.at(-1).kill();
+  await sim.sleep(30);
+  await submit(c, job.job, v.plain_proof_b64);
+  const o = s.env.PEARL_POOL.live.get("pearl-0").obj;
+  // Back, but holding its authorize until the share is 58.5 s old.
+  up.mode = "mute";
+  const n0 = up.sockets.length;
+  up.up = true;
+  for (let i = 0; i < 200 && up.sockets.length === n0; i++) await sim.sleep(50);
+  for (const e of o.upQueue) e.at = Date.now() - 58_500;
+  up.sockets.at(-1).raw(JSON.stringify({ id: 1, result: true, error: null }) + "\n");
+  for (let i = 0; i < 60 && up.submits.length === 0; i++) await sim.sleep(20);
+  up.mode = "silent";
+  up.sockets.at(-1).kill();
+  for (let i = 0; i < 60 && (await s.status()).pearl.lost === 0; i++) await sim.sleep(100);
+  ok((await s.status()).pearl.lost === 1 && up.submits.length === 1, `a share sent at 58 s and never answered is not sent again past a minute (sends ${up.submits.length})`);
   c.close();
 }
 

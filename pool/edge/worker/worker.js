@@ -375,7 +375,7 @@ async function route(request, env) {
           hashrate: up.reduce((a, s) => a + (s.hashrate || 0), 0),
           // Pearl's rate is multiply-accumulates a second, not hashes, so it is
           // its own figure rather than added into the one above.
-          ...(pearl ? { pearl: { hashrate: pearl.pearl.hashrate, connections: pearl.connections, accepted: pearl.pearl.accepted, forwarded: pearl.pearl.forwarded, sent: pearl.pearl.sent, answered: pearl.pearl.answered, waiting: pearl.pearl.waiting, lost: pearl.pearl.lost, upAccepted: pearl.pearl.upAccepted } } : {}),
+          ...(pearl ? { pearl: { hashrate: pearl.pearl.hashrate, connections: pearl.connections, accepted: pearl.pearl.accepted, forwarded: pearl.pearl.forwarded, sent: pearl.pearl.sent, answered: pearl.pearl.answered, waiting: pearl.pearl.waiting, lost: pearl.pearl.lost, upAccepted: pearl.pearl.upAccepted, upRejected: pearl.pearl.upRejected, inFlight: pearl.pearl.inFlight, upstream: pearl.pearl.upstream, upLineAgoS: pearl.pearl.upLineAgoS, reconnects: pearl.pearl.reconnects } } : {}),
           perShard: all.map((s) => (s ? s.connections : null)),
           // Seconds since each shard's alarm last ran: its clock, visible.
           alarmAgoS: all.map((s) => (s && Number.isFinite(s.alarmAgoS) ? s.alarmAgoS : null)),

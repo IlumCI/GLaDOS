@@ -39,11 +39,20 @@ const UP_QUEUE = 64, UP_QUEUE_MS = 60_000;
 // key (one is ~90 KB, and a value holds 128 KiB), deleted once upstream answers
 // it or it is too old to send, and restored oldest first when the object starts.
 const OWED = "owed.";
+// 2Miners sends a job every few seconds. An upstream that has said nothing for
+// this long -- no answer to the authorize, no job -- is a dead line, open or not.
+const UP_SILENCE_MS = 90_000;
 
 // The id of a line this pool wrote upstream, without parsing ~90 KB of proof.
 function upId(line) {
   const m = /^\{"id":(\d+),/.exec(line);
   return m ? Number(m[1]) : null;
+}
+
+// `p`, or `why` thrown once `ms` have passed without it.
+function within(p, ms, why) {
+  let t;
+  return Promise.race([p, new Promise((_, no) => { t = setTimeout(() => no(new Error(why)), ms); })]).finally(() => clearTimeout(t));
 }
 
 export class PearlPool {
@@ -58,7 +67,11 @@ export class PearlPool {
     this.lastSeen = new Map(); // WebSocket -> last inbound
     this.rate = new Map();     // WebSocket -> the miner's reported MAC/s
     this.nextId = 1;
-    this.up = { sock: null, writer: null, running: false, authorized: false };
+    // `conn` is the one upstream connection the pool writes to: { sock, writer,
+    // reader, authorized }. A loop reads only its own and stops once it is not
+    // this one; `gen` retires a whole loop the alarm finds stuck.
+    this.up = { conn: null, running: false, gen: 0, aliveAt: 0, lineAt: 0, reconnects: 0 };
+    this.silenceMs = Number(env.PEARL_UP_SILENCE_MS) || UP_SILENCE_MS;
     this.upQueue = []; // { line, at }
     this.inFlight = new Map(); // upstream id -> { line, at }, written and not yet answered
     this.upCount = { sent: 0, answered: 0, queued: 0, lost: 0 };
@@ -107,7 +120,8 @@ export class PearlPool {
         maintenance: this.maint && this.maint.on ? this.maint : undefined,
         slots: 1, connections: this.socks.size, addresses: this.room.addresses().size,
         hashrate: 0, // other shards' figure is hashes of their algorithm; Pearl's is MACs, so it is kept apart
-        pearl: { hashrate: mac, ...this.room.stats, ...this.upCount, waiting: this.upQueue.length, inFlight: this.inFlight.size, height: this.room.jobs[0] ? this.room.jobs[0].height : null },
+        pearl: { hashrate: mac, ...this.room.stats, ...this.upCount, waiting: this.upQueue.length, inFlight: this.inFlight.size, height: this.room.jobs[0] ? this.room.jobs[0].height : null,
+          upstream: this.upState(), upLineAgoS: this.up.lineAt ? Math.round((Date.now() - this.up.lineAt) / 1000) : null, reconnects: this.up.reconnects },
       });
     }
     if (request.headers.get("Upgrade") !== "websocket") return new Response("expected a WebSocket upgrade", { status: 426 });
@@ -202,8 +216,16 @@ export class PearlPool {
       if (easier) { try { ws.send(easier); } catch {} }
     }
     try { await this.save(); } catch (e) { console.log(`[pearl] save failed: ${e && e.message}`); }
+    // A loop that has not stepped in three silences is stuck somewhere no
+    // timer of its own reaches: retired, and a fresh one started.
+    if (this.up.running && now - this.up.aliveAt > 3 * this.silenceMs) {
+      console.log(`[pearl up] the upstream loop has not moved in ${Math.round((now - this.up.aliveAt) / 1000)} s; starting it again`);
+      this.up.gen++;
+      this.up.running = false;
+      this.closeUp();
+    }
     // Shares owed with nobody connected (a restart, say): the upstream opens for them alone.
-    if (!this.up.running && this.upHeld()) this.ctx.waitUntil(this.runUp());
+    if (!this.up.running && (this.socks.size > 0 || this.upHeld())) this.ctx.waitUntil(this.runUp());
     if (this.socks.size > 0 || this.upHeld()) await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
   }
 
@@ -267,11 +289,13 @@ export class PearlPool {
   upSend(line, entry = null) {
     const e = entry || { line, at: Date.now() };
     this.owe(e);
-    if (this.up.writer && this.up.authorized) {
-      this.up.writer.write(new TextEncoder().encode(e.line)).catch(() => {});
+    const conn = this.up.conn;
+    if (conn && conn.authorized) {
+      conn.writer.write(new TextEncoder().encode(e.line)).catch(() => {});
       const id = upId(e.line);
       if (id !== null) {
-        this.inFlight.set(id, { line: e.line, at: Date.now(), key: e.key });
+        // `at` stays when it was found: a share sent again is no younger.
+        this.inFlight.set(id, { line: e.line, at: e.at, key: e.key });
         if (this.inFlight.size > 256) { const [, old] = this.inFlight.entries().next().value; this.inFlight.delete(this.inFlight.keys().next().value); this.paid(old); } // an upstream that answers nothing
       } else this.paid(e); // no id to be answered by: sent is all it can be
       this.upCount.sent++;
@@ -300,19 +324,32 @@ export class PearlPool {
     if (waiting.length) console.log(`[pearl up] ${sent} share(s) that waited for upstream sent, ${waiting.length - sent} too old`);
   }
 
+  upState() {
+    const c = this.up.conn;
+    return c ? (c.authorized ? "authorized" : "connecting") : this.up.running ? "reconnecting" : "closed";
+  }
+
   async runUp() {
+    const gen = ++this.up.gen;
     this.up.running = true;
+    this.up.aliveAt = Date.now();
     let backoff = 2000;
-    while (this.socks.size > 0 || this.upHeld()) {
+    while (this.up.gen === gen && (this.socks.size > 0 || this.upHeld())) {
+      const conn = { sock: null, writer: null, reader: null, authorized: false };
+      this.up.conn = conn;
       try {
-        this.up.sock = connect(this.env.PEARL_UPSTREAM);
-        this.up.writer = this.up.sock.writable.getWriter();
-        await this.up.writer.write(new TextEncoder().encode(this.room.authorize()));
-        const reader = this.up.sock.readable.getReader(), dec = new TextDecoder();
+        conn.sock = connect(this.env.PEARL_UPSTREAM);
+        conn.writer = conn.sock.writable.getWriter();
+        conn.reader = conn.sock.readable.getReader();
+        await within(conn.writer.write(new TextEncoder().encode(this.room.authorize())), this.silenceMs, "upstream did not take the authorize");
+        const dec = new TextDecoder();
         let buf = "";
         read: for (;;) {
-          const { value, done } = await reader.read();
+          const { value, done } = await within(conn.reader.read(), this.silenceMs, `upstream silent for ${Math.round(this.silenceMs / 1000)} s`);
+          // Closed, or replaced, while this read waited: not this loop's to go on with.
+          if (this.up.conn !== conn) break;
           if (done) { console.log("[pearl up] upstream closed the connection"); break; }
+          this.up.aliveAt = this.up.lineAt = Date.now();
           buf += dec.decode(value, { stream: true });
           if (buf.length > 1 << 20) { console.log("[pearl up] runaway line from upstream"); break; }
           let nl;
@@ -323,7 +360,7 @@ export class PearlPool {
             const out = this.room.upLine(line);
             for (const l of out.log) console.log(l);
             // A job counts as a yes too: an upstream that sends work has taken us.
-            if (!this.up.authorized && (out.authorized || out.newJob)) { this.up.authorized = true; this.flushUp(); }
+            if (!conn.authorized && (out.authorized || out.newJob)) { conn.authorized = true; this.flushUp(); }
             if (out.answered !== undefined) { this.paid(this.inFlight.get(out.answered)); this.inFlight.delete(out.answered); this.upCount.answered++; }
             if (out.newJob) this.broadcast();
             if (this.socks.size === 0 && !this.upHeld()) break read; // owed nothing, and no one to mine for
@@ -333,12 +370,14 @@ export class PearlPool {
       } catch (e) {
         if (this.socks.size > 0 || this.upHeld()) console.log(`[pearl up] ${e && e.message ? e.message : e}`);
       }
-      this.closeUp();
-      if (this.socks.size === 0 && !this.upHeld()) break;
+      this.closeUp(conn);
+      if (this.up.gen !== gen || (this.socks.size === 0 && !this.upHeld())) break;
+      this.up.reconnects++;
       await new Promise((r) => setTimeout(r, backoff));
+      this.up.aliveAt = Date.now();
       backoff = Math.min(backoff * 2, 60_000);
     }
-    this.up.running = false;
+    if (this.up.gen === gen) this.up.running = false;
   }
 
   broadcast() {
@@ -348,20 +387,27 @@ export class PearlPool {
     }
   }
 
-  closeUp() {
-    this.up.authorized = false;
-    if (this.inFlight.size) {
-      // Oldest first, ahead of anything queued since; they are not counted twice.
-      const back = [...this.inFlight.values()];
-      this.inFlight.clear();
-      this.upCount.sent -= back.length;
-      this.upQueue.unshift(...back);
-      while (this.upQueue.length > UP_QUEUE) { this.paid(this.upQueue.shift()); this.upCount.lost++; }
-      console.log(`[pearl up] ${back.length} share(s) upstream never answered, queued again`);
+  // Close `conn` (the current connection when none is named). Only the
+  // current one's unanswered shares go back in the queue: they were written
+  // to it. Its reader is cancelled -- a close() ends our side only, and an
+  // upstream that goes on talking must not keep a loop reading it.
+  closeUp(conn = this.up.conn) {
+    if (!conn) return;
+    if (this.up.conn === conn) {
+      this.up.conn = null;
+      if (this.inFlight.size) {
+        // Oldest first, ahead of anything queued since; they are not counted twice.
+        const back = [...this.inFlight.values()];
+        this.inFlight.clear();
+        this.upCount.sent -= back.length;
+        this.upQueue.unshift(...back);
+        while (this.upQueue.length > UP_QUEUE) { this.paid(this.upQueue.shift()); this.upCount.lost++; }
+        console.log(`[pearl up] ${back.length} share(s) upstream never answered, queued again`);
+      }
     }
-    try { this.up.writer && this.up.writer.releaseLock(); } catch {}
-    try { this.up.sock && this.up.sock.close(); } catch {}
-    this.up.sock = null;
-    this.up.writer = null;
+    conn.authorized = false;
+    try { conn.reader && conn.reader.cancel().catch(() => {}); } catch {}
+    try { conn.writer && conn.writer.releaseLock(); } catch {}
+    try { conn.sock && conn.sock.close(); } catch {}
   }
 }
