@@ -46,6 +46,7 @@ pub mod disk;
 pub mod syscall;
 pub mod prof;
 pub mod snd;
+pub mod drm;
 pub mod netctl;
 pub mod services;
 
@@ -63,6 +64,7 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     out.extend(proc::checks());
     out.extend(snd::checks());
     out.extend(netctl::checks());
+    out.extend(drm::checks());
     out.extend(services::checks());
     out.extend(program::checks());
     out.extend(syscall::checks());

@@ -27,6 +27,7 @@
 //! advance rather than reading and hoping.
 
 pub mod virtio;
+pub mod virtgpu;
 
 use crate::dev::pci::{self, Device};
 use alloc::string::String;

@@ -267,6 +267,9 @@ impl Drop for DevFile {
         if let super::dev::Node::Snd(k) = self.node {
             super::snd::closed(k);
         }
+        if let super::dev::Node::Drm = self.node {
+            super::drm::closed(self.at);
+        }
     }
 }
 

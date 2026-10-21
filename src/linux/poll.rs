@@ -213,6 +213,11 @@ pub fn ready(fd: &Fd) -> u16 {
                     if super::snd::writable() { POLLOUT } else { 0 }
                 }
                 super::dev::Node::Snd(super::snd::Node::Control) => 0,
+                // No events are delivered on the node itself.
+                super::dev::Node::Drm => 0,
+                super::dev::Node::Fence => {
+                    if super::drm::fence_ready(b.at as u64) { POLLIN } else { 0 }
+                }
             }
         }
     }

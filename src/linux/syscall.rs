@@ -1896,7 +1896,21 @@ fn input_fd(fd: u64) -> Option<(super::input::Dev, bool)> {
     .flatten()
 }
 
-fn place_fd(fds: &mut Vec<Option<super::fs::Fd>>, entry: super::fs::Fd) -> u64 {
+/// A sync file for GPU fence `fence`, placed in the current guest's table.
+pub(super) fn new_fence_fd(fence: u64) -> u64 {
+    with_fds(|fds, _| {
+        let entry = super::fs::Fd::Dev(alloc::rc::Rc::new(core::cell::RefCell::new(super::fs::DevFile {
+            path: String::from("sync_file"),
+            node: super::dev::Node::Fence,
+            at: fence as usize,
+            nonblock: false,
+        })));
+        place_fd(fds, entry)
+    })
+    .unwrap_or(EBADF)
+}
+
+pub(super) fn place_fd(fds: &mut Vec<Option<super::fs::Fd>>, entry: super::fs::Fd) -> u64 {
     match fds.iter().position(|f| f.is_none()) {
         Some(slot) => {
             fds[slot] = Some(entry);
@@ -1990,6 +2004,7 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
             if let super::dev::Node::Snd(k) = n {
                 super::snd::opened(k);
             }
+            let at = if n == super::dev::Node::Drm { super::drm::opened() } else { at };
             let entry = super::fs::Fd::Dev(alloc::rc::Rc::new(core::cell::RefCell::new(
                 super::fs::DevFile {
                     path: path.clone(),
@@ -2455,6 +2470,17 @@ pub(super) fn sleep_for(sec: u64, nsec: u64) -> u64 {
     let hz = crate::TIMER_HZ as u64;
     let want = sec.saturating_mul(hz) + nsec * hz / 1_000_000_000;
     let until = crate::dev::lapic::ticks().saturating_add(want);
+    // **The part under a tick is slept too.** Whole ticks alone rounded
+    // anything shorter than 10 ms down to nothing, so a 160 us sleep returned
+    // at once -- and Venus counts its waits in sleeps it believes took that
+    // long: after 1024 of them it expects the host to have reported alive in
+    // the time they took, and a loop that had really slept for a fraction of
+    // that aborted the program with no message. A sleep may run long; it may
+    // not run short. The remainder is waited out on the TSC.
+    let mhz = crate::time::tsc_mhz().max(1);
+    let end_tsc = crate::time::rdtsc()
+        .saturating_add(sec.saturating_mul(1_000_000).saturating_mul(mhz))
+        .saturating_add(nsec * mhz / 1000);
 
     // **This spun, and it was the one wait in the kernel that did.** The loop
     // was `while ticks() < until { spin_loop() }`: no yield, so a guest
@@ -2491,7 +2517,58 @@ pub(super) fn sleep_for(sec: u64, nsec: u64) -> u64 {
             big_lock();
         }
     }
+    // Under a tick left: hand the core to whoever wants it and come back,
+    // until the TSC says the time has passed. Not a timer sleep, since the
+    // timer cannot wake anything sooner than its next tick.
+    while crate::time::rdtsc() < end_tsc {
+        if overran(crate::dev::lapic::ticks()) {
+            unsafe { kill_blocked() }
+        }
+        let flags: u64;
+        unsafe { core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags)) };
+        let held = holds_big();
+        if held {
+            big_unlock();
+        }
+        crate::cpu::enable_interrupts();
+        crate::task::yield_now();
+        if flags & (1 << 9) == 0 {
+            crate::cpu::disable_interrupts();
+        }
+        if held {
+            big_lock();
+        }
+    }
     0
+}
+
+/// `clock_nanosleep`: relative unless `TIMER_ABSTIME`, in which case the time
+/// is a reading of `clock` to sleep until.
+pub(super) fn sys_clock_nanosleep(clock: u64, flags: u64, req: u64) -> u64 {
+    const TIMER_ABSTIME: u64 = 1;
+    if !reachable(req, 16, false) {
+        return EFAULT;
+    }
+    let (sec, nsec) = unsafe {
+        (
+            core::ptr::read_volatile(req as *const u64),
+            core::ptr::read_volatile((req + 8) as *const u64),
+        )
+    };
+    if flags & TIMER_ABSTIME == 0 {
+        return sleep_for(sec, nsec);
+    }
+    if nsec >= 1_000_000_000 {
+        return EINVAL;
+    }
+    let Some((ns, nn)) = clock_pair(clock) else { return EINVAL };
+    let want = sec as u128 * 1_000_000_000 + nsec as u128;
+    let now = ns as u128 * 1_000_000_000 + nn as u128;
+    if want <= now {
+        return 0;
+    }
+    let d = want - now;
+    sleep_for((d / 1_000_000_000) as u64, (d % 1_000_000_000) as u64)
 }
 
 /// Write through a descriptor that names a file.
@@ -5293,16 +5370,25 @@ pub(super) fn sys_lseek(fd: u64, off: u64, whence: u64) -> u64 {
 pub(super) static STAT_OLD: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 pub(super) fn write_stat(buf: u64, kind: super::fs::Kind, size: usize, ino: u64) -> u64 {
+    write_stat_rdev(buf, kind, size, ino, 0)
+}
+
+/// `write_stat` for a device node, whose `st_rdev` is how a program tells
+/// which device it is. libdrm reads `major(st_rdev)` and `minor(st_rdev)` to
+/// find the render node's `/sys/dev/char/<major>:<minor>` directory, and a
+/// zero there is a device it cannot place.
+pub(super) fn write_stat_rdev(buf: u64, kind: super::fs::Kind, size: usize, ino: u64, rdev: u64) -> u64 {
+    let mut b = super::fs::stat_bytes(kind, size, ino);
+    b[40..48].copy_from_slice(&rdev.to_le_bytes());
     if abi32() && STAT_OLD.load(Ordering::Relaxed) {
-        return write_stat_old(buf, kind, size, ino);
+        return write_stat_old(buf, size, &b);
     }
     if abi32() {
-        return write_stat64(buf, kind, size, ino);
+        return write_stat64(buf, &b);
     }
     if !reachable(buf, 144, true) {
         return EFAULT;
     }
-    let b = super::fs::stat_bytes(kind, size, ino);
     unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), buf as *mut u8, 144) };
     0
 }
@@ -5313,14 +5399,13 @@ pub(super) fn write_stat(buf: u64, kind: super::fs::Kind, size: usize, ino: u64)
 /// recalled.
 /// i386 `struct stat`: dev, ino as u32; mode, nlink, uid, gid as u16; rdev,
 /// size, blksize, blocks as u32; three (sec, nsec) pairs; two spare words.
-fn write_stat_old(buf: u64, kind: super::fs::Kind, size: usize, ino: u64) -> u64 {
+fn write_stat_old(buf: u64, size: usize, w: &[u8; 144]) -> u64 {
     if !reachable(buf, 64, true) {
         return EFAULT;
     }
     if size > u32::MAX as usize {
         return (-75i64) as u64; // EOVERFLOW, as Linux answers
     }
-    let w = super::fs::stat_bytes(kind, size, ino);
     let r32 = |at: usize| u32::from_le_bytes([w[at], w[at + 1], w[at + 2], w[at + 3]]);
     let r64 = |at: usize| u64::from_le_bytes(w[at..at + 8].try_into().unwrap());
     let mut b = [0u8; 64];
@@ -5342,13 +5427,12 @@ fn write_stat_old(buf: u64, kind: super::fs::Kind, size: usize, ino: u64) -> u64
     0
 }
 
-fn write_stat64(buf: u64, kind: super::fs::Kind, size: usize, ino: u64) -> u64 {
+fn write_stat64(buf: u64, w: &[u8; 144]) -> u64 {
     if !reachable(buf, 96, true) {
         return EFAULT;
     }
     // Reuse the 64-bit encoder for the fields that mean the same thing, so
     // mode, link count and block count cannot be computed two ways.
-    let w = super::fs::stat_bytes(kind, size, ino);
     let r32 = |at: usize| u32::from_le_bytes([w[at], w[at + 1], w[at + 2], w[at + 3]]);
     let r64 = |at: usize| u64::from_le_bytes(w[at..at + 8].try_into().unwrap());
     // x86-64 `struct stat`: dev 0, ino 8, nlink 16, mode 24, uid 28, gid 32,
@@ -5377,29 +5461,29 @@ pub(super) fn sys_fstat(fd: u64, buf: u64) -> u64 {
     let found = with_fds(|fds, _| match fds.get(fd as usize) {
         Some(Some(super::fs::Fd::Disk(b))) => {
             let f = b.borrow();
-            Some((super::fs::Kind::File, f.size, super::fs::ino_of(&f.path)))
+            Some((super::fs::Kind::File, f.size, super::fs::ino_of(&f.path), 0))
         }
         Some(Some(super::fs::Fd::File(b))) => {
             let f = b.borrow();
-            Some((super::fs::Kind::File, f.data.len(), super::fs::ino_of(&f.path)))
+            Some((super::fs::Kind::File, f.data.len(), super::fs::ino_of(&f.path), 0))
         }
         Some(Some(super::fs::Fd::Dir(b))) => {
             let d = b.borrow();
-            Some((super::fs::Kind::Dir, 0, super::fs::ino_of(&d.path)))
+            Some((super::fs::Kind::Dir, 0, super::fs::ino_of(&d.path), 0))
         }
         Some(Some(super::fs::Fd::Dev(b))) => {
             let d = b.borrow();
-            Some((super::fs::Kind::Char, super::dev::size(d.node), super::fs::ino_of(&d.path)))
+            Some((super::fs::Kind::Char, super::dev::size(d.node), super::fs::ino_of(&d.path), super::dev::rdev(d.node)))
         }
         // The standard three report as pipes, which is the only answer that
         // agrees with the rest of this module: `lseek` on them is `ESPIPE` and
         // `read` on stdin is a permanent end of file.
-        Some(Some(_)) => Some((super::fs::Kind::Fifo, 0, 1)),
+        Some(Some(_)) => Some((super::fs::Kind::Fifo, 0, 1, 0)),
         _ => None,
     })
     .flatten();
     match found {
-        Some((k, n, ino)) => write_stat(buf, k, n, ino),
+        Some((k, n, ino, rdev)) => write_stat_rdev(buf, k, n, ino, rdev),
         None => EBADF,
     }
 }
@@ -5446,7 +5530,7 @@ pub(super) fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 
         };
     }
     if let Some(n) = super::dev::node(&path) {
-        return write_stat(buf, super::fs::Kind::Char, super::dev::size(n), super::fs::ino_of(&path));
+        return write_stat_rdev(buf, super::fs::Kind::Char, super::dev::size(n), super::fs::ino_of(&path), super::dev::rdev(n));
     }
     if super::dev::is_dir(&path) {
         return write_stat(buf, super::fs::Kind::Dir, 0, super::fs::ino_of(&path));
@@ -5629,6 +5713,14 @@ pub(super) fn sys_ioctl(fd: u64, req: u64, arg: u64) -> u64 {
     if let Some(d) = node.flatten().and_then(super::dev::is_input) {
         return input_ioctl(d, req, arg);
     }
+    if let Some(Some(super::dev::Node::Drm)) = node {
+        let id = with_fds(|fds, _| match fds.get(fd as usize) {
+            Some(Some(super::fs::Fd::Dev(b))) => b.borrow().at,
+            _ => 0,
+        })
+        .unwrap_or(0);
+        return super::drm::ioctl(id, req, arg);
+    }
     if let Some(Some(super::dev::Node::Snd(k))) = node {
         let nonblock = with_fds(|fds, _| match fds.get(fd as usize) {
             Some(Some(super::fs::Fd::Dev(b))) => b.borrow().nonblock,
@@ -5768,9 +5860,50 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
             .and_then(|sp| sp.fds.get(fd as usize))
             .and_then(|f| f.as_ref())
             .and_then(|f| match f {
-                super::fs::Fd::Dev(b) => Some(b.borrow().node),
+                super::fs::Fd::Dev(b) => Some((b.borrow().node, b.borrow().at)),
                 _ => None,
             });
+        // A GPU buffer: the pages of the device's host-visible window that
+        // `MAP` put it at, mapped into the arena the way a memfd's are, and
+        // given nothing back on unmap (`Copied`), because they are the
+        // window's and not the heap's.
+        if let Some((super::dev::Node::Drm, id)) = dev {
+            const MAP_SHARED: u64 = 0x01;
+            if flags & MAP_SHARED == 0 {
+                return EINVAL;
+            }
+            let Some((phys, size)) = super::drm::mapping(id, off) else { return EINVAL };
+            let want = page_up(len as usize) as u64;
+            if want == 0 || want > page_up(size as usize) as u64 {
+                return EINVAL;
+            }
+            let Some(sp) = (unsafe { guest_slot() }).as_mut() else { return ENODEV };
+            if sp.tables.is_none() {
+                // Without a space of its own the guest could only be handed
+                // the window's own physical address, which sits wherever the
+                // firmware put the BAR and is nothing a guest may hold.
+                return ENODEV;
+            }
+            // A placed mapping over a reservation is refused: the reservation's
+            // own pages would be shadowed and later freed by a record that no
+            // longer describes them. Venus places only for
+            // `VK_EXT_map_memory_placed`, which an application has to ask for.
+            if flags & MAP_FIXED != 0 {
+                return EINVAL;
+            }
+            let Some(at) = arena_take(sp, want) else { return ENOMEM };
+            let Some(t) = sp.tables.as_mut() else { return ENODEV };
+            let mut o = 0u64;
+            while o < want {
+                if !t.map_page(at + o, phys + o, prot & PROT_WRITE != 0, true) {
+                    return ENOMEM;
+                }
+                o += 4096;
+            }
+            sp.maps.push(Mapping { at, len: want as usize, from: Source::Copied });
+            return at;
+        }
+        let dev = dev.map(|(n, _)| n);
         if let Some(n) = dev {
             if n != super::dev::Node::Fb {
                 // The other three have no memory to map. `ENODEV` is what
@@ -6515,7 +6648,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_RMDIR => (sys_name_op(f.rdi, b'r'), true),
         SYS_UNLINK => (sys_name_op(f.rdi, b'u'), true),
         SYS_NANOSLEEP => (sys_nanosleep(f.rdi), true),
-        SYS_CLOCK_NANOSLEEP => (sys_nanosleep(f.rdx), true),
+        SYS_CLOCK_NANOSLEEP => (sys_clock_nanosleep(f.rdi, f.rsi, f.rdx), true),
         // **Accepted and never delivered, which is the honest shape.** A
         // handler is recorded nowhere because nothing here can raise a signal
         // at a guest: there is no other process to send one, no terminal to
@@ -6532,6 +6665,12 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         }
         SYS_RT_SIGRETURN => (super::signal::sigreturn(f), true),
         SYS_KILL => (super::signal::kill(f.rdi as i64, f.rsi), true),
+        // To the thread group rather than the one thread: signals here are
+        // pending per process. What `raise` and `abort` need is that the
+        // signal arrives at all -- answering `ENOSYS` left glibc's `abort`
+        // with nothing but its final `hlt`, a fault where a program should
+        // have died of SIGABRT.
+        SYS_TGKILL => (super::signal::kill(f.rdi as i64, f.rdx), true),
         // No parent, and no group but the one. `getppid` answering zero is
         // what a process reparented to nothing reports.
         SYS_GETPPID => (super::fork::parent_pid(), true),
@@ -6897,7 +7036,7 @@ fn arena_report(sp: &Space) {
 
 /// Take `want` bytes of arena: first fit from what `munmap` gave back, then
 /// the cursor. `None` is out of arena, which the caller says as `ENOMEM`.
-fn arena_take(sp: &mut Space, want: u64) -> Option<u64> {
+pub(super) fn arena_take(sp: &mut Space, want: u64) -> Option<u64> {
     if let Some(i) = sp.arena_free.iter().position(|&(_, l)| l >= want) {
         let (a, l) = sp.arena_free[i];
         if l == want {

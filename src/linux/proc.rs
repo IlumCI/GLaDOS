@@ -52,7 +52,7 @@ pub fn is_dir(path: &str) -> bool {
         "/proc" | "/proc/self" | "/sys" | "/sys/devices" | "/sys/devices/system"
             | "/sys/devices/system/cpu" | "/sys/devices/system/cpu/cpu0"
             | "/sys/devices/system/cpu/cpu0/cpufreq"
-    )
+    ) || super::drm::sys_is_dir(path)
 }
 
 /// The one `/sys` file there is: the rate the timestamp counter runs at.
@@ -88,7 +88,7 @@ pub fn is_file(path: &str) -> bool {
         path,
         "/proc/self/exe" | "/proc/self/cmdline" | "/proc/self/environ" | "/proc/self/maps"
             | "/proc/meminfo" | CPU_MAX_FREQ
-    )
+    ) || super::drm::sys_is_file(path)
 }
 
 /// Where a synthetic symlink points.
@@ -101,7 +101,7 @@ pub fn is_file(path: &str) -> bool {
 pub fn link(path: &str) -> Option<String> {
     match path {
         "/proc/self/exe" => syscall::guest_image(),
-        _ => None,
+        _ => super::drm::sys_link(path),
     }
 }
 
@@ -148,7 +148,7 @@ pub fn read(path: &str) -> Option<Vec<u8>> {
                 .into_bytes(),
             )
         }
-        _ => None,
+        _ => super::drm::sys_read(path),
     }
 }
 
@@ -221,7 +221,7 @@ pub fn entries(dir: &str) -> Vec<(String, bool, usize)> {
         "/proc/self" => {
             alloc::vec![file("exe"), file("cmdline"), file("environ"), file("maps")]
         }
-        _ => Vec::new(),
+        _ => super::drm::sys_entries(dir),
     }
 }
 

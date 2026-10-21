@@ -2000,7 +2000,13 @@ fn gpu_cmd(acpi: &Option<Acpi>, rest: &str) {
     match rest {
         "wake" => return gpu_wake(acpi, false, None),
         "wake now" => return gpu_wake(acpi, true, None),
+        "drm" => return crate::gpu::virtgpu::report(),
         "virtio" => {
+            if crate::gpu::virtgpu::held() {
+                // The probe resets the device, which would pull the queue and
+                // every context out from under the guests using it.
+                return kprintln!("  virtio-gpu is held for /dev/dri -- 'gpu drm' reports on it");
+            }
             return match acpi.as_ref().and_then(|a| a.mcfg) {
                 Some(ecam) => crate::gpu::virtio::probe(ecam),
                 None => kprintln!("  no MCFG table, so no ECAM base and no PCIe enumeration at all"),

@@ -40,13 +40,13 @@ const CMD_GET_CAPSET: u32 = 0x0109;
 const CMD_CTX_CREATE: u32 = 0x0200;
 const CMD_CTX_DESTROY: u32 = 0x0201;
 
-const RESP_OK_NODATA: u32 = 0x1100;
+pub(super) const RESP_OK_NODATA: u32 = 0x1100;
 const RESP_OK_CAPSET_INFO: u32 = 0x1102;
 const RESP_OK_CAPSET: u32 = 0x1103;
 
 pub const CAPSET_VENUS: u32 = 4;
 
-const HDR: usize = 24;
+pub(super) const HDR: usize = 24;
 /// Long enough for a render server to start on a loaded host. A control
 /// command that is not answered in this long is not going to be.
 const WAIT_MS: u64 = 5000;
@@ -90,7 +90,7 @@ pub fn hdr(ty: u32, ctx: u32) -> [u8; HDR] {
     h
 }
 
-fn le32(b: &[u8], at: usize) -> u32 {
+pub(super) fn le32(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
 }
 
@@ -107,7 +107,7 @@ pub struct CapsetInfo {
 pub struct Gpu {
     pub t: Transport,
     pub features: u64,
-    ctrl: Option<virtio::Queue>,
+    pub(super) ctrl: Option<virtio::Queue>,
     req: Dma,
     resp: Dma,
 }

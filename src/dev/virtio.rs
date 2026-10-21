@@ -14,11 +14,11 @@
 //! BAR, an offset and a length. All numbers here are the virtio 1.2
 //! specification's, section 4.1.
 //!
-//! **Polled, one request in flight.** No MSI-X is configured -- `pci.rs` has no
-//! MSI support at all -- so every queue vector is set to `NO_VECTOR` and the used
-//! ring is polled with a deadline, the bargain every other driver in this tree
-//! makes. One request at a time is what a control queue needs and it means the
-//! descriptor table never has to be managed as a free list.
+//! **Polled.** No MSI-X is configured -- `pci.rs` has no MSI support at all --
+//! so every queue vector is set to `NO_VECTOR` and the used ring is polled, the
+//! bargain every other driver in this tree makes. Descriptors go out in pairs
+//! from a free list, because virtio-gpu holds a fenced command's answer until
+//! the fence signals and a queue with one request in flight would wait for it.
 
 use crate::dev::dma::Dma;
 use crate::dev::pci::{self, Device};
@@ -308,6 +308,7 @@ impl Transport {
             doorbell: self.notify + off * self.notify_mul as u64,
             next: 0,
             seen: 0,
+            free: (0..size / 2).rev().map(|i| i * 2).collect(),
         })
     }
 
@@ -324,11 +325,19 @@ impl Transport {
     }
 }
 
-/// One split virtqueue, used one request at a time.
+/// One split virtqueue, its descriptors handed out in pairs.
 ///
 /// Field order matters for the one reason that is silent: `Queue` owns the ring
 /// memory, and the device keeps reading it until the transport is reset. The
 /// owner must reset before dropping, which `gpu::virtio::Gpu`'s `Drop` does.
+///
+/// **Several requests may be in flight**, because virtio-gpu answers a fenced
+/// command only once the fence has signalled -- that is what a fence *is* on
+/// this device -- so a queue that waited for each answer before posting the
+/// next would make every `vkQueueSubmit` synchronous with the host's GPU. A
+/// request is a pair of descriptors, out and in, and the used ring names the
+/// pair by its head; `post` and `reap` are that, and `call` is both with a
+/// wait between.
 pub struct Queue {
     pub index: u16,
     pub size: u16,
@@ -338,23 +347,23 @@ pub struct Queue {
     doorbell: u64,
     next: u16,
     seen: u16,
+    /// Heads of descriptor pairs nobody is using.
+    free: alloc::vec::Vec<u16>,
 }
 
 impl Queue {
-    /// Send `out` (device-readable), receive into `into` (device-writable), and
-    /// wait up to `ms` for the device to finish. Answers the byte count the
-    /// device says it wrote.
-    pub fn call(&mut self, out: &Dma, out_len: usize, into: &mut Dma, ms: u64) -> Result<usize, &'static str> {
-        if self.size < 2 {
-            return Err("the queue is too short for a request and its reply");
-        }
+    /// Publish one request: `out_len` bytes at `out` for the device to read,
+    /// `in_len` at `into` for it to write. Answers the head that the
+    /// completion will carry, or nothing when every pair is in use.
+    pub fn post(&mut self, out: u64, out_len: usize, into: u64, in_len: usize) -> Option<u16> {
+        let head = self.free.pop()?;
         let d = self.desc.as_mut_slice();
-        put_desc(d, 0, out.pa(), out_len as u32, DESC_NEXT, 1);
-        put_desc(d, 1, into.pa(), into.len() as u32, DESC_WRITE, 0);
+        put_desc(d, head as usize, out, out_len as u32, DESC_NEXT, head + 1);
+        put_desc(d, head as usize + 1, into, in_len as u32, DESC_WRITE, 0);
         let n = self.size as usize;
         let a = self.avail.as_mut_slice();
         let slot = 4 + 2 * (self.next as usize % n);
-        a[slot..slot + 2].copy_from_slice(&0u16.to_le_bytes());
+        a[slot..slot + 2].copy_from_slice(&head.to_le_bytes());
         // The descriptor and the ring entry must be visible before the index
         // that publishes them, and the index before the doorbell.
         fence(Ordering::SeqCst);
@@ -362,18 +371,46 @@ impl Queue {
         unsafe { write_volatile(a.as_mut_ptr().add(2) as *mut u16, self.next) };
         fence(Ordering::SeqCst);
         w16(self.doorbell, self.index);
+        Some(head)
+    }
 
-        let deadline = crate::time::rdtsc() + crate::time::tsc_mhz().max(1) * 1000 * ms;
+    /// One finished request, as its head and the byte count the device wrote,
+    /// with the pair returned to the free list. Nothing when none has
+    /// finished since the last reap.
+    pub fn reap(&mut self) -> Option<(u16, usize)> {
         let used = self.used.as_slice().as_ptr();
+        let idx = unsafe { read_volatile(used.add(2) as *const u16) };
+        if idx == self.seen {
+            return None;
+        }
+        fence(Ordering::SeqCst);
+        let e = 4 + 8 * (self.seen as usize % self.size as usize);
+        let u = self.used.as_slice();
+        let id = u32::from_le_bytes([u[e], u[e + 1], u[e + 2], u[e + 3]]) as u16;
+        let len = u32::from_le_bytes([u[e + 4], u[e + 5], u[e + 6], u[e + 7]]) as usize;
+        self.seen = self.seen.wrapping_add(1);
+        self.free.push(id);
+        Some((id, len))
+    }
+
+    /// Send `out` (device-readable), receive into `into` (device-writable), and
+    /// wait up to `ms` for the device to finish. Answers the byte count the
+    /// device says it wrote.
+    ///
+    /// Only for a queue nothing else has requests in flight on: a completion
+    /// for somebody else's head would be taken as this one's. `gpu::virtgpu`
+    /// owns its queue outright and uses `post` and `reap` instead.
+    pub fn call(&mut self, out: &Dma, out_len: usize, into: &mut Dma, ms: u64) -> Result<usize, &'static str> {
+        if self.size < 2 {
+            return Err("the queue is too short for a request and its reply");
+        }
+        let head = self.post(out.pa(), out_len, into.pa(), into.len()).ok_or("every descriptor is in use")?;
+        let deadline = crate::time::rdtsc() + crate::time::tsc_mhz().max(1) * 1000 * ms;
         loop {
-            let idx = unsafe { read_volatile(used.add(2) as *const u16) };
-            if idx != self.seen {
-                fence(Ordering::SeqCst);
-                let e = 4 + 8 * (self.seen as usize % n);
-                let u = self.used.as_slice();
-                let len = u32::from_le_bytes([u[e + 4], u[e + 5], u[e + 6], u[e + 7]]) as usize;
-                self.seen = self.seen.wrapping_add(1);
-                return Ok(len);
+            if let Some((id, len)) = self.reap() {
+                if id == head {
+                    return Ok(len);
+                }
             }
             if crate::time::rdtsc() > deadline {
                 return Err("the device did not answer in time");
