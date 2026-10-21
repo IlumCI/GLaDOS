@@ -5158,9 +5158,13 @@ pub fn draw() {
     super::render::damaged(damage.len() as u64, damage.area());
     super::compose::present_region(&damage);
     // Put the pointer back where it was. Without this every keystroke that
-    // repaints would blink the arrow out until the mouse next moved.
+    // repaints would blink the arrow out until the mouse next moved -- unless
+    // a program holds the pointer, which is exactly when it must stay off:
+    // a game's every frame was putting the desktop's arrow back over it.
     if let Some((px, py)) = unsafe { *POS.get() } {
-        cursor_show(&real, px, py);
+        if GRAB.load(core::sync::atomic::Ordering::Acquire) == 0 {
+            cursor_show(&real, px, py);
+        }
     }
     let ended = crate::time::rdtsc();
     super::render::frame_timed(started, presenting, ended);

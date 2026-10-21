@@ -2380,6 +2380,7 @@ pub fn holds_big() -> bool {
 /// Feature switches for bisecting the SMP work at runtime (`linux feat`).
 pub static FEAT_BIG: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 pub static FEAT_SHOOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+pub static FEAT_KICK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
 /// **A ticket lock, served in order.** It was a compare-and-swap, and that is
 /// unfair in the way that matters here: a guest's threads take and give back
@@ -4069,7 +4070,70 @@ const FUTEX_SLOTS: usize = 32;
 /// one woke the other: harmless only because every waiter re-reads its word.
 static FUTEX: Racy<[(u64, u64, u64); FUTEX_SLOTS]> = Racy::new([(0, 0, 0); FUTEX_SLOTS]);
 
+/// Who is waiting on which word: (root, address, task). Under the guest lock.
+///
+/// **A wake names its waiters.** Waits used to nap until the next tick or
+/// until *any* syscall finished, and every syscall's end woke every napper to
+/// look again. llvmpipe synchronises its rasterizer threads through futexes
+/// many times a frame, so each of those wakes became ten wakeups, ten trips
+/// through the guest lock and ten IPIs, and Portal ran slower on four cores
+/// than on one: 0.46 frames a second against 0.54, where the host goes from
+/// 0.9 to 2.3. A `FUTEX_WAKE` now wakes the tasks waiting on that word and
+/// nobody else.
+static FUTEX_WAITERS: Racy<Vec<(u64, u64, usize)>> = Racy::new(Vec::new());
+
+/// Wait for a wake on `addr`, or `until`, or a second, whichever is first --
+/// the second only a backstop against a wake this table somehow missed.
+fn futex_nap(addr: u64, until: Option<u64>) {
+    let me = crate::task::current();
+    let root = guest_root();
+    let w = unsafe { &mut *FUTEX_WAITERS.get() };
+    w.push((root, addr, me));
+    let now = crate::dev::lapic::ticks();
+    let deadline = until.unwrap_or(u64::MAX).min(now + crate::TIMER_HZ as u64).max(now + 1);
+    crate::task::set_wake(deadline);
+    let held = holds_big();
+    if held {
+        big_unlock();
+    }
+    let flags: u64;
+    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags)) };
+    crate::cpu::enable_interrupts();
+    crate::task::yield_now();
+    let _ = crate::task::take_woken();
+    crate::task::set_wake(0);
+    if flags & (1 << 9) == 0 {
+        crate::cpu::disable_interrupts();
+    }
+    if held {
+        big_lock();
+    }
+    let w = unsafe { &mut *FUTEX_WAITERS.get() };
+    if let Some(i) = w.iter().position(|&(r, a, t)| r == root && a == addr && t == me) {
+        w.swap_remove(i);
+    }
+}
+
 pub(super) fn futex_bump(addr: u64) -> u64 {
+    let took = big_take();
+    let root = guest_root();
+    let mut any = false;
+    for &(r, a, t) in unsafe { &*FUTEX_WAITERS.get() }.iter() {
+        if r == root && a == addr {
+            any |= crate::task::wake(t);
+        }
+    }
+    if any {
+        crate::dev::lapic::kick_others();
+    }
+    let n = futex_bump_count(addr);
+    if took {
+        big_unlock();
+    }
+    n
+}
+
+fn futex_bump_count(addr: u64) -> u64 {
     let t = unsafe { &mut *FUTEX.get() };
     let root = guest_root();
     if let Some(e) = t.iter_mut().find(|e| e.1 == addr && e.0 == root) {
@@ -4227,7 +4291,7 @@ fn futex_inner(uaddr: u64, op: u64, val: u64, timeout: u64, uaddr2: u64, val3: u
                 if overran(crate::dev::lapic::ticks()) {
                     unsafe { kill_blocked() }
                 }
-                wait_turn();
+                futex_nap(uaddr, until);
             }
         }
         FUTEX_WAKE | FUTEX_WAKE_BITSET => {
@@ -6855,6 +6919,11 @@ fn arena_take(sp: &mut Space, want: u64) -> Option<u64> {
 /// a stale translation would hand the next tenant the last one's pages --
 /// and the range filed, merged with its neighbours.
 fn arena_give(sp: &mut Space, at: u64, len: u64) {
+    // A name for a range that is no longer that file. Left behind, the next
+    // tenant -- llvmpipe's JIT, most often -- was profiled as libMiles or a
+    // font, and a hot spot named after the wrong file sends the reader to
+    // the wrong source.
+    unsafe { &mut *MAP_NAMES.get() }.retain(|&(a, l, _, _)| a + l <= at || a >= at + len);
     let Some(t) = sp.tables.as_mut() else { return };
     let mut off = 0;
     while off < len {

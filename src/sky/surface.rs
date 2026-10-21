@@ -189,6 +189,9 @@ struct XdgSurface {
     acked: bool,
 }
 
+/// Frames committed by every client, ever: what a frame rate is read from.
+pub static FRAMES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 struct Toplevel {
     xdg: u32,
     title: String,
@@ -432,6 +435,7 @@ impl Client {
                 }
                 g.copied += n;
                 g.commits += 1;
+                FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
             Some((_, f)) => {
                 let px = copy_pixels(&b)?;
@@ -441,6 +445,7 @@ impl Client {
                 f.copied += px.len() as u64;
                 f.px = px;
                 f.commits += 1;
+                FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
             None => {
                 let px = copy_pixels(&b)?;

@@ -35,6 +35,8 @@ static RIPS: [AtomicU64; SAMPLES] = [const { AtomicU64::new(0) }; SAMPLES];
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 const CORES: usize = 16;
+/// Ring-3 ticks per task: which thread the time is.
+static BY_TASK: [AtomicU64; crate::task::MAX_TASKS] = [const { AtomicU64::new(0) }; crate::task::MAX_TASKS];
 /// Per core: ticks at ring 3, ticks in a guest's task at ring 0 (a wait with
 /// interrupts on), and ticks with no guest on that core.
 static RING3: [AtomicU64; CORES] = [const { AtomicU64::new(0) }; CORES];
@@ -70,6 +72,8 @@ pub fn sample(cs: u64, rip: u64) {
     let core = if crate::cpu::percpu::armed() { crate::cpu::percpu::cpu_id() as usize } else { 0 }.min(CORES - 1);
     if cs & 3 == 3 {
         RING3[core].fetch_add(1, Ordering::Relaxed);
+        let t = crate::task::current().min(crate::task::MAX_TASKS - 1);
+        BY_TASK[t].fetch_add(1, Ordering::Relaxed);
         let i = NEXT.fetch_add(1, Ordering::Relaxed);
         if i < SAMPLES {
             RIPS[i].store(rip, Ordering::Relaxed);
@@ -81,7 +85,13 @@ pub fn sample(cs: u64, rip: u64) {
     }
 }
 
+/// When profiling began, and the client frame count then.
+static SINCE: AtomicU64 = AtomicU64::new(0);
+static FRAMES_AT: AtomicU64 = AtomicU64::new(0);
+
 pub fn reset() {
+    SINCE.store(unsafe { core::arch::x86_64::_rdtsc() }, Ordering::Relaxed);
+    FRAMES_AT.store(crate::sky::surface::FRAMES.load(Ordering::Relaxed), Ordering::Relaxed);
     for r in 0..ROWS {
         CYCLES[r].store(0, Ordering::Relaxed);
         CALLS[r].store(0, Ordering::Relaxed);
@@ -92,6 +102,9 @@ pub fn reset() {
         OTHER[c].store(0, Ordering::Relaxed);
     }
     NEXT.store(0, Ordering::Relaxed);
+    for t in 0..crate::task::MAX_TASKS {
+        BY_TASK[t].store(0, Ordering::Relaxed);
+    }
 }
 
 pub fn report() {
@@ -103,6 +116,12 @@ pub fn report() {
         Some(t) => crate::kprintln!("  the guest lock is held by task {}", t),
         None => crate::kprintln!("  the guest lock is free"),
     }
+    let secs = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(SINCE.load(Ordering::Relaxed)) / mhz / 1_000_000;
+    let frames = crate::sky::surface::FRAMES.load(Ordering::Relaxed) - FRAMES_AT.load(Ordering::Relaxed);
+    crate::kprintln!(
+        "  {} client frame(s) in {} s, {}.{} per second",
+        frames, secs, frames / secs.max(1), frames * 10 / secs.max(1) % 10
+    );
     crate::kprintln!("  ticks per core: ring 3 / guest waiting / no guest");
     for c in 0..CORES {
         let (a, b, o) = (RING3[c].load(Ordering::Relaxed), WAIT[c].load(Ordering::Relaxed), OTHER[c].load(Ordering::Relaxed));
@@ -110,6 +129,15 @@ pub fn report() {
             crate::kprintln!("    cpu{c}  {a:>7} {b:>7} {o:>7}");
         }
     }
+    let mut tasks: Vec<(u64, usize)> = (0..crate::task::MAX_TASKS)
+        .map(|t| (BY_TASK[t].load(Ordering::Relaxed), t))
+        .filter(|&(n, _)| n > 0)
+        .collect();
+    tasks.sort_by(|a, b| b.0.cmp(&a.0));
+    crate::kprintln!(
+        "  ring-3 ticks by task: {}",
+        tasks.iter().take(12).map(|(n, t)| alloc::format!("{t}:{n}")).collect::<Vec<_>>().join(" ")
+    );
     let mut rows: Vec<(u64, u64, usize)> = (0..ROWS)
         .map(|r| (CYCLES[r].load(Ordering::Relaxed), CALLS[r].load(Ordering::Relaxed), r))
         .filter(|&(c, _, _)| c > 0)

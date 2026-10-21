@@ -7425,7 +7425,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     use core::sync::atomic::Ordering::Relaxed;
                     let name = words.next().unwrap_or("");
                     let on = words.next() != Some("off");
-                    let flags: [(&str, &core::sync::atomic::AtomicBool); 9] = [
+                    let flags: [(&str, &core::sync::atomic::AtomicBool); 10] = [
+                        ("kick", &linux::syscall::FEAT_KICK),
                         ("idle", &crate::sky::server::FEAT_IDLE),
                         ("desk", &crate::sky::server::FEAT_DESK),
                         ("big", &linux::syscall::FEAT_BIG),

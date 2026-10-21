@@ -251,7 +251,7 @@ extern "x86-interrupt" fn kick_isr(_frame: idt::InterruptStackFrame) {
 /// Wake every other core from `hlt`, for a task made runnable that one of
 /// them should pick up now rather than at its next tick.
 pub fn kick_others() {
-    if crate::smp::online() <= 1 {
+    if crate::smp::online() <= 1 || !crate::linux::syscall::FEAT_KICK.load(Ordering::Relaxed) {
         return;
     }
     ipi_settle();
