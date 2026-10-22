@@ -106,6 +106,9 @@ struct Bo {
     blob_mem: u32,
     /// Where `MAP` put it in the host-visible window, once it has.
     phys: Option<u64>,
+    /// How the host says the mapping may be cached: virtio-gpu's map info,
+    /// 1 cached, 2 uncached, 3 write-combined.
+    cache: u32,
 }
 
 struct Client {
@@ -119,6 +122,10 @@ struct Client {
 /// One per open render node. Racy because every caller is a guest syscall,
 /// and those run under the guest lock.
 static CLIENTS: Racy<Vec<Client>> = Racy::new(Vec::new());
+/// `gpu drm trace on`: a line per mapping.
+pub static TRACE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// The cache type the host gave the last mapping, for `gpu drm`.
+pub static LAST_CACHE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static NEXT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(1);
 
 /// The device behind the node, found once. The bus is fixed at boot, and
@@ -422,7 +429,7 @@ fn create_blob(c: &mut Client, arg: u64) -> u64 {
     };
     let handle = c.next_handle;
     c.next_handle += 1;
-    c.bos.push(Bo { handle, res, size, blob_mem: mem, phys: None });
+    c.bos.push(Bo { handle, res, size, blob_mem: mem, phys: None, cache: 0 });
     let mut o = b;
     o[8..12].copy_from_slice(&handle.to_le_bytes());
     o[12..16].copy_from_slice(&res.to_le_bytes());
@@ -436,7 +443,14 @@ fn map(c: &mut Client, arg: u64) -> u64 {
     if bo.phys.is_none() {
         let (res, size) = (bo.res, bo.size);
         match virtgpu::with(|d| d.map_blob(res, size)) {
-            Ok(Ok((p, _cache))) => bo.phys = Some(p),
+            Ok(Ok((p, cache))) => {
+                bo.phys = Some(p);
+                bo.cache = cache & 0x0f;
+                LAST_CACHE.store(bo.cache, core::sync::atomic::Ordering::Relaxed);
+                if TRACE.load(core::sync::atomic::Ordering::Relaxed) {
+                    crate::kprintln!("[drm] map res {} {} bytes at {:#x}, cache {}", res, size, p, bo.cache);
+                }
+            }
             Ok(Err(e)) => {
                 // Said once here because the client only sees ENOMEM, and
                 // Venus turns that into "out of host memory" about the instance.
@@ -451,12 +465,34 @@ fn map(c: &mut Client, arg: u64) -> u64 {
 }
 
 /// What `mmap` on a render node maps: the physical pages of the buffer named
-/// by `off`, and how many bytes of it there are.
-pub fn mapping(id: usize, off: u64) -> Option<(u64, u64)> {
+/// by `off`, how many bytes of it there are, and how they may be cached.
+///
+/// **The cache type is the host's to say and it is not decoration.** The GPU
+/// writes NVIDIA's write-combined memory without snooping the CPU's caches,
+/// so a write-back mapping of it reads the CPU's own stale lines: a compute
+/// result came back with 13,424 of a million elements still holding the
+/// pattern written before the dispatch, and elements read wrong and then
+/// right as lines were evicted mid-check.
+///
+/// **And under KVM the type only counts if QEMU honours it.** QEMU 11.1.1
+/// leaves `honor-guest-pat` off by default, which keeps KVM's quirk of
+/// forcing every guest page write-back -- so uncached and write-combined
+/// mapped exactly like write-back and failed the same way. With
+/// `-accel kvm,honor-guest-pat=on` all three runs matched. Host-cached
+/// memory is snooped and was right either way.
+pub fn mapping(id: usize, off: u64) -> Option<(u64, u64, crate::mem::space::Cache)> {
+    use crate::mem::space::Cache;
     let c = client(id)?;
     let h = (off >> MAP_SHIFT) as u32;
     let bo = c.bos.iter().find(|b| b.handle == h)?;
-    Some((bo.phys?, bo.size))
+    let cache = match bo.cache {
+        1 => Cache::WriteBack,
+        3 => Cache::WriteCombining,
+        // Uncached, and anything the host did not say: the type that cannot
+        // be wrong, only slow.
+        _ => Cache::Uncached,
+    };
+    Some((bo.phys?, bo.size, cache))
 }
 
 fn execbuffer(c: &mut Client, arg: u64) -> u64 {

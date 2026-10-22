@@ -2001,6 +2001,10 @@ fn gpu_cmd(acpi: &Option<Acpi>, rest: &str) {
         "wake" => return gpu_wake(acpi, false, None),
         "wake now" => return gpu_wake(acpi, true, None),
         "drm" => return crate::gpu::virtgpu::report(),
+        "drm trace on" | "drm trace off" => {
+            crate::linux::drm::TRACE.store(rest.ends_with("on"), core::sync::atomic::Ordering::Relaxed);
+            return;
+        }
         "virtio" => {
             if crate::gpu::virtgpu::held() {
                 // The probe resets the device, which would pull the queue and

@@ -48,6 +48,30 @@ const ENTRIES: usize = 512;
 /// taking the arithmetic on trust.
 pub const WINDOW: u64 = 1 << 39;
 
+/// The memory type a leaf selects, through the PAT slots `cpu::mtrr` programs:
+/// slot 0 is write-back, slot 1 (PWT) write-combining, slot 3 (PWT|PCD)
+/// uncached.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cache {
+    WriteBack,
+    WriteCombining,
+    Uncached,
+}
+
+impl Cache {
+    fn bits(self) -> u64 {
+        const PWT: u64 = 1 << 3;
+        const PCD: u64 = 1 << 4;
+        match self {
+            Cache::WriteBack => 0,
+            // Slot 1 is WC only once the PAT is programmed; before that it is
+            // write-through, which is still coherent with a device, just slower.
+            Cache::WriteCombining => PWT,
+            Cache::Uncached => PWT | PCD,
+        }
+    }
+}
+
 /// The root every kernel task runs on, sampled the first time one of these is
 /// built.
 ///
@@ -239,13 +263,22 @@ impl Space {
     /// question about what the kernel is using, and `map_low` is the entry
     /// point that asks it.
     pub fn map_page(&mut self, at: u64, phys: u64, writable: bool, user: bool) -> bool {
+        self.map_page_typed(at, phys, writable, user, Cache::WriteBack)
+    }
+
+    /// `map_page` with a memory type, for pages whose owner says how they may
+    /// be cached -- a GPU's host-visible window most of all. Mapping a page
+    /// write-back that the device writes behind the cache's back leaves stale
+    /// lines in it, and a program reads the value it wrote before the device
+    /// did; nothing faults and a few hundred cache lines are simply wrong.
+    pub fn map_page_typed(&mut self, at: u64, phys: u64, writable: bool, user: bool, cache: Cache) -> bool {
         // Below the window only inside the 32-bit hole: addresses with no
         // memory and no device behind them, so shadowing one moves nothing the
         // kernel uses. See `fixed::hole32`.
         if at < WINDOW && !super::fixed::in_hole(at, 4096) {
             return false;
         }
-        self.map_at(at, phys, writable, user)
+        self.map_at(at, phys, writable, user, cache)
     }
 
     /// The physical page behind `at` in this space, if a 4 KiB leaf maps it.
@@ -310,14 +343,14 @@ impl Space {
         if !super::fixed::is_free(at, 4096) {
             return Err("the kernel is using that address, so shadowing it would move its own memory");
         }
-        if self.map_at(at, phys, writable, user) {
+        if self.map_at(at, phys, writable, user, Cache::WriteBack) {
             Ok(())
         } else {
             Err("the tables could not be built")
         }
     }
 
-    fn map_at(&mut self, at: u64, phys: u64, writable: bool, user: bool) -> bool {
+    fn map_at(&mut self, at: u64, phys: u64, writable: bool, user: bool, cache: Cache) -> bool {
         if at % 4096 != 0 || phys % 4096 != 0 {
             return false;
         }
@@ -347,6 +380,7 @@ impl Space {
         if user {
             flags |= USER;
         }
+        flags |= cache.bits();
         unsafe { (&mut *(pt as *mut [u64; ENTRIES]))[i1] = (phys & ADDR_MASK) | flags };
         true
     }

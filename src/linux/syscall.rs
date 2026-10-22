@@ -5872,7 +5872,7 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
             if flags & MAP_SHARED == 0 {
                 return EINVAL;
             }
-            let Some((phys, size)) = super::drm::mapping(id, off) else { return EINVAL };
+            let Some((phys, size, cache)) = super::drm::mapping(id, off) else { return EINVAL };
             let want = page_up(len as usize) as u64;
             if want == 0 || want > page_up(size as usize) as u64 {
                 return EINVAL;
@@ -5895,7 +5895,7 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
             let Some(t) = sp.tables.as_mut() else { return ENODEV };
             let mut o = 0u64;
             while o < want {
-                if !t.map_page(at + o, phys + o, prot & PROT_WRITE != 0, true) {
+                if !t.map_page_typed(at + o, phys + o, prot & PROT_WRITE != 0, true, cache) {
                     return ENOMEM;
                 }
                 o += 4096;

@@ -453,6 +453,17 @@ pub fn report() {
         d.hv_mapped() >> 10,
         d.host_visible.map(|r| r.len >> 20).unwrap_or(0)
     );
+    let cache = crate::linux::drm::LAST_CACHE.load(core::sync::atomic::Ordering::Relaxed);
+    kprintln!(
+        "  last mapping's cache type from the host: {}",
+        match cache {
+            0 => "none mapped yet",
+            1 => "cached",
+            2 => "uncached",
+            3 => "write-combined",
+            _ => "unknown",
+        }
+    );
     if d.async_errors > 0 {
         kprintln!(
             "  {} fenced command(s) answered an error, the last {:#06x} {}",

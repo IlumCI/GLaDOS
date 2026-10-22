@@ -221,7 +221,8 @@ pub fn probe(ecam: u64) {
     let devs = find(ecam);
     if devs.is_empty() {
         kprintln!("  no virtio-gpu on this bus -- under QEMU that is");
-        kprintln!("    --qemu-late \"-display egl-headless -device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M\"");
+        kprintln!("    --qemu-late \"-display egl-headless -device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=512M\"");
+        kprintln!("    and -accel kvm,honor-guest-pat=on, or write-combined GPU memory reads stale");
         return;
     }
     let d = devs[0];

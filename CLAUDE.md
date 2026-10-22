@@ -6972,6 +6972,45 @@ python3 tools/drive.py --no-payload "${C[@]}" "linux run /tmp/wl/skytest 90"
 it prints each step. To photograph its window, give it thousands of frames,
 `linux deadline 120`, and let `drive.py --timeout` take the screenshot.
 
+### The GPU in ring 3 (`src/linux/drm.rs`, `src/gpu/virtgpu.rs`)
+
+`/dev/dri/renderD128` speaks Linux's `virtio_gpu` uAPI, and unmodified Mesa
+Venus at ring 3 does all the Vulkan; nothing in the kernel knows what Vulkan
+is. Under QEMU that reaches the host's RTX 3050:
+
+    linux run /mnt/vk/vulkaninfo --summary   Virtio-GPU Venus (NVIDIA GeForce RTX 3050 Laptop GPU)
+    linux run /mnt/vk/vkcompute              a million-element dispatch, every element checked
+
+The recipe is `--qemu-extra "-accel kvm,honor-guest-pat=on -cpu host"` and
+`--qemu-late "-display egl-headless -device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=512M"`,
+with Arch's `vulkaninfo`, loader and `libvulkan_virtio.so` closure staged on
+`game.img ::/vk` beside an ICD json naming `/mnt/vk/libvulkan_virtio.so`.
+`tools/guest/vkcompute.c` is the test that matters, because `vulkaninfo`
+submits almost nothing. `gpu drm` reports on the held device and
+`gpu drm trace on` prints each mapping with the cache type the host gave.
+
+**`honor-guest-pat=on` is not optional.** QEMU 11.1.1 defaults it off, which
+keeps KVM forcing every guest page write-back, and NVIDIA's write-combined
+memory is written by the GPU without snooping: a write-back view of it reads
+the CPU's stale lines, and about a fifth of a compute result came back as the
+pattern written before the dispatch. The kernel maps each blob with the type
+the host reports (`Space::map_page_typed`); without the flag that type is
+ignored and uncached fails exactly like write-back. Host-cached memory is
+snooped and is right either way, which is what made it look like a
+write-combining bug.
+
+**A sleep may not run short.** `nanosleep` rounded anything under a 10 ms
+tick to nothing, and Venus counts 1024 waits it believes took ~3.5 s before
+asking whether the host ring reported alive -- so a foreground run aborted,
+silently, because its log lines are debug-level. The remainder under a tick
+is waited out on the TSC now.
+
+The second backend is meant to be nouveau behind the same node (NVK at ring
+3, GSP firmware from `/lib/firmware/nvidia/ga107/gsp/`), for the GF63 on bare
+metal; only the ioctl table and what a submit means would differ. Not done:
+dma-buf/PRIME, presenting a Vulkan image on the desktop, 32-bit clients, GL
+through Zink.
+
 ### Crypto (`src/crypto/`)
 
 Written from scratch, and this is the one place where that is a liability
