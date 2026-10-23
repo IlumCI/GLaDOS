@@ -673,7 +673,11 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
         255 => (sc::sys_epoll_ctl(b, c, d, si), true),
         256 => (sc::sys_epoll_wait(b, c, d, si), true),
         403 => (sc::sys_clock_gettime(b, c), true),
-        407 => (sc::sys_nanosleep(d), true),
+        // clock_nanosleep_time64: the 64-bit timespec, so the same call as
+        // x86-64's, flags and all. It dropped `TIMER_ABSTIME`, which turns a
+        // sleep until a time into a sleep for that many seconds.
+        407 => (sc::sys_clock_nanosleep(b, c, d), true),
+        116 => (sysinfo32(b), true),
         240 => {
             if c & 0x7f == 0 || c & 0x7f == 9 {
                 super::prof::note_stack(f.rsp as u32 as u64, f.rip as u32 as u64);
@@ -728,6 +732,7 @@ pub fn name_of(nr: u64) -> &'static str {
         91 => "munmap",
         120 => "clone",
         122 => "uname",
+        116 => "sysinfo",
         125 => "mprotect",
         140 => "_llseek",
         145 => "readv",
@@ -794,4 +799,31 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
         core::mem::offset_of!(Frame32, rip) == 15 * 8,
     ));
     out
+}
+
+/// i386 `sysinfo`: the same facts as x86-64's in 32-bit longs, 64 bytes.
+///
+/// glibc's `sysconf(_SC_PHYS_PAGES)` is built on this, and Zink refuses to
+/// create a screen when it cannot learn how much memory the machine has --
+/// so a 32-bit GL program on the GPU fell back to software over a call this
+/// table did not have. `mem_unit` scales the figures when the heap would not
+/// fit a 32-bit count of bytes.
+fn sysinfo32(buf: u64) -> u64 {
+    if !sc::reachable(buf, 64, true) {
+        return sc::EFAULT;
+    }
+    let (used, total) = crate::mem::heap::HEAP.stats();
+    let free = total.saturating_sub(used) as u64;
+    let total = total as u64;
+    let unit: u64 = if total > u32::MAX as u64 { 4096 } else { 1 };
+    let uptime = crate::dev::lapic::ticks() / crate::TIMER_HZ as u64;
+    let mut b = [0u8; 64];
+    let mut put = |off: usize, v: u32| b[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    put(0, uptime as u32);
+    put(16, (total / unit) as u32);
+    put(20, (free / unit) as u32);
+    put(52, unit as u32);
+    b[40..42].copy_from_slice(&1u16.to_le_bytes());
+    unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), buf as *mut u8, 64) };
+    0
 }

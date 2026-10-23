@@ -50,6 +50,7 @@ pub mod object;
 pub mod server;
 pub mod surface;
 pub mod seat;
+pub mod dmabuf;
 pub mod wire;
 
 /// What `diag sky` asks of everything here.
@@ -58,6 +59,7 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     out.extend(object::checks());
     out.extend(client::checks());
     out.extend(surface::checks());
+    out.extend(dmabuf::checks());
     out.extend(server::checks());
     out
 }

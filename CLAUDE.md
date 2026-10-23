@@ -7005,11 +7005,41 @@ asking whether the host ring reported alive -- so a foreground run aborted,
 silently, because its log lines are debug-level. The remainder under a tick
 is waited out on the TSC now.
 
+**Portal runs on it through Zink, 32-bit**, at 8.4 fps against llvmpipe's
+1.15 on the same pinned host (`out/gpu/portal.sh`). Four things had to be
+true and each was a wall:
+
+- **EGL must find a GPU to ask for**, which it does from the compositor:
+  Skywalker advertises `zwp_linux_dmabuf_v1` v4 (`sky/dmabuf.rs`) with a
+  default feedback naming the render node, takes no dma-buf, and refuses a
+  buffer with `failed`. With `MESA_LOADER_DRIVER_OVERRIDE=zink` EGL opens the
+  node and Zink presents through Venus's Wayland WSI, forced onto `wl_shm`
+  with `MESA_VK_WSI_DEBUG=sw,buffer` (render optimal, blit to a host buffer,
+  copy) -- because Venus on NVIDIA wants dma-buf otherwise.
+- **The render node's major is 511, not 226.** Venus on NVIDIA hides its DRM
+  node (reports 0:0) and Zink handed a render fd accepts only the Vulkan
+  device matching that node -- unless the major is outside 1..255, where it
+  takes the first. libdrm on Linux finds nodes through `/sys/dev/char` and
+  never checks 226.
+- **`CLOCK_MONOTONIC` has nanosecond resolution** (TSC), and i386 has
+  `sysinfo` (Zink refuses to start without the machine's memory size).
+- **A ring watchdog** (`drm::watch`). Venus's host ring threads go to sleep
+  with commands unread and the guest polls forever -- head short of tail,
+  status IDLE, host parked in `cnd_wait` -- on every ring, after a varying
+  number of batches, and raising the host's idle timeout to 50 ms did not
+  stop it. The cause is not found. The kernel sees each `vkCreateRingMESA`,
+  so it knows every ring's head, tail and status, and while a guest waits it
+  sends the notify for any ring idle with work whose head has not moved
+  across two looks. 3,746 such wakes in four minutes of Portal: correct, and
+  the likely ceiling on the frame rate.
+
+`gpu drm` counts the wakes; `gpu drm peek <phys> [words]` reads host-visible
+memory from the kernel, which is how the stall was seen.
+
 The second backend is meant to be nouveau behind the same node (NVK at ring
 3, GSP firmware from `/lib/firmware/nvidia/ga107/gsp/`), for the GF63 on bare
 metal; only the ioctl table and what a submit means would differ. Not done:
-dma-buf/PRIME, presenting a Vulkan image on the desktop, 32-bit clients, GL
-through Zink.
+dma-buf/PRIME, and a zero-copy present.
 
 ### Crypto (`src/crypto/`)
 

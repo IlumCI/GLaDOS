@@ -102,6 +102,8 @@ pub static FEAT_IDLE: core::sync::atomic::AtomicBool = core::sync::atomic::Atomi
 pub static FEAT_DESK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
 pub fn pump() {
+    // Venus rings the host fell asleep on; see `drm::watch`.
+    crate::linux::drm::watch();
     // The network endpoint, served on the same turn for the same reason.
     if FEAT_NETCTL.load(core::sync::atomic::Ordering::Relaxed) {
         crate::linux::netctl::pump();
@@ -115,6 +117,10 @@ pub fn pump() {
         client.publish(surface::XDG_WM_BASE, 1);
         client.publish(super::seat::WL_OUTPUT, 3);
         client.publish(super::seat::WL_SEAT, 5);
+        // Names the GPU, so Mesa's EGL renders on it; see `dmabuf`.
+        if super::dmabuf::offered() {
+            client.publish(super::dmabuf::DMABUF, 4);
+        }
         if FEAT_LOCK.load(core::sync::atomic::Ordering::Relaxed) {
             client.publish(super::seat::RELATIVE_MANAGER, 1);
             client.publish(super::seat::CONSTRAINTS, 1);

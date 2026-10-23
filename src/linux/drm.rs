@@ -39,18 +39,32 @@ use crate::sync::Racy;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-pub const MAJOR: u64 = 226;
+/// **Not 226, and the reason is a lie somebody else tells.** Venus running on
+/// NVIDIA's driver hides its DRM node -- `vn_wsi_init` reports render 0:0 and
+/// switches `VK_EXT_physical_device_drm` off, so that common WSI takes its
+/// blit path -- and Zink, handed a render-node fd by EGL, will accept only the
+/// Vulkan device whose DRM node matches that fd's `st_rdev` -- so with 226:128
+/// no device can match (read from `zink_get_display_device`, not yet watched
+/// failing). Zink does that matching only for a
+/// major in 1..255 (`zink_picks_device`), and outside that range it takes the
+/// first device, which is the only one there is.
+///
+/// Nothing else is told anything different. On Linux libdrm finds a node
+/// through `/sys/dev/char/<major>:<minor>` and never compares the major
+/// against 226 -- that test is for the BSDs -- so enumeration, the PCI ids and
+/// the node's name all come out as before.
+pub const MAJOR: u64 = 511;
 pub const RENDER_MINOR: u64 = 128;
 pub const NODE: &str = "/dev/dri/renderD128";
 
-/// `makedev(226, 128)` as glibc encodes it: the low eight bits of the minor
+/// `makedev(MAJOR, 128)` as glibc encodes it: the low eight bits of the minor
 /// at the bottom, the major above them, and the rest of the minor at 20.
 /// libdrm takes it apart with `major()` and `minor()`, so an encoding that is
 /// merely plausible names a different `/sys/dev/char` directory.
 pub const RDEV: u64 = ((MAJOR & 0xfff) << 8) | (RENDER_MINOR & 0xff) | ((RENDER_MINOR & !0xff) << 12);
 
-const SYS_DEV: &str = "/sys/dev/char/226:128";
-const SYS_DEVICE: &str = "/sys/dev/char/226:128/device";
+const SYS_DEV: &str = "/sys/dev/char/511:128";
+const SYS_DEVICE: &str = "/sys/dev/char/511:128/device";
 
 // ioctl numbers, `_IOC(dir, 'd', nr, size)`. Matched on the type byte and the
 // number, never on the size field: a 32-bit and a 64-bit client encode a
@@ -122,6 +136,12 @@ struct Client {
 /// One per open render node. Racy because every caller is a guest syscall,
 /// and those run under the guest lock.
 static CLIENTS: Racy<Vec<Client>> = Racy::new(Vec::new());
+/// `gpu drm idle <us>`: rewrites the idle timeout in Venus's
+/// `vkCreateRingMESA` (command 188, a u64 of nanoseconds at byte 76, sent by
+/// Mesa as 1 ms). An experiment kept as a knob: raising it to 50 ms got
+/// Portal further and did not stop the stalls, which is what put the
+/// watchdog below in place of it. Zero leaves the command as written.
+pub static RING_IDLE_US: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// `gpu drm trace on`: a line per mapping.
 pub static TRACE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 /// The cache type the host gave the last mapping, for `gpu drm`.
@@ -153,6 +173,7 @@ pub fn closed(id: usize) {
     let clients = unsafe { CLIENTS.get() };
     let Some(i) = clients.iter().position(|c| c.id == id) else { return };
     let c = clients.swap_remove(i);
+    forget_rings(id);
     let _ = virtgpu::with(|d| {
         for b in &c.bos {
             if let Some(p) = b.phys {
@@ -197,6 +218,14 @@ fn u64_at(b: &[u8], at: usize) -> u64 {
 
 /// One ioctl on a render node, from the client the descriptor carries.
 pub fn ioctl(id: usize, req: u64, arg: u64) -> u64 {
+    let r = ioctl_inner(id, req, arg);
+    if TRACE.load(core::sync::atomic::Ordering::Relaxed) && (r as i64) < 0 {
+        crate::kprintln!("[drm] client {} ioctl nr {:#x} -> {}", id, req & 0xff, r as i64);
+    }
+    r
+}
+
+fn ioctl_inner(id: usize, req: u64, arg: u64) -> u64 {
     if (req >> 8) & 0xff != DRM_TYPE {
         return ENOTTY;
     }
@@ -389,6 +418,12 @@ fn context_init(c: &mut Client, arg: u64) -> u64 {
 
 /// Copy a guest command stream in, bounded.
 fn stream(at: u64, len: usize) -> Option<Vec<u8>> {
+    // An empty stream is a submit made only for its fence -- Venus does this
+    // to get a sync file for work already in its ring -- and its pointer is
+    // null, which no reachability check would pass.
+    if len == 0 {
+        return Some(Vec::new());
+    }
     if len > virtgpu::MAX_SUBMIT || !syscall::reachable(at, len, false) {
         return None;
     }
@@ -508,8 +543,35 @@ fn execbuffer(c: &mut Client, arg: u64) -> u64 {
     // ring's work already, and Venus only asks for one across rings with
     // timeline semaphores, which it is not using here.
     let _ = flags & EXECBUF_FENCE_FD_IN;
-    let Some(data) = stream(cmd, size) else { return EFAULT };
+    let Some(mut data) = stream(cmd, size) else {
+        if TRACE.load(core::sync::atomic::Ordering::Relaxed) {
+            crate::kprintln!(
+                "[drm] execbuffer stream {:#x} + {} refused: {}",
+                cmd,
+                size,
+                if size > virtgpu::MAX_SUBMIT { "over the submit limit" } else { "not the guest's memory" }
+            );
+        }
+        return EFAULT;
+    };
+    let idle = RING_IDLE_US.load(core::sync::atomic::Ordering::Relaxed);
+    if idle != 0 && data.len() >= 84 && u32_at(&data, 0) == 188 && u64_at(&data, 76) == 1_000_000 {
+        data[76..84].copy_from_slice(&(idle * 1000).to_le_bytes());
+    }
+    if data.len() >= 136 && u32_at(&data, 0) == CMD_CREATE_RING {
+        note_ring(c.id, ctx, &data);
+    }
     let out = flags & EXECBUF_FENCE_FD_OUT != 0;
+    if TRACE.load(core::sync::atomic::Ordering::Relaxed) {
+        crate::kprintln!(
+            "[drm] t={} us submit {} bytes ring {:?}{} first {:?}",
+            crate::time::rdtsc() / crate::time::tsc_mhz().max(1),
+            data.len(),
+            ring,
+            if out { " fenced" } else { "" },
+            data.chunks(4).take(40).map(|c| u32::from_le_bytes([c[0], c.get(1).copied().unwrap_or(0), c.get(2).copied().unwrap_or(0), c.get(3).copied().unwrap_or(0)])).collect::<Vec<u32>>()
+        );
+    }
     let fence = match virtgpu::with(|d| d.submit(ctx, ring, &data, out)) {
         Ok(Ok(f)) => f,
         Ok(Err(_)) => return EINVAL,
@@ -547,8 +609,8 @@ pub fn sys_is_dir(path: &str) -> bool {
         && matches!(
             path,
             "/sys/dev" | "/sys/dev/char" | SYS_DEV | SYS_DEVICE
-                | "/sys/dev/char/226:128/device/drm"
-                | "/sys/dev/char/226:128/device/drm/renderD128"
+                | "/sys/dev/char/511:128/device/drm"
+                | "/sys/dev/char/511:128/device/drm/renderD128"
         )
 }
 
@@ -557,13 +619,14 @@ const SYS_FILES: [&str; 7] = ["uevent", "vendor", "device", "subsystem_vendor", 
 pub fn sys_is_file(path: &str) -> bool {
     present().is_some()
         && path
-            .strip_prefix("/sys/dev/char/226:128/device/")
+            .strip_prefix("/sys/dev/char/511:128/device/")
             .is_some_and(|f| SYS_FILES.contains(&f))
+        || (present().is_some() && path == "/sys/dev/char/511:128/uevent")
 }
 
 /// The `subsystem` link, whose last component is how libdrm learns the bus.
 pub fn sys_link(path: &str) -> Option<String> {
-    (present().is_some() && path == "/sys/dev/char/226:128/device/subsystem")
+    (present().is_some() && path == "/sys/dev/char/511:128/device/subsystem")
         .then(|| String::from("../../../../bus/pci"))
 }
 
@@ -580,7 +643,13 @@ fn config() -> Option<[u8; 64]> {
 }
 
 pub fn sys_read(path: &str) -> Option<Vec<u8>> {
-    let f = path.strip_prefix("/sys/dev/char/226:128/device/")?;
+    if path == "/sys/dev/char/511:128/uevent" {
+        // The node's own uevent, which is where libdrm reads a node's name
+        // from when it has only a device number.
+        present()?;
+        return Some(alloc::format!("MAJOR={}\nMINOR={}\nDEVNAME=dri/renderD128\nDEVTYPE=drm_minor\n", MAJOR, RENDER_MINOR).into_bytes());
+    }
+    let f = path.strip_prefix("/sys/dev/char/511:128/device/")?;
     let (bus, dev, func) = present()?;
     let c = config()?;
     let h16 = |at: usize| u16::from_le_bytes([c[at], c[at + 1]]);
@@ -608,15 +677,15 @@ pub fn sys_entries(dir: &str) -> Vec<(String, bool, usize)> {
     let f = |n: &str| (String::from(n), false, 0usize);
     match dir {
         "/sys/dev" => alloc::vec![d("char")],
-        "/sys/dev/char" => alloc::vec![d("226:128")],
-        SYS_DEV => alloc::vec![d("device")],
+        "/sys/dev/char" => alloc::vec![d("511:128")],
+        SYS_DEV => alloc::vec![d("device"), f("uevent")],
         SYS_DEVICE => {
             let mut v: Vec<_> = SYS_FILES.iter().map(|n| f(n)).collect();
             v.push(d("drm"));
             v.push(f("subsystem"));
             v
         }
-        "/sys/dev/char/226:128/device/drm" => alloc::vec![d("renderD128")],
+        "/sys/dev/char/511:128/device/drm" => alloc::vec![d("renderD128")],
         _ => Vec::new(),
     }
 }
@@ -625,10 +694,12 @@ pub fn sys_entries(dir: &str) -> Vec<(String, bool, usize)> {
 pub fn checks() -> Vec<(&'static str, bool)> {
     let mut out = Vec::new();
     // glibc's `major` and `minor` on the value, reimplemented: the claim is
-    // that the round trip names 226:128 and nothing else.
+    // that the round trip names this node and nothing else.
     let maj = ((RDEV >> 8) & 0xfff) | ((RDEV >> 32) & !0xfff);
     let min = (RDEV & 0xff) | ((RDEV >> 12) & !0xff);
-    out.push(("the render node's st_rdev takes apart to 226:128", maj == 226 && min == 128));
+    out.push(("the render node's st_rdev takes apart to its major and 128", maj == MAJOR && min == 128));
+    // The property the major was chosen for, stated where it can fail.
+    out.push(("and the major is one Zink will not try to match a Vulkan device against", !(1..255).contains(&MAJOR)));
     out.push(("a map offset names its handle and stays page-aligned", (5u64 << MAP_SHIFT) % 4096 == 0 && ((5u64 << MAP_SHIFT) >> MAP_SHIFT) == 5));
     out.push((
         "an i386 mmap2 can still reach handle 4095 through a 32-bit page number",
@@ -636,4 +707,111 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     ));
     out.extend(virtgpu::checks());
     out
+}
+
+// --- the ring watchdog ------------------------------------------------------
+//
+// Venus moves Vulkan through rings in shared memory, and a host ring thread
+// that has gone idle sleeps until the guest sends `vkNotifyRingMESA`. Mesa
+// sends one only when it sees the ring's IDLE status bit as it publishes a
+// new tail, at most once a millisecond.
+//
+// **Under this kernel that wake-up is lost, and the cause is not known.**
+// Driven with Portal on Zink: a ring's head stopped short of its tail with
+// the status reading IDLE|ALIVE, the host's ring thread parked in
+// `cnd_wait` (read off it with eu-stack), and the guest polling its seqno
+// forever -- the main ring and the per-thread rings both, after a varying
+// number of batches, and with the host's idle timeout raised from 1 ms to
+// 50 ms as well. Reading both sides' orderings says it cannot happen with
+// coherent memory and agreeing clocks, and the clocks agree (2688 MHz on
+// both); a premise is wrong somewhere unread.
+//
+// So the kernel keeps the bargain itself. It sees every `vkCreateRingMESA`
+// go by, which names the ring's id, its shared-memory resource and where
+// head, tail and status sit in it. While a guest waits, a ring whose status
+// says IDLE with commands unread, and whose head has not moved since the
+// last look, gets the notify Mesa would have sent. A notify to a ring that
+// is already awake costs the host a condition-variable signal and nothing
+// else, so a wrong guess is cheap and a right one ends a hang.
+
+const CMD_CREATE_RING: u32 = 188;
+const CMD_NOTIFY_RING: u32 = 190;
+const STATUS_IDLE: u32 = 1;
+
+#[derive(Clone, Copy)]
+struct Ring {
+    client: usize,
+    ctx: u32,
+    id: u64,
+    res: u32,
+    head: u64,
+    tail: u64,
+    status: u64,
+    /// The head at the last look: a ring is only woken once its head has
+    /// stood still across two looks, so a host mid-burst is left alone.
+    seen: u32,
+}
+
+static RINGS: Racy<Vec<Ring>> = Racy::new(Vec::new());
+static LAST_LOOK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Notifies the watchdog has sent, for `gpu drm`.
+pub static KICKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// `vkCreateRingMESA` as Venus encodes it, in u32 words: the command, flags,
+/// the ring id (u64), the create-info pointer marker, then the info --
+/// sType, pNext, flags, resourceId at word 14, offset, size, idleTimeout,
+/// and the head, tail and status offsets as u64s at words 21, 23 and 25.
+/// Read from a captured command rather than recalled, and each field is
+/// checked against what it must be before anything is believed.
+fn note_ring(client: usize, ctx: u32, d: &[u8]) {
+    let w = |i: usize| u32_at(d, i * 4) as u64;
+    let id = w(2) | w(3) << 32;
+    let res = w(14) as u32;
+    let (head, tail, status) = (w(21) | w(22) << 32, w(23) | w(24) << 32, w(25) | w(26) << 32);
+    if res == 0 || head >= 4096 || tail >= 4096 || status >= 4096 {
+        return;
+    }
+    let rings = unsafe { RINGS.get() };
+    rings.retain(|r| !(r.client == client && r.id == id));
+    rings.push(Ring { client, ctx, id, res, head, tail, status, seen: u32::MAX });
+}
+
+fn forget_rings(client: usize) {
+    unsafe { RINGS.get() }.retain(|r| r.client != client);
+}
+
+/// Look at every ring, at most every two milliseconds, and wake the ones the
+/// host is sleeping on with work in them. Called from a guest's waits.
+pub fn watch() {
+    let now = crate::time::rdtsc() / crate::time::tsc_mhz().max(1);
+    let last = LAST_LOOK.load(core::sync::atomic::Ordering::Relaxed);
+    if now < last + 2000 {
+        return;
+    }
+    LAST_LOOK.store(now, core::sync::atomic::Ordering::Relaxed);
+    let rings = unsafe { RINGS.get() };
+    for r in rings.iter_mut() {
+        let Some(c) = client(r.client) else { continue };
+        let Some(phys) = c.bos.iter().find(|b| b.res == r.res).and_then(|b| b.phys) else { continue };
+        if !crate::mem::paging::map_range(phys & !0xfff, 4096, true) {
+            continue;
+        }
+        let rd = |off: u64| unsafe { core::ptr::read_volatile((phys + off) as *const u32) };
+        let (head, tail, status) = (rd(r.head), rd(r.tail), rd(r.status));
+        if head == tail || status & STATUS_IDLE == 0 || head != r.seen {
+            r.seen = head;
+            continue;
+        }
+        let mut n = [0u8; 24];
+        n[0..4].copy_from_slice(&CMD_NOTIFY_RING.to_le_bytes());
+        n[8..16].copy_from_slice(&r.id.to_le_bytes());
+        n[16..20].copy_from_slice(&tail.to_le_bytes());
+        let ctx = r.ctx;
+        if virtgpu::with(|d| d.submit(ctx, Some(0), &n, false)).is_ok() {
+            KICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if TRACE.load(core::sync::atomic::Ordering::Relaxed) {
+                crate::kprintln!("[drm] ring {:#x} idle at {} of {}: notified", r.id, head, tail);
+            }
+        }
+    }
 }

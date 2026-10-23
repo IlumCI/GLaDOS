@@ -2524,6 +2524,7 @@ pub(super) fn sleep_for(sec: u64, nsec: u64) -> u64 {
         if overran(crate::dev::lapic::ticks()) {
             unsafe { kill_blocked() }
         }
+        crate::linux::drm::watch();
         let flags: u64;
         unsafe { core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags)) };
         let held = holds_big();
@@ -3950,13 +3951,27 @@ pub(super) fn clock_pair(which: u64) -> Option<(u64, u64)> {
             let dt = crate::dev::rtc::now()?;
             Some((crate::dev::rtc::unix_seconds(&dt) as u64, 0))
         }
-        // MONOTONIC, its coarse and raw twins, and the two process clocks --
-        // one guest, no threads, so process time and uptime are the same
-        // number and answering it is better than a program giving up.
-        1 | 2 | 3 | 4 | 6 | 7 => {
+        // MONOTONIC_COARSE: the tick, which is what "coarse" promises.
+        6 => {
             let t = crate::dev::lapic::ticks();
             let hz = crate::TIMER_HZ as u64;
             Some((t / hz, (t % hz) * (1_000_000_000 / hz)))
+        }
+        // MONOTONIC, raw, boottime and the two process clocks -- answered
+        // from the TSC, to the nanosecond.
+        //
+        // **They were the 10 ms tick, and that deadlocked the GPU.** Venus
+        // wakes an idle host ring at most once per millisecond of this clock,
+        // on the understanding that the host stays awake for a millisecond
+        // after its last work. With a clock that stands still for ten, a
+        // submit two real milliseconds after a notify read "no time has
+        // passed", skipped the notify, and waited for a host that had
+        // already gone to sleep -- forever, with both sides idle. The same
+        // bargain is in every protocol that rate-limits a doorbell by time.
+        1 | 2 | 3 | 4 | 7 => {
+            let mhz = crate::time::tsc_mhz().max(1) as u128;
+            let ns = crate::time::rdtsc() as u128 * 1000 / mhz;
+            Some(((ns / 1_000_000_000) as u64, (ns % 1_000_000_000) as u64))
         }
         _ => None,
     }
@@ -5948,9 +5963,13 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
     if !anon {
         if let Some(m) = memfd(fd) {
             const MAP_SHARED: u64 = 0x01;
-            if flags & MAP_SHARED == 0 {
-                // A private mapping of a memfd is a copy-on-write view, which
-                // is legal and which nothing has asked for. Refusing says so.
+            if flags & MAP_SHARED == 0 && prot & PROT_WRITE != 0 {
+                // A private writable mapping of a memfd is a copy-on-write
+                // view, which is legal and which nothing has asked for.
+                // Refusing says so. A private *read-only* one cannot differ
+                // from a shared one -- nothing can write through it -- and it
+                // is how EGL reads a compositor's dma-buf format table, so it
+                // is served as the shared pages.
                 return EINVAL;
             }
             if off != 0 {

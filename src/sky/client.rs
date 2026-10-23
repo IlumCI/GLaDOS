@@ -190,6 +190,7 @@ impl Client {
             WL_REGISTRY => self.registry(msg),
             iface if super::surface::handles(iface) => self.surface_request(entry.iface, entry.version, msg),
             iface if super::seat::handles(iface) => self.seat_request(entry.iface, entry.version, msg),
+            iface if super::dmabuf::handles(iface) => self.dmabuf_request(entry.iface, entry.version, msg),
             // An object of an interface nothing answers for yet. Refusing is
             // the honest response and it is also the useful one: the trace
             // says which interface to write next, the way `-ENOSYS` does for
@@ -298,6 +299,7 @@ impl Client {
                 self.objects.create(id, g.iface, version)?;
                 self.bound(id, g.iface);
                 self.seat_bound(id, g.iface);
+                self.dmabuf_bound(id, g.iface, version);
                 Ok(())
             }
             _ => Err(Error::NoMethod),

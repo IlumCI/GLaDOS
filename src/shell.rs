@@ -2001,6 +2001,29 @@ fn gpu_cmd(acpi: &Option<Acpi>, rest: &str) {
         "wake" => return gpu_wake(acpi, false, None),
         "wake now" => return gpu_wake(acpi, true, None),
         "drm" => return crate::gpu::virtgpu::report(),
+        // Read host-visible GPU memory from the kernel: `gpu drm peek <phys> [words]`.
+        // For looking at a Venus ring's head, tail and status words when a
+        // guest and the host disagree about whose turn it is.
+        t if t.starts_with("drm peek ") => {
+            let mut w = t[9..].split_whitespace();
+            let at = w.next().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok());
+            let n = w.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(16).min(256);
+            let Some(at) = at else { return kprintln!("  usage: gpu drm peek <hex phys> [words]") };
+            let page = at & !0xfff;
+            if !crate::mem::paging::map_range(page, (at + n * 4 + 0xfff - page) & !0xfff, true) {
+                return kprintln!("  cannot map {:#x}", at);
+            }
+            for i in 0..n {
+                let v = unsafe { core::ptr::read_volatile((at + i * 4) as *const u32) };
+                kprintln!("  {:#x}: {:#010x} ({})", at + i * 4, v, v);
+            }
+            return;
+        }
+        t if t.starts_with("drm idle ") => {
+            let us = t[9..].trim().parse::<u64>().unwrap_or(0);
+            crate::linux::drm::RING_IDLE_US.store(us, core::sync::atomic::Ordering::Relaxed);
+            return kprintln!("  Venus ring idle timeout {}", if us == 0 { alloc::string::String::from("as the guest asks") } else { alloc::format!("rewritten to {} us", us) });
+        }
         "drm trace on" | "drm trace off" => {
             crate::linux::drm::TRACE.store(rest.ends_with("on"), core::sync::atomic::Ordering::Relaxed);
             return;
