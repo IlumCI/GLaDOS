@@ -1022,7 +1022,12 @@ def main():
         # screen is legible, and a GUI that has never been looked at is a GUI
         # nobody has tested.
         "-monitor", f"tcp:127.0.0.1:{MONITOR_PORT},server=on,wait=off",
-        *(["-display", "sdl", "-name", "GLaDOS"] if window else ["-display", "none"]),
+        # `GLADOS_DISPLAY=gtk,gl=on` is a window someone can play in (sdl,gl=on
+        # opened a window and the guest never booted): the GPU
+        # path needs the display to hand QEMU an OpenGL context, which
+        # `egl-headless` does for a test and a plain `sdl` window does not.
+        *(["-display", os.environ["GLADOS_DISPLAY"], "-name", "GLaDOS"] if os.environ.get("GLADOS_DISPLAY") else
+          ["-display", "sdl", "-name", "GLaDOS"] if window else ["-display", "none"]),
         *(["-vga", "none", "-device", f"VGA,xres={res[0]},yres={res[1]}"] if res else
           ["-vga", "none", "-device", "VGA,xres=1920,yres=1080"] if hd else []),
         "-no-reboot",
