@@ -433,7 +433,7 @@ fn index_walk(st: &cas::Store, r: &cas::ChunkRef, kind: u8, depth: usize, w: &mu
 /// guests; a kernel task walking the tree was not atomic against anything. The
 /// timer preempted the shell halfway down a path, a guest's `close` committed
 /// a file into the same directory, and the shell resumed walking freed
-/// memory -- found as Portal hanging or faulting in LLVM, one run in one, as
+/// memory -- found as a game hanging or faulting in LLVM, one run in one, as
 /// soon as the shell's idle loop started reading `/etc/net/known` every tick.
 /// Taking both here closes it for every caller at once, on one core or many.
 fn with<R>(f: impl FnOnce(&mut Sysbox) -> R) -> Option<R> {

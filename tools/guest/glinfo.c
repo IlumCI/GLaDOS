@@ -4,7 +4,7 @@
  * Opens an SDL2 GL window the way Source does, prints the four strings that
  * say which driver answered, then draws a few thousand textured-free
  * triangles a frame for a fixed time and reports frames per second. Small
- * enough to tell "zink is not being picked" from "Portal is slow" without
+ * enough to tell "zink is not being picked" from "the game is slow" without
  * waiting five minutes for a map to load.
  *
  *   glinfo [seconds] [width height]

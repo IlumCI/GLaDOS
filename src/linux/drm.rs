@@ -110,10 +110,10 @@ const CTX_PARAM_NUM_RINGS: u64 = 2;
 /// An offset `MAP` hands out is the handle shifted up by this much, so `mmap`
 /// can find the buffer from the offset alone.
 ///
-/// **It was 32, and that killed Portal.** An i386 client's `mmap2` carries
+/// **It was 32, and that killed a game.** An i386 client's `mmap2` carries
 /// the offset in pages as a 32-bit number, so a shift of 32 reached handle
 /// 4095 -- which read as "far more buffers than a client keeps mapped" and
-/// was a cap on buffers ever *created*, handles only counting up. Portal
+/// was a cap on buffers ever *created*, handles only counting up. a game
 /// passes 4096 while loading a level; glibc then refuses the `mmap` itself
 /// with `EINVAL` before the kernel sees it, Zink reports
 /// VK_ERROR_MEMORY_MAP_FAILED and dereferences the mapping it did not get.
@@ -148,7 +148,7 @@ static CLIENTS: Racy<Vec<Client>> = Racy::new(Vec::new());
 /// `gpu drm idle <us>`: rewrites the idle timeout in Venus's
 /// `vkCreateRingMESA` (command 188, a u64 of nanoseconds at byte 76, sent by
 /// Mesa as 1 ms). An experiment kept as a knob: raising it to 50 ms got
-/// Portal further and did not stop the stalls, which is what put the
+/// the game further and did not stop the stalls, which is what put the
 /// watchdog below in place of it. Zero leaves the command as written.
 pub static RING_IDLE_US: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// `gpu drm trace on`: a line per mapping.
@@ -315,7 +315,7 @@ fn ioctl_inner(id: usize, req: u64, arg: u64) -> u64 {
 /// the GPU wrote. Linux flushes whenever a page changes memory type; this
 /// kernel had never had a page change type before.
 ///
-/// It was written as the cause of Portal's first-frame freeze and is not:
+/// It was written as the cause of a game's first-frame freeze and is not:
 /// with Venus's semaphore and fence feedback switched off entirely
 /// (`VN_PERF=no_semaphore_feedback,no_fence_feedback`) the freeze still
 /// happened. It stays because the aliasing it removes is real.
@@ -628,7 +628,7 @@ fn execbuffer(c: &mut Client, arg: u64) -> u64 {
     // **The guest lock is let go for the round trip.** A submit nobody fences
     // is answered only when the host has taken it, which is a few hundred
     // microseconds and sometimes several milliseconds -- and every guest
-    // syscall waits on that lock, so Portal's other threads queued behind
+    // syscall waits on that lock, so a game's other threads queued behind
     // every Venus notify: 11,251 of them in one run, each holding the whole
     // guest for 180 us. What the submit needs was copied out above (`ctx`,
     // `ring`, `data`), and nothing of the client is touched until the lock is
@@ -835,7 +835,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 // new tail, at most once a millisecond.
 //
 // **Under this kernel that wake-up is lost, and the cause is not known.**
-// Driven with Portal on Zink: a ring's head stopped short of its tail with
+// Driven with a 32-bit game on Zink: a ring's head stopped short of its tail with
 // the status reading IDLE|ALIVE, the host's ring thread parked in
 // `cnd_wait` (read off it with eu-stack), and the guest polling its seqno
 // forever -- the main ring and the per-thread rings both, after a varying
@@ -872,7 +872,7 @@ struct Ring {
 static RINGS: Racy<Vec<Ring>> = Racy::new(Vec::new());
 /// How often the rings are looked at. Every look that finds a sleeping ring
 /// with work is a stall ended, and the time between looks is what each one
-/// costs the guest: at 2 ms and two looks Portal ran at 8.4 fps.
+/// costs the guest: at 2 ms and two looks the game ran at 8.4 fps.
 const WATCH_US: u64 = 500;
 static LAST_LOOK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// Notifies the watchdog has sent, for `gpu drm`.
@@ -934,7 +934,7 @@ pub fn watch() {
         let ctx = r.ctx;
         // Waited for, deliberately. Sent without waiting, the notifies piled
         // into the queue while QEMU had it blocked behind an unmap, every
-        // descriptor filled, and Portal stopped for good with the watchdog
+        // descriptor filled, and the game stopped for good with the watchdog
         // still counting.
         if matches!(virtgpu::with(|d| d.submit(ctx, Some(0), &n, false)), Ok(Ok(_))) {
             KICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);

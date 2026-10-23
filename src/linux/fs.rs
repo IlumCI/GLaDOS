@@ -389,7 +389,7 @@ impl Fd {
 /// not a question it can answer -- true of the *store's* objects and not of a
 /// path, which is a string naming one place. With no symlinks anywhere here, a
 /// lexical walk up is exactly what Linux does. Source's engine finds its game
-/// directory as `bin/../portal`, and the refusal surfaced as "Setup file
+/// directory as `bin/../game`, and the refusal surfaced as "Setup file
 /// 'gameinfo.txt' doesn't exist" about a file that does. The `/tmp` write jail
 /// is unaffected: it is checked against the resolved path.
 pub fn resolve(cwd: &str, path: &str) -> Option<String> {
@@ -533,7 +533,7 @@ pub fn dirent(out: &mut Vec<u8>, room: usize, ino: u64, next: u64, is_dir: bool,
 /// through glibc's compatibility path: the kernel answers `statx`, and glibc
 /// narrows the result into the old `struct stat` -- answering `EOVERFLOW` if
 /// the inode does not fit. The kernel saw success and the program saw a file
-/// it "cannot access": libasound, reading its own configuration, left Portal
+/// it "cannot access": libasound, reading its own configuration, left a game
 /// silent that way. Real Linux inode numbers fit, so these must too; at 31 bits
 /// two paths collide once in about forty thousand files, and a collision only
 /// makes two files look like hard links.
@@ -564,7 +564,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         resolve("/ai", "../etc/passwd").as_deref() == Some("/etc/passwd")
             && resolve("/", "a/../b").as_deref() == Some("/b")
             && resolve("/", "../../x").as_deref() == Some("/x")
-            && resolve("/mnt/portal/bin", "../portal").as_deref() == Some("/mnt/portal/portal"),
+            && resolve("/mnt/game/bin", "../game").as_deref() == Some("/mnt/game/game"),
     ));
     out.push((
         "the root resolves to itself",

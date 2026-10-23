@@ -701,7 +701,7 @@ pub enum Source {
     ///
     /// Linux never needs a physically contiguous run for `mmap`; this kernel
     /// did, and after enough churn a 50 MB request failed against a heap with
-    /// far more than 50 MB free. Portal reported it as `std::bad_alloc`.
+    /// far more than 50 MB free. a game reported it as `std::bad_alloc`.
     Paged,
     /// A forked child's inherited record of one of its parent's mappings.
     ///
@@ -855,7 +855,7 @@ pub struct Space {
     ///
     /// This was "worth building when something runs out", and something did.
     /// A 64-bit guest has 510 GiB of arena; a 32-bit one has the hole below
-    /// its stack, about 1.4 GiB. Portal maps and unmaps scratch buffers of tens
+    /// its stack, about 1.4 GiB. A game maps and unmaps scratch buffers of tens
     /// of megabytes on its way to the menu -- about 1,100 `munmap`s on the
     /// host -- and with a bump cursor the hole was gone before the menu was:
     /// `malloc` answered NULL, and Valve's GL layer `memcpy`d a texture to
@@ -2300,7 +2300,7 @@ pub(super) fn wait_turn() {
 /// `wait_turn` for a waiter whose condition no syscall will change -- a GPU
 /// fence, which signals when the host's answer lands in a virtqueue. A nap
 /// lasts until the next tick unless a syscall ends first, so every fence
-/// wait cost at least a tick: Portal on Zink spent 23 ms a poll in 993
+/// wait cost at least a tick: a 32-bit game on Zink spent 23 ms a poll in 993
 /// polls over twenty seconds. Such a waiter yields instead and looks again.
 pub(super) fn wait_turn_for(device: bool) {
     let held = holds_big();
@@ -2371,7 +2371,7 @@ pub fn wake_nappers() {
 // ---- guests on every core -------------------------------------------------
 //
 // **Ring 3 runs everywhere; the kernel side of a guest runs one at a time.**
-// A guest's threads spend their time at ring 3 -- the profile of Portal
+// A guest's threads spend their time at ring 3 -- the profile of a game
 // reaching its menu was nine tenths llvmpipe's own rasteriser -- and that is
 // what spreads across cores. Every syscall takes `BIG` on the way in and
 // gives it back on the way out, and every wait inside one gives it back for
@@ -3821,7 +3821,7 @@ pub(super) fn sys_access(path_at: u64, mode: u64) -> u64 {
     // **A mounted volume is not in the namespace**, so asking only `sysbox`
     // answered `ENOENT` for every file on one. `open` and `stat` already ask
     // the disk first; `access` was the call that did not, and the Source
-    // engine decides whether a game exists with `access("portal/gameinfo.txt")`
+    // engine decides whether a game exists with `access("<game>/gameinfo.txt")`
     // -- so a game that could open its every file reported that it was not
     // installed.
     if let Some(on) = super::disk::lookup(&path) {
@@ -4177,7 +4177,7 @@ static FUTEX: Racy<[(u64, u64, u64); FUTEX_SLOTS]> = Racy::new([(0, 0, 0); FUTEX
 /// until *any* syscall finished, and every syscall's end woke every napper to
 /// look again. llvmpipe synchronises its rasterizer threads through futexes
 /// many times a frame, so each of those wakes became ten wakeups, ten trips
-/// through the guest lock and ten IPIs, and Portal ran slower on four cores
+/// through the guest lock and ten IPIs, and a game ran slower on four cores
 /// than on one: 0.46 frames a second against 0.54, where the host goes from
 /// 0.9 to 2.3. A `FUTEX_WAKE` now wakes the tasks waiting on that word and
 /// nobody else.
@@ -4186,10 +4186,10 @@ static FUTEX: Racy<[(u64, u64, u64); FUTEX_SLOTS]> = Racy::new([(0, 0, 0); FUTEX
 /// wake, and a waiter that finds it set returns 0 -- which is the whole of
 /// what Linux promises a woken waiter. It used to return only if its word
 /// had changed or the address's count in `FUTEX` had moved, and `FUTEX` has
-/// 32 slots that are never given back: past Portal's 32nd futex address a
+/// 32 slots that are never given back: past a game's 32nd futex address a
 /// wake that left the word alone woke the task, which looked, saw nothing
 /// changed and slept again -- for good, since the one-second backstop asks
-/// the same two questions. A lost wake of exactly the shape Portal's
+/// the same two questions. A lost wake of exactly the shape a game's
 /// first-frame freeze has: every ring idle, the main thread in a Vulkan wait
 /// it repeats. After this the freeze is rarer and still happens, so it was
 /// one cause or none; the run counts are in the commit that made this.
@@ -6034,7 +6034,7 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
             // hold when the heap happens to sit below 4 GiB, and for a 32-bit
             // guest on a machine whose heap is above it the answer was
             // `0x1479b0000`: the guest kept the low 32 bits, and Mesa drew
-            // every frame of Portal into whatever it owned at `0x479b0000` --
+            // every frame of a game into whatever it owned at `0x479b0000` --
             // malloc's chunks, a library's read-only page. glibc reported it
             // as tcache corruption, as an invalid free, and as a fault on a
             // page that was never the buffer, three symptoms with one cause.
@@ -6186,7 +6186,7 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
         // `munmap` of part of one is what glibc's thread arenas and LLVM's JIT
         // do to align a reservation. Contiguous, those trims could only be
         // accepted and the range kept, and a 32-bit guest's 1.4 GiB arena ran
-        // out under Portal's options dialog -- `malloc` handed gallium a NULL.
+        // out under a game's options dialog -- `malloc` handed gallium a NULL.
         let anon_paged = backing.is_none() && unsafe { guest_slot() }.as_ref().is_some_and(|sp| sp.tables.is_some());
         let contiguous = if anon_paged { None } else { alloc_pages(len as usize) };
         let Some(phys) = contiguous else {
@@ -8148,7 +8148,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         // has no single parent -- true of a node, and beside the point for a
         // path, which names its parent in its own text. The refusal cost a
         // real program its data directory: the Source engine resolves
-        // `bin/../portal` and reported its game as not installed.
+        // `bin/../game` and reported its game as not installed.
         put(32, "../lib/geom.ai&xi", &mut buf);
         out.push((
             "a relative path may step back with .. , which drops a component",

@@ -141,7 +141,7 @@ pub fn hole32(devices: &[u64]) -> Option<(u64, u64)> {
 /// what lets this look past the first device: `hole32` stops below the lowest
 /// BAR because it knows no sizes, and on QEMU that is the framebuffer at 2 GiB
 /// with a gigabyte and more of empty PCI window above it. A 32-bit guest that
-/// was out of address space at 1.4 GiB -- Portal loading a level -- is what
+/// was out of address space at 1.4 GiB -- a game loading a level -- is what
 /// that cost.
 pub fn holes32(devices: &[(u64, u64)]) -> alloc::vec::Vec<(u64, u64)> {
     let (ranges, n) = unsafe { &*DESCRIBED.get() };

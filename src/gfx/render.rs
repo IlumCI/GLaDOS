@@ -144,7 +144,7 @@ pub fn wake_compositor() {
     // wake it arrive from a guest on another core. Marking it ready changes
     // nothing a halted core can see, so it composed on that core's next timer
     // tick -- up to 10 ms late, every frame, and the frame callback a client
-    // waits on is fired from that compose. Portal on Zink spent two polls of
+    // waits on is fired from that compose. a 32-bit game on Zink spent two polls of
     // about a tick each per frame waiting there. `wake_nappers` has always
     // kicked for the same reason; this one did not.
     if i != u64::MAX && crate::task::wake(i as usize) {

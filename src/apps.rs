@@ -3,7 +3,7 @@
 //! A program written for another system is a file plus a recipe -- which
 //! volume to mount where, which interpreter to put where its headers look,
 //! which environment, which directory to start in, what to run. Typing that
-//! recipe is what running Portal meant until now, nine shell lines long. An
+//! recipe is what running a 32-bit game meant until now, nine shell lines long. An
 //! entry here is the recipe written down once, and the desktop turns it into
 //! an icon.
 //!
@@ -21,15 +21,15 @@
 //! repeat (`env`, `copy`) simply repeat:
 //!
 //! ```text
-//! name=Portal
+//! name=Game
 //! runtime=linux
 //! mount=/mnt                 # the volume this file was found on, mounted here
 //! copy=/mnt/lib32/ld-linux.so.2 /lib/ld-linux.so.2
-//! cwd=/mnt/portal
-//! env=LD_LIBRARY_PATH=/mnt/portal/bin:/mnt/lib32
+//! cwd=/mnt/game
+//! env=LD_LIBRARY_PATH=/mnt/game/bin:/mnt/lib32
 //! gpu=yes                    # Zink over Venus when a GPU is there
-//! exec=/mnt/portal/hl2_linux -game portal -fullscreen
-//! icon=$DISK/portal/portal/resource/game-icon.bmp
+//! exec=/mnt/game/game -fullscreen
+//! icon=$DISK/game/icon.bmp
 //! ```
 //!
 //! `$DISK` in any value is the volume's own mount point, for an entry that
@@ -197,7 +197,7 @@ pub fn bmp(b: &[u8]) -> Option<Image> {
     let compression = u32_at(30)?;
     // 0 is BI_RGB, whose 32-bit layout is fixed as B, G, R and a spare
     // byte. 3 is BI_BITFIELDS, whose masks say where each channel is -- and
-    // they are not the BI_RGB ones in practice: Portal's own icon is stored
+    // they are not the BI_RGB ones in practice: a real game's own icon is stored
     // A, B, G, R, and assuming the usual order read its alpha as blue.
     if !(compression == 0 || compression == 3) || !(bpp == 24 || bpp == 32) {
         return None;
@@ -346,7 +346,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         for i in [57, 61, 65, 69] { o[i] = 0; }
         bmp(&o).is_some_and(|i| i.px.iter().all(|p| p >> 24 == 255))
     }));
-    out.push(("bitfield masks are honoured, in Portal's own A-B-G-R order", {
+    out.push(("bitfield masks are honoured, in the A-B-G-R order a real game's icon uses", {
         // A 56-byte header, masks R ff000000 G 00ff0000 B 0000ff00 A 000000ff,
         // one pixel of opaque pure blue: stored bytes are A, B, G, R.
         let mut o = alloc::vec![0u8; 70];

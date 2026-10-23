@@ -404,7 +404,7 @@ impl crate::gfx::DeskApp for Window {
         // A client waits for this in `poll`, napping until the next tick
         // unless a syscall ends first, and this is the compositor's task
         // rather than anybody's syscall -- so every frame callback arrived up
-        // to a tick late. Portal on Zink spent 22.6 ms a poll on it.
+        // to a tick late. a 32-bit game on Zink spent 22.6 ms a poll on it.
         if fresh {
             crate::linux::syscall::wake_nappers();
         }
@@ -483,7 +483,7 @@ impl crate::gfx::DeskApp for Window {
 
     /// At its own size: nothing here sends `xdg_toplevel.configure` with a
     /// new one yet, so a tiled slot larger than the picture is black margin
-    /// -- Portal's 800x600 in a 1280x700 slot was three quarters void.
+    /// -- a game's 800x600 in a 1280x700 slot was three quarters void.
     fn floats(&self) -> bool {
         true
     }

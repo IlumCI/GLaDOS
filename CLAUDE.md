@@ -1819,8 +1819,8 @@ with `payload.py` instead.
 The licence half is the durable reason rather than the scope half.
 Xash3D-FWGS is GPL-3.0-or-later and this kernel is not, so shipping it on the
 install image puts obligations on the whole disc that nobody has decided to
-take on; Half-Life's own data is Valve's, under exactly the rule that keeps
-anybody's game data out of this repository. Neither is a thing to discover
+take on; a game's own data is its publisher's, under exactly the rule that
+keeps anybody's game data out of this repository. Neither is a thing to discover
 after a
 release is cut.
 
@@ -3445,7 +3445,7 @@ image at a second base is the whole of it. `load` places the program, places
 the interpreter beside it, and jumps to the *interpreter's* entry. `dlopen`
 then works because it is `ld.so`'s problem rather than ours, which is the whole
 reason to load an interpreter instead of writing a linker -- and `dlopen` is
-what Half-Life needs, since the game logic lives in `hl.so`.
+what a game engine needs, since game logic usually lives in a module it loads.
 
 **Three numbers have to be right and all three are silent when wrong.**
 `AT_ENTRY` is the *program's* entry, not the interpreter's, or `ld.so`
@@ -7005,8 +7005,9 @@ asking whether the host ring reported alive -- so a foreground run aborted,
 silently, because its log lines are debug-level. The remainder under a tick
 is waited out on the TSC now.
 
-**Portal runs on it through Zink, 32-bit**, at 8.4 fps against llvmpipe's
-1.15 on the same pinned host (`out/gpu/portal.sh`). Four things had to be
+**A 32-bit 3D game runs on it through Zink**, at 8.4 fps against llvmpipe's
+1.15 on the same pinned host (`out/gpu/game.sh`, local, as is the game).
+No game and no game file is in this repository or on any image it builds. Four things had to be
 true and each was a wall:
 
 - **EGL must find a GPU to ask for**, which it does from the compositor:
@@ -7030,7 +7031,7 @@ true and each was a wall:
   stop it. The cause is not found. The kernel sees each `vkCreateRingMESA`,
   so it knows every ring's head, tail and status, and while a guest waits it
   sends the notify for any ring idle with work whose head has not moved
-  across two looks. 3,746 such wakes in four minutes of Portal: correct, and
+  across two looks. 3,746 such wakes in four minutes of the game: correct, and
   the likely ceiling on the frame rate.
 
 `gpu drm` counts the wakes; `gpu drm peek <phys> [words]` reads host-visible
@@ -7046,13 +7047,13 @@ is owed: walk by holding W through QEMU's keyboard (`@mouse sendkey w N`),
 since the up arrow did not move the player, and `linux feed` timelines
 start at the *next* guest's launch, not at once.
 
-**A buffer handle above 4095 crashed Portal**, and that one is fixed. `MAP`
+**A buffer handle above 4095 crashed the game**, and that one is fixed. `MAP`
 made a buffer's offset the handle shifted by 32 and handles only counted
 up; an i386 `mmap2` carries the offset in pages as 32 bits, so glibc
 refused the map itself and Zink dereferenced the mapping it did not get.
 Handles are the smallest free one now and the shift is 24.
 
-**Portal still sometimes freezes on its first frame, and this is the open
+**The game still sometimes freezes on its first frame, and this is the open
 problem.** Every ring caught up, no fence in flight, 0 frames. Since the
 futex fix (a wake now marks the waiter it chose) 8 runs rendered and 10
 froze -- with or without input. What is known, so nobody re-tests it:
@@ -7076,7 +7077,7 @@ Instruments: `linux waits` (each thread's call and its stack from its last
 futex or `clock_nanosleep`, with `PRE="linux prof on"` so stacks are taken
 from launch), `gpu drm` (submits by command with mean and worst, every
 ring's head, tail and status), and `GLADOS_EFI=<path>` on drive.py to boot
-an older build for an A/B. `out/gpu/portal.sh` takes `PRE`, `MID`, `MOVE`
+an older build for an A/B. `out/gpu/game.sh` takes `PRE`, `MID`, `MOVE`
 (beats for the measured window, `|`-separated), `POST`, `POST2`, `ENVY`.
 
 **Installed programs are desktop icons** (`src/apps.rs`, 543d8d7,
@@ -7085,8 +7086,8 @@ is `key=value` lines -- name, runtime, mount, copy, cwd, env (repeats),
 gpu, exec, icon -- read at boot; `apps` lists them, `launch <name>` and a
 double-click run one as a job beside the shell. `gpu=yes` adds the Zink
 environment only when /dev/dri is there; `icon=` is a BMP on the same
-volume, read with its bitfield masks honoured (Portal's is A-B-G-R).
-game.img carries `apps/portal.app`. `runtime=` is the seam a Windows or BSD
+volume, read with its bitfield masks honoured (a real game's is A-B-G-R).
+The local game disk carries its own `apps/*.app`. `runtime=` is the seam a Windows or BSD
 runtime plugs into.
 
 The second backend is meant to be nouveau behind the same node (NVK at ring

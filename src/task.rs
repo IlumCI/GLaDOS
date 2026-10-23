@@ -39,7 +39,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 ///
 /// Ninety-six leaves eleven. **The guest threads were eight, and that was
 /// found as a hang rather than a refusal**: llvmpipe starts one rasterizer per
-/// core, so Portal at four cores had four of them, two gallium queues, a
+/// core, so a game at four cores had four of them, two gallium queues, a
 /// filesystem thread and tier0's -- eight -- and the ninth thread the engine
 /// started never ran, while the main thread waited in `CThread::Start` for it
 /// to say it had. At two cores the same game fit with two to spare. `adopt_idle` and `spawn` both refuse past the end and say
