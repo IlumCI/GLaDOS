@@ -290,6 +290,15 @@ pub fn launch(name: &str) -> Result<u32, String> {
 }
 
 fn launch_linux(a: &App) -> Result<u32, String> {
+    // **Once at a time.** A double-click that lands twice started a second
+    // copy, and the second launch's mount replaced the volume under the
+    // first while it was reading from it -- two copies of a 32-bit GPU game
+    // took the whole machine down. A program already running is refused by
+    // name, before anything is mounted or copied.
+    let cmd = a.exec.split_whitespace().collect::<Vec<_>>().join(" ");
+    if let Some(j) = crate::job::list().iter().find(|j| j.state != "done" && j.title == cmd) {
+        return Err(alloc::format!("{} is already running as job {}", a.name, j.id));
+    }
     if let (Some(at), Some(p)) = (&a.mount, a.partition) {
         crate::linux::disk::mount(at, p).map_err(String::from)?;
     }
