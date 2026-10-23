@@ -881,9 +881,17 @@ fn icon_at(fb: &Framebuffer, x: i32, y: i32) -> Option<usize> {
 fn draw_icons(fb: &Framebuffer, hover: Hover) {
     for (r, k) in icon_rects(fb) {
         let px = r.x + (r.w - icon_px()) / 2;
-        // An installed program wears the Programs pictogram until programs
-        // carry pictures of their own.
-        pictogram(fb, if k < ICONS.len() { k } else { ICO_PROGRAMS }, px, r.y, icon_px());
+        // An installed program wears its own picture when its entry names
+        // one, and the Programs pictogram when it does not.
+        let s = icon_px();
+        let drawn = k >= ICONS.len()
+            && crate::apps::with_picture(k - ICONS.len(), |img| {
+                super::scale::draw(fb, img, px as i32, r.y as i32, s, s, 255)
+            })
+            .is_some();
+        if !drawn {
+            pictogram(fb, if k < ICONS.len() { k } else { ICO_PROGRAMS }, px, r.y, s);
+        }
         let names = crate::apps::names();
         let label: &str = if k < ICONS.len() { ICONS[k].0 } else { names.get(k - ICONS.len()).map(|s| s.as_str()).unwrap_or("") };
         let tw = theme::text_w_of(label);
