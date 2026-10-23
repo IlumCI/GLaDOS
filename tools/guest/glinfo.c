@@ -20,6 +20,10 @@
 #include <stdlib.h>
 
 int main(int argc, char **argv) {
+    // Unbuffered: a guest's stdout is a pipe to the console, so a buffered
+    // line would appear only when the program exits -- after the frames it
+    // is reporting on.
+    setvbuf(stdout, NULL, _IONBF, 0);
     double secs = argc > 1 ? atof(argv[1]) : 5;
     int w = argc > 3 ? atoi(argv[2]) : 1280, h = argc > 3 ? atoi(argv[3]) : 800;
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
