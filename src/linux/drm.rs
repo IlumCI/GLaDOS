@@ -747,12 +747,15 @@ struct Ring {
     head: u64,
     tail: u64,
     status: u64,
-    /// The head at the last look: a ring is only woken once its head has
-    /// stood still across two looks, so a host mid-burst is left alone.
+    /// The head at the last look, for the trace.
     seen: u32,
 }
 
 static RINGS: Racy<Vec<Ring>> = Racy::new(Vec::new());
+/// How often the rings are looked at. Every look that finds a sleeping ring
+/// with work is a stall ended, and the time between looks is what each one
+/// costs the guest: at 2 ms and two looks Portal ran at 8.4 fps.
+const WATCH_US: u64 = 500;
 static LAST_LOOK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// Notifies the watchdog has sent, for `gpu drm`.
 pub static KICKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -785,7 +788,7 @@ fn forget_rings(client: usize) {
 pub fn watch() {
     let now = crate::time::rdtsc() / crate::time::tsc_mhz().max(1);
     let last = LAST_LOOK.load(core::sync::atomic::Ordering::Relaxed);
-    if now < last + 2000 {
+    if now < last + WATCH_US {
         return;
     }
     LAST_LOOK.store(now, core::sync::atomic::Ordering::Relaxed);
@@ -798,8 +801,12 @@ pub fn watch() {
         }
         let rd = |off: u64| unsafe { core::ptr::read_volatile((phys + off) as *const u32) };
         let (head, tail, status) = (rd(r.head), rd(r.tail), rd(r.status));
-        if head == tail || status & STATUS_IDLE == 0 || head != r.seen {
-            r.seen = head;
+        // One look is enough. IDLE with work unread is either the host
+        // asleep on it or the host in the few instructions between setting
+        // IDLE and finding the new tail -- and a notify to an awake ring
+        // costs it a condition-variable signal and nothing else.
+        r.seen = head;
+        if head == tail || status & STATUS_IDLE == 0 {
             continue;
         }
         let mut n = [0u8; 24];
@@ -807,7 +814,11 @@ pub fn watch() {
         n[8..16].copy_from_slice(&r.id.to_le_bytes());
         n[16..20].copy_from_slice(&tail.to_le_bytes());
         let ctx = r.ctx;
-        if virtgpu::with(|d| d.submit(ctx, Some(0), &n, false)).is_ok() {
+        // Waited for, deliberately. Sent without waiting, the notifies piled
+        // into the queue while QEMU had it blocked behind an unmap, every
+        // descriptor filled, and Portal stopped for good with the watchdog
+        // still counting.
+        if matches!(virtgpu::with(|d| d.submit(ctx, Some(0), &n, false)), Ok(Ok(_))) {
             KICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if TRACE.load(core::sync::atomic::Ordering::Relaxed) {
                 crate::kprintln!("[drm] ring {:#x} idle at {} of {}: notified", r.id, head, tail);

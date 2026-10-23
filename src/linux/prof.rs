@@ -153,7 +153,10 @@ pub fn report() {
         } else {
             super::syscall::name_of((r - 512) as u64)
         };
-        crate::kprintln!("    {:<18} {:>8} ms {:>9} calls {:>7} us each", name, cy / mhz / 1000, n, cy / mhz / n.max(1));
+        // A call the name table lacks still says which it is.
+        let num = if r < 512 { r } else { r - 512 };
+        let shown = if name == "?" { alloc::format!("? nr {}{}", num, if r < 512 { " (i386)" } else { "" }) } else { String::from(name) };
+        crate::kprintln!("    {:<18} {:>8} ms {:>9} calls {:>7} us each", shown, cy / mhz / 1000, n, cy / mhz / n.max(1));
     }
     let n = NEXT.load(Ordering::Relaxed).min(SAMPLES);
     let mut by_file: BTreeMap<String, u64> = BTreeMap::new();

@@ -2294,9 +2294,18 @@ pub(super) fn sys_nanosleep(req: u64) -> u64 {
 /// per task now -- the guest's stack pointer, the syscall stack, its TLS --
 /// and swapped by `schedule`. The caller's interrupt state is put back after.
 pub(super) fn wait_turn() {
+    wait_turn_for(false)
+}
+
+/// `wait_turn` for a waiter whose condition no syscall will change -- a GPU
+/// fence, which signals when the host's answer lands in a virtqueue. A nap
+/// lasts until the next tick unless a syscall ends first, so every fence
+/// wait cost at least a tick: Portal on Zink spent 23 ms a poll in 993
+/// polls over twenty seconds. Such a waiter yields instead and looks again.
+pub(super) fn wait_turn_for(device: bool) {
     let held = holds_big();
     let me = crate::task::current();
-    let nap = NAP.load(Ordering::Relaxed) && me < crate::task::MAX_TASKS;
+    let nap = !device && NAP.load(Ordering::Relaxed) && me < crate::task::MAX_TASKS;
     if nap {
         // **A nap, not a yield.** With guests on several cores, a waiter that
         // only yields comes straight back when its core has nothing else to
@@ -4729,8 +4738,20 @@ pub(super) fn do_poll(fds: u64, nfds: u64, limit: Option<u64>) -> u64 {
         }
         // The display server answers while its client waits.
         crate::sky::server::pump();
-        wait_turn();
+        wait_turn_for(polls_fence(fds, nfds));
     }
+}
+
+/// Whether any entry of a poll array is a GPU sync file.
+fn polls_fence(fds: u64, nfds: u64) -> bool {
+    (0..nfds as usize).any(|i| {
+        let raw = unsafe { core::ptr::read_unaligned((fds + (i * super::poll::PFD_LEN) as u64) as *const i32) };
+        raw >= 0
+            && with_fds(|t, _| {
+                matches!(t.get(raw as usize), Some(Some(super::fs::Fd::Dev(b))) if b.borrow().node == super::dev::Node::Fence)
+            })
+            .unwrap_or(false)
+    })
 }
 
 pub(super) fn sys_select(nfds: u64, r: u64, w: u64, e: u64, tv: u64) -> u64 {

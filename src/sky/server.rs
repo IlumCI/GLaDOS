@@ -399,7 +399,15 @@ impl crate::gfx::DeskApp for Window {
         f.focused = _focused;
         // Painted is shown: the desktop lays this surface into the frame it
         // is composing and presents it before it next looks at a client.
+        let fresh = f.presented != f.commits;
         f.presented = f.commits;
+        // A client waits for this in `poll`, napping until the next tick
+        // unless a syscall ends first, and this is the compositor's task
+        // rather than anybody's syscall -- so every frame callback arrived up
+        // to a tick late. Portal on Zink spent 22.6 ms a poll on it.
+        if fresh {
+            crate::linux::syscall::wake_nappers();
+        }
         let w = f.w.min(client.w) as usize;
         let h = f.h.min(client.h) as usize;
         // Black only where the picture does not reach -- a window the client
