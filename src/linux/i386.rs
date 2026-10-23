@@ -676,7 +676,13 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
         // clock_nanosleep_time64: the 64-bit timespec, so the same call as
         // x86-64's, flags and all. It dropped `TIMER_ABSTIME`, which turns a
         // sleep until a time into a sleep for that many seconds.
-        407 => (sc::sys_clock_nanosleep(b, c, d), true),
+        407 => {
+            // A thread asleep is as much a question as one parked on a lock:
+            // a stalled Portal's main thread sleeps in a loop and renders
+            // nothing, and only its stack says what it is waiting out.
+            super::prof::note_stack(f.rsp as u32 as u64, f.rip as u32 as u64);
+            (sc::sys_clock_nanosleep(b, c, d), true)
+        }
         116 => (sysinfo32(b), true),
         240 => {
             if c & 0x7f == 0 || c & 0x7f == 9 {

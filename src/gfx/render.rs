@@ -139,8 +139,16 @@ pub fn reset_askers() {
 /// masked, so no holder on this core can be interrupted by it.
 pub fn wake_compositor() {
     let i = COMP_TASK.load(Ordering::Acquire);
-    if i != u64::MAX {
-        crate::task::wake(i as usize);
+    // **And kick its core.** The compositor is pinned to the bootstrap
+    // processor, which spends a guest's run halted, while the commits that
+    // wake it arrive from a guest on another core. Marking it ready changes
+    // nothing a halted core can see, so it composed on that core's next timer
+    // tick -- up to 10 ms late, every frame, and the frame callback a client
+    // waits on is fired from that compose. Portal on Zink spent two polls of
+    // about a tick each per frame waiting there. `wake_nappers` has always
+    // kicked for the same reason; this one did not.
+    if i != u64::MAX && crate::task::wake(i as usize) {
+        crate::dev::lapic::kick_others();
     }
 }
 

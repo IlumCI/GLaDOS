@@ -108,10 +108,20 @@ const CTX_PARAM_CAPSET_ID: u64 = 1;
 const CTX_PARAM_NUM_RINGS: u64 = 2;
 
 /// An offset `MAP` hands out is the handle shifted up by this much, so `mmap`
-/// can find the buffer from the offset alone. 32 because an i386 client's
-/// `mmap2` carries the offset in pages as a 32-bit number, which still reaches
-/// handle 4095 -- far more buffers than a client keeps mapped.
-const MAP_SHIFT: u32 = 32;
+/// can find the buffer from the offset alone.
+///
+/// **It was 32, and that killed Portal.** An i386 client's `mmap2` carries
+/// the offset in pages as a 32-bit number, so a shift of 32 reached handle
+/// 4095 -- which read as "far more buffers than a client keeps mapped" and
+/// was a cap on buffers ever *created*, handles only counting up. Portal
+/// passes 4096 while loading a level; glibc then refuses the `mmap` itself
+/// with `EINVAL` before the kernel sees it, Zink reports
+/// VK_ERROR_MEMORY_MAP_FAILED and dereferences the mapping it did not get.
+/// Two of three runs ended there. Handles are reused now (`free_handle`), so
+/// the number tracks live buffers, and 24 reaches 2^20 of them -- a buffer
+/// is mapped whole and never at an offset inside it, so the low 24 bits are
+/// never needed.
+const MAP_SHIFT: u32 = 24;
 
 struct Bo {
     handle: u32,
@@ -130,7 +140,6 @@ struct Client {
     ctx: Option<u32>,
     capset: u32,
     bos: Vec<Bo>,
-    next_handle: u32,
 }
 
 /// One per open render node. Racy because every caller is a guest syscall,
@@ -164,7 +173,7 @@ pub fn present() -> Option<(u8, u8, u8)> {
 /// descriptor carries.
 pub fn opened() -> usize {
     let id = NEXT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    unsafe { CLIENTS.get() }.push(Client { id, ctx: None, capset: 0, bos: Vec::new(), next_handle: 1 });
+    unsafe { CLIENTS.get() }.push(Client { id, ctx: None, capset: 0, bos: Vec::new() });
     id
 }
 
@@ -291,6 +300,47 @@ fn ioctl_inner(id: usize, req: u64, arg: u64) -> u64 {
         // Venus's, and refused by name rather than half-done.
         NR_VIRTGPU_RESOURCE_CREATE | NR_VIRTGPU_TRANSFER_FROM_HOST | NR_VIRTGPU_TRANSFER_TO_HOST => EINVAL,
         _ => EINVAL,
+    }
+}
+
+/// Push every cache line of `[phys, phys + len)` out of every cache level.
+///
+/// **A page of the host-visible window has more than one life, and a cache
+/// remembers the last one.** The window is handed out first fit, so the
+/// pages a Venus ring's shared memory used -- host-cached, mapped write-back,
+/// its lines resident -- become, once that ring is gone, a feedback buffer
+/// the GPU writes. NVIDIA writes that memory without snooping, and an
+/// uncached or write-combined read on Intel still snoops this processor's own
+/// caches, so the guest can read the ring's old line instead of the value
+/// the GPU wrote. Linux flushes whenever a page changes memory type; this
+/// kernel had never had a page change type before.
+///
+/// It was written as the cause of Portal's first-frame freeze and is not:
+/// with Venus's semaphore and fence feedback switched off entirely
+/// (`VN_PERF=no_semaphore_feedback,no_fence_feedback`) the freeze still
+/// happened. It stays because the aliasing it removes is real.
+fn flush_lines(phys: u64, len: u64) {
+    if len == 0 || !crate::mem::paging::map_range(phys & !0xfff, (len + (phys & 0xfff) + 0xfff) & !0xfff, true) {
+        return;
+    }
+    let mut a = phys & !63;
+    while a < phys + len {
+        unsafe { core::arch::asm!("clflush [{}]", in(reg) a, options(nostack, preserves_flags)) };
+        a += 64;
+    }
+    unsafe { core::arch::asm!("mfence", options(nostack, preserves_flags)) };
+}
+
+/// The smallest handle no live buffer holds, as Linux's `idr` answers: a
+/// handle names a buffer only while the buffer exists, and a number that
+/// only grew would outrun what an i386 `mmap2` can name (`MAP_SHIFT`).
+fn free_handle(bos: &[Bo]) -> u32 {
+    let mut h = 1u32;
+    loop {
+        if !bos.iter().any(|b| b.handle == h) {
+            return h;
+        }
+        h += 1;
     }
 }
 
@@ -462,8 +512,7 @@ fn create_blob(c: &mut Client, arg: u64) -> u64 {
         Ok(Err(_)) => return EINVAL,
         Err(_) => return ENODEV,
     };
-    let handle = c.next_handle;
-    c.next_handle += 1;
+    let handle = free_handle(&c.bos);
     c.bos.push(Bo { handle, res, size, blob_mem: mem, phys: None, cache: 0 });
     let mut o = b;
     o[8..12].copy_from_slice(&handle.to_le_bytes());
@@ -481,6 +530,9 @@ fn map(c: &mut Client, arg: u64) -> u64 {
             Ok(Ok((p, cache))) => {
                 bo.phys = Some(p);
                 bo.cache = cache & 0x0f;
+                if bo.cache != 1 {
+                    flush_lines(p, size);
+                }
                 LAST_CACHE.store(bo.cache, core::sync::atomic::Ordering::Relaxed);
                 if TRACE.load(core::sync::atomic::Ordering::Relaxed) {
                     crate::kprintln!("[drm] map res {} {} bytes at {:#x}, cache {}", res, size, p, bo.cache);
@@ -572,7 +624,25 @@ fn execbuffer(c: &mut Client, arg: u64) -> u64 {
             data.chunks(4).take(40).map(|c| u32::from_le_bytes([c[0], c.get(1).copied().unwrap_or(0), c.get(2).copied().unwrap_or(0), c.get(3).copied().unwrap_or(0)])).collect::<Vec<u32>>()
         );
     }
-    let fence = match virtgpu::with(|d| d.submit(ctx, ring, &data, out)) {
+    let t0 = crate::time::rdtsc();
+    // **The guest lock is let go for the round trip.** A submit nobody fences
+    // is answered only when the host has taken it, which is a few hundred
+    // microseconds and sometimes several milliseconds -- and every guest
+    // syscall waits on that lock, so Portal's other threads queued behind
+    // every Venus notify: 11,251 of them in one run, each holding the whole
+    // guest for 180 us. What the submit needs was copied out above (`ctx`,
+    // `ring`, `data`), and nothing of the client is touched until the lock is
+    // back. The device keeps its own lock, which is what orders submits.
+    let held = syscall::holds_big();
+    if held {
+        syscall::big_unlock();
+    }
+    let r = virtgpu::with(|d| d.submit(ctx, ring, &data, out));
+    if held {
+        syscall::big_lock();
+    }
+    note_submit(if data.len() >= 4 { u32_at(&data, 0) } else { u32::MAX }, out, t0);
+    let fence = match r {
         Ok(Ok(f)) => f,
         Ok(Err(_)) => return EINVAL,
         Err(_) => return ENODEV,
@@ -587,6 +657,50 @@ fn execbuffer(c: &mut Client, arg: u64) -> u64 {
         }
     }
     0
+}
+
+/// What each submit was and how long the kernel held the guest for it, by
+/// the first command in the stream. A stall reads as one thread in `ioctl`
+/// for the whole of it, and nothing else said which command or why.
+/// Sixteen kinds, first come; `(id, fenced)` -> (count, total us, worst us).
+static SUBMITS: crate::sync::Spin<[(u32, bool, u64, u64, u64); 16]> =
+    crate::sync::Spin::new([(0, false, 0, 0, 0); 16]);
+
+fn note_submit(cmd: u32, fenced: bool, t0: u64) {
+    let us = (crate::time::rdtsc() - t0) / crate::time::tsc_mhz().max(1);
+    let mut t = SUBMITS.lock_irq();
+    let slot = t.iter().position(|e| e.2 != 0 && e.0 == cmd && e.1 == fenced).or_else(|| t.iter().position(|e| e.2 == 0));
+    if let Some(i) = slot {
+        let e = &mut t[i];
+        *e = (cmd, fenced, e.2 + 1, e.3 + us, e.4.max(us));
+    }
+}
+
+/// `gpu drm`'s second half: the submit table, and every ring as it stands.
+pub fn report_rings() {
+    use crate::kprintln;
+    let t = *SUBMITS.lock_irq();
+    kprintln!("  submits by first command (id, fenced: count, mean, worst):");
+    for e in t.iter().filter(|e| e.2 != 0) {
+        kprintln!("    {:>5} {:<7} {:>8}  {:>7} us  {:>8} us", e.0, if e.1 { "fenced" } else { "waited" }, e.2, e.3 / e.2, e.4);
+    }
+    let rings = unsafe { RINGS.get() };
+    for r in rings.iter() {
+        let Some(c) = client(r.client) else { continue };
+        let Some(phys) = c.bos.iter().find(|b| b.res == r.res).and_then(|b| b.phys) else { continue };
+        if !crate::mem::paging::map_range(phys & !0xfff, 4096, true) {
+            continue;
+        }
+        let rd = |off: u64| unsafe { core::ptr::read_volatile((phys + off) as *const u32) };
+        kprintln!(
+            "  ring {:#x} ctx {}: head {} tail {} status {:#x}",
+            r.id,
+            r.ctx,
+            rd(r.head),
+            rd(r.tail),
+            rd(r.status)
+        );
+    }
 }
 
 /// Whether a sync file's fence has signalled.
@@ -702,9 +816,13 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push(("and the major is one Zink will not try to match a Vulkan device against", !(1..255).contains(&MAJOR)));
     out.push(("a map offset names its handle and stays page-aligned", (5u64 << MAP_SHIFT) % 4096 == 0 && ((5u64 << MAP_SHIFT) >> MAP_SHIFT) == 5));
     out.push((
-        "an i386 mmap2 can still reach handle 4095 through a 32-bit page number",
-        ((4095u64 << MAP_SHIFT) >> 12) <= u32::MAX as u64,
+        "an i386 mmap2 reaches handle 2^20 - 1 through a 32-bit page number",
+        ((((1u64 << 20) - 1) << MAP_SHIFT) >> 12) <= u32::MAX as u64,
     ));
+    out.push(("a closed buffer's handle is the next one handed out", {
+        let bo = |handle| Bo { handle, res: 0, size: 0, blob_mem: 0, phys: None, cache: 0 };
+        free_handle(&[bo(1), bo(3)]) == 2 && free_handle(&[bo(1), bo(2)]) == 3 && free_handle(&[]) == 1
+    }));
     out.extend(virtgpu::checks());
     out
 }

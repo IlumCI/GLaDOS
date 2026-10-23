@@ -58,6 +58,7 @@ size cap; guest RAM still has to cover the weights, so raise --memory.
 
 
 import codecs
+import os
 import shutil
 import socket
 import subprocess
@@ -822,6 +823,10 @@ def main():
     # finds no bootloader and reports "Not Found", which looks nothing like
     # "you forgot to copy the build".
     built = ROOT / "target/x86_64-unknown-uefi/release/glados.efi"
+    # `GLADOS_EFI` boots another build -- an A/B against an older commit,
+    # built in a worktree, without disturbing this tree's artifact.
+    if os.environ.get("GLADOS_EFI"):
+        built = Path(os.environ["GLADOS_EFI"])
     if not built.exists():
         built = ROOT / "target/x86_64-unknown-uefi/debug/glados.efi"
     if not built.exists():

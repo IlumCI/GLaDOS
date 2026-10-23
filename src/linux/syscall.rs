@@ -4181,15 +4181,28 @@ static FUTEX: Racy<[(u64, u64, u64); FUTEX_SLOTS]> = Racy::new([(0, 0, 0); FUTEX
 /// than on one: 0.46 frames a second against 0.54, where the host goes from
 /// 0.9 to 2.3. A `FUTEX_WAKE` now wakes the tasks waiting on that word and
 /// nobody else.
-static FUTEX_WAITERS: Racy<Vec<(u64, u64, usize)>> = Racy::new(Vec::new());
+///
+/// **And the waiter it names is told so.** The fourth field is set by the
+/// wake, and a waiter that finds it set returns 0 -- which is the whole of
+/// what Linux promises a woken waiter. It used to return only if its word
+/// had changed or the address's count in `FUTEX` had moved, and `FUTEX` has
+/// 32 slots that are never given back: past Portal's 32nd futex address a
+/// wake that left the word alone woke the task, which looked, saw nothing
+/// changed and slept again -- for good, since the one-second backstop asks
+/// the same two questions. A lost wake of exactly the shape Portal's
+/// first-frame freeze has: every ring idle, the main thread in a Vulkan wait
+/// it repeats. After this the freeze is rarer and still happens, so it was
+/// one cause or none; the run counts are in the commit that made this.
+static FUTEX_WAITERS: Racy<Vec<(u64, u64, usize, bool)>> = Racy::new(Vec::new());
 
 /// Wait for a wake on `addr`, or `until`, or a second, whichever is first --
 /// the second only a backstop against a wake this table somehow missed.
-fn futex_nap(addr: u64, until: Option<u64>) {
+/// Answers whether a `FUTEX_WAKE` chose this waiter.
+fn futex_nap(addr: u64, until: Option<u64>) -> bool {
     let me = crate::task::current();
     let root = guest_root();
     let w = unsafe { &mut *FUTEX_WAITERS.get() };
-    w.push((root, addr, me));
+    w.push((root, addr, me, false));
     let now = crate::dev::lapic::ticks();
     let deadline = until.unwrap_or(u64::MAX).min(now + crate::TIMER_HZ as u64).max(now + 1);
     crate::task::set_wake(deadline);
@@ -4210,8 +4223,9 @@ fn futex_nap(addr: u64, until: Option<u64>) {
         big_lock();
     }
     let w = unsafe { &mut *FUTEX_WAITERS.get() };
-    if let Some(i) = w.iter().position(|&(r, a, t)| r == root && a == addr && t == me) {
-        w.swap_remove(i);
+    match w.iter().position(|&(r, a, t, _)| r == root && a == addr && t == me) {
+        Some(i) => w.swap_remove(i).3,
+        None => false,
     }
 }
 
@@ -4219,9 +4233,10 @@ pub(super) fn futex_bump(addr: u64) -> u64 {
     let took = big_take();
     let root = guest_root();
     let mut any = false;
-    for &(r, a, t) in unsafe { &*FUTEX_WAITERS.get() }.iter() {
-        if r == root && a == addr {
-            any |= crate::task::wake(t);
+    for e in unsafe { &mut *FUTEX_WAITERS.get() }.iter_mut() {
+        if e.0 == root && e.1 == addr {
+            e.3 = true;
+            any |= crate::task::wake(e.2);
         }
     }
     if any {
@@ -4392,7 +4407,9 @@ fn futex_inner(uaddr: u64, op: u64, val: u64, timeout: u64, uaddr2: u64, val3: u
                 if overran(crate::dev::lapic::ticks()) {
                     unsafe { kill_blocked() }
                 }
-                futex_nap(uaddr, until);
+                if futex_nap(uaddr, until) {
+                    return 0;
+                }
             }
         }
         FUTEX_WAKE | FUTEX_WAKE_BITSET => {
@@ -5908,10 +5925,20 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
             if flags & MAP_SHARED == 0 {
                 return EINVAL;
             }
-            let Some((phys, size, cache)) = super::drm::mapping(id, off) else { return EINVAL };
+            // Each refusal names itself, a few times: Zink's only word for any
+            // of them is VK_ERROR_MEMORY_MAP_FAILED, and it dereferences the
+            // mapping it did not get a moment later.
+            static SAID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            let refuse = |why: &str, e: u64| {
+                if SAID.fetch_add(1, Ordering::Relaxed) < 8 {
+                    crate::kprintln!("[drm] mmap of {} bytes at offset {:#x} refused: {}", len, off, why);
+                }
+                e
+            };
+            let Some((phys, size, cache)) = super::drm::mapping(id, off) else { return refuse("no such buffer, or not mapped", EINVAL) };
             let want = page_up(len as usize) as u64;
             if want == 0 || want > page_up(size as usize) as u64 {
-                return EINVAL;
+                return refuse("longer than the buffer", EINVAL);
             }
             let Some(sp) = (unsafe { guest_slot() }).as_mut() else { return ENODEV };
             if sp.tables.is_none() {
@@ -5925,9 +5952,9 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
             // longer describes them. Venus places only for
             // `VK_EXT_map_memory_placed`, which an application has to ask for.
             if flags & MAP_FIXED != 0 {
-                return EINVAL;
+                return refuse("placed (MAP_FIXED)", EINVAL);
             }
-            let Some(at) = arena_take(sp, want) else { return ENOMEM };
+            let Some(at) = arena_take(sp, want) else { return refuse("no room left in the guest's address space", ENOMEM) };
             let Some(t) = sp.tables.as_mut() else { return ENODEV };
             let mut o = 0u64;
             while o < want {

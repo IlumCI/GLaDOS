@@ -454,6 +454,10 @@ pub fn report() {
         d.host_visible.map(|r| r.len >> 20).unwrap_or(0)
     );
     kprintln!("  rings woken by the watchdog: {}", crate::linux::drm::KICKS.load(core::sync::atomic::Ordering::Relaxed));
+    drop(g);
+    crate::linux::drm::report_rings();
+    let g = DEV.lock();
+    let Some(d) = g.as_ref() else { return };
     let cache = crate::linux::drm::LAST_CACHE.load(core::sync::atomic::Ordering::Relaxed);
     kprintln!(
         "  last mapping's cache type from the host: {}",
