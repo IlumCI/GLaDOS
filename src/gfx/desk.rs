@@ -852,7 +852,9 @@ fn icon_rects(fb: &Framebuffer) -> Vec<(Rect, usize)> {
     let mut out = Vec::new();
     let mut x = 10u32;
     let mut y = 14u32;
-    for (k, _) in ICONS.iter().enumerate() {
+    // The machine's own icons, then one per installed program.
+    let count = ICONS.len() + crate::apps::names().len();
+    for k in 0..count {
         if y + ICON_H > fb.height().saturating_sub(task_h()) {
             // Wrap to a second column, as the 98 desktop did. The terminal
             // reserves only the first column, so overflow icons sit behind
@@ -879,8 +881,11 @@ fn icon_at(fb: &Framebuffer, x: i32, y: i32) -> Option<usize> {
 fn draw_icons(fb: &Framebuffer, hover: Hover) {
     for (r, k) in icon_rects(fb) {
         let px = r.x + (r.w - icon_px()) / 2;
-        pictogram(fb, k, px, r.y, icon_px());
-        let (label, _) = ICONS[k];
+        // An installed program wears the Programs pictogram until programs
+        // carry pictures of their own.
+        pictogram(fb, if k < ICONS.len() { k } else { ICO_PROGRAMS }, px, r.y, icon_px());
+        let names = crate::apps::names();
+        let label: &str = if k < ICONS.len() { ICONS[k].0 } else { names.get(k - ICONS.len()).map(|s| s.as_str()).unwrap_or("") };
         let tw = theme::text_w_of(label);
         let tx = r.x + (r.w.saturating_sub(tw)) / 2;
         let ty = r.y + icon_px() + 6;
@@ -2974,7 +2979,13 @@ fn press_at(x: i32, y: i32) {
         with(|d| d.mode = Mode::Normal);
         if double {
             if let Some(k) = icon_at(&fb, x, y) {
-                launch(ICONS[k].1);
+                if k < ICONS.len() {
+                    launch(ICONS[k].1);
+                } else if let Some(name) = crate::apps::names().get(k - ICONS.len()) {
+                    // A program, started beside the shell on its own task:
+                    // the command only queues it, so the desktop never waits.
+                    queue_command(&alloc::format!("launch {}", name));
+                }
             }
         }
         super::render::invalidate();
@@ -5412,7 +5423,7 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
         // stale. `render verify` found it on the first hover over Terminal.
         let pad = 8;
         let b = Rect::new(b.x.saturating_sub(pad), b.y.saturating_sub(pad), b.w + 2 * pad, b.h + 2 * pad);
-        out.push(Layer { id: LayerId::Icons, bounds: b, stamp: Stamp::of((d.hover, theme::scale())), parts: Vec::new() });
+        out.push(Layer { id: LayerId::Icons, bounds: b, stamp: Stamp::of((d.hover, theme::scale(), crate::apps::GENERATION.load(core::sync::atomic::Ordering::Relaxed))), parts: Vec::new() });
     }
 
     let focus = d.focus();

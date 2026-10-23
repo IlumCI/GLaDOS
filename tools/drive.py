@@ -160,7 +160,7 @@ def find_firmware():
     )
 
 
-def monitor(lines):
+def monitor(lines, gap=0.35):
     """Send commands to QEMU's monitor.
 
     The mouse is the reason this exists separately from `capture`: there is no
@@ -180,7 +180,7 @@ def monitor(lines):
             pass
         for line in lines:
             mon.sendall((line + "\n").encode())
-            time.sleep(0.35)
+            time.sleep(gap)
         try:
             mon.recv(4096)
         except OSError:
@@ -1188,7 +1188,11 @@ def main():
                     if line.startswith("@mouse ") or line.startswith("@shot "):
                         verb, arg = line.split(None, 1)
                         if verb == "@mouse":
-                            monitor([arg])
+                            # `a ; b` sends both 50 ms apart in one beat --
+                            # the only way to land a double-click inside the
+                            # desktop's 400 ms, since every beat costs 0.4 s.
+                            parts = [p.strip() for p in arg.split(";")]
+                            monitor(parts, gap=0.05 if len(parts) > 1 else 0.35)
                             print(f"[drive] mouse: {arg}")
                         else:
                             try:

@@ -5538,6 +5538,30 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             }
         },
         "gpu" => gpu_cmd(acpi, rest.trim()),
+        // Installed programs, read off every disk's `apps/` and `/etc/apps`
+        // -- see `apps`. `apps scan` looks again after a disk changes.
+        "apps" => {
+            if rest.trim() == "scan" {
+                kprintln!("  {} program(s) found", crate::apps::scan());
+            }
+            let list = crate::apps::list();
+            if list.is_empty() {
+                kprintln!("  nothing installed -- an apps/*.app file on a FAT disk, or /etc/apps/<name>, adds one");
+            }
+            for a in list {
+                kprintln!(
+                    "  {:<20} {:?}{}  {}",
+                    a.name,
+                    a.runtime,
+                    if a.gpu { ", gpu" } else { "" },
+                    a.exec
+                );
+            }
+        }
+        "launch" => match crate::apps::launch(rest.trim()) {
+            Ok(id) => kprintln!("  [job {}] {} started", id, rest.trim()),
+            Err(why) => kprintln!("  {}", why),
+        },
         "jobs" => jobs_cmd(),
         "kill" => match rest.trim().trim_start_matches('%').parse::<u32>() {
             Ok(id) => kprintln!("  [job {}] {}", id, crate::job::kill(id)),

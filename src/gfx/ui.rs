@@ -1847,6 +1847,12 @@ pub fn program_manager() -> Panel {
         run("Diagnostics", "win open diag"),
         run("Settings", "win open settings"),
     ];
+    // Installed programs follow the machine's own, each started the way its
+    // desktop icon starts it.
+    let mut items = items;
+    for name in crate::apps::names() {
+        items.push((name.clone(), Action::Run(alloc::format!("launch {}", name))));
+    }
     Panel::new(
         "Aperture Program Manager",
         alloc::vec![
