@@ -7036,6 +7036,59 @@ true and each was a wall:
 `gpu drm` counts the wakes; `gpu drm peek <phys> [words]` reads host-visible
 memory from the kernel, which is how the stall was seen.
 
+**It runs at 27 to 38 fps now, standing still** (297f492; 19.6 at c194c1d),
+from two changes: an unfenced submit waits for the host with the guest lock
+let go -- every Venus notify had held every guest thread for its round trip
+-- and waking the compositor kicks its core, which is halted while the guest
+runs elsewhere, so a commit no longer waits a tick to be composed. **Not
+measured while the player moves.** That is the number that matters and it
+is owed: walk by holding W through QEMU's keyboard (`@mouse sendkey w N`),
+since the up arrow did not move the player, and `linux feed` timelines
+start at the *next* guest's launch, not at once.
+
+**A buffer handle above 4095 crashed Portal**, and that one is fixed. `MAP`
+made a buffer's offset the handle shifted by 32 and handles only counted
+up; an i386 `mmap2` carries the offset in pages as 32 bits, so glibc
+refused the map itself and Zink dereferenced the mapping it did not get.
+Handles are the smallest free one now and the shift is 24.
+
+**Portal still sometimes freezes on its first frame, and this is the open
+problem.** Every ring caught up, no fence in flight, 0 frames. Since the
+futex fix (a wake now marks the waiter it chose) 8 runs rendered and 10
+froze -- with or without input. What is known, so nobody re-tests it:
+
+- the main thread is inside **present**: `dri_flush` ->
+  `zink_kopper_present_queue` (zink_kopper.c:958, the synchronous
+  `kopper_present`) -> Venus's `vkQueuePresentKHR`, polling in
+  `clock_nanosleep` (Venus's `vn_relax`) for something the host never
+  completes. Resolved against Mesa 26.2.5's debug info: game.img carries
+  26.2.5 and LLVM 23 now precisely so stacks symbolise (Arch publishes
+  `lib32-mesa-debug` only for current versions; 26.2.3 had none);
+- not the ring wake (all rings idle), not stale semaphore or fence feedback
+  (froze with `VN_PERF=no_semaphore_feedback,no_fence_feedback`), not focus
+  (froze with `SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS=0`), not in-fences (Venus
+  never sets `FENCE_FD_IN`);
+- the next question is the present path itself: the WSI blit's fence or
+  the host's `vkQueuePresentKHR` under `MESA_VK_WSI_DEBUG=sw,buffer`, so
+  run with `VN_DEBUG` on and read which wait the present thread is in.
+
+Instruments: `linux waits` (each thread's call and its stack from its last
+futex or `clock_nanosleep`, with `PRE="linux prof on"` so stacks are taken
+from launch), `gpu drm` (submits by command with mean and worst, every
+ring's head, tail and status), and `GLADOS_EFI=<path>` on drive.py to boot
+an older build for an A/B. `out/gpu/portal.sh` takes `PRE`, `MID`, `MOVE`
+(beats for the measured window, `|`-separated), `POST`, `POST2`, `ENVY`.
+
+**Installed programs are desktop icons** (`src/apps.rs`, 543d8d7,
+4dc2cf3). An `apps/*.app` file on any FAT volume, or `/etc/apps/<name>`,
+is `key=value` lines -- name, runtime, mount, copy, cwd, env (repeats),
+gpu, exec, icon -- read at boot; `apps` lists them, `launch <name>` and a
+double-click run one as a job beside the shell. `gpu=yes` adds the Zink
+environment only when /dev/dri is there; `icon=` is a BMP on the same
+volume, read with its bitfield masks honoured (Portal's is A-B-G-R).
+game.img carries `apps/portal.app`. `runtime=` is the seam a Windows or BSD
+runtime plugs into.
+
 The second backend is meant to be nouveau behind the same node (NVK at ring
 3, GSP firmware from `/lib/firmware/nvidia/ga107/gsp/`), for the GF63 on bare
 metal; only the ioctl table and what a submit means would differ. Not done:
