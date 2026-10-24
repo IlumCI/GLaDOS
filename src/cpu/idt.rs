@@ -83,6 +83,22 @@ impl Entry {
 
 static IDT: Racy<[Entry; 256]> = Racy::new([Entry::missing(); 256]);
 
+/// Install a gate ring 3 may raise with `int`: DPL 3, interrupt gate.
+///
+/// For `int 0x80`, the 32-bit Linux system call. Every other gate is DPL 0,
+/// so a guest executing `int n` for any of them takes #GP instead -- which is
+/// the property that keeps a guest from calling the timer handler itself.
+/// Still an interrupt gate rather than a trap gate, so IF is clear on entry,
+/// as `syscall`'s FMASK makes it for 64-bit guests.
+///
+/// # Safety
+/// `handler` must be an entry stub that can be reached from ring 3.
+pub unsafe fn set_user_gate(vector: u8, handler: *const ()) {
+    let e = unsafe { &mut IDT.get()[vector as usize] };
+    e.set(handler as u64, 0);
+    e.type_attr = 0xEE;
+}
+
 /// The address the firmware loaded this kernel at, captured from the Loaded
 /// Image protocol before boot services exit. RIP alone names nothing under a
 /// relocated load; `rip - IMAGE_BASE` is an RVA that the build tree's

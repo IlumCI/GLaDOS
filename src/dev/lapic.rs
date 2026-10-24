@@ -194,7 +194,68 @@ extern "x86-interrupt" fn timer_isr(frame: idt::InterruptStackFrame) {
     // says, because a guest blocked in a read is sitting in the kernel and
     // that is precisely when it is waiting to be fed.
     crate::linux::input::service(now);
+    crate::linux::prof::sample(frame.cs, frame.rip);
     crate::task::tick();
+}
+
+/// The vector a TLB shootdown arrives on.
+pub const VECTOR_SHOOTDOWN: u8 = 0xF3;
+static SHOT_ACKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Another core changed a guest's page tables: drop every cached
+/// translation. A CR3 reload is the whole of it -- guest pages are never
+/// global, so it reaches every one of them -- and it is cheaper than finding
+/// out which few changed.
+extern "x86-interrupt" fn shootdown_isr(_frame: idt::InterruptStackFrame) {
+    unsafe {
+        core::arch::asm!("mov {t}, cr3", "mov cr3, {t}", t = out(reg) _, options(nostack, preserves_flags));
+    }
+    SHOT_ACKS.fetch_add(1, Ordering::AcqRel);
+    eoi();
+}
+
+/// Ask every other core to flush and wait until each has, or until a few
+/// milliseconds say one never will. A core with interrupts off for that long
+/// is holding something no guest is waiting on, and a guest waiting forever
+/// for it would be a worse failure than one stale translation.
+pub fn shootdown() {
+    let others = crate::smp::online().saturating_sub(1);
+    if others == 0 {
+        return;
+    }
+    SHOT_ACKS.store(0, Ordering::Release);
+    ipi_settle();
+    // Fixed delivery, assert, destination shorthand "all excluding self".
+    write(REG_ICR_LO, VECTOR_SHOOTDOWN as u32 | 1 << 14 | 0b11 << 18);
+    ipi_settle();
+    let mhz = crate::time::tsc_mhz().max(1);
+    let t0 = unsafe { core::arch::x86_64::_rdtsc() };
+    while SHOT_ACKS.load(Ordering::Acquire) < others {
+        if unsafe { core::arch::x86_64::_rdtsc() } - t0 > 5_000 * mhz {
+            crate::serial_println!("[smp] a TLB shootdown went unanswered by {} core(s)", others - SHOT_ACKS.load(Ordering::Acquire));
+            break;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// The vector that only wakes a core.
+pub const VECTOR_KICK: u8 = 0xF4;
+
+/// Nothing to do but be an interrupt: a core in `hlt` returns from it and
+/// its idle loop looks for work again.
+extern "x86-interrupt" fn kick_isr(_frame: idt::InterruptStackFrame) {
+    eoi();
+}
+
+/// Wake every other core from `hlt`, for a task made runnable that one of
+/// them should pick up now rather than at its next tick.
+pub fn kick_others() {
+    if crate::smp::online() <= 1 || !crate::linux::syscall::FEAT_KICK.load(Ordering::Relaxed) {
+        return;
+    }
+    ipi_settle();
+    write(REG_ICR_LO, VECTOR_KICK as u32 | 1 << 14 | 0b11 << 18);
 }
 
 /// A spurious interrupt is the APIC telling us an interrupt was withdrawn
@@ -211,6 +272,8 @@ pub fn init(lapic_addr: u64) {
 
         idt::set_handler(VECTOR_TIMER, timer_isr as *const (), 0);
         idt::set_handler(VECTOR_SPURIOUS, spurious_isr as *const (), 0);
+        idt::set_handler(VECTOR_SHOOTDOWN, shootdown_isr as *const (), 0);
+        idt::set_handler(VECTOR_KICK, kick_isr as *const (), 0);
     }
 
     // Bit 8 of the spurious vector register is the APIC software enable.

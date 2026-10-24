@@ -26,6 +26,9 @@
 //! return. `boot0` therefore refuses on every condition it can name in
 //! advance rather than reading and hoping.
 
+pub mod virtio;
+pub mod virtgpu;
+
 use crate::dev::pci::{self, Device};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -533,6 +536,10 @@ pub fn selftest() -> bool {
     claim("all ones is not a chip", decode_boot0(0xFFFF_FFFF).is_none());
     claim("zero is not a chip", decode_boot0(0).is_none());
     claim("pre-Fermi layout refused", decode_boot0(0x0000_00a1).is_none());
+
+    for (what, good) in virtio::selftest() {
+        claim(what, good);
+    }
 
     ok
 }

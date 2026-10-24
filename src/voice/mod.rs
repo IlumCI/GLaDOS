@@ -39,6 +39,11 @@ static QUEUE: Spin<VecDeque<String>> = Spin::new(VecDeque::new());
 /// is kept in `/etc/voice` so it stays asked.
 static ON: AtomicBool = AtomicBool::new(true);
 static ECAM: AtomicU64 = AtomicU64::new(0);
+
+/// Where configuration space is, as the voice was told at boot; zero before.
+pub fn ecam() -> u64 {
+    ECAM.load(Ordering::Acquire)
+}
 static SPOKEN: AtomicUsize = AtomicUsize::new(0);
 static SPEAKING: AtomicBool = AtomicBool::new(false);
 /// The mask the last sentence was rendered with, in thousandths, for the

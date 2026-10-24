@@ -33,17 +33,23 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 ///     2   clock and compositor
 ///     16  mining slices, at MAX_SLICES = 16
 ///     3   the resident mind, the agent and the socket task
+///     48  guest threads, at `linux::thread::MAX_THREADS`
 ///     --
-///     37
+///     85
 ///
-/// Forty leaves three. `adopt_idle` and `spawn` both refuse past the end and say
+/// Ninety-six leaves eleven. **The guest threads were eight, and that was
+/// found as a hang rather than a refusal**: llvmpipe starts one rasterizer per
+/// core, so a game at four cores had four of them, two gallium queues, a
+/// filesystem thread and tier0's -- eight -- and the ninth thread the engine
+/// started never ran, while the main thread waited in `CThread::Start` for it
+/// to say it had. At two cores the same game fit with two to spare. `adopt_idle` and `spawn` both refuse past the end and say
 /// so, so overrunning this is a smaller pool or a missing painter rather than a
 /// corrupted table -- which is what it was.
 ///
 /// The cost is the static `TASKS` array and nothing else: `adopt_idle` takes a
 /// stack that already exists, and only `spawn` allocates `STACK_SIZE`, so the
 /// sixteen slices are 1 MiB of stacks whether this is 24 or 40.
-pub const MAX_TASKS: usize = 40;
+pub const MAX_TASKS: usize = 96;
 const STACK_SIZE: usize = 64 * 1024;
 
 // Defined in assembly rather than as a `#[naked]` fn: this must have exactly
@@ -151,6 +157,11 @@ pub struct Ring3 {
     pub syscall_stack: u64,
     pub host_rsp: u64,
     pub fs_base: u64,
+    /// A 32-bit guest's thread-local descriptors, its `%gs` selector, and
+    /// whether it is one at all. See `linux::i386`.
+    pub tls: [u64; 3],
+    pub gs: u16,
+    pub bits32: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -863,6 +874,21 @@ pub fn state_of(index: usize) -> Option<State> {
 /// interval and hashed at one slice's rate while the report said two. Use
 /// `pin_to` where the point is one task per core; use this where the point is
 /// that the scheduler may choose.
+/// Which core a task is confined to, or -1 for any.
+pub fn pin_of(index: usize) -> i16 {
+    let t = TASKS.lock_irq();
+    if index < MAX_TASKS { t[index].pin } else { 0 }
+}
+
+/// Confine a task to a core, or free it with -1. Takes effect at its next
+/// switch.
+pub fn set_pin(index: usize, pin: i16) {
+    let mut t = TASKS.lock_irq();
+    if index < MAX_TASKS && t[index].state != State::Unused && !t[index].idle {
+        t[index].pin = pin;
+    }
+}
+
 pub fn unpin(index: usize) -> bool {
     let mut t = TASKS.lock_irq();
     if index >= MAX_TASKS || t[index].state == State::Unused || t[index].idle {
@@ -1184,13 +1210,19 @@ pub fn ring3_active(on: bool, syscall_stack: u64) {
     let me = current();
     let mut t = TASKS.lock_irq();
     if on {
+        crate::linux::syscall::arm_core();
         let mut r = t[me].ring3.unwrap_or_default();
         if syscall_stack != 0 {
             r.syscall_stack = syscall_stack;
         }
         t[me].ring3 = Some(r);
+        // Now, not at the next switch: the guest is about to be entered
+        // without one, and its first timer tick at ring 3 must not land on
+        // the core's shared entry stack.
+        crate::cpu::gdt::set_rsp0(r.syscall_stack);
     } else {
         t[me].ring3 = None;
+        crate::cpu::gdt::set_rsp0(0);
     }
 }
 
@@ -1352,7 +1384,7 @@ pub fn exit() -> ! {
 }
 
 /// Set or clear the current task's wake deadline. Answers whether it took.
-fn set_wake(tick: u64) -> bool {
+pub(crate) fn set_wake(tick: u64) -> bool {
     let me = crate::smp::this_cpu() as usize;
     if me >= MAX_CPUS {
         return false;
@@ -1440,7 +1472,7 @@ pub fn sleep_until_or(tick: u64, ready: impl Fn() -> bool) -> bool {
 }
 
 /// Read and clear this task's wake flag.
-fn take_woken() -> bool {
+pub(crate) fn take_woken() -> bool {
     let me = crate::smp::this_cpu() as usize;
     if me >= MAX_CPUS {
         return false;
@@ -1655,9 +1687,10 @@ fn schedule() {
         // the global and 0 still in its field, so a guard on the field skips
         // the save and loses the index. Two stores on a path that runs a
         // hundred times a second is not worth a branch that can be wrong.
-        let live = crate::linux::syscall::current_guest();
-        *out_guest = live;
-        crate::linux::syscall::set_current_guest(in_guest);
+        // Nothing to swap any more: the index is an array indexed by task
+        // (`linux::syscall::TASK_GUEST`), and the field is kept only so the
+        // tuple above stays the shape the rest of this function reads.
+        let _ = (out_guest, in_guest);
         if !in_fpu.is_null() {
             crate::cpu::xrstor_from(in_fpu);
         }

@@ -587,7 +587,21 @@ pub struct Chrome {
     pub client: Rect,
 }
 
+/// Whether a frame is the whole screen, which is what a full-screen window's
+/// frame is and nothing else's: those have no border and no caption. Decided
+/// by the rectangle so every caller of `chrome` -- painting, hit-testing,
+/// input -- agrees without being told a window's state.
+pub fn is_bare(frame: Rect) -> bool {
+    frame.x == 0
+        && frame.y == 0
+        && super::primary().is_some_and(|fb| frame.w == fb.width() && frame.h == fb.height())
+}
+
 pub fn chrome(frame: Rect, has_menus: bool) -> Chrome {
+    if is_bare(frame) {
+        let title = Rect::new(frame.x, frame.y, frame.w, 0);
+        return Chrome { frame, title, body: frame, menubar: None, client: frame };
+    }
     let inner = frame.shrink(frame_w());
     let title = Rect::new(inner.x, inner.y, inner.w, title_h());
     // Two pixels of border show between the caption and the body, which under
@@ -623,6 +637,10 @@ pub fn window(
     hot_caption: Option<usize>,
 ) -> Chrome {
     let c = chrome(r, has_menus);
+    if is_bare(r) {
+        fb.rect(r.x, r.y, r.w, r.h, Color::new(0, 0, 0));
+        return c;
+    }
     // The frame and caption are glass (1.4.1): the blurred wallpaper behind
     // them, colourised. Four strips -- the top one taking in the caption and
     // the line under it -- rather than the whole window, because the body is

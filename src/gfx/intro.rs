@@ -124,7 +124,7 @@ pub fn show(fb: &Framebuffer, mem_mib: u64) {
 
     // OS identity
     let oy = ay + MARK.len() as u32 * GH * asc + 14;
-    centre(fb, w, oy, "G L a D O S   1.4.2", A_HI, 3);
+    centre(fb, w, oy, "G L a D O S   1.4.3", A_HI, 3);
     centre(fb, w, oy + 42, "Genetic Lifeform and Disk Operating System", A, 2);
 
     // two columns: registration (lore) | system (detected)

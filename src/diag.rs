@@ -465,6 +465,11 @@ pub const SUITES: &[Suite] = &[
         run: sky_selftest,
     },
     Suite {
+        name: "apps",
+        about: "an installed program's entry, and the bitmap it may carry for an icon",
+        run: apps_selftest,
+    },
+    Suite {
         name: "problem",
         about: "a problem is checkable, and a trivial one is refused",
         run: crate::ai::problem::selftest,
@@ -730,6 +735,21 @@ fn sky_selftest() -> bool {
     ok
 }
 
+fn apps_selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    let mut n = 0usize;
+    for (what, good) in crate::apps::checks() {
+        n += 1;
+        if !good {
+            kprintln!("    FAIL: {}", what);
+            ok = false;
+        }
+    }
+    kprintln!("    {} claim(s)", n);
+    ok
+}
+
 fn place_selftest() -> bool {
     use crate::kprintln;
     let mut ok = true;
@@ -810,7 +830,7 @@ fn web_selftest() -> bool {
 /// says it exists to prevent. A `static` cannot be read in a const context, so
 /// the array cannot be measured directly; naming its length is the next best
 /// thing and it is now the only place the number appears.
-const SLOTS: usize = 101;
+const SLOTS: usize = 102;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.

@@ -170,6 +170,8 @@ pub enum Fd {
     /// `Vec` a `File` carries would be either impossible or a copy of the
     /// screen that nobody scans out.
     Dev(Rc<RefCell<DevFile>>),
+    /// A file on a mounted FAT volume, read by range. See `linux::disk`.
+    Disk(Rc<RefCell<crate::linux::disk::DiskFile>>),
 }
 
 /// An open `/dev` node and where its cursor sits.
@@ -258,6 +260,19 @@ pub struct DevFile {
     pub nonblock: bool,
 }
 
+impl Drop for DevFile {
+    /// The last descriptor on a sound device stops the stream, which is what
+    /// a program that exits without draining expects.
+    fn drop(&mut self) {
+        if let super::dev::Node::Snd(k) = self.node {
+            super::snd::closed(k);
+        }
+        if let super::dev::Node::Drm = self.node {
+            super::drm::closed(self.at);
+        }
+    }
+}
+
 impl Fd {
     pub fn is_dir(&self) -> bool {
         matches!(self, Fd::Dir(_))
@@ -297,6 +312,7 @@ impl Fd {
             Fd::Epoll(b) => Fd::Epoll(b.clone()),
             Fd::Memfd(b) => Fd::Memfd(b.clone()),
             Fd::Dev(b) => Fd::Dev(b.clone()),
+            Fd::Disk(b) => Fd::Disk(b.clone()),
         }
     }
 
@@ -365,14 +381,18 @@ impl Fd {
 
 /// Resolve a guest path against a working directory.
 ///
-/// Answers `None` for anything with a `..` in it. The tree has O(1) copies and
-/// no single parent, so walking back up is not a question it can answer, and
-/// silently normalising the path would resolve to somewhere the guest did not
-/// name.
+/// `..` is resolved lexically: it removes the component before it, and at the
+/// root it stays at the root, as Linux has it.
+///
+/// **This refused every `..` until a real program needed one.** The reason
+/// given was that the tree has O(1) copies and no single parent, so "up" is
+/// not a question it can answer -- true of the *store's* objects and not of a
+/// path, which is a string naming one place. With no symlinks anywhere here, a
+/// lexical walk up is exactly what Linux does. Source's engine finds its game
+/// directory as `bin/../game`, and the refusal surfaced as "Setup file
+/// 'gameinfo.txt' doesn't exist" about a file that does. The `/tmp` write jail
+/// is unaffected: it is checked against the resolved path.
 pub fn resolve(cwd: &str, path: &str) -> Option<String> {
-    if path.split('/').any(|c| c == "..") {
-        return None;
-    }
     let joined = if path.starts_with('/') {
         path.to_string()
     } else {
@@ -383,17 +403,20 @@ pub fn resolve(cwd: &str, path: &str) -> Option<String> {
         s.push_str(path);
         s
     };
-    // Collapse `.` and empty components so `/a//./b` is `/a/b`.
-    let mut out = String::from("/");
+    // Collapse `.` and empty components so `/a//./b` is `/a/b`, and take
+    // `..` back one component.
+    let mut parts: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
     for c in joined.split('/') {
-        if c.is_empty() || c == "." {
-            continue;
+        match c {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            c => parts.push(c),
         }
-        if out.len() > 1 {
-            out.push('/');
-        }
-        out.push_str(c);
     }
+    let mut out = String::from("/");
+    out.push_str(&parts.join("/"));
     Some(out)
 }
 
@@ -505,10 +528,19 @@ pub fn dirent(out: &mut Vec<u8>, room: usize, ino: u64, next: u64, is_dir: bool,
 /// to spot hard links, so a hash of the path answers both: distinct paths get
 /// distinct numbers, and the same path gets the same number twice running.
 /// Zero is avoided because some callers treat it as absent.
+///
+/// **Thirty-one bits, not sixty-four.** A 32-bit program's `stat` goes
+/// through glibc's compatibility path: the kernel answers `statx`, and glibc
+/// narrows the result into the old `struct stat` -- answering `EOVERFLOW` if
+/// the inode does not fit. The kernel saw success and the program saw a file
+/// it "cannot access": libasound, reading its own configuration, left a game
+/// silent that way. Real Linux inode numbers fit, so these must too; at 31 bits
+/// two paths collide once in about forty thousand files, and a collision only
+/// makes two files look like hard links.
 pub fn ino_of(path: &str) -> u64 {
     let h = crate::store::sha256::hash(path.as_bytes());
-    let n = u64::from_le_bytes([h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]]);
-    n | 1
+    let n = u32::from_le_bytes([h[0], h[1], h[2], h[3]]) as u64;
+    (n & 0x7FFF_FFFF) | 1
 }
 
 /// What `diag linux` asks of the projection.
@@ -528,8 +560,11 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         resolve("/", "/a//./b/").as_deref() == Some("/a/b"),
     ));
     out.push((
-        "a path that walks upwards is refused rather than normalised",
-        resolve("/ai", "../etc/passwd").is_none() && resolve("/", "a/../b").is_none(),
+        "a path that walks upwards is resolved lexically, and stops at the root",
+        resolve("/ai", "../etc/passwd").as_deref() == Some("/etc/passwd")
+            && resolve("/", "a/../b").as_deref() == Some("/b")
+            && resolve("/", "../../x").as_deref() == Some("/x")
+            && resolve("/mnt/game/bin", "../game").as_deref() == Some("/mnt/game/game"),
     ));
     out.push((
         "the root resolves to itself",

@@ -437,6 +437,61 @@ pub fn wifi_poll() {
     note_wlan_link();
 }
 
+static AUTO_AT: Racy<(u64, u64)> = Racy::new((0, 0));
+static AUTO_LOOK: Racy<u64> = Racy::new(0);
+
+/// The kernel's own manager: rejoin a known network when the station has
+/// nothing to do. Stands down while a ring-3 manager (`netd`, over
+/// `linux::netctl`) says it is deciding, so the two never fight over one
+/// radio -- and picks the same networks from the same file when it is not.
+///
+/// Scans at most every thirty seconds, joins at most every ten: a network
+/// that refuses the passphrase must not be asked again every turn.
+fn autojoin() {
+    if crate::linux::netctl::managed() {
+        return;
+    }
+    let now = now_ms();
+    let (last_scan, last_join) = unsafe { *AUTO_AT.get() };
+    if now.saturating_sub(last_join) < 10_000 {
+        return;
+    }
+    // Not the namespace on every idle turn: once a second at most, and not
+    // at all on a machine with no wireless part.
+    let look = unsafe { &mut *AUTO_LOOK.get() };
+    if now.saturating_sub(*look) < 1_000 || ifaces()[WLAN0].nic.is_none() {
+        return;
+    }
+    *look = now;
+    let known = crate::linux::netctl::known();
+    if known.is_empty() {
+        return;
+    }
+    let Some(_claim) = try_claim_wifi() else { return };
+    let Some(w) = wlan() else { return };
+    let (state, _) = w.status();
+    if matches!(state, "scanning" | "authenticating" | "associating" | "handshaking" | "running") {
+        return;
+    }
+    let heard = w.networks();
+    let best = heard
+        .iter()
+        .filter_map(|n| known.iter().find(|(s, _)| *s == n.ssid).map(|k| (n.rssi, k)))
+        .max_by_key(|(rssi, _)| *rssi);
+    match best {
+        Some((_, (ssid, pass))) => {
+            kprintln!("\n  [wifi] joining {}, a known network", ssid);
+            w.join(ssid, pass, now);
+            unsafe { *AUTO_AT.get() = (last_scan, now) };
+        }
+        None if now.saturating_sub(last_scan) >= 30_000 => {
+            w.join("", "", now);
+            unsafe { *AUTO_AT.get() = (now, last_join) };
+        }
+        None => {}
+    }
+}
+
 /// The same, plus a repaint when what is in the air has changed.
 ///
 /// **Only from the shell's idle loop**, because of the draw. A scan takes
@@ -452,6 +507,10 @@ pub fn wifi_poll() {
 pub fn wifi_service() {
     wifi_poll();
     dhcp_where_wanted();
+    if crate::sky::server::FEAT_IDLE.load(core::sync::atomic::Ordering::Relaxed) {
+        autojoin();
+        crate::linux::services::tick();
+    }
     let Some(_claim) = try_claim_wifi() else { return };
     let Some(w) = wlan() else { return };
     let (state, secure) = w.status();

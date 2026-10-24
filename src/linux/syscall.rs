@@ -158,49 +158,50 @@ pub const SYS_BRK: u64 = 12;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_MMAP: u64 = 9;
 pub const SYS_MPROTECT: u64 = 10;
+pub const SYS_MADVISE: u64 = 28;
 pub const SYS_MUNMAP: u64 = 11;
 pub const SYS_ARCH_PRCTL: u64 = 158;
 pub const SYS_EXIT_GROUP: u64 = 231;
 
 /// `-ENOSYS`, as Linux returns it: errors come back as small negatives in
 /// `rax` rather than through any side channel.
-const ENOSYS: u64 = (-38i64) as u64;
-const EBADF: u64 = (-9i64) as u64;
-const EPERM: u64 = (-1i64) as u64;
-const ENOMEM: u64 = (-12i64) as u64;
-const EINVAL: u64 = (-22i64) as u64;
-const EFAULT: u64 = (-14i64) as u64;
-const ENOENT: u64 = (-2i64) as u64;
-const EACCES: u64 = (-13i64) as u64;
-const EMFILE: u64 = (-24i64) as u64;
-const ENOTDIR: u64 = (-20i64) as u64;
-const EISDIR: u64 = (-21i64) as u64;
-const ENOTTY: u64 = (-25i64) as u64;
-const ESPIPE: u64 = (-29i64) as u64;
-const ENOTCONN: u64 = (-107i64) as u64;
-const EAGAIN: u64 = (-11i64) as u64;
-const EINTR: u64 = (-4i64) as u64;
-const ENAMETOOLONG: u64 = (-36i64) as u64;
-const EROFS: u64 = (-30i64) as u64;
-const EEXIST: u64 = (-17i64) as u64;
-const ERANGE: u64 = (-34i64) as u64;
-const ENOTEMPTY: u64 = (-39i64) as u64;
-const ENODEV: u64 = (-19i64) as u64;
-const ENOSPC: u64 = (-28i64) as u64;
+pub(super) const ENOSYS: u64 = (-38i64) as u64;
+pub(super) const EBADF: u64 = (-9i64) as u64;
+pub(super) const EPERM: u64 = (-1i64) as u64;
+pub(super) const ENOMEM: u64 = (-12i64) as u64;
+pub(super) const EINVAL: u64 = (-22i64) as u64;
+pub(super) const EFAULT: u64 = (-14i64) as u64;
+pub(super) const ENOENT: u64 = (-2i64) as u64;
+pub(super) const EACCES: u64 = (-13i64) as u64;
+pub(super) const EMFILE: u64 = (-24i64) as u64;
+pub(super) const ENOTDIR: u64 = (-20i64) as u64;
+pub(super) const EISDIR: u64 = (-21i64) as u64;
+pub(super) const ENOTTY: u64 = (-25i64) as u64;
+pub(super) const ESPIPE: u64 = (-29i64) as u64;
+pub(super) const ENOTCONN: u64 = (-107i64) as u64;
+pub(super) const EAGAIN: u64 = (-11i64) as u64;
+pub(super) const EINTR: u64 = (-4i64) as u64;
+pub(super) const ENAMETOOLONG: u64 = (-36i64) as u64;
+pub(super) const EROFS: u64 = (-30i64) as u64;
+pub(super) const EEXIST: u64 = (-17i64) as u64;
+pub(super) const ERANGE: u64 = (-34i64) as u64;
+pub(super) const ENOTEMPTY: u64 = (-39i64) as u64;
+pub(super) const ENODEV: u64 = (-19i64) as u64;
+pub(super) const ENOSPC: u64 = (-28i64) as u64;
 /// `O_NONBLOCK`, which on an event device is the difference between a program
 /// that polls and one that waits.
 const O_NONBLOCK: u64 = 0o4000;
 
 /// `AT_EMPTY_PATH`: operate on the descriptor rather than on a path under it.
 const AT_EMPTY_PATH: u64 = 0x1000;
-const EAFNOSUPPORT: u64 = (-97i64) as u64;
-const EPROTONOSUPPORT: u64 = (-93i64) as u64;
-const ENOTSOCK: u64 = (-88i64) as u64;
-const ECONNREFUSED: u64 = (-111i64) as u64;
-const ETIMEDOUT: u64 = (-110i64) as u64;
-const ENETDOWN: u64 = (-100i64) as u64;
-const EISCONN: u64 = (-106i64) as u64;
-const ENOBUFS: u64 = (-105i64) as u64;
+pub(super) const EAFNOSUPPORT: u64 = (-97i64) as u64;
+pub(super) const EPROTONOSUPPORT: u64 = (-93i64) as u64;
+pub(super) const ENOTSOCK: u64 = (-88i64) as u64;
+pub(super) const ECONNREFUSED: u64 = (-111i64) as u64;
+pub(super) const ETIMEDOUT: u64 = (-110i64) as u64;
+pub(super) const ENETDOWN: u64 = (-100i64) as u64;
+pub(super) const EISCONN: u64 = (-106i64) as u64;
+pub(super) const ENOBUFS: u64 = (-105i64) as u64;
 
 /// `O_WRONLY` and `O_RDWR`. This view is read-only, so both are refused.
 const O_WRONLY: u64 = 1;
@@ -233,7 +234,9 @@ const OPEN_MAX_BYTES: usize = 64 * 1024 * 1024;
 const DENTS_MAX: usize = 1 << 20;
 
 /// How many descriptors a guest may hold, and how long a path may be.
-const MAX_FDS: usize = 64;
+/// Linux's usual soft limit. It was 64, and a Source game keeps dozens of
+/// archive chunks open at once.
+const MAX_FDS: usize = 1024;
 const PATH_MAX: usize = 4096;
 
 /// The largest single mapping a guest may ask for.
@@ -243,7 +246,11 @@ const PATH_MAX: usize = 4096;
 /// produce a *small* allocation and hand back a pointer to far less memory
 /// than the guest was told it had. A cap makes that unreachable at the one
 /// place it can be checked cheaply.
-const MAP_MAX: u64 = 64 * 1024 * 1024;
+///
+/// A gigabyte: well short of any wrap, and above the largest single library
+/// a real program maps -- Mesa's 32-bit `libLLVM` is 177 MB, and the old
+/// 64 MiB cap answered `ENOMEM` for it and left the program with no OpenGL.
+const MAP_MAX: u64 = 1024 * 1024 * 1024;
 
 /// What the guest had in its registers when it trapped.
 ///
@@ -339,8 +346,10 @@ core::arch::global_asm!(
     r#"
     .globl glados_syscall_entry
 glados_syscall_entry:
-    mov [rip + GLADOS_GUEST_RSP], rsp
-    mov rsp, [rip + GLADOS_SYSCALL_STACK]
+    swapgs
+    mov gs:[0], rsp
+    mov rsp, gs:[8]
+    swapgs
     and rsp, -16
     sub rsp, 512
     fxsave64 [rsp]
@@ -380,7 +389,9 @@ glados_syscall_entry:
     pop r15
     fxrstor64 [rsp]
     add rsp, 512
-    mov rsp, [rip + GLADOS_GUEST_RSP]
+    swapgs
+    mov rsp, gs:[0]
+    swapgs
     sysretq
 
     .globl glados_enter_guest
@@ -391,7 +402,13 @@ glados_enter_guest:
     push r13
     push r14
     push r15
-    mov [rip + GLADOS_HOST_RSP], rsp
+    mov rax, rsp
+    pushfq
+    cli
+    swapgs
+    mov gs:[16], rax
+    swapgs
+    popfq
     push 0x33
     push rsi
     push 0x202
@@ -440,7 +457,13 @@ glados_enter_guest_regs:
     push r13
     push r14
     push r15
-    mov [rip + GLADOS_HOST_RSP], rsp
+    mov rax, rsp
+    pushfq
+    cli
+    swapgs
+    mov gs:[16], rax
+    swapgs
+    popfq
     push 0x33
     push qword ptr [rdi + 8]
     push qword ptr [rdi + 16]
@@ -465,7 +488,10 @@ glados_enter_guest_regs:
 
     .globl glados_leave_guest
 glados_leave_guest:
-    mov rsp, [rip + GLADOS_HOST_RSP]
+    cli
+    swapgs
+    mov rsp, gs:[16]
+    swapgs
     mov rax, rdi
     pop r15
     pop r14
@@ -512,15 +538,60 @@ pub struct Resume {
     pub fs: u64,
 }
 
-/// Where the guest's stack pointer went while the handler runs.
-#[no_mangle]
-static mut GLADOS_GUEST_RSP: u64 = 0;
-/// The top of the handler's own stack.
-#[no_mangle]
-static mut GLADOS_SYSCALL_STACK: u64 = 0;
-/// Where `glados_enter_guest` left the host, for `exit_group` to return to.
-#[no_mangle]
-static mut GLADOS_HOST_RSP: u64 = 0;
+/// The ring-3 entry state, one block per core.
+///
+/// **It was three globals**, swapped by the scheduler at every switch, which
+/// made them per task for exactly as long as one core ran guests: a value
+/// only read while its own task runs is per task provided somebody swaps it
+/// -- and with guests on two cores, two tasks are running. So they are per
+/// core now, still swapped at each switch, and the assembly reaches this
+/// core's block through `swapgs`: `IA32_KERNEL_GS_BASE` holds its address
+/// (`arm_core`). The kernel itself never uses `GS` -- `cpu::percpu` reads
+/// `rdpid` -- so each `swapgs` is paired with another at once and nothing
+/// runs between them with interrupts on.
+///
+/// Field order is the assembly's offsets: 0, 8, 16.
+#[repr(C, align(64))]
+pub struct CoreEntry {
+    /// Where the guest's stack pointer went while the handler runs.
+    guest_rsp: u64,
+    /// The top of the handler's own stack.
+    syscall_stack: u64,
+    /// Where `glados_enter_guest` left the host, for `exit_group` to return to.
+    host_rsp: u64,
+}
+
+static mut GLADOS_ENTRY: [CoreEntry; crate::task::MAX_CPUS] =
+    [const { CoreEntry { guest_rsp: 0, syscall_stack: 0, host_rsp: 0 } }; crate::task::MAX_CPUS];
+
+fn core_entry() -> *mut CoreEntry {
+    let c = (crate::smp::this_cpu() as usize).min(crate::task::MAX_CPUS - 1);
+    unsafe { core::ptr::addr_of_mut!(GLADOS_ENTRY[c]) }
+}
+
+const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
+static ARMED: [core::sync::atomic::AtomicBool; crate::task::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; crate::task::MAX_CPUS];
+
+/// The per-core half of arming: the `syscall` MSRs and this core's entry
+/// block. Every core that may run a guest needs it, and an application
+/// processor has none of it until it first does.
+pub fn arm_core() {
+    let c = (crate::smp::this_cpu() as usize).min(crate::task::MAX_CPUS - 1);
+    if ARMED[c].swap(true, Ordering::AcqRel) {
+        return;
+    }
+    unsafe {
+        let star = (crate::cpu::gdt::KERNEL_CS as u64) << 32
+            | (crate::cpu::gdt::SYSRET_BASE as u64) << 48;
+        crate::cpu::wrmsr(IA32_STAR, star);
+        crate::cpu::wrmsr(IA32_LSTAR, glados_syscall_entry as usize as u64);
+        crate::cpu::wrmsr(IA32_FMASK, 0x700);
+        let efer = crate::cpu::rdmsr(IA32_EFER);
+        crate::cpu::wrmsr(IA32_EFER, efer | EFER_SCE);
+        crate::cpu::wrmsr(IA32_KERNEL_GS_BASE, core::ptr::addr_of_mut!(GLADOS_ENTRY[c]) as u64);
+    }
+}
 
 /// Sixteen KiB, aligned, and static rather than heap-allocated.
 ///
@@ -539,11 +610,15 @@ static mut SYSCALL_STACK: Stack = Stack([0; 16 * 1024]);
 /// its own task is running *is* per-task, provided somebody swaps it at the
 /// boundary.
 pub fn ring3_now() -> crate::task::Ring3 {
+    let (tls, gs, bits32) = super::i386::save();
     unsafe {
         crate::task::Ring3 {
-            guest_rsp: core::ptr::read(core::ptr::addr_of!(GLADOS_GUEST_RSP)),
-            syscall_stack: core::ptr::read(core::ptr::addr_of!(GLADOS_SYSCALL_STACK)),
-            host_rsp: core::ptr::read(core::ptr::addr_of!(GLADOS_HOST_RSP)),
+            tls,
+            gs,
+            bits32,
+            guest_rsp: (*core_entry()).guest_rsp,
+            syscall_stack: (*core_entry()).syscall_stack,
+            host_rsp: (*core_entry()).host_rsp,
             fs_base: crate::cpu::rdmsr(IA32_FS_BASE),
         }
     }
@@ -560,12 +635,18 @@ pub fn ring3_now() -> crate::task::Ring3 {
 pub fn ring3_load(r: Option<crate::task::Ring3>) {
     match r {
         Some(r) => unsafe {
-            core::ptr::write(core::ptr::addr_of_mut!(GLADOS_GUEST_RSP), r.guest_rsp);
-            core::ptr::write(core::ptr::addr_of_mut!(GLADOS_SYSCALL_STACK), r.syscall_stack);
-            core::ptr::write(core::ptr::addr_of_mut!(GLADOS_HOST_RSP), r.host_rsp);
+            arm_core();
+            (*core_entry()).guest_rsp = r.guest_rsp;
+            (*core_entry()).syscall_stack = r.syscall_stack;
+            (*core_entry()).host_rsp = r.host_rsp;
             crate::cpu::wrmsr(IA32_FS_BASE, r.fs_base);
+            // This task's own landing for an interrupt taken at ring 3. See
+            // `gdt::set_rsp0` for what sharing one cost.
+            crate::cpu::gdt::set_rsp0(r.syscall_stack);
+            super::i386::load(r.tls, r.gs, r.bits32);
         },
         None => {
+            crate::cpu::gdt::set_rsp0(0);
             if let Some(sp) = unsafe { guest_slot().as_ref() } {
                 unsafe { crate::cpu::wrmsr(IA32_FS_BASE, sp.saved_fs) };
             }
@@ -613,6 +694,15 @@ pub enum Source {
     /// something it never owned. The pages to release are the backing's, and
     /// this is the only place that still knows which they were.
     Backed(u64),
+    /// Arena memory built from separate heap pages, because no contiguous run
+    /// of the size asked for was free. The pages are found again through the
+    /// guest's own tables when they go back -- which is why `give_back` alone
+    /// cannot free them, and `free_paged` does.
+    ///
+    /// Linux never needs a physically contiguous run for `mmap`; this kernel
+    /// did, and after enough churn a 50 MB request failed against a heap with
+    /// far more than 50 MB free. a game reported it as `std::bad_alloc`.
+    Paged,
     /// A forked child's inherited record of one of its parent's mappings.
     ///
     /// **A sixth way back, and it is to do nothing.** The record was cloned
@@ -678,6 +768,12 @@ pub struct Regions {
     pub interp_mapped: bool,
     pub stack_mapped: bool,
     pub brk_mapped: bool,
+    /// The ABI, and where its `mmap` arena runs.
+    pub bits32: bool,
+    pub mmap_at: u64,
+    pub mmap_end: u64,
+    /// More arena, below 4 GiB for a 32-bit guest: holes past the first.
+    pub arena_extra: [(u64, u64); 7],
 }
 
 /// What a guest owns.
@@ -749,12 +845,25 @@ pub struct Space {
     pub owned: alloc::vec::Vec<(u64, usize)>,
     /// The next free address in the guest's mmap arena.
     ///
-    /// A bump cursor and never reused, which is a real limitation with a
-    /// number on it: the arena is 510 GiB below the next slot, so a guest
-    /// would have to map and unmap that much before it wrapped. Reclaiming
-    /// means a free list, and a free list is worth building when something
-    /// runs out rather than before.
+    /// A bump cursor, with `arena_free` in front of it.
     pub mmap_next: u64,
+    /// Where the arena must stop: the stack for a 32-bit guest, which has no
+    /// room to spare below 4 GiB, and effectively nowhere for a 64-bit one.
+    pub mmap_end: u64,
+    /// Arena ranges given back by `munmap`, sorted and coalesced, taken
+    /// first-fit before the cursor moves.
+    ///
+    /// This was "worth building when something runs out", and something did.
+    /// A 64-bit guest has 510 GiB of arena; a 32-bit one has the hole below
+    /// its stack, about 1.4 GiB. A game maps and unmaps scratch buffers of tens
+    /// of megabytes on its way to the menu -- about 1,100 `munmap`s on the
+    /// host -- and with a bump cursor the hole was gone before the menu was:
+    /// `malloc` answered NULL, and Valve's GL layer `memcpy`d a texture to
+    /// address zero.
+    pub arena_free: Vec<(u64, u64)>,
+    /// A 32-bit guest: `int 0x80`, a compatibility code segment, 4-byte
+    /// pointers in every structure it hands over.
+    pub bits32: bool,
     pub image_path: String,
     pub interp_path: Option<String>,
     /// `FS` base as the kernel left it. A guest sets `FS` for its
@@ -816,9 +925,23 @@ pub const GUEST_MMAP_AT: u64 = crate::mem::space::WINDOW + 0x5000_0000;
 
 static TABLE: Racy<Vec<Option<Space>>> = Racy::new(Vec::new());
 
-/// Which slot the syscall path is speaking for.
-static CURRENT_GUEST: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
+/// Which slot each task's syscall path is speaking for.
+///
+/// **Indexed by task, rather than one global the scheduler swaps.** It was the
+/// global, saved and restored by `schedule` beside the ring-3 state, and that
+/// is correct only while every path that switches tasks goes through that one
+/// seam and in that one order. A 32-bit guest's threads found a path that did
+/// not: two pool tasks entered `futex` with the guest's own page tables in
+/// CR3 and index 0 in the global, so `owns` checked the wrong guest's regions
+/// and answered `EFAULT` about the guest's own memory -- glibc's "The futex
+/// facility returned an unexpected error code". An array indexed by the
+/// running task has no seam to miss.
+static TASK_GUEST: [core::sync::atomic::AtomicUsize; crate::task::MAX_TASKS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::task::MAX_TASKS];
+
+fn guest_index() -> usize {
+    TASK_GUEST[me()].load(core::sync::atomic::Ordering::Relaxed)
+}
 
 /// The running guest's slot, grown into existence if this is its first use.
 ///
@@ -828,7 +951,7 @@ static CURRENT_GUEST: core::sync::atomic::AtomicUsize =
 #[allow(clippy::mut_from_ref)]
 pub unsafe fn guest_slot() -> &'static mut Option<Space> {
     let t = unsafe { TABLE.get() };
-    let i = CURRENT_GUEST.load(core::sync::atomic::Ordering::Relaxed);
+    let i = guest_index();
     while t.len() <= i {
         t.push(None);
     }
@@ -883,7 +1006,7 @@ pub fn hold_guest(g: super::load::Guest) {
 }
 
 pub unsafe fn set_guest_rsp(v: u64) {
-    unsafe { core::ptr::write(core::ptr::addr_of_mut!(GLADOS_GUEST_RSP), v) };
+    unsafe { (*core_entry()).guest_rsp = v };
 }
 
 /// Give this guest a different image, keeping what `execve` says survives.
@@ -930,7 +1053,10 @@ pub fn replace_guest(
         signals: super::signal::State::default(),
         holder: None,
         owned: alloc::vec::Vec::new(),
-        mmap_next: GUEST_MMAP_AT,
+        mmap_next: r.mmap_at,
+        mmap_end: r.mmap_end,
+        arena_free: Vec::new(),
+        bits32: r.bits32,
         image_path: String::new(),
         interp_path: None,
         saved_fs,
@@ -939,7 +1065,7 @@ pub fn replace_guest(
 }
 
 pub unsafe fn set_syscall_stack(stack: u64) {
-    unsafe { core::ptr::write(core::ptr::addr_of_mut!(GLADOS_SYSCALL_STACK), stack) };
+    unsafe { (*core_entry()).syscall_stack = stack };
 }
 
 pub unsafe fn enter_resumed(r: &Resume) -> u64 {
@@ -958,13 +1084,13 @@ pub fn guest_fs() -> u64 {
 /// Where the running guest's stack pointer went, for a `fork` that has to give
 /// its child the same one.
 pub fn guest_rsp() -> u64 {
-    unsafe { core::ptr::read(core::ptr::addr_of!(GLADOS_GUEST_RSP)) }
+    unsafe { (*core_entry()).guest_rsp }
 }
 
 /// Whether the run deadline has passed, for a loop that would otherwise wait
 /// forever on a child that is never coming back.
 pub unsafe fn kill_if_overdue() -> bool {
-    let d = DEADLINE.load(Ordering::Relaxed);
+    let d = super::session::current().map(super::session::deadline_of).unwrap_or(0);
     doomed() != 0 || (d != 0 && crate::dev::lapic::ticks() >= d)
 }
 
@@ -1021,6 +1147,9 @@ pub fn clone_guest(
         tables: Some(tables),
         owned,
         mmap_next: p.mmap_next,
+        mmap_end: p.mmap_end,
+        arena_free: p.arena_free.clone(),
+        bits32: p.bits32,
         image_path: p.image_path.clone(),
         interp_path: p.interp_path.clone(),
         saved_fs: p.saved_fs,
@@ -1053,7 +1182,7 @@ pub unsafe fn slot_at(i: usize) -> &'static mut Option<Space> {
 
 /// Which guest the syscall path is speaking for.
 pub fn current_guest() -> usize {
-    CURRENT_GUEST.load(core::sync::atomic::Ordering::Relaxed)
+    guest_index()
 }
 
 /// Speak for a different guest from now on.
@@ -1063,14 +1192,29 @@ pub fn current_guest() -> usize {
 /// things one name, and the first time they needed to move apart -- a kernel
 /// reading a guest's memory without running it -- the fold would be the bug.
 pub fn set_current_guest(i: usize) {
-    CURRENT_GUEST.store(i, core::sync::atomic::Ordering::Relaxed);
+    TASK_GUEST[me()].store(i, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// What task `t` speaks for, for the scheduler's report and the selftest.
+pub fn guest_of_task(t: usize) -> usize {
+    TASK_GUEST.get(t).map(|g| g.load(core::sync::atomic::Ordering::Relaxed)).unwrap_or(0)
 }
 
 /// The lowest slot holding no guest, growing the table if every one is taken.
+///
+/// **Never slot 0.** Every task's guest index starts at 0, so slot 0 is what a
+/// task that is in no session speaks for -- and with one session it was also
+/// where that session's guest lived, which made "the shell's task" and "the
+/// guest" the same index. With several sessions that would let the shell's
+/// task, or any pool task between tenants, resolve `guest_slot()` to whichever
+/// session happened to land in slot 0. Kept empty, it answers `None` to them.
 pub fn free_guest_slot() -> usize {
     let t = unsafe { TABLE.get() };
-    if let Some(i) = t.iter().position(|g| g.is_none()) {
-        return i;
+    while t.is_empty() {
+        t.push(None);
+    }
+    if let Some(i) = t.iter().skip(1).position(|g| g.is_none()) {
+        return i + 1;
     }
     t.push(None);
     t.len() - 1
@@ -1156,7 +1300,9 @@ pub fn reachable(at: u64, len: usize, need_write: bool) -> bool {
     while page < end {
         match crate::mem::paging::query(page) {
             Some(p) if p.present && (!need_write || p.write) => {}
-            _ => return false,
+            _ => {
+                return false;
+            }
         }
         page += PAGE;
     }
@@ -1173,7 +1319,10 @@ const PAGE: u64 = 4096;
 /// read it would be reading a dangling range it believed it had verified.
 pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
     let brk = r.brk;
-    teardown();
+    // A slot of its own rather than tearing down whatever the task last held:
+    // with several sessions, "whatever this task last held" may be nothing it
+    // owns. See `free_guest_slot` for why it is never slot 0.
+    set_current_guest(free_guest_slot());
     // A display server is listening before the guest's first instruction, so
     // a client that connects first thing finds one. See `sky::server`.
     crate::sky::server::serve();
@@ -1189,7 +1338,15 @@ pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
             signals: super::signal::State::default(),
             holder: None,
             owned: alloc::vec::Vec::new(),
-            mmap_next: GUEST_MMAP_AT,
+            mmap_next: r.mmap_at,
+            mmap_end: r.mmap_end,
+            arena_free: {
+                let mut v: Vec<(u64, u64)> =
+                    r.arena_extra.iter().filter(|&&(a, e)| e > a).map(|&(a, e)| (a, e - a)).collect();
+                v.sort_unstable();
+                v
+            },
+            bits32: r.bits32,
             stack: r.stack,
             brk_start: brk.at,
             brk_now: brk.at,
@@ -1202,7 +1359,7 @@ pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
                 v.push(Some(super::fs::Fd::Stderr));
                 v
             },
-            cwd: String::from("/"),
+            cwd: start_cwd(),
             argv: Vec::new(),
             image_path: String::new(),
             interp_path: None,
@@ -1217,18 +1374,22 @@ pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
 /// `exit_group` is how programs end -- so the teardown is where mappings are
 /// actually reclaimed and `munmap` is only the early return of one.
 pub fn teardown() -> usize {
-    // Every display connection ends with the guest that held it, and its
-    // windows with it: nothing else would take them down.
-    crate::sky::server::reap();
-    // **Before anything else, and unconditionally.** A guest that took the
-    // display and then faulted is exactly the case this has to cover, and a
-    // release conditional on a tidy exit would leave the desktop stood down
-    // with the last frame of a dead program on it and no way back short of a
-    // reboot.
-    super::dev::hold_screen(false);
-    super::input::stop();
-    super::thread::reset();
-    super::fork::reset();
+    // **Before anything else, and unconditionally for this session.** A guest
+    // that took the display and then faulted is exactly the case this has to
+    // cover, and a release conditional on a tidy exit would leave the desktop
+    // stood down with the last frame of a dead program on it and no way back
+    // short of a reboot. Only *this* session's hold, though: another session
+    // holding the screen is still drawing on it.
+    let sess = super::session::current();
+    super::dev::release_screen(sess);
+    // The scripted input feed is one per machine and is a test harness's, so
+    // it stands down only when the last session does.
+    if super::session::live_count() <= 1 {
+        super::input::stop();
+    }
+    if let Some(s) = sess {
+        super::fork::reset(s);
+    }
     let mut freed = 0;
     unsafe {
         if let Some(sp) = guest_slot().as_mut() {
@@ -1242,13 +1403,18 @@ pub fn teardown() -> usize {
                     f.flush();
                 }
             }
-            for m in sp.maps.drain(..) {
+            let maps = core::mem::take(&mut sp.maps);
+            for m in maps {
                 // A guest is free to exit having mprotected its mappings to
                 // something the heap cannot reuse. Handing a read-only or
                 // absent page back to the allocator would poison it for
                 // whatever asks next, and the symptom would appear in an
                 // unrelated subsystem hours later.
-                give_back(m.at, m.len, Some(m.from));
+                if m.from == Source::Paged {
+                    free_paged(sp, m.at, page_up(m.len) as u64);
+                } else {
+                    give_back(m.at, m.len, Some(m.from));
+                }
                 freed += 1;
             }
             // The image, stack, interpreter and break came from `Exec`
@@ -1293,6 +1459,11 @@ pub fn teardown() -> usize {
         }
         *guest_slot() = None;
     }
+    // The display connections this guest held closed with its descriptors
+    // above; end those and no others. `reap` ended every client on the
+    // machine, which with several sessions is everybody else's windows too.
+    crate::sky::server::reap_closed();
+    set_current_guest(0);
     freed
 }
 
@@ -1312,8 +1483,13 @@ pub fn release_guest(i: usize) {
             f.flush();
         }
     }
-    for m in sp.maps.drain(..) {
-        give_back(m.at, m.len, Some(m.from));
+    let maps = core::mem::take(&mut sp.maps);
+    for m in maps {
+        if m.from == Source::Paged {
+            free_paged(&mut sp, m.at, page_up(m.len) as u64);
+        } else {
+            give_back(m.at, m.len, Some(m.from));
+        }
     }
     for (at, len) in core::mem::take(&mut sp.owned) {
         free_pages(at, len);
@@ -1388,6 +1564,10 @@ impl Call {
 /// Descriptor-relative calls put the path second, which is the detail that
 /// makes reading `openat`'s first argument produce a plausible empty string.
 fn path_arg(nr: u64) -> Option<usize> {
+    // A 32-bit guest's calls are tagged, and their numbers are i386's.
+    if nr & super::i386::TAG != 0 {
+        return super::i386::path_arg(nr & !super::i386::TAG);
+    }
     Some(match nr {
         SYS_OPEN | SYS_STAT | SYS_LSTAT | SYS_ACCESS => 0,
         SYS_OPENAT | SYS_NEWFSTATAT => 1,
@@ -1395,7 +1575,13 @@ fn path_arg(nr: u64) -> Option<usize> {
     })
 }
 
-static TRACE: Racy<Vec<Call>> = Racy::new(Vec::new());
+/// The last finished session's calls, per task that ran one, so the shell and
+/// a background job each read the trace of the session *they* ran rather than
+/// whichever finished last. Recording goes to the session itself
+/// (`session::record`), so a forked child's and a thread's calls land in their
+/// session's trace whichever task made them.
+static TASK_TRACE: Racy<[Vec<Call>; crate::task::MAX_TASKS]> =
+    Racy::new([const { Vec::new() }; crate::task::MAX_TASKS]);
 /// Bounded, because a guest in a loop on an unimplemented call would otherwise
 /// grow this until the heap gave out -- and the first thousand entries are the
 /// measurement anyway. What matters is which calls appear, not how often.
@@ -1409,24 +1595,12 @@ const TRACE_CAP: usize = 1024;
 /// under. That coincidence is not luck: it is what makes a same-ring trap cost
 /// nothing to set up.
 pub fn arm() {
+    arm_core();
     unsafe {
         let top = core::ptr::addr_of!(SYSCALL_STACK.0) as u64 + (16 * 1024);
-        core::ptr::write(core::ptr::addr_of_mut!(GLADOS_SYSCALL_STACK), top);
-
-        // Bits 47:32 are what `syscall` loads. Bits 63:48 are what `sysret`
-        // counts from, and it counts to selectors that only exist because the
-        // GDT was widened for them.
-        let star = (crate::cpu::gdt::KERNEL_CS as u64) << 32
-            | (crate::cpu::gdt::SYSRET_BASE as u64) << 48;
-        crate::cpu::wrmsr(IA32_STAR, star);
-        crate::cpu::wrmsr(IA32_LSTAR, glados_syscall_entry as usize as u64);
-        // Clear IF, TF and DF on entry. IF because the handler runs on one
-        // static stack and a timer tick landing inside it would re-enter that
-        // stack; DF because Rust's memory intrinsics assume it is clear and a
-        // guest is under no obligation to leave it that way.
-        crate::cpu::wrmsr(IA32_FMASK, 0x700);
-        let efer = crate::cpu::rdmsr(IA32_EFER);
-        crate::cpu::wrmsr(IA32_EFER, efer | EFER_SCE);
+        (*core_entry()).syscall_stack = top;
+        // And the 32-bit door beside it.
+        super::i386::arm();
     }
 }
 
@@ -1440,14 +1614,14 @@ pub fn armed() -> bool {
 
 /// Everything the guest has asked for.
 pub fn trace() -> Vec<Call> {
-    unsafe { TRACE.get().clone() }
+    unsafe { (*TASK_TRACE.get())[me()].clone() }
 }
 
 pub fn clear_trace() {
-    unsafe { TRACE.get().clear() }
+    unsafe { (*TASK_TRACE.get())[me()].clear() }
 }
 
-fn record(mut c: Call) {
+pub(super) fn record(mut c: Call) {
     // Read the path *here*, after the call has run and while the guest's
     // memory is still its own. `read_cstr` is bounds-checked, so a guest
     // passing rubbish costs an `EFAULT` this quietly drops rather than a
@@ -1460,16 +1634,41 @@ fn record(mut c: Call) {
             c.path_len = n as u8;
         }
     }
-    let t = unsafe { TRACE.get() };
-    if t.len() < TRACE_CAP {
-        t.push(c);
+    if MEMLOG.load(Ordering::Relaxed) {
+        // i386 numbers carry the tag; the 64-bit ones do not.
+        let n = c.nr;
+        let i386 = n & (1 << 31) != 0;
+        let base = n & !(1 << 31);
+        let mem = if i386 { matches!(base, 90 | 91 | 125 | 192 | 219 | 356 | 194 | 93) } else { matches!(base, 9 | 10 | 11 | 28 | 319 | 77) };
+        if mem {
+            crate::kprintln!(
+                "  [mem] {} {:#x} {:#x} {:#x} {:#x} {:#x} -> {:#x}",
+                name_of(n), c.args[0], c.args[1], c.args[2], c.args[3], c.args[4], c.ret
+            );
+        }
     }
+    if MISSES.load(Ordering::Relaxed) && c.path_len > 0 && (c.ret as i64) < 0 {
+        let p = core::str::from_utf8(&c.path[..c.path_len as usize]).unwrap_or("?");
+        crate::kprintln!("  [miss] {} {} -> {}", name_of(c.nr), p, c.ret as i64);
+    }
+    super::session::record(c, TRACE_CAP);
 }
+
+/// Print every path a guest named and was refused, as it happens.
+///
+/// The trace keeps the first thousand calls, and a game spends those loading
+/// libraries; the lookup that decides whether it starts comes thousands of
+/// calls later. A refused path is the one fact that question turns on, and
+/// printing it live costs nothing while the switch is off.
+pub static MISSES: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Print every memory-map call as it happens: which call made a page what it
+/// is, which no end-of-run report can say once the console may be wedged.
+pub static MEMLOG: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// The guest wrote something. Only the two standard descriptors, and every
 /// other fd is `-EBADF` rather than silently accepted -- a write to fd 7 that
 /// reported success would be a program whose output vanished.
-fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
+pub(super) fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
     // **Ask the table, not the number.** This compared `fd` against 1 and 2,
     // which is right until a guest does the one thing every shell does:
     // `close(1)` then `open(...)` hands the file descriptor 1, and a write to
@@ -1629,7 +1828,7 @@ pub fn read_cstr(at: u64) -> Result<String, u64> {
 }
 
 /// The descriptor table, or nothing when no guest is running.
-fn with_fds<T>(f: impl FnOnce(&mut Vec<Option<super::fs::Fd>>, &str) -> T) -> Option<T> {
+pub(super) fn with_fds<T>(f: impl FnOnce(&mut Vec<Option<super::fs::Fd>>, &str) -> T) -> Option<T> {
     let sp = unsafe { guest_slot() };
     // Destructured rather than borrowed twice, which is also why the working
     // directory is no longer cloned here. It was, because `&mut sp.fds` and
@@ -1697,7 +1896,21 @@ fn input_fd(fd: u64) -> Option<(super::input::Dev, bool)> {
     .flatten()
 }
 
-fn place_fd(fds: &mut Vec<Option<super::fs::Fd>>, entry: super::fs::Fd) -> u64 {
+/// A sync file for GPU fence `fence`, placed in the current guest's table.
+pub(super) fn new_fence_fd(fence: u64) -> u64 {
+    with_fds(|fds, _| {
+        let entry = super::fs::Fd::Dev(alloc::rc::Rc::new(core::cell::RefCell::new(super::fs::DevFile {
+            path: String::from("sync_file"),
+            node: super::dev::Node::Fence,
+            at: fence as usize,
+            nonblock: false,
+        })));
+        place_fd(fds, entry)
+    })
+    .unwrap_or(EBADF)
+}
+
+pub(super) fn place_fd(fds: &mut Vec<Option<super::fs::Fd>>, entry: super::fs::Fd) -> u64 {
     match fds.iter().position(|f| f.is_none()) {
         Some(slot) => {
             fds[slot] = Some(entry);
@@ -1713,7 +1926,7 @@ fn place_fd(fds: &mut Vec<Option<super::fs::Fd>>, entry: super::fs::Fd) -> u64 {
     }
 }
 
-fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
+pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
     let raw = match read_cstr(path_at) {
         Ok(v) => v,
         Err(e) => return e,
@@ -1739,6 +1952,33 @@ fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
             String::new()
         };
         let Some(path) = super::fs::resolve(&base, &raw) else { return ENOENT };
+        // A mounted volume, read in place by range. Before everything else,
+        // so a mount point shadows whatever the namespace has at that path.
+        if super::disk::claims(&path) {
+            if wants_write {
+                return EROFS;
+            }
+            let entry = match super::disk::lookup(&path) {
+                Some(Some(n)) if n.is_dir => super::fs::Fd::Dir(alloc::rc::Rc::new(
+                    core::cell::RefCell::new(super::fs::Dir {
+                        path: path.clone(),
+                        entries: super::disk::entries(&path),
+                        at: 0,
+                    }),
+                )),
+                Some(Some(_)) => {
+                    if flags & O_DIRECTORY != 0 {
+                        return ENOTDIR;
+                    }
+                    match super::disk::DiskFile::open(&path) {
+                        Ok(f) => super::fs::Fd::Disk(alloc::rc::Rc::new(core::cell::RefCell::new(f))),
+                        Err(_) => return ENOENT,
+                    }
+                }
+                _ => return ENOENT,
+            };
+            return place_fd(fds, entry);
+        }
         // **Before the store, because these are answers rather than blobs.**
         // Nothing under `/proc` is writable, listed by `sysbox` or in a
         // snapshot, and asking the store about it first would answer `ENOENT`
@@ -1761,6 +2001,10 @@ fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
                 Some(d) => super::input::now_at(d) as usize,
                 None => 0,
             };
+            if let super::dev::Node::Snd(k) = n {
+                super::snd::opened(k);
+            }
+            let at = if n == super::dev::Node::Drm { super::drm::opened() } else { at };
             let entry = super::fs::Fd::Dev(alloc::rc::Rc::new(core::cell::RefCell::new(
                 super::fs::DevFile {
                     path: path.clone(),
@@ -1904,7 +2148,7 @@ fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
 /// One function because they are one decision three times over: resolve, check
 /// the jail, then ask the tree. Splitting them would put the `EROFS` check in
 /// three places, which is how one of them ends up missing it.
-fn sys_name_op(path_at: u64, op: u8) -> u64 {
+pub(super) fn sys_name_op(path_at: u64, op: u8) -> u64 {
     let raw = match read_cstr(path_at) {
         Ok(v) => v,
         Err(e) => return e,
@@ -1954,7 +2198,45 @@ fn sys_name_op(path_at: u64, op: u8) -> u64 {
 /// There is no `chdir`, so this is a constant -- and it is still worth serving,
 /// because `pwd` exits 1 without it and every program that resolves a relative
 /// path for a message calls it.
-fn sys_getcwd(buf: u64, len: u64) -> u64 {
+/// Where the next guest starts, for a program that finds its data relative to
+/// the directory it was started in -- which is every game.
+static START_CWD: Racy<String> = Racy::new(String::new());
+
+pub fn set_start_cwd(p: &str) {
+    unsafe { *START_CWD.get() = String::from(p) };
+}
+
+pub fn start_cwd() -> String {
+    let c = unsafe { START_CWD.get().clone() };
+    if c.is_empty() { String::from("/") } else { c }
+}
+
+/// `chdir`: move the working directory to a directory that exists, wherever
+/// it is -- the namespace, a mounted volume, `/proc` or `/dev`.
+pub(super) fn sys_chdir(path_at: u64) -> u64 {
+    let raw = match read_cstr(path_at) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
+    let Some(path) = found else { return ENOENT };
+    let is_dir = match super::disk::lookup(&path) {
+        Some(on) => on.is_some_and(|n| n.is_dir),
+        None => sysbox::is_dir(&path) || super::dev::is_dir(&path) || super::proc::is_dir(&path) || path == "/",
+    };
+    if !is_dir {
+        return ENOTDIR;
+    }
+    match unsafe { guest_slot() }.as_mut() {
+        Some(sp) => {
+            sp.cwd = path;
+            0
+        }
+        None => EBADF,
+    }
+}
+
+pub(super) fn sys_getcwd(buf: u64, len: u64) -> u64 {
     let cwd = with_fds(|_, cwd| alloc::string::String::from(cwd)).unwrap_or_default();
     let n = cwd.len() + 1;
     if (len as usize) < n {
@@ -1980,7 +2262,7 @@ fn sys_getcwd(buf: u64, len: u64) -> u64 {
 /// gives the tick a chance to fire. It costs the CPU it is not using, which is
 /// the trade a kernel with one runnable guest has, and it is bounded by the
 /// same deadline everything else is.
-fn sys_nanosleep(req: u64) -> u64 {
+pub(super) fn sys_nanosleep(req: u64) -> u64 {
     if !reachable(req, 16, false) {
         return EFAULT;
     }
@@ -1990,12 +2272,224 @@ fn sys_nanosleep(req: u64) -> u64 {
             core::ptr::read_volatile((req + 8) as *const u64),
         )
     };
+    sleep_for(sec, nsec)
+}
+
+/// The sleep itself, for any ABI's timespec.
+/// Give up the CPU from inside a guest's blocking wait, with interrupts on.
+///
+/// **A syscall arrives with interrupts off** -- `syscall` clears IF through
+/// FMASK and `int 0x80` is an interrupt gate -- and every wait loop here
+/// yielded without turning them back on. That was harmless while one guest
+/// waited and kernel tasks ran between its turns. A program with a dozen
+/// threads parked in futex waits found the other case: the run queue was
+/// nothing but those waiters, each handing the CPU to the next with IF clear,
+/// so no timer interrupt was ever taken, `ticks()` stopped, and every timeout
+/// and deadline -- all measured in ticks -- froze with it. The sleeping clock
+/// and compositor never woke, the screen stopped, and the run deadline that
+/// exists to end exactly this could not fire. Sampled from QEMU's monitor:
+/// core 0 cycling through `schedule` and `futex` with IF clear, for minutes.
+///
+/// Safe to open because everything a syscall leaves live across a switch is
+/// per task now -- the guest's stack pointer, the syscall stack, its TLS --
+/// and swapped by `schedule`. The caller's interrupt state is put back after.
+pub(super) fn wait_turn() {
+    wait_turn_for(false)
+}
+
+/// `wait_turn` for a waiter whose condition no syscall will change -- a GPU
+/// fence, which signals when the host's answer lands in a virtqueue. A nap
+/// lasts until the next tick unless a syscall ends first, so every fence
+/// wait cost at least a tick: a 32-bit game on Zink spent 23 ms a poll in 993
+/// polls over twenty seconds. Such a waiter yields instead and looks again.
+pub(super) fn wait_turn_for(device: bool) {
+    let held = holds_big();
+    let me = crate::task::current();
+    let nap = !device && NAP.load(Ordering::Relaxed) && me < crate::task::MAX_TASKS;
+    if nap {
+        // **A nap, not a yield.** With guests on several cores, a waiter that
+        // only yields comes straight back when its core has nothing else to
+        // run, takes the guest lock to look at its condition, and goes round
+        // again -- several of them doing that at once keep the lock busy and
+        // starve the one thread with work to do. So it sleeps until the next
+        // tick, and the end of every syscall wakes whoever is napping, since
+        // a syscall is what changes what a guest waits on. The deadline is
+        // set before the lock is let go, so a wake that lands in between is
+        // kept rather than lost (`task::wake` on a task not yet asleep).
+        NAPPING[me].store(true, Ordering::Release);
+        NAPPERS.fetch_add(1, Ordering::AcqRel);
+        crate::task::set_wake(crate::dev::lapic::ticks() + 1);
+    }
+    if held {
+        big_unlock();
+    }
+    let flags: u64;
+    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags)) };
+    crate::cpu::enable_interrupts();
+    crate::task::yield_now();
+    if nap {
+        let _ = crate::task::take_woken();
+        crate::task::set_wake(0);
+        NAPPING[me].store(false, Ordering::Release);
+        NAPPERS.fetch_sub(1, Ordering::AcqRel);
+    }
+    if flags & (1 << 9) == 0 {
+        crate::cpu::disable_interrupts();
+    }
+    if held {
+        big_lock();
+    }
+}
+
+/// Whether waits nap (`linux nap on|off`).
+pub static NAP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+/// Tasks napping in `wait_turn`, and how many, so a syscall that finds none
+/// pays one load.
+static NAPPING: [core::sync::atomic::AtomicBool; crate::task::MAX_TASKS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; crate::task::MAX_TASKS];
+static NAPPERS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Wake every napping waiter, and nudge the other cores out of `hlt` so one
+/// that is idle picks the waiter up now rather than at its next tick. Called
+/// as each syscall finishes.
+pub fn wake_nappers() {
+    if NAPPERS.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    let me = crate::task::current();
+    let mut any = false;
+    for t in 0..crate::task::MAX_TASKS {
+        if t != me && NAPPING[t].load(Ordering::Acquire) {
+            any |= crate::task::wake(t);
+        }
+    }
+    if any {
+        crate::dev::lapic::kick_others();
+    }
+}
+
+// ---- guests on every core -------------------------------------------------
+//
+// **Ring 3 runs everywhere; the kernel side of a guest runs one at a time.**
+// A guest's threads spend their time at ring 3 -- the profile of a game
+// reaching its menu was nine tenths llvmpipe's own rasteriser -- and that is
+// what spreads across cores. Every syscall takes `BIG` on the way in and
+// gives it back on the way out, and every wait inside one gives it back for
+// as long as it waits (`wait_turn`, `sleep_for`), so the guest state behind
+// the ~150 `Racy`s the syscall path touches is still reached by one core at
+// a time. That is the old big kernel lock, deliberately: auditing each of
+// those statics is the SMP audit the 1.4.0 plan holds, and this is the
+// shape that does not wait for it.
+//
+// Acquiring spins with interrupts **on**: the holder may be waiting for this
+// core to acknowledge a TLB shootdown, and a core spinning with them off
+// would never answer.
+
+const NOBODY: usize = usize::MAX;
+
+/// Whether a guest's tasks may run on any core (`linux cores all|one`).
+pub static SPREAD: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+static BIG: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(NOBODY);
+
+/// Which task holds the guest lock, for `linux prof`.
+pub fn big_holder() -> Option<usize> {
+    let h = BIG.load(Ordering::Acquire);
+    (h != NOBODY).then_some(h)
+}
+
+pub fn holds_big() -> bool {
+    BIG.load(Ordering::Acquire) == crate::task::current()
+}
+
+/// Feature switches for bisecting the SMP work at runtime (`linux feat`).
+pub static FEAT_BIG: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+pub static FEAT_SHOOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+pub static FEAT_KICK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+/// **A ticket lock, served in order.** It was a compare-and-swap, and that is
+/// unfair in the way that matters here: a guest's threads take and give back
+/// the lock thousands of times a second, so a kernel task wanting it once --
+/// the shell reaching the namespace for `mouse move` -- lost every race and
+/// sat at the prompt for minutes while the game went on.
+static NEXT_TICKET: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static SERVING: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+pub fn big_lock() {
+    if !FEAT_BIG.load(Ordering::Relaxed) {
+        return;
+    }
+    let me = crate::task::current();
+    if BIG.load(Ordering::Acquire) == me {
+        return;
+    }
+    let ticket = NEXT_TICKET.fetch_add(1, Ordering::AcqRel);
+    let mut spins = 0u32;
+    while SERVING.load(Ordering::Acquire) != ticket {
+        let flags: u64;
+        unsafe { core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags)) };
+        crate::cpu::enable_interrupts();
+        spins += 1;
+        if spins % 64 == 0 {
+            // Somebody on this core may be what holds it, or be next in line.
+            crate::task::yield_now();
+        } else {
+            core::hint::spin_loop();
+        }
+        if flags & (1 << 9) == 0 {
+            crate::cpu::disable_interrupts();
+        }
+    }
+    BIG.store(me, Ordering::Release);
+}
+
+/// Take the guest lock unless this task already holds it, and say whether
+/// it was taken here -- for a kernel path that may be reached from inside a
+/// syscall or from outside one.
+pub fn big_take() -> bool {
+    if holds_big() {
+        return false;
+    }
+    big_lock();
+    true
+}
+
+pub fn big_unlock() {
+    let me = crate::task::current();
+    if BIG.compare_exchange(me, NOBODY, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+        SERVING.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// Every other core drops its cached translations, and this one waits until
+/// they have. After any syscall that removed or narrowed a guest mapping:
+/// a thread of the same guest on another core would otherwise go on reading
+/// and writing pages through a translation the tables no longer hold --
+/// pages already back in the heap.
+pub fn tlb_shootdown() {
+    if crate::smp::online() <= 1 || !FEAT_SHOOT.load(Ordering::Relaxed) {
+        return;
+    }
+    crate::dev::lapic::shootdown();
+}
+
+pub(super) fn sleep_for(sec: u64, nsec: u64) -> u64 {
     if nsec >= 1_000_000_000 {
         return EINVAL;
     }
     let hz = crate::TIMER_HZ as u64;
     let want = sec.saturating_mul(hz) + nsec * hz / 1_000_000_000;
     let until = crate::dev::lapic::ticks().saturating_add(want);
+    // **The part under a tick is slept too.** Whole ticks alone rounded
+    // anything shorter than 10 ms down to nothing, so a 160 us sleep returned
+    // at once -- and Venus counts its waits in sleeps it believes took that
+    // long: after 1024 of them it expects the host to have reported alive in
+    // the time they took, and a loop that had really slept for a fraction of
+    // that aborted the program with no message. A sleep may run long; it may
+    // not run short. The remainder is waited out on the TSC.
+    let mhz = crate::time::tsc_mhz().max(1);
+    let end_tsc = crate::time::rdtsc()
+        .saturating_add(sec.saturating_mul(1_000_000).saturating_mul(mhz))
+        .saturating_add(nsec * mhz / 1000);
 
     // **This spun, and it was the one wait in the kernel that did.** The loop
     // was `while ticks() < until { spin_loop() }`: no yield, so a guest
@@ -2017,9 +2511,74 @@ fn sys_nanosleep(req: u64) -> u64 {
         // reason it does while one waits on a socket.
         crate::sky::server::pump();
         let now = crate::dev::lapic::ticks();
+        let flags: u64;
+        unsafe { core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags)) };
+        let held = holds_big();
+        if held {
+            big_unlock();
+        }
+        crate::cpu::enable_interrupts();
         let _ = crate::task::sleep_until(until.min(now.saturating_add(1)));
+        if flags & (1 << 9) == 0 {
+            crate::cpu::disable_interrupts();
+        }
+        if held {
+            big_lock();
+        }
+    }
+    // Under a tick left: hand the core to whoever wants it and come back,
+    // until the TSC says the time has passed. Not a timer sleep, since the
+    // timer cannot wake anything sooner than its next tick.
+    while crate::time::rdtsc() < end_tsc {
+        if overran(crate::dev::lapic::ticks()) {
+            unsafe { kill_blocked() }
+        }
+        crate::linux::drm::watch();
+        let flags: u64;
+        unsafe { core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags)) };
+        let held = holds_big();
+        if held {
+            big_unlock();
+        }
+        crate::cpu::enable_interrupts();
+        crate::task::yield_now();
+        if flags & (1 << 9) == 0 {
+            crate::cpu::disable_interrupts();
+        }
+        if held {
+            big_lock();
+        }
     }
     0
+}
+
+/// `clock_nanosleep`: relative unless `TIMER_ABSTIME`, in which case the time
+/// is a reading of `clock` to sleep until.
+pub(super) fn sys_clock_nanosleep(clock: u64, flags: u64, req: u64) -> u64 {
+    const TIMER_ABSTIME: u64 = 1;
+    if !reachable(req, 16, false) {
+        return EFAULT;
+    }
+    let (sec, nsec) = unsafe {
+        (
+            core::ptr::read_volatile(req as *const u64),
+            core::ptr::read_volatile((req + 8) as *const u64),
+        )
+    };
+    if flags & TIMER_ABSTIME == 0 {
+        return sleep_for(sec, nsec);
+    }
+    if nsec >= 1_000_000_000 {
+        return EINVAL;
+    }
+    let Some((ns, nn)) = clock_pair(clock) else { return EINVAL };
+    let want = sec as u128 * 1_000_000_000 + nsec as u128;
+    let now = ns as u128 * 1_000_000_000 + nn as u128;
+    if want <= now {
+        return 0;
+    }
+    let d = want - now;
+    sleep_for((d / 1_000_000_000) as u64, (d % 1_000_000_000) as u64)
 }
 
 /// Write through a descriptor that names a file.
@@ -2093,7 +2652,7 @@ fn write_file(fd: u64, buf: u64, len: usize) -> u64 {
 /// Every pointer is checked twice over: once for the vector itself, and once
 /// per buffer, because the vector is guest memory holding guest pointers and
 /// neither is trustworthy.
-fn sys_writev(fd: u64, iov: u64, cnt: u64) -> u64 {
+pub(super) fn sys_writev(fd: u64, iov: u64, cnt: u64) -> u64 {
     // Linux's own bound. Refused rather than clamped: a caller that asked for
     // more than this has a bug, and writing the first thousand of its buffers
     // would hide it behind a short count.
@@ -2103,19 +2662,13 @@ fn sys_writev(fd: u64, iov: u64, cnt: u64) -> u64 {
     if cnt == 0 {
         return 0;
     }
-    let Some(bytes) = (cnt as usize).checked_mul(16) else { return EINVAL };
+    let Some(bytes) = (cnt as usize).checked_mul(iov_size() as usize) else { return EINVAL };
     if !reachable(iov, bytes, false) {
         return EFAULT;
     }
     let mut total: u64 = 0;
     for i in 0..cnt as usize {
-        let at = iov + (i * 16) as u64;
-        let (base, len) = unsafe {
-            (
-                core::ptr::read_volatile(at as *const u64),
-                core::ptr::read_volatile((at + 8) as *const u64),
-            )
-        };
+        let (base, len) = iov_at(iov, i as u64);
         if len == 0 {
             continue;
         }
@@ -2246,7 +2799,7 @@ fn pipe_end(fd: u64) -> Option<alloc::rc::Rc<core::cell::RefCell<super::fs::Pipe
 /// the direction each end drives has to be right, and `Fd::pipe_side` is the
 /// one place that decides -- a pipe whose two ends shared a queue would work
 /// perfectly when talking to itself and deliver nothing across.
-fn do_pipe(at: u64, flags: u64) -> u64 {
+pub(super) fn do_pipe(at: u64, flags: u64) -> u64 {
     const O_NONBLOCK: u64 = 0o4000;
     const O_CLOEXEC: u64 = 0o2000000;
     // Refused rather than ignored. `O_DIRECT` on a pipe changes it to packet
@@ -2298,7 +2851,7 @@ fn epoll_set(fd: u64) -> Option<alloc::rc::Rc<core::cell::RefCell<super::epoll::
     .flatten()
 }
 
-fn sys_epoll_create(size: u64) -> u64 {
+pub(super) fn sys_epoll_create(size: u64) -> u64 {
     // The hint has been ignored since 2.6.8 and a non-positive one is still
     // refused, because a program passing zero computed a number wrongly rather
     // than choosing a default.
@@ -2308,7 +2861,7 @@ fn sys_epoll_create(size: u64) -> u64 {
     make_epoll()
 }
 
-fn sys_epoll_create1(flags: u64) -> u64 {
+pub(super) fn sys_epoll_create1(flags: u64) -> u64 {
     const EPOLL_CLOEXEC: u64 = 0o2000000;
     if flags & !EPOLL_CLOEXEC != 0 {
         return EINVAL;
@@ -2322,7 +2875,7 @@ fn make_epoll() -> u64 {
     ))))
 }
 
-fn sys_epoll_ctl(epfd: u64, op: u64, fd: u64, ev: u64) -> u64 {
+pub(super) fn sys_epoll_ctl(epfd: u64, op: u64, fd: u64, ev: u64) -> u64 {
     let Some(set) = epoll_set(epfd) else { return EBADF };
     // A set watching itself would be asked its own readiness to compute its own
     // readiness, so it is refused where Linux refuses it too.
@@ -2367,7 +2920,7 @@ fn sys_epoll_ctl(epfd: u64, op: u64, fd: u64, ev: u64) -> u64 {
     }
 }
 
-fn sys_epoll_wait(epfd: u64, evs: u64, maxevents: u64, timeout: u64) -> u64 {
+pub(super) fn sys_epoll_wait(epfd: u64, evs: u64, maxevents: u64, timeout: u64) -> u64 {
     let Some(set) = epoll_set(epfd) else { return EBADF };
     if (maxevents as i64) <= 0 || maxevents > MAX_WATCHED {
         return EINVAL;
@@ -2421,11 +2974,11 @@ fn sys_epoll_wait(epfd: u64, evs: u64, maxevents: u64, timeout: u64) -> u64 {
         }
         // The display server answers while its client waits.
         crate::sky::server::pump();
-        crate::task::yield_now();
+        wait_turn();
     }
 }
 
-const EBUSY: u64 = (-16i64) as u64;
+pub(super) const EBUSY: u64 = (-16i64) as u64;
 
 /// The anonymous file a descriptor names, if it is one.
 fn memfd(fd: u64) -> Option<alloc::rc::Rc<core::cell::RefCell<super::fs::Memfd>>> {
@@ -2443,10 +2996,16 @@ fn memfd(fd: u64) -> Option<alloc::rc::Rc<core::cell::RefCell<super::fs::Memfd>>
 /// accepting it costs nothing, and `fcntl(F_ADD_SEALS)` fails the way it does
 /// on a kernel built without the feature. A compositor that required its
 /// clients to have sealed would be one written here, and it is not.
-fn sys_memfd_create(name: u64, flags: u64) -> u64 {
+pub(super) fn sys_memfd_create(name: u64, flags: u64) -> u64 {
     const MFD_CLOEXEC: u64 = 1;
     const MFD_ALLOW_SEALING: u64 = 2;
-    if flags & !(MFD_CLOEXEC | MFD_ALLOW_SEALING) != 0 {
+    // NOEXEC_SEAL and EXEC (Linux 6.3) say whether the file may be mapped
+    // executable. Nothing maps a memfd executable here and no seal is
+    // enforced, so both are accepted as statements about intent; refusing
+    // them cost every new libwayland a failed first attempt.
+    const MFD_NOEXEC_SEAL: u64 = 8;
+    const MFD_EXEC: u64 = 0x10;
+    if flags & !(MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL | MFD_EXEC) != 0 {
         return EINVAL;
     }
     let name = match read_cstr(name) {
@@ -2470,7 +3029,26 @@ fn sys_memfd_create(name: u64, flags: u64) -> u64 {
 ///
 /// Every real user sizes before mapping, which is the order the call was
 /// designed around: create, size, map, draw.
-fn sys_ftruncate(fd: u64, len: u64) -> u64 {
+/// `fallocate` in its default mode, on a memfd: make the file at least
+/// `offset + len` long, which is what `posix_fallocate` asks before a client
+/// maps a shared buffer. Anything else -- punching holes, collapsing ranges,
+/// a file in the store -- is refused, since only growth has a meaning here.
+pub(super) fn sys_fallocate(fd: u64, mode: u64, offset: u64, len: u64) -> u64 {
+    const EOPNOTSUPP: u64 = (-95i64) as u64;
+    if mode != 0 {
+        return EOPNOTSUPP;
+    }
+    let Some(end) = offset.checked_add(len) else { return EINVAL };
+    match memfd(fd) {
+        Some(m) => {
+            let have = m.borrow().len as u64;
+            if end <= have { 0 } else { sys_ftruncate(fd, end) }
+        }
+        None => EOPNOTSUPP,
+    }
+}
+
+pub(super) fn sys_ftruncate(fd: u64, len: u64) -> u64 {
     if (len as i64) < 0 {
         return EINVAL;
     }
@@ -2579,7 +3157,7 @@ fn sockaddr_un(at: u64, len: u64) -> Result<String, u64> {
     Ok(out)
 }
 
-fn sys_bind(fd: u64, at: u64, len: u64) -> u64 {
+pub(super) fn sys_bind(fd: u64, at: u64, len: u64) -> u64 {
     let Some(sock) = unix_sock(fd) else { return ENOTSOCK };
     let path = match sockaddr_un(at, len) {
         Ok(v) => v,
@@ -2591,7 +3169,7 @@ fn sys_bind(fd: u64, at: u64, len: u64) -> u64 {
     }
 }
 
-fn sys_listen(fd: u64) -> u64 {
+pub(super) fn sys_listen(fd: u64) -> u64 {
     let Some(sock) = unix_sock(fd) else { return ENOTSOCK };
     match super::unix::listen(&sock) {
         Ok(()) => 0,
@@ -2605,7 +3183,7 @@ fn sys_listen(fd: u64) -> u64 {
 /// same bargain `futex` and `nanosleep` make here. A server that blocks costs
 /// the CPU it is not using; one that passes `SOCK_NONBLOCK` gets `EAGAIN` and
 /// decides for itself.
-fn sys_accept4(fd: u64, addr: u64, alen: u64, flags: u64) -> u64 {
+pub(super) fn sys_accept4(fd: u64, addr: u64, alen: u64, flags: u64) -> u64 {
     const SOCK_NONBLOCK: u64 = 0o4000;
     let Some(sock) = unix_sock(fd) else { return ENOTSOCK };
     loop {
@@ -2634,13 +3212,13 @@ fn sys_accept4(fd: u64, addr: u64, alen: u64, flags: u64) -> u64 {
                 if unsafe { kill_if_overdue() } {
                     return EAGAIN;
                 }
-                crate::task::yield_now();
+                wait_turn();
             }
         }
     }
 }
 
-fn sys_socketpair(domain: u64, kind: u64, _proto: u64, sv: u64) -> u64 {
+pub(super) fn sys_socketpair(domain: u64, kind: u64, _proto: u64, sv: u64) -> u64 {
     if domain != 1 {
         return EAFNOSUPPORT;
     }
@@ -2680,7 +3258,7 @@ fn sys_socketpair(domain: u64, kind: u64, _proto: u64, sv: u64) -> u64 {
 /// `size_t`. A structure read one field out of step produces a control
 /// message that looks well-formed and names the wrong descriptors.
 /// Too big for the control buffer offered.
-const EMSGSIZE: u64 = (-90i64) as u64;
+pub(super) const EMSGSIZE: u64 = (-90i64) as u64;
 
 mod msg {
     pub const NAME: u64 = 0;
@@ -2718,19 +3296,51 @@ mod msg {
 /// Bounded at `IOV_MAX`, which Linux also bounds, and refused rather than
 /// clamped: a caller that asked to send more than this and got a short count
 /// would have to guess whether the rest was dropped or never attempted.
-fn gather(iov: u64, cnt: u64) -> Result<Vec<u8>, u64> {
+/// Whether the running guest is 32-bit, which is what decides the shape of
+/// every structure it hands the kernel. Asked at the boundary, by the function
+/// that reads or writes the structure, so one implementation of a call serves
+/// both ABIs and only the bytes differ.
+pub(super) fn abi32() -> bool {
+    unsafe { guest_slot() }.as_ref().is_some_and(|s| s.bits32)
+}
+
+/// How wide one `struct iovec` is for the running guest: two pointers.
+pub(super) fn iov_size() -> u64 {
+    if abi32() { 8 } else { msg::IOV_SIZE }
+}
+
+/// Entry `i` of an `iovec` array, as (base, length), at the guest's width.
+/// The caller has already checked the array is reachable.
+pub(super) fn iov_at(iov: u64, i: u64) -> (u64, u64) {
+    let e = iov + i * iov_size();
+    unsafe {
+        if abi32() {
+            (
+                core::ptr::read_volatile(e as *const u32) as u64,
+                core::ptr::read_volatile((e + 4) as *const u32) as u64,
+            )
+        } else {
+            (
+                core::ptr::read_volatile((e + msg::IOV_BASE) as *const u64),
+                core::ptr::read_volatile((e + msg::IOV_LEN) as *const u64),
+            )
+        }
+    }
+}
+
+pub(super) fn gather(iov: u64, cnt: u64) -> Result<Vec<u8>, u64> {
     const IOV_MAX: u64 = 1024;
     if cnt > IOV_MAX {
         return Err(EINVAL);
     }
     let mut out = Vec::new();
     for i in 0..cnt {
-        let e = iov + i * msg::IOV_SIZE;
-        if !reachable(e, msg::IOV_SIZE as usize, false) {
+        let e = iov + i * iov_size();
+        if !reachable(e, iov_size() as usize, false) {
             return Err(EFAULT);
         }
-        let base = unsafe { core::ptr::read((e + msg::IOV_BASE) as *const u64) };
-        let len = unsafe { core::ptr::read((e + msg::IOV_LEN) as *const u64) } as usize;
+        let (base, len) = iov_at(iov, i);
+        let len = len as usize;
         if len == 0 {
             continue;
         }
@@ -2743,7 +3353,7 @@ fn gather(iov: u64, cnt: u64) -> Result<Vec<u8>, u64> {
 }
 
 /// Total room an `iovec` array offers, and a writer for filling it.
-fn scatter(iov: u64, cnt: u64, data: &[u8]) -> Result<usize, u64> {
+pub(super) fn scatter(iov: u64, cnt: u64, data: &[u8]) -> Result<usize, u64> {
     const IOV_MAX: u64 = 1024;
     if cnt > IOV_MAX {
         return Err(EINVAL);
@@ -2753,12 +3363,12 @@ fn scatter(iov: u64, cnt: u64, data: &[u8]) -> Result<usize, u64> {
         if done == data.len() {
             break;
         }
-        let e = iov + i * msg::IOV_SIZE;
-        if !reachable(e, msg::IOV_SIZE as usize, false) {
+        let e = iov + i * iov_size();
+        if !reachable(e, iov_size() as usize, false) {
             return Err(EFAULT);
         }
-        let base = unsafe { core::ptr::read((e + msg::IOV_BASE) as *const u64) };
-        let len = unsafe { core::ptr::read((e + msg::IOV_LEN) as *const u64) } as usize;
+        let (base, len) = iov_at(iov, i);
+        let len = len as usize;
         let n = len.min(data.len() - done);
         if n == 0 {
             continue;
@@ -2772,36 +3382,83 @@ fn scatter(iov: u64, cnt: u64, data: &[u8]) -> Result<usize, u64> {
     Ok(done)
 }
 
+/// A `msghdr`'s four fields this kernel reads -- iov, iovlen, control,
+/// controllen -- at the running guest's width: 28 bytes of 4-byte fields on
+/// i386, 56 bytes with 8-byte pointers and lengths on x86-64.
+fn msghdr_in(hdr: u64, write: bool) -> Result<(u64, u64, u64, u64), u64> {
+    let (size, w) = if abi32() { (28usize, 4u64) } else { (msg::SIZE, 8u64) };
+    if !reachable(hdr, size, write) {
+        return Err(EFAULT);
+    }
+    let rd = |i: u64| unsafe {
+        if w == 4 {
+            core::ptr::read_unaligned((hdr + i * 4) as *const u32) as u64
+        } else {
+            core::ptr::read_unaligned((hdr + i * 8) as *const u64)
+        }
+    };
+    // name, namelen, iov, iovlen, control, controllen, flags
+    Ok((rd(2), rd(3), rd(4), rd(5)))
+}
+
+/// What `recvmsg` writes back: the control length used, no flags, no name.
+fn msghdr_out(hdr: u64, control_len: u64) {
+    unsafe {
+        if abi32() {
+            core::ptr::write_unaligned((hdr + 20) as *mut u32, control_len as u32);
+            core::ptr::write_unaligned((hdr + 24) as *mut u32, 0);
+            core::ptr::write_unaligned((hdr + 4) as *mut u32, 0);
+        } else {
+            core::ptr::write((hdr + msg::CONTROLLEN) as *mut u64, control_len);
+            core::ptr::write((hdr + msg::FLAGS) as *mut u32, 0);
+            core::ptr::write((hdr + msg::NAMELEN) as *mut u32, 0);
+        }
+    }
+}
+
+/// A control message header: (where its data starts, alignment). i386's
+/// `cmsghdr` is three 4-byte fields aligned to 4; x86-64's carries an 8-byte
+/// length and aligns to 8. Wayland passes every shared-memory buffer through
+/// one of these, so a width mismatch is a display that never gets a frame.
+fn cmsg_shape() -> (u64, u64) {
+    if abi32() { (12, 4) } else { (msg::CMSG_DATA, 8) }
+}
+
 /// Pull `SCM_RIGHTS` descriptors out of a control buffer.
 fn control_fds(at: u64, len: u64) -> Result<Vec<super::fs::Fd>, u64> {
     let mut out = Vec::new();
-    if at == 0 || len < msg::CMSG_DATA {
+    let (data, align) = cmsg_shape();
+    if at == 0 || len < data {
         return Ok(out);
     }
     if !reachable(at, len as usize, false) {
         return Err(EFAULT);
     }
     let mut off = 0u64;
-    while off + msg::CMSG_DATA <= len {
+    while off + data <= len {
         let h = at + off;
-        let clen = unsafe { core::ptr::read((h + msg::CMSG_LEN) as *const u64) };
-        let level = unsafe { core::ptr::read((h + msg::CMSG_LEVEL) as *const u32) };
-        let kind = unsafe { core::ptr::read((h + msg::CMSG_TYPE) as *const u32) };
-        // A length that does not cover its own header, or runs past the
-        // buffer, ends the walk rather than being trusted -- the field is the
-        // guest's and a loop that believed it would read whatever follows.
-        if clen < msg::CMSG_DATA || off + clen > len {
+        let (clen, level, kind) = unsafe {
+            if data == 12 {
+                (
+                    core::ptr::read_unaligned(h as *const u32) as u64,
+                    core::ptr::read_unaligned((h + 4) as *const u32),
+                    core::ptr::read_unaligned((h + 8) as *const u32),
+                )
+            } else {
+                (
+                    core::ptr::read((h + msg::CMSG_LEN) as *const u64),
+                    core::ptr::read((h + msg::CMSG_LEVEL) as *const u32),
+                    core::ptr::read((h + msg::CMSG_TYPE) as *const u32),
+                )
+            }
+        };
+        if clen < data || off + clen > len {
             break;
         }
         if level == msg::SOL_SOCKET && kind == msg::SCM_RIGHTS {
-            let n = ((clen - msg::CMSG_DATA) / 4) as usize;
+            let n = ((clen - data) / 4) as usize;
             for i in 0..n {
-                let fd = unsafe {
-                    core::ptr::read((h + msg::CMSG_DATA + (i * 4) as u64) as *const u32)
-                } as u64;
-                // **Cloned, not moved.** The sender keeps its descriptor; what
-                // travels is another name for the same open file description,
-                // which is what `SCM_RIGHTS` means and why `Fd::share` exists.
+                let fd = unsafe { core::ptr::read_unaligned((h + data + (i * 4) as u64) as *const u32) } as u64;
                 let Some(f) = with_fds(|fds, _| {
                     fds.get(fd as usize).and_then(|x| x.as_ref()).map(|x| x.share())
                 })
@@ -2811,22 +3468,19 @@ fn control_fds(at: u64, len: u64) -> Result<Vec<super::fs::Fd>, u64> {
                 out.push(f);
             }
         }
-        off += msg::align8(clen);
+        off += (clen + align - 1) & !(align - 1);
     }
     Ok(out)
 }
 
-/// Put descriptors into the table and describe them in a control buffer.
+/// Install received descriptors and write one `SCM_RIGHTS` header naming them.
 fn write_control(at: u64, room: u64, fds: Vec<super::fs::Fd>) -> Result<u64, u64> {
     if fds.is_empty() {
         return Ok(0);
     }
-    let need = msg::CMSG_DATA + (fds.len() * 4) as u64;
+    let (data, _) = cmsg_shape();
+    let need = data + (fds.len() * 4) as u64;
     if at == 0 || room < need {
-        // Linux sets `MSG_CTRUNC` and drops them. Dropping a descriptor
-        // silently is how a receiver ends up with a message referring to a
-        // buffer it was never given, so this refuses the call instead and
-        // says which way it failed.
         return Err(EMSGSIZE);
     }
     if !reachable(at, need as usize, true) {
@@ -2841,15 +3495,22 @@ fn write_control(at: u64, room: u64, fds: Vec<super::fs::Fd>) -> Result<u64, u64
         nums.push(n as u32);
     }
     unsafe {
-        core::ptr::write((at + msg::CMSG_LEN) as *mut u64, need);
-        core::ptr::write((at + msg::CMSG_LEVEL) as *mut u32, msg::SOL_SOCKET);
-        core::ptr::write((at + msg::CMSG_TYPE) as *mut u32, msg::SCM_RIGHTS);
+        if data == 12 {
+            core::ptr::write_unaligned(at as *mut u32, need as u32);
+            core::ptr::write_unaligned((at + 4) as *mut u32, msg::SOL_SOCKET);
+            core::ptr::write_unaligned((at + 8) as *mut u32, msg::SCM_RIGHTS);
+        } else {
+            core::ptr::write((at + msg::CMSG_LEN) as *mut u64, need);
+            core::ptr::write((at + msg::CMSG_LEVEL) as *mut u32, msg::SOL_SOCKET);
+            core::ptr::write((at + msg::CMSG_TYPE) as *mut u32, msg::SCM_RIGHTS);
+        }
         for (i, n) in nums.iter().enumerate() {
-            core::ptr::write((at + msg::CMSG_DATA + (i * 4) as u64) as *mut u32, *n);
+            core::ptr::write_unaligned((at + data + (i * 4) as u64) as *mut u32, *n);
         }
     }
     Ok(need)
 }
+
 
 fn unix_stream(fd: u64) -> Option<(alloc::rc::Rc<core::cell::RefCell<super::unix::Pipe>>,
                                    super::unix::Side)> {
@@ -2861,15 +3522,12 @@ fn unix_stream(fd: u64) -> Option<(alloc::rc::Rc<core::cell::RefCell<super::unix
     }
 }
 
-fn sys_sendmsg(fd: u64, hdr: u64, _flags: u64) -> u64 {
+pub(super) fn sys_sendmsg(fd: u64, hdr: u64, _flags: u64) -> u64 {
     let Some((pipe, side)) = unix_stream(fd) else { return ENOTCONN };
-    if !reachable(hdr, msg::SIZE, false) {
-        return EFAULT;
-    }
-    let iov = unsafe { core::ptr::read((hdr + msg::IOV) as *const u64) };
-    let cnt = unsafe { core::ptr::read((hdr + msg::IOVLEN) as *const u64) };
-    let ctl = unsafe { core::ptr::read((hdr + msg::CONTROL) as *const u64) };
-    let ctl_len = unsafe { core::ptr::read((hdr + msg::CONTROLLEN) as *const u64) };
+    let (iov, cnt, ctl, ctl_len) = match msghdr_in(hdr, false) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let data = match gather(iov, cnt) {
         Ok(v) => v,
         Err(e) => return e,
@@ -2889,24 +3547,21 @@ fn sys_sendmsg(fd: u64, hdr: u64, _flags: u64) -> u64 {
     n as u64
 }
 
-fn sys_recvmsg(fd: u64, hdr: u64, flags: u64) -> u64 {
+pub(super) fn sys_recvmsg(fd: u64, hdr: u64, flags: u64) -> u64 {
     const MSG_DONTWAIT: u64 = 0x40;
     let Some((pipe, side)) = unix_stream(fd) else { return ENOTCONN };
-    if !reachable(hdr, msg::SIZE, true) {
-        return EFAULT;
-    }
-    let iov = unsafe { core::ptr::read((hdr + msg::IOV) as *const u64) };
-    let cnt = unsafe { core::ptr::read((hdr + msg::IOVLEN) as *const u64) };
-    let ctl = unsafe { core::ptr::read((hdr + msg::CONTROL) as *const u64) };
-    let ctl_len = unsafe { core::ptr::read((hdr + msg::CONTROLLEN) as *const u64) };
+    let (iov, cnt, ctl, ctl_len) = match msghdr_in(hdr, true) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     let mut room = 0usize;
     for i in 0..cnt.min(1024) {
-        let e = iov + i * msg::IOV_SIZE;
-        if !reachable(e, msg::IOV_SIZE as usize, false) {
+        let e = iov + i * iov_size();
+        if !reachable(e, iov_size() as usize, false) {
             return EFAULT;
         }
-        room += unsafe { core::ptr::read((e + msg::IOV_LEN) as *const u64) } as usize;
+        room += iov_at(iov, i).1 as usize;
     }
     let mut buf = alloc::vec![0u8; room.min(64 * 1024)];
     let got = loop {
@@ -2923,7 +3578,7 @@ fn sys_recvmsg(fd: u64, hdr: u64, flags: u64) -> u64 {
         }
         // The display server answers while its client waits.
         crate::sky::server::pump();
-        crate::task::yield_now();
+        wait_turn();
     };
     if let Err(e) = scatter(iov, cnt, &buf[..got]) {
         return e;
@@ -2935,16 +3590,12 @@ fn sys_recvmsg(fd: u64, hdr: u64, flags: u64) -> u64 {
         Ok(v) => v,
         Err(e) => return e,
     };
-    unsafe {
-        core::ptr::write((hdr + msg::CONTROLLEN) as *mut u64, wrote);
-        core::ptr::write((hdr + msg::FLAGS) as *mut u32, 0);
-        core::ptr::write((hdr + msg::NAMELEN) as *mut u32, 0);
-        let _ = msg::NAME;
-    }
+    msghdr_out(hdr, wrote);
+    let _ = msg::NAME;
     got as u64
 }
 
-fn sys_socket(domain: u64, kind: u64, proto: u64) -> u64 {
+pub(super) fn sys_socket(domain: u64, kind: u64, proto: u64) -> u64 {
     // `AF_UNIX`, which is what wineserver speaks and what nothing on a wire
     // ever sees. Answered before the `AF_INET` path rather than inside it,
     // because the two share a syscall number and nothing else.
@@ -2999,7 +3650,7 @@ fn sock_of(fd: u64) -> Result<alloc::rc::Rc<core::cell::RefCell<super::fs::Sock>
     .unwrap_or(Err(EBADF))
 }
 
-fn sys_connect(fd: u64, at: u64, len: u64) -> u64 {
+pub(super) fn sys_connect(fd: u64, at: u64, len: u64) -> u64 {
     // `AF_UNIX` first, because the two share a syscall number and nothing
     // else: `sock_of` below demands a TCP socket and would refuse this one
     // with a message about the wrong thing.
@@ -3053,7 +3704,7 @@ fn sys_connect(fd: u64, at: u64, len: u64) -> u64 {
 /// than the guest deadline that would otherwise end the argument.
 const SOCK_TIMEOUT_MS: u64 = 10_000;
 
-fn sys_send(fd: u64, buf: u64, len: u64) -> u64 {
+pub(super) fn sys_send(fd: u64, buf: u64, len: u64) -> u64 {
     if len == 0 {
         return 0;
     }
@@ -3072,7 +3723,7 @@ fn sys_send(fd: u64, buf: u64, len: u64) -> u64 {
     }
 }
 
-fn sys_recv(fd: u64, buf: u64, len: u64) -> u64 {
+pub(super) fn sys_recv(fd: u64, buf: u64, len: u64) -> u64 {
     if len == 0 {
         return 0;
     }
@@ -3099,7 +3750,7 @@ fn sys_recv(fd: u64, buf: u64, len: u64) -> u64 {
     n as u64
 }
 
-fn sys_shutdown(fd: u64, _how: u64) -> u64 {
+pub(super) fn sys_shutdown(fd: u64, _how: u64) -> u64 {
     let sock = match sock_of(fd) {
         Ok(v) => v,
         Err(e) => return e,
@@ -3120,26 +3771,20 @@ fn sys_shutdown(fd: u64, _how: u64) -> u64 {
 /// its input through this, so without it the applet opened the file,
 /// `dup2`ed it onto stdin, and then reported "Function not implemented"
 /// about a file it was holding open.
-fn sys_readv(fd: u64, iov: u64, cnt: u64) -> u64 {
+pub(super) fn sys_readv(fd: u64, iov: u64, cnt: u64) -> u64 {
     if cnt > 1024 {
         return EINVAL;
     }
     if cnt == 0 {
         return 0;
     }
-    let Some(bytes) = (cnt as usize).checked_mul(16) else { return EINVAL };
+    let Some(bytes) = (cnt as usize).checked_mul(iov_size() as usize) else { return EINVAL };
     if !reachable(iov, bytes, false) {
         return EFAULT;
     }
     let mut total: u64 = 0;
     for i in 0..cnt as usize {
-        let at = iov + (i * 16) as u64;
-        let (base, len) = unsafe {
-            (
-                core::ptr::read_volatile(at as *const u64),
-                core::ptr::read_volatile((at + 8) as *const u64),
-            )
-        };
+        let (base, len) = iov_at(iov, i as u64);
         if len == 0 {
             continue;
         }
@@ -3163,7 +3808,7 @@ fn sys_readv(fd: u64, iov: u64, cnt: u64) -> u64 {
 /// there is, and `W_OK` outside `/tmp` is the only "no" this can honestly
 /// give. That makes `access(p, W_OK)` a real test of the write jail, which is
 /// what a program uses it for.
-fn sys_access(path_at: u64, mode: u64) -> u64 {
+pub(super) fn sys_access(path_at: u64, mode: u64) -> u64 {
     let raw = match read_cstr(path_at) {
         Ok(v) => v,
         Err(e) => return e,
@@ -3173,6 +3818,25 @@ fn sys_access(path_at: u64, mode: u64) -> u64 {
     }
     let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
     let Some(path) = found else { return ENOENT };
+    // **A mounted volume is not in the namespace**, so asking only `sysbox`
+    // answered `ENOENT` for every file on one. `open` and `stat` already ask
+    // the disk first; `access` was the call that did not, and the Source
+    // engine decides whether a game exists with `access("<game>/gameinfo.txt")`
+    // -- so a game that could open its every file reported that it was not
+    // installed.
+    if let Some(on) = super::disk::lookup(&path) {
+        let Some(n) = on else { return ENOENT };
+        if mode & 2 != 0 {
+            return EROFS;
+        }
+        if mode & 1 != 0 && !n.is_dir {
+            return EACCES;
+        }
+        return 0;
+    }
+    if super::dev::node(&path).is_some() || super::dev::is_dir(&path) || super::proc::claims(&path) {
+        return 0;
+    }
     if !sysbox::is_dir(&path) && sysbox::blob_len(&path).is_none() {
         return ENOENT;
     }
@@ -3194,7 +3858,7 @@ fn sys_access(path_at: u64, mode: u64) -> u64 {
 /// no guest pointer is dereferenced. `cat` reaches for it first and falls back
 /// to `read`/`write` when it fails, which is why it worked without this and
 /// still spent a refused call every time.
-fn sys_sendfile(out: u64, into: u64, off_at: u64, count: u64) -> u64 {
+pub(super) fn sys_sendfile(out: u64, into: u64, off_at: u64, count: u64) -> u64 {
     if off_at != 0 {
         // An explicit offset means "read from here and do not move the
         // cursor", which needs a second cursor this table does not keep.
@@ -3255,7 +3919,7 @@ fn sys_sendfile(out: u64, into: u64, off_at: u64, count: u64) -> u64 {
 /// wireless driver refuses to pretend it can associate, and the battery code
 /// refuses to invent a reading. The release is the real build version, so a
 /// bug report carries something true.
-fn sys_uname(buf: u64) -> u64 {
+pub(super) fn sys_uname(buf: u64) -> u64 {
     const N: usize = 65;
     if !reachable(buf, N * 6, true) {
         return EFAULT;
@@ -3289,26 +3953,40 @@ fn sys_uname(buf: u64) -> u64 {
 /// actually moves. A caller timing something short with `REALTIME` will
 /// measure zero, and that is a property of the hardware rather than of this
 /// call.
-fn clock_pair(which: u64) -> Option<(u64, u64)> {
+pub(super) fn clock_pair(which: u64) -> Option<(u64, u64)> {
     match which {
         // CLOCK_REALTIME and its coarse twin.
         0 | 5 => {
             let dt = crate::dev::rtc::now()?;
             Some((crate::dev::rtc::unix_seconds(&dt) as u64, 0))
         }
-        // MONOTONIC, its coarse and raw twins, and the two process clocks --
-        // one guest, no threads, so process time and uptime are the same
-        // number and answering it is better than a program giving up.
-        1 | 2 | 3 | 4 | 6 | 7 => {
+        // MONOTONIC_COARSE: the tick, which is what "coarse" promises.
+        6 => {
             let t = crate::dev::lapic::ticks();
             let hz = crate::TIMER_HZ as u64;
             Some((t / hz, (t % hz) * (1_000_000_000 / hz)))
+        }
+        // MONOTONIC, raw, boottime and the two process clocks -- answered
+        // from the TSC, to the nanosecond.
+        //
+        // **They were the 10 ms tick, and that deadlocked the GPU.** Venus
+        // wakes an idle host ring at most once per millisecond of this clock,
+        // on the understanding that the host stays awake for a millisecond
+        // after its last work. With a clock that stands still for ten, a
+        // submit two real milliseconds after a notify read "no time has
+        // passed", skipped the notify, and waited for a host that had
+        // already gone to sleep -- forever, with both sides idle. The same
+        // bargain is in every protocol that rate-limits a doorbell by time.
+        1 | 2 | 3 | 4 | 7 => {
+            let mhz = crate::time::tsc_mhz().max(1) as u128;
+            let ns = crate::time::rdtsc() as u128 * 1000 / mhz;
+            Some(((ns / 1_000_000_000) as u64, (ns % 1_000_000_000) as u64))
         }
         _ => None,
     }
 }
 
-fn sys_clock_gettime(which: u64, at: u64) -> u64 {
+pub(super) fn sys_clock_gettime(which: u64, at: u64) -> u64 {
     let Some((sec, nsec)) = clock_pair(which) else { return EINVAL };
     if !reachable(at, 16, true) {
         return EFAULT;
@@ -3320,7 +3998,7 @@ fn sys_clock_gettime(which: u64, at: u64) -> u64 {
     0
 }
 
-fn sys_gettimeofday(tv: u64, tz: u64) -> u64 {
+pub(super) fn sys_gettimeofday(tv: u64, tz: u64) -> u64 {
     // The timezone argument has been obsolete since 4.4BSD and glibc passes
     // NULL. A caller that passes one gets it zeroed rather than refused, since
     // refusing a field nobody means anything by would fail the whole call.
@@ -3350,7 +4028,28 @@ fn sys_gettimeofday(tv: u64, tz: u64) -> u64 {
 /// rather than lazy: close-on-exec is a promise about what survives an `exec`,
 /// and there is no `exec` here for anything to survive. The day there is, this
 /// has to start remembering, and it is written down here so that day finds it.
-fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
+/// `mincore`: which pages of a range are resident. Every page a guest owns is
+/// -- nothing here is ever paged out -- so the answer is "all of them" for a
+/// range it owns and `ENOMEM` for one it does not, which is exactly the
+/// question Mesa's EGL asks with it: is this pointer real memory? It was
+/// unimplemented, and Mesa read that as "no" about the Wayland display it had
+/// just been handed and answered "Could not get EGL display".
+pub(super) fn sys_mincore(at: u64, len: u64, vec: u64) -> u64 {
+    if at % 4096 != 0 {
+        return EINVAL;
+    }
+    let pages = page_up(len as usize) / 4096;
+    if !owns(at, len.max(1) as usize) {
+        return ENOMEM;
+    }
+    if !reachable(vec, pages.max(1), true) {
+        return EFAULT;
+    }
+    unsafe { core::ptr::write_bytes(vec as *mut u8, 1, pages) };
+    0
+}
+
+pub(super) fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
     let known = with_fds(|fds, _| matches!(fds.get(fd as usize), Some(Some(_)))).unwrap_or(false);
     if !known {
         return EBADF;
@@ -3359,8 +4058,31 @@ fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
         0 => sys_dup(fd, None).max_free_from(arg), // F_DUPFD
         1 => 0,                                    // F_GETFD, nothing is close-on-exec
         2 => 0,                                    // F_SETFD, accepted and not stored
-        3 => 0,                                    // F_GETFL, everything here is O_RDONLY
-        4 => 0,                                    // F_SETFL, no flag it could set applies
+        // F_GETFL and F_SETFL: a device keeps its blocking mode, which is
+        // how libasound turns a stream it opened non-blocking back into a
+        // blocking one. Elsewhere no flag it could set applies.
+        3 => with_fds(|fds, _| match fds.get(fd as usize) {
+            Some(Some(super::fs::Fd::Dev(b))) => 2 | if b.borrow().nonblock { O_NONBLOCK } else { 0 },
+            _ => 0,
+        })
+        .unwrap_or(0),
+        4 => {
+            with_fds(|fds, _| {
+                if let Some(Some(super::fs::Fd::Dev(b))) = fds.get(fd as usize) {
+                    b.borrow_mut().nonblock = arg & O_NONBLOCK != 0;
+                }
+            });
+            0
+        }
+        // Record locks, in both widths. One process at a time owns any file
+        // it writes here, so there is nobody to lock against.
+        5 | 6 | 7 | 12 | 13 | 14 => 0,
+        1030 => sys_dup(fd, None).max_free_from(arg), // F_DUPFD_CLOEXEC
+        // File seals on a memfd: accepted and not enforced. A client seals
+        // its buffer so the compositor can trust its size, and the compositor
+        // here copies a commit out under its own bounds check anyway.
+        1033 => 0,                                 // F_ADD_SEALS
+        1034 => 0,                                 // F_GET_SEALS: none
         _ => EINVAL,
     }
 }
@@ -3410,7 +4132,7 @@ impl MinFd for u64 {
 /// names for one address space and a program free to write through both.
 /// (This said `fork` was "the one thing this system cannot grow into", which
 /// `fork.rs` has since disproved.)
-fn sys_clone(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64, rip: u64) -> u64 {
+pub(super) fn sys_clone(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64, rip: u64) -> u64 {
     if !super::thread::is_thread(flags) {
         return ENOSYS;
     }
@@ -3440,17 +4162,102 @@ fn sys_clone(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64, rip: u64) -
 
 /// How many addresses a futex wait queue can name at once.
 const FUTEX_SLOTS: usize = 32;
-/// (address, how many times it has been woken).
-static FUTEX: Racy<[(u64, u64); FUTEX_SLOTS]> = Racy::new([(0, 0); FUTEX_SLOTS]);
+/// (address space, address, how many times it has been woken).
+///
+/// **The address space is part of the key.** Every guest with a root of its
+/// own maps its image, stack and arena at the same virtual addresses, so two
+/// sessions -- or a parent and its forked child -- waiting on "the same"
+/// address are waiting on different words. Keyed by address alone, a wake in
+/// one woke the other: harmless only because every waiter re-reads its word.
+static FUTEX: Racy<[(u64, u64, u64); FUTEX_SLOTS]> = Racy::new([(0, 0, 0); FUTEX_SLOTS]);
 
-fn futex_bump(addr: u64) -> u64 {
-    let t = unsafe { &mut *FUTEX.get() };
-    if let Some(e) = t.iter_mut().find(|e| e.0 == addr) {
-        e.1 += 1;
-        return e.1;
+/// Who is waiting on which word: (root, address, task). Under the guest lock.
+///
+/// **A wake names its waiters.** Waits used to nap until the next tick or
+/// until *any* syscall finished, and every syscall's end woke every napper to
+/// look again. llvmpipe synchronises its rasterizer threads through futexes
+/// many times a frame, so each of those wakes became ten wakeups, ten trips
+/// through the guest lock and ten IPIs, and a game ran slower on four cores
+/// than on one: 0.46 frames a second against 0.54, where the host goes from
+/// 0.9 to 2.3. A `FUTEX_WAKE` now wakes the tasks waiting on that word and
+/// nobody else.
+///
+/// **And the waiter it names is told so.** The fourth field is set by the
+/// wake, and a waiter that finds it set returns 0 -- which is the whole of
+/// what Linux promises a woken waiter. It used to return only if its word
+/// had changed or the address's count in `FUTEX` had moved, and `FUTEX` has
+/// 32 slots that are never given back: past a game's 32nd futex address a
+/// wake that left the word alone woke the task, which looked, saw nothing
+/// changed and slept again -- for good, since the one-second backstop asks
+/// the same two questions. A lost wake of exactly the shape a game's
+/// first-frame freeze has: every ring idle, the main thread in a Vulkan wait
+/// it repeats. After this the freeze is rarer and still happens, so it was
+/// one cause or none; the run counts are in the commit that made this.
+static FUTEX_WAITERS: Racy<Vec<(u64, u64, usize, bool)>> = Racy::new(Vec::new());
+
+/// Wait for a wake on `addr`, or `until`, or a second, whichever is first --
+/// the second only a backstop against a wake this table somehow missed.
+/// Answers whether a `FUTEX_WAKE` chose this waiter.
+fn futex_nap(addr: u64, until: Option<u64>) -> bool {
+    let me = crate::task::current();
+    let root = guest_root();
+    let w = unsafe { &mut *FUTEX_WAITERS.get() };
+    w.push((root, addr, me, false));
+    let now = crate::dev::lapic::ticks();
+    let deadline = until.unwrap_or(u64::MAX).min(now + crate::TIMER_HZ as u64).max(now + 1);
+    crate::task::set_wake(deadline);
+    let held = holds_big();
+    if held {
+        big_unlock();
     }
-    if let Some(e) = t.iter_mut().find(|e| e.0 == 0) {
-        *e = (addr, 1);
+    let flags: u64;
+    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags)) };
+    crate::cpu::enable_interrupts();
+    crate::task::yield_now();
+    let _ = crate::task::take_woken();
+    crate::task::set_wake(0);
+    if flags & (1 << 9) == 0 {
+        crate::cpu::disable_interrupts();
+    }
+    if held {
+        big_lock();
+    }
+    let w = unsafe { &mut *FUTEX_WAITERS.get() };
+    match w.iter().position(|&(r, a, t, _)| r == root && a == addr && t == me) {
+        Some(i) => w.swap_remove(i).3,
+        None => false,
+    }
+}
+
+pub(super) fn futex_bump(addr: u64) -> u64 {
+    let took = big_take();
+    let root = guest_root();
+    let mut any = false;
+    for e in unsafe { &mut *FUTEX_WAITERS.get() }.iter_mut() {
+        if e.0 == root && e.1 == addr {
+            e.3 = true;
+            any |= crate::task::wake(e.2);
+        }
+    }
+    if any {
+        crate::dev::lapic::kick_others();
+    }
+    let n = futex_bump_count(addr);
+    if took {
+        big_unlock();
+    }
+    n
+}
+
+fn futex_bump_count(addr: u64) -> u64 {
+    let t = unsafe { &mut *FUTEX.get() };
+    let root = guest_root();
+    if let Some(e) = t.iter_mut().find(|e| e.1 == addr && e.0 == root) {
+        e.2 += 1;
+        return e.2;
+    }
+    if let Some(e) = t.iter_mut().find(|e| e.1 == 0) {
+        *e = (root, addr, 1);
         return 1;
     }
     // Out of slots. Every waiter re-reads the word it is waiting on as well,
@@ -3459,9 +4266,10 @@ fn futex_bump(addr: u64) -> u64 {
     0
 }
 
-fn futex_count(addr: u64) -> u64 {
+pub(super) fn futex_count(addr: u64) -> u64 {
     let t = unsafe { &*FUTEX.get() };
-    t.iter().find(|e| e.0 == addr).map(|e| e.1).unwrap_or(0)
+    let root = guest_root();
+    t.iter().find(|e| e.1 == addr && e.0 == root).map(|e| e.2).unwrap_or(0)
 }
 
 /// Wait on a word, or wake whoever is waiting on one.
@@ -3477,9 +4285,43 @@ fn futex_count(addr: u64) -> u64 {
 /// scheduler to block against, so a wait is this kernel's wait. It costs a
 /// context switch per tick per waiter, and it cannot deadlock the machine
 /// because the run deadline reaches it.
-fn sys_futex(uaddr: u64, op: u64, val: u64, timeout: u64) -> u64 {
+pub(super) fn sys_futex(uaddr: u64, op: u64, val: u64, timeout: u64) -> u64 {
+    futex(uaddr, op, val, timeout, 0, 0, false)
+}
+
+/// The whole of `futex`, for either ABI: `ts32` says whether the timeout is a
+/// 32-bit `timespec` (i386's original `futex`) or a 64-bit one.
+///
+/// **Seven operations, and the bitset forms were the gap that stopped a real
+/// program.** glibc i386 waits with `FUTEX_WAIT_BITSET`, whose timeout is an
+/// *absolute* time on the monotonic clock (or the real-time one with
+/// `FUTEX_CLOCK_REALTIME`), and anything else answered `ENOSYS` -- which glibc
+/// treats as impossible and reports as "The futex facility returned an
+/// unexpected error code", in a loop, from every thread that waited. The
+/// bitset itself is accepted and not used to select waiters: every waiter on
+/// the word is woken, which is a spurious wake for the ones the bitset
+/// excluded, and spurious wakes are part of the contract.
+///
+/// The requeue forms are honoured the same way. Moving waiters from one word
+/// to another needs a wait queue this kernel does not keep; waking them all
+/// sends each back through its own re-check, which lands it on whichever word
+/// it should now be waiting on. Correct by the contract, and slower than
+/// Linux under contention.
+///
+/// PI operations stay refused: priority inheritance needs a scheduler that
+/// knows about priorities.
+pub(super) fn futex(uaddr: u64, op: u64, val: u64, timeout: u64, uaddr2: u64, val3: u64, ts32: bool) -> u64 {
+    futex_inner(uaddr, op, val, timeout, uaddr2, val3, ts32)
+}
+
+fn futex_inner(uaddr: u64, op: u64, val: u64, timeout: u64, uaddr2: u64, val3: u64, ts32: bool) -> u64 {
     const FUTEX_WAIT: u64 = 0;
     const FUTEX_WAKE: u64 = 1;
+    const FUTEX_REQUEUE: u64 = 3;
+    const FUTEX_CMP_REQUEUE: u64 = 4;
+    const FUTEX_WAKE_OP: u64 = 5;
+    const FUTEX_WAIT_BITSET: u64 = 9;
+    const FUTEX_WAKE_BITSET: u64 = 10;
     const PRIVATE: u64 = 128;
     const CLOCK_REALTIME: u64 = 256;
     let kind = op & !(PRIVATE | CLOCK_REALTIME);
@@ -3489,35 +4331,66 @@ fn sys_futex(uaddr: u64, op: u64, val: u64, timeout: u64) -> u64 {
     if !reachable(uaddr, 4, false) {
         return EFAULT;
     }
+    let read_ts = |at: u64| -> Option<(u64, u64)> {
+        if ts32 {
+            if !reachable(at, 8, false) {
+                return None;
+            }
+            Some(unsafe {
+                (
+                    core::ptr::read_unaligned(at as *const u32) as u64,
+                    core::ptr::read_unaligned((at + 4) as *const u32) as u64,
+                )
+            })
+        } else {
+            if !reachable(at, 16, false) {
+                return None;
+            }
+            Some(unsafe {
+                (
+                    core::ptr::read_unaligned(at as *const u64),
+                    core::ptr::read_unaligned((at + 8) as *const u64),
+                )
+            })
+        }
+    };
+    let woken_live = || val.min(super::thread::live() as u64 + 1);
     match kind {
-        FUTEX_WAIT => {
+        FUTEX_WAIT | FUTEX_WAIT_BITSET => {
+            if kind == FUTEX_WAIT_BITSET && val3 as u32 == 0 {
+                return EINVAL;
+            }
             let seen = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
-            if seen as u64 != val {
+            if seen as u64 != val as u32 as u64 {
                 // Already changed. `EAGAIN` and not zero, because a caller
                 // that slept would re-check and a caller told zero would not.
                 return EAGAIN;
             }
             let woken = futex_count(uaddr);
-            // A relative timeout, and a zero pointer means forever.
-            let until = if timeout != 0 && reachable(timeout, 16, false) {
-                let (sec, nsec) = unsafe {
-                    (
-                        core::ptr::read_volatile(timeout as *const u64),
-                        core::ptr::read_volatile((timeout + 8) as *const u64),
-                    )
-                };
-                let hz = crate::TIMER_HZ as u64;
-                Some(
-                    crate::dev::lapic::ticks()
-                        + sec.saturating_mul(hz)
-                        + nsec * hz / 1_000_000_000,
-                )
-            } else {
+            let hz = crate::TIMER_HZ as u64;
+            let until = if timeout == 0 {
                 None
+            } else {
+                let Some((sec, nsec)) = read_ts(timeout) else { return EFAULT };
+                if kind == FUTEX_WAIT_BITSET {
+                    // Absolute, on the clock the flag names.
+                    let clk = if op & CLOCK_REALTIME != 0 { 0 } else { 1 };
+                    let (now_s, now_ns) = clock_pair(clk).unwrap_or((0, 0));
+                    let want = sec.saturating_mul(1_000_000_000).saturating_add(nsec);
+                    let now = now_s.saturating_mul(1_000_000_000).saturating_add(now_ns);
+                    let left = want.saturating_sub(now);
+                    Some(crate::dev::lapic::ticks() + left / (1_000_000_000 / hz))
+                } else {
+                    Some(
+                        crate::dev::lapic::ticks()
+                            + sec.saturating_mul(hz)
+                            + nsec * hz / 1_000_000_000,
+                    )
+                }
             };
             loop {
                 let now = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
-                if now as u64 != val || futex_count(uaddr) != woken {
+                if now as u64 != val as u32 as u64 || futex_count(uaddr) != woken {
                     return 0;
                 }
                 if let Some(t) = until {
@@ -3534,16 +4407,77 @@ fn sys_futex(uaddr: u64, op: u64, val: u64, timeout: u64) -> u64 {
                 if overran(crate::dev::lapic::ticks()) {
                     unsafe { kill_blocked() }
                 }
-                crate::task::yield_now();
+                if futex_nap(uaddr, until) {
+                    return 0;
+                }
             }
         }
-        FUTEX_WAKE => {
+        FUTEX_WAKE | FUTEX_WAKE_BITSET => {
             futex_bump(uaddr);
             // How many were woken. There is no queue to count, so this answers
             // what was asked for, which is what a caller uses to decide
             // whether to bother with a syscall next time -- and over-reporting
             // is the safe direction, since it makes a caller do less.
-            val.min(super::thread::live() as u64 + 1)
+            woken_live()
+        }
+        FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
+            if kind == FUTEX_CMP_REQUEUE {
+                let now = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
+                if now != val3 as u32 {
+                    return EAGAIN;
+                }
+            }
+            futex_bump(uaddr);
+            woken_live()
+        }
+        FUTEX_WAKE_OP => {
+            // *uaddr2 = op(*uaddr2, oparg); wake uaddr; and wake uaddr2 too
+            // if the old value compares as the encoding says. **A compare-
+            // and-swap, not a read and a write**: this said a plain store was
+            // atomic because no other core could be running the guest, which
+            // stopped being true when guest threads spread across cores -- a
+            // thread on another core doing `lock cmpxchg` on this word between
+            // the read and the write had its update lost, and the waiter it
+            // was meant to release waited forever.
+            if uaddr2 % 4 != 0 || !reachable(uaddr2, 4, true) {
+                return EFAULT;
+            }
+            let enc = val3 as u32;
+            let (opn, cmp) = ((enc >> 28) & 7, (enc >> 24) & 15);
+            let mut oparg = (enc >> 12) & 0xFFF;
+            let cmparg = enc & 0xFFF;
+            if enc & (1 << 31) != 0 {
+                oparg = 1u32.checked_shl(oparg).unwrap_or(0);
+            }
+            if opn > 4 {
+                return ENOSYS;
+            }
+            let word = unsafe { &*(uaddr2 as *const core::sync::atomic::AtomicU32) };
+            let old = word
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+                    Some(match opn {
+                        0 => oparg,
+                        1 => old.wrapping_add(oparg),
+                        2 => old | oparg,
+                        3 => old & !oparg,
+                        _ => old ^ oparg,
+                    })
+                })
+                .unwrap_or_else(|v| v);
+            futex_bump(uaddr);
+            let hit = match cmp {
+                0 => old == cmparg,
+                1 => old != cmparg,
+                2 => (old as i32) < cmparg as i32,
+                3 => (old as i32) <= cmparg as i32,
+                4 => (old as i32) > cmparg as i32,
+                5 => (old as i32) >= cmparg as i32,
+                _ => return ENOSYS,
+            };
+            if hit {
+                futex_bump(uaddr2);
+            }
+            woken_live()
         }
         _ => ENOSYS,
     }
@@ -3569,12 +4503,36 @@ pub fn run_thread(w: super::thread::Work, stack: u64) {
     unsafe {
         core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags))
     };
+    // **The thread speaks for its process's guest and walks its tables.** A
+    // pool task's guest index was whatever it last held, and its root the
+    // kernel's: right while the main guest always sat in slot 0 on the
+    // kernel's root, and wrong for any guest with a space of its own, whose
+    // memory a thread on the kernel's root cannot even see. Set here, the way
+    // a forked child's `body` sets them, and put back below.
+    let me_t = crate::task::current();
+    let prev = current_guest();
+    set_current_guest(w.guest);
+    super::session::enter(w.session);
+    crate::task::set_root(me_t, guest_root());
     crate::task::ring3_active(true, stack);
     unsafe {
-        core::ptr::write(core::ptr::addr_of_mut!(GLADOS_SYSCALL_STACK), stack);
+        (*core_entry()).syscall_stack = stack;
         crate::cpu::wrmsr(IA32_FS_BASE, w.fs);
     }
-    let code = as_guest(|| unsafe { glados_enter_guest(w.rip, w.rsp) });
+    // A 32-bit thread carries its TLS and its `%gs` in from the clone; they
+    // go into this core's GDT and the segment register before the way in.
+    if w.regs32.is_some() {
+        super::i386::load(w.tls32, w.gs, true);
+    }
+    let code = as_guest(|| unsafe {
+        match &w.regs32 {
+            Some(r) => super::i386::glados_enter_guest32_regs(r as *const _),
+            None => glados_enter_guest(w.rip, w.rsp),
+        }
+    });
+    if w.regs32.is_some() {
+        super::i386::begin(false);
+    }
     // **A thread that crashes takes its process with it**, as on Linux: the
     // memory it shares with every other thread is exactly what a wild pointer
     // may have just corrupted, so the others carrying on would be running on
@@ -3589,7 +4547,7 @@ pub fn run_thread(w: super::thread::Work, stack: u64) {
         if let Some(m) = main_task() {
             doom(m, code);
         }
-        super::thread::begin_exit();
+        super::session::begin_exit(w.session);
     }
     // **Clearing this is the whole of how `pthread_join` works.** The joiner
     // futex-waits on the word, and the kernel zeroing it is the notification;
@@ -3600,12 +4558,15 @@ pub fn run_thread(w: super::thread::Work, stack: u64) {
         futex_bump(w.ctid);
     }
     crate::task::ring3_active(false, 0);
+    crate::task::set_root(me_t, 0);
+    super::session::leave();
+    set_current_guest(prev);
     if flags & (1 << 9) != 0 {
         crate::cpu::enable_interrupts();
     }
 }
 
-fn sys_dup3(from: u64, to: u64, flags: u64) -> u64 {
+pub(super) fn sys_dup3(from: u64, to: u64, flags: u64) -> u64 {
     const O_CLOEXEC: u64 = 0o2_000_000;
     if flags & !O_CLOEXEC != 0 {
         return EINVAL;
@@ -3616,7 +4577,7 @@ fn sys_dup3(from: u64, to: u64, flags: u64) -> u64 {
     sys_dup(from, Some(to))
 }
 
-fn sys_dup(from: u64, to: Option<u64>) -> u64 {
+pub(super) fn sys_dup(from: u64, to: Option<u64>) -> u64 {
     with_fds(|fds, _| {
         let copy = match fds.get(from as usize) {
             Some(Some(f)) => f.share(),
@@ -3652,7 +4613,7 @@ fn sys_dup(from: u64, to: Option<u64>) -> u64 {
     .unwrap_or(EBADF)
 }
 
-fn sys_close(fd: u64) -> u64 {
+pub(super) fn sys_close(fd: u64) -> u64 {
     with_fds(|fds, _| match fds.get_mut(fd as usize) {
         Some(slot @ Some(_)) => {
             // Committed here rather than on every write, and only when this is
@@ -3713,7 +4674,7 @@ fn span_ms(at: u64, per_ms: u64) -> Option<i64> {
     Some(whole.saturating_mul(1000).saturating_add(frac / per_ms) as i64)
 }
 
-fn sys_poll(fds: u64, nfds: u64, timeout: u64) -> u64 {
+pub(super) fn sys_poll(fds: u64, nfds: u64, timeout: u64) -> u64 {
     // The field is an `int`, so a wait of -1 arrives as 0xFFFFFFFF and has to
     // be read back through i32 before it means "no limit" rather than
     // "forty-nine days".
@@ -3729,7 +4690,7 @@ fn sys_poll(fds: u64, nfds: u64, timeout: u64) -> u64 {
 /// exact rather than lazy: there is no behaviour it could change. It stops
 /// being true the day delivery happens anywhere else, and `signal.rs` already
 /// records that the timer is the other candidate.
-fn sys_ppoll(fds: u64, nfds: u64, ts: u64, _mask: u64, _setsize: u64) -> u64 {
+pub(super) fn sys_ppoll(fds: u64, nfds: u64, ts: u64, _mask: u64, _setsize: u64) -> u64 {
     let limit = if ts == 0 {
         None
     } else {
@@ -3741,7 +4702,7 @@ fn sys_ppoll(fds: u64, nfds: u64, ts: u64, _mask: u64, _setsize: u64) -> u64 {
     do_poll(fds, nfds, limit)
 }
 
-fn do_poll(fds: u64, nfds: u64, limit: Option<u64>) -> u64 {
+pub(super) fn do_poll(fds: u64, nfds: u64, limit: Option<u64>) -> u64 {
     use super::poll::{PFD_LEN, POLLNVAL};
     if nfds > MAX_WATCHED {
         return EINVAL;
@@ -3794,11 +4755,23 @@ fn do_poll(fds: u64, nfds: u64, limit: Option<u64>) -> u64 {
         }
         // The display server answers while its client waits.
         crate::sky::server::pump();
-        crate::task::yield_now();
+        wait_turn_for(polls_fence(fds, nfds));
     }
 }
 
-fn sys_select(nfds: u64, r: u64, w: u64, e: u64, tv: u64) -> u64 {
+/// Whether any entry of a poll array is a GPU sync file.
+fn polls_fence(fds: u64, nfds: u64) -> bool {
+    (0..nfds as usize).any(|i| {
+        let raw = unsafe { core::ptr::read_unaligned((fds + (i * super::poll::PFD_LEN) as u64) as *const i32) };
+        raw >= 0
+            && with_fds(|t, _| {
+                matches!(t.get(raw as usize), Some(Some(super::fs::Fd::Dev(b))) if b.borrow().node == super::dev::Node::Fence)
+            })
+            .unwrap_or(false)
+    })
+}
+
+pub(super) fn sys_select(nfds: u64, r: u64, w: u64, e: u64, tv: u64) -> u64 {
     let limit = if tv == 0 {
         None
     } else {
@@ -3810,7 +4783,7 @@ fn sys_select(nfds: u64, r: u64, w: u64, e: u64, tv: u64) -> u64 {
     do_select(nfds, r, w, e, limit)
 }
 
-fn sys_pselect6(nfds: u64, r: u64, w: u64, e: u64, ts: u64) -> u64 {
+pub(super) fn sys_pselect6(nfds: u64, r: u64, w: u64, e: u64, ts: u64) -> u64 {
     // The sixth argument is a signal mask, and it cannot matter here for the
     // reason `ppoll` gives.
     let limit = if ts == 0 {
@@ -3890,11 +4863,11 @@ fn do_select(nfds: u64, rp: u64, wp: u64, ep: u64, limit: Option<u64>) -> u64 {
         if overran(crate::dev::lapic::ticks()) {
             unsafe { kill_blocked() }
         }
-        crate::task::yield_now();
+        wait_turn();
     }
 }
 
-fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
+pub(super) fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
     if len == 0 {
         return 0;
     }
@@ -3949,7 +4922,7 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
             // touches the keyboard.
             // The display server answers while its client waits.
             crate::sky::server::pump();
-            crate::task::yield_now();
+            wait_turn();
         }
     }
     // A Unix socket waits the way an event device does and for the same
@@ -3977,7 +4950,7 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
             }
             // The display server answers while its client waits.
             crate::sky::server::pump();
-            crate::task::yield_now();
+            wait_turn();
         }
     }
     // An anonymous file is memory that is already there, so nothing waits.
@@ -4018,7 +4991,7 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
             }
             // The display server answers while its client waits.
             crate::sky::server::pump();
-            crate::task::yield_now();
+            wait_turn();
         }
     }
     with_fds(|fds, _| match fds.get_mut(fd as usize) {
@@ -4026,6 +4999,14 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
         // Zero is the honest answer and is what a program reading a closed
         // pipe sees.
         Some(Some(super::fs::Fd::Stdin)) => 0,
+        Some(Some(super::fs::Fd::Disk(body))) => {
+            let f = &mut *body.borrow_mut();
+            let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
+            let at = f.at;
+            let n = f.read_at(at, out);
+            f.at = at.saturating_add(n);
+            n as u64
+        }
         Some(Some(super::fs::Fd::File(body))) => {
             let f = &mut *body.borrow_mut();
             let (data, at) = (&f.data, &mut f.at);
@@ -4071,7 +5052,7 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
 /// 38" about a library it had already found, opened and read the first 832
 /// bytes of. Error 38 is `ENOSYS`, and the guest reported our gap more clearly
 /// than our own trace did.
-fn sys_pread64(fd: u64, buf: u64, len: u64, off: u64) -> u64 {
+pub(super) fn sys_pread64(fd: u64, buf: u64, len: u64, off: u64) -> u64 {
     if len == 0 {
         return 0;
     }
@@ -4085,6 +5066,10 @@ fn sys_pread64(fd: u64, buf: u64, len: u64, off: u64) -> u64 {
         return EFAULT;
     }
     with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Disk(body))) => {
+            let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
+            body.borrow_mut().read_at(off as usize, out) as u64
+        }
         Some(Some(super::fs::Fd::File(body))) => {
             let f = body.borrow();
             // Past the end is zero rather than an error, the same answer
@@ -4147,7 +5132,7 @@ fn sys_pread64(fd: u64, buf: u64, len: u64, off: u64) -> u64 {
 /// **The answer is not NUL-terminated.** `readlink` returns a length and
 /// writes exactly that many bytes, and a terminator written past it would
 /// land in the caller's buffer beyond what it was told was used.
-fn sys_readlinkat(dirfd: u64, path_at: u64, buf: u64, size: u64) -> u64 {
+pub(super) fn sys_readlinkat(dirfd: u64, path_at: u64, buf: u64, size: u64) -> u64 {
     let raw = match read_cstr(path_at) {
         Ok(v) => v,
         Err(e) => return e,
@@ -4183,6 +5168,7 @@ fn sys_readlinkat(dirfd: u64, path_at: u64, buf: u64, size: u64) -> u64 {
         // one wrong value sending a correct program down a path that ends in
         // a crash it cannot explain.
         return if super::proc::claims(&path)
+            || matches!(super::disk::lookup(&path), Some(Some(_)))
             || sysbox::blob_len(&path).is_some()
             || sysbox::is_dir(&path)
         {
@@ -4199,7 +5185,7 @@ fn sys_readlinkat(dirfd: u64, path_at: u64, buf: u64, size: u64) -> u64 {
     n as u64
 }
 
-fn sys_time(tloc: u64) -> u64 {
+pub(super) fn sys_time(tloc: u64) -> u64 {
     let secs = crate::dev::rtc::now()
         .map(|dt| crate::dev::rtc::unix_seconds(&dt) as u64)
         .unwrap_or(0);
@@ -4235,7 +5221,7 @@ const SYSINFO_LEN: usize = 112;
 /// deviation worth naming: the heap is one contiguous allocation the kernel
 /// already owns, so it is what a guest could actually be given, and reporting
 /// the firmware's total would promise memory nothing here can hand out.
-fn sys_sysinfo(buf: u64) -> u64 {
+pub(super) fn sys_sysinfo(buf: u64) -> u64 {
     if !reachable(buf, SYSINFO_LEN, true) {
         return EFAULT;
     }
@@ -4265,7 +5251,7 @@ fn sys_sysinfo(buf: u64) -> u64 {
 /// Answers the *bytes written* rather than zero, which is the part of this
 /// call that is easy to get wrong. A libc uses the return value to know how
 /// much of a much larger `cpu_set_t` it must clear itself.
-fn sys_sched_getaffinity(_pid: u64, len: u64, mask: u64) -> u64 {
+pub(super) fn sys_sched_getaffinity(_pid: u64, len: u64, mask: u64) -> u64 {
     // Linux insists on a whole number of longs, and it is worth insisting too:
     // a length that is not one means the caller and this disagree about the
     // shape of a bitmap, and a partial write is how that becomes silent.
@@ -4281,7 +5267,7 @@ fn sys_sched_getaffinity(_pid: u64, len: u64, mask: u64) -> u64 {
     8
 }
 
-fn sys_getrandom(buf: u64, len: u64, _flags: u64) -> u64 {
+pub(super) fn sys_getrandom(buf: u64, len: u64, _flags: u64) -> u64 {
     if len == 0 {
         return 0;
     }
@@ -4295,7 +5281,7 @@ fn sys_getrandom(buf: u64, len: u64, _flags: u64) -> u64 {
     n as u64
 }
 
-fn sys_set_robust_list(_head: u64, len: u64) -> u64 {
+pub(super) fn sys_set_robust_list(_head: u64, len: u64) -> u64 {
     if len != 24 {
         return EINVAL;
     }
@@ -4314,7 +5300,7 @@ fn sys_set_robust_list(_head: u64, len: u64) -> u64 {
 /// it must not claim to have accepted: a guest told its stack is now 8 MiB
 /// would grow into whatever is next in the heap. `EPERM` is what Linux answers
 /// a process that may not raise a hard limit, which is the nearest true thing.
-fn sys_prlimit64(_pid: u64, resource: u64, new: u64, old: u64) -> u64 {
+pub(super) fn sys_prlimit64(_pid: u64, resource: u64, new: u64, old: u64) -> u64 {
     const RLIMIT_DATA: u64 = 2;
     const RLIMIT_STACK: u64 = 3;
     const RLIMIT_NOFILE: u64 = 7;
@@ -4344,8 +5330,23 @@ fn sys_prlimit64(_pid: u64, resource: u64, new: u64, old: u64) -> u64 {
     0
 }
 
-fn sys_lseek(fd: u64, off: u64, whence: u64) -> u64 {
+pub(super) fn sys_lseek(fd: u64, off: u64, whence: u64) -> u64 {
     with_fds(|fds, _| match fds.get_mut(fd as usize) {
+        Some(Some(super::fs::Fd::Disk(body))) => {
+            let f = &mut *body.borrow_mut();
+            let base = match whence {
+                0 => 0i64,
+                1 => f.at as i64,
+                2 => f.size as i64,
+                _ => return EINVAL,
+            };
+            let want = base.saturating_add(off as i64);
+            if want < 0 {
+                return EINVAL;
+            }
+            f.at = want as usize;
+            want as u64
+        }
         Some(Some(super::fs::Fd::File(body))) => {
             let f = &mut *body.borrow_mut();
             let (data, at) = (&f.data, &mut f.at);
@@ -4414,43 +5415,133 @@ fn sys_lseek(fd: u64, off: u64, whence: u64) -> u64 {
     .unwrap_or(EBADF)
 }
 
-fn write_stat(buf: u64, kind: super::fs::Kind, size: usize, ino: u64) -> u64 {
+/// Set across an i386 `stat`, `lstat` or `fstat` (106-108), whose structure
+/// is the 1990s one: 64 bytes, 32-bit sizes. A library linked against an old
+/// glibc's `__xstat` reaches it -- libasound from the Steam runtime did, for
+/// its own configuration file, and reported a file that was there as one it
+/// "cannot access", which left the game silent.
+pub(super) static STAT_OLD: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub(super) fn write_stat(buf: u64, kind: super::fs::Kind, size: usize, ino: u64) -> u64 {
+    write_stat_rdev(buf, kind, size, ino, 0)
+}
+
+/// `write_stat` for a device node, whose `st_rdev` is how a program tells
+/// which device it is. libdrm reads `major(st_rdev)` and `minor(st_rdev)` to
+/// find the render node's `/sys/dev/char/<major>:<minor>` directory, and a
+/// zero there is a device it cannot place.
+pub(super) fn write_stat_rdev(buf: u64, kind: super::fs::Kind, size: usize, ino: u64, rdev: u64) -> u64 {
+    let mut b = super::fs::stat_bytes(kind, size, ino);
+    b[40..48].copy_from_slice(&rdev.to_le_bytes());
+    if abi32() && STAT_OLD.load(Ordering::Relaxed) {
+        return write_stat_old(buf, size, &b);
+    }
+    if abi32() {
+        return write_stat64(buf, &b);
+    }
     if !reachable(buf, 144, true) {
         return EFAULT;
     }
-    let b = super::fs::stat_bytes(kind, size, ino);
     unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), buf as *mut u8, 144) };
     0
 }
 
-fn sys_fstat(fd: u64, buf: u64) -> u64 {
+/// i386's `struct stat64`: 96 bytes, packed, with the inode twice -- a 32-bit
+/// copy at 12 and the full one at 88 -- and the times as 32-bit seconds and
+/// nanoseconds. Offsets read off the host's own header with `gcc -m32`, not
+/// recalled.
+/// i386 `struct stat`: dev, ino as u32; mode, nlink, uid, gid as u16; rdev,
+/// size, blksize, blocks as u32; three (sec, nsec) pairs; two spare words.
+fn write_stat_old(buf: u64, size: usize, w: &[u8; 144]) -> u64 {
+    if !reachable(buf, 64, true) {
+        return EFAULT;
+    }
+    if size > u32::MAX as usize {
+        return (-75i64) as u64; // EOVERFLOW, as Linux answers
+    }
+    let r32 = |at: usize| u32::from_le_bytes([w[at], w[at + 1], w[at + 2], w[at + 3]]);
+    let r64 = |at: usize| u64::from_le_bytes(w[at..at + 8].try_into().unwrap());
+    let mut b = [0u8; 64];
+    b[0..4].copy_from_slice(&(r64(0) as u32).to_le_bytes());
+    b[4..8].copy_from_slice(&(r64(8) as u32).to_le_bytes());
+    b[8..10].copy_from_slice(&(r32(24) as u16).to_le_bytes());
+    b[10..12].copy_from_slice(&(r64(16) as u16).to_le_bytes());
+    b[12..14].copy_from_slice(&(r32(28) as u16).to_le_bytes());
+    b[14..16].copy_from_slice(&(r32(32) as u16).to_le_bytes());
+    b[16..20].copy_from_slice(&(r64(40) as u32).to_le_bytes());
+    b[20..24].copy_from_slice(&(r64(48) as u32).to_le_bytes());
+    b[24..28].copy_from_slice(&(r64(56) as u32).to_le_bytes());
+    b[28..32].copy_from_slice(&(r64(64) as u32).to_le_bytes());
+    for (i, at) in [72usize, 88, 104].iter().enumerate() {
+        b[32 + i * 8..36 + i * 8].copy_from_slice(&(r64(*at) as u32).to_le_bytes());
+        b[36 + i * 8..40 + i * 8].copy_from_slice(&(r64(at + 8) as u32).to_le_bytes());
+    }
+    unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), buf as *mut u8, 64) };
+    0
+}
+
+fn write_stat64(buf: u64, w: &[u8; 144]) -> u64 {
+    if !reachable(buf, 96, true) {
+        return EFAULT;
+    }
+    // Reuse the 64-bit encoder for the fields that mean the same thing, so
+    // mode, link count and block count cannot be computed two ways.
+    let r32 = |at: usize| u32::from_le_bytes([w[at], w[at + 1], w[at + 2], w[at + 3]]);
+    let r64 = |at: usize| u64::from_le_bytes(w[at..at + 8].try_into().unwrap());
+    // x86-64 `struct stat`: dev 0, ino 8, nlink 16, mode 24, uid 28, gid 32,
+    // rdev 40, size 48, blksize 56, blocks 64, then three timespecs at 72.
+    let mut b = [0u8; 96];
+    b[0..8].copy_from_slice(&r64(0).to_le_bytes());
+    b[12..16].copy_from_slice(&(r64(8) as u32).to_le_bytes());
+    b[16..20].copy_from_slice(&r32(24).to_le_bytes());
+    b[20..24].copy_from_slice(&(r64(16) as u32).to_le_bytes());
+    b[24..28].copy_from_slice(&r32(28).to_le_bytes());
+    b[28..32].copy_from_slice(&r32(32).to_le_bytes());
+    b[32..40].copy_from_slice(&r64(40).to_le_bytes());
+    b[44..52].copy_from_slice(&r64(48).to_le_bytes());
+    b[52..56].copy_from_slice(&(r64(56) as u32).to_le_bytes());
+    b[56..64].copy_from_slice(&r64(64).to_le_bytes());
+    for (i, at) in [72usize, 88, 104].iter().enumerate() {
+        b[64 + i * 8..68 + i * 8].copy_from_slice(&(r64(*at) as u32).to_le_bytes());
+        b[68 + i * 8..72 + i * 8].copy_from_slice(&(r64(at + 8) as u32).to_le_bytes());
+    }
+    b[88..96].copy_from_slice(&r64(8).to_le_bytes());
+    unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), buf as *mut u8, 96) };
+    0
+}
+
+pub(super) fn sys_fstat(fd: u64, buf: u64) -> u64 {
     let found = with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Disk(b))) => {
+            let f = b.borrow();
+            Some((super::fs::Kind::File, f.size, super::fs::ino_of(&f.path), 0))
+        }
         Some(Some(super::fs::Fd::File(b))) => {
             let f = b.borrow();
-            Some((super::fs::Kind::File, f.data.len(), super::fs::ino_of(&f.path)))
+            Some((super::fs::Kind::File, f.data.len(), super::fs::ino_of(&f.path), 0))
         }
         Some(Some(super::fs::Fd::Dir(b))) => {
             let d = b.borrow();
-            Some((super::fs::Kind::Dir, 0, super::fs::ino_of(&d.path)))
+            Some((super::fs::Kind::Dir, 0, super::fs::ino_of(&d.path), 0))
         }
         Some(Some(super::fs::Fd::Dev(b))) => {
             let d = b.borrow();
-            Some((super::fs::Kind::Char, super::dev::size(d.node), super::fs::ino_of(&d.path)))
+            Some((super::fs::Kind::Char, super::dev::size(d.node), super::fs::ino_of(&d.path), super::dev::rdev(d.node)))
         }
         // The standard three report as pipes, which is the only answer that
         // agrees with the rest of this module: `lseek` on them is `ESPIPE` and
         // `read` on stdin is a permanent end of file.
-        Some(Some(_)) => Some((super::fs::Kind::Fifo, 0, 1)),
+        Some(Some(_)) => Some((super::fs::Kind::Fifo, 0, 1, 0)),
         _ => None,
     })
     .flatten();
     match found {
-        Some((k, n, ino)) => write_stat(buf, k, n, ino),
+        Some((k, n, ino, rdev)) => write_stat_rdev(buf, k, n, ino, rdev),
         None => EBADF,
     }
 }
 
-fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 {
+pub(super) fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 {
     let raw = match read_cstr(path_at) {
         Ok(v) => v,
         Err(e) => return e,
@@ -4484,8 +5575,15 @@ fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 {
         None => None,
     };
     let Some(path) = found else { return ENOENT };
+    if let Some(on) = super::disk::lookup(&path) {
+        return match on {
+            Some(n) if n.is_dir => write_stat(buf, super::fs::Kind::Dir, 0, super::fs::ino_of(&path)),
+            Some(n) => write_stat(buf, super::fs::Kind::File, n.size, super::fs::ino_of(&path)),
+            None => ENOENT,
+        };
+    }
     if let Some(n) = super::dev::node(&path) {
-        return write_stat(buf, super::fs::Kind::Char, super::dev::size(n), super::fs::ino_of(&path));
+        return write_stat_rdev(buf, super::fs::Kind::Char, super::dev::size(n), super::fs::ino_of(&path), super::dev::rdev(n));
     }
     if super::dev::is_dir(&path) {
         return write_stat(buf, super::fs::Kind::Dir, 0, super::fs::ino_of(&path));
@@ -4514,7 +5612,7 @@ fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 {
     }
 }
 
-fn sys_getdents64(fd: u64, buf: u64, len: u64) -> u64 {
+pub(super) fn sys_getdents64(fd: u64, buf: u64, len: u64) -> u64 {
     if !reachable(buf, len as usize, true) {
         return EFAULT;
     }
@@ -4655,7 +5753,7 @@ fn input_ioctl(d: super::input::Dev, req: u64, arg: u64) -> u64 {
 /// `ENOTTY` rather than `EINVAL` for an unknown request, because that is how a
 /// program asks "are you a terminal" and gets told no -- which is what every
 /// runtime here does on startup and what `isatty` is built from.
-fn sys_ioctl(fd: u64, req: u64, arg: u64) -> u64 {
+pub(super) fn sys_ioctl(fd: u64, req: u64, arg: u64) -> u64 {
     let node = with_fds(|fds, _| match fds.get(fd as usize) {
         Some(Some(super::fs::Fd::Dev(b))) => Some(b.borrow().node),
         Some(Some(_)) => None,
@@ -4667,6 +5765,22 @@ fn sys_ioctl(fd: u64, req: u64, arg: u64) -> u64 {
     }
     if let Some(d) = node.flatten().and_then(super::dev::is_input) {
         return input_ioctl(d, req, arg);
+    }
+    if let Some(Some(super::dev::Node::Drm)) = node {
+        let id = with_fds(|fds, _| match fds.get(fd as usize) {
+            Some(Some(super::fs::Fd::Dev(b))) => b.borrow().at,
+            _ => 0,
+        })
+        .unwrap_or(0);
+        return super::drm::ioctl(id, req, arg);
+    }
+    if let Some(Some(super::dev::Node::Snd(k))) = node {
+        let nonblock = with_fds(|fds, _| match fds.get(fd as usize) {
+            Some(Some(super::fs::Fd::Dev(b))) => b.borrow().nonblock,
+            _ => false,
+        })
+        .unwrap_or(false);
+        return super::snd::ioctl(k, req, arg, nonblock);
     }
     let Some(Some(super::dev::Node::Fb)) = node else { return ENOTTY };
     match req {
@@ -4728,10 +5842,29 @@ fn sys_ioctl(fd: u64, req: u64, arg: u64) -> u64 {
 /// allocator asks `brk(0)` and grows from the answer -- but a program that
 /// assumed adjacency would be wrong, so it is written down rather than left to
 /// be discovered.
-fn sys_brk(want: u64) -> u64 {
+pub(super) fn sys_brk(want: u64) -> u64 {
     let sp = unsafe { guest_slot() };
     let Some(sp) = sp.as_mut() else { return 0 };
     if want >= sp.brk_start && want <= sp.brk_end {
+        // **Growing past where the break has been gives zeroed pages, as
+        // Linux's does.** Linux unmaps the pages a shrinking break leaves and
+        // maps fresh ones when it grows back; here the region is allocated
+        // once and the break is a number, so a trim followed by a grow handed
+        // glibc back its own freed chunks -- and glibc's `calloc` treats
+        // memory above the old top as fresh and does not clear it. Whole
+        // pages only: the bytes between the old break and the end of its page
+        // stay, because on Linux that page was never unmapped either.
+        let from = page_up(sp.brk_now as usize) as u64;
+        let to = (page_up(want as usize) as u64).min(sp.brk_end);
+        let mut page = from;
+        while page < to {
+            if let Some(p) = crate::mem::paging::query(page) {
+                if p.present && p.write {
+                    unsafe { core::ptr::write_bytes(page as *mut u8, 0, PAGE as usize) };
+                }
+            }
+            page += PAGE;
+        }
         sp.brk_now = want;
     }
     sp.brk_now
@@ -4744,7 +5877,7 @@ fn sys_brk(want: u64) -> u64 {
 /// `MAP_FIXED` needs an address one address space can promise, which is the
 /// same objection that makes the loader decline `ET_EXEC`. And a zero length
 /// is `EINVAL` on Linux, so it is `EINVAL` here.
-fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64 {
+pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64 {
     if len == 0 {
         return EINVAL;
     }
@@ -4780,9 +5913,60 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
             .and_then(|sp| sp.fds.get(fd as usize))
             .and_then(|f| f.as_ref())
             .and_then(|f| match f {
-                super::fs::Fd::Dev(b) => Some(b.borrow().node),
+                super::fs::Fd::Dev(b) => Some((b.borrow().node, b.borrow().at)),
                 _ => None,
             });
+        // A GPU buffer: the pages of the device's host-visible window that
+        // `MAP` put it at, mapped into the arena the way a memfd's are, and
+        // given nothing back on unmap (`Copied`), because they are the
+        // window's and not the heap's.
+        if let Some((super::dev::Node::Drm, id)) = dev {
+            const MAP_SHARED: u64 = 0x01;
+            if flags & MAP_SHARED == 0 {
+                return EINVAL;
+            }
+            // Each refusal names itself, a few times: Zink's only word for any
+            // of them is VK_ERROR_MEMORY_MAP_FAILED, and it dereferences the
+            // mapping it did not get a moment later.
+            static SAID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            let refuse = |why: &str, e: u64| {
+                if SAID.fetch_add(1, Ordering::Relaxed) < 8 {
+                    crate::kprintln!("[drm] mmap of {} bytes at offset {:#x} refused: {}", len, off, why);
+                }
+                e
+            };
+            let Some((phys, size, cache)) = super::drm::mapping(id, off) else { return refuse("no such buffer, or not mapped", EINVAL) };
+            let want = page_up(len as usize) as u64;
+            if want == 0 || want > page_up(size as usize) as u64 {
+                return refuse("longer than the buffer", EINVAL);
+            }
+            let Some(sp) = (unsafe { guest_slot() }).as_mut() else { return ENODEV };
+            if sp.tables.is_none() {
+                // Without a space of its own the guest could only be handed
+                // the window's own physical address, which sits wherever the
+                // firmware put the BAR and is nothing a guest may hold.
+                return ENODEV;
+            }
+            // A placed mapping over a reservation is refused: the reservation's
+            // own pages would be shadowed and later freed by a record that no
+            // longer describes them. Venus places only for
+            // `VK_EXT_map_memory_placed`, which an application has to ask for.
+            if flags & MAP_FIXED != 0 {
+                return refuse("placed (MAP_FIXED)", EINVAL);
+            }
+            let Some(at) = arena_take(sp, want) else { return refuse("no room left in the guest's address space", ENOMEM) };
+            let Some(t) = sp.tables.as_mut() else { return ENODEV };
+            let mut o = 0u64;
+            while o < want {
+                if !t.map_page_typed(at + o, phys + o, prot & PROT_WRITE != 0, true, cache) {
+                    return ENOMEM;
+                }
+                o += 4096;
+            }
+            sp.maps.push(Mapping { at, len: want as usize, from: Source::Copied });
+            return at;
+        }
+        let dev = dev.map(|(n, _)| n);
         if let Some(n) = dev {
             if n != super::dev::Node::Fb {
                 // The other three have no memory to map. `ENODEV` is what
@@ -4827,9 +6011,13 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
     if !anon {
         if let Some(m) = memfd(fd) {
             const MAP_SHARED: u64 = 0x01;
-            if flags & MAP_SHARED == 0 {
-                // A private mapping of a memfd is a copy-on-write view, which
-                // is legal and which nothing has asked for. Refusing says so.
+            if flags & MAP_SHARED == 0 && prot & PROT_WRITE != 0 {
+                // A private writable mapping of a memfd is a copy-on-write
+                // view, which is legal and which nothing has asked for.
+                // Refusing says so. A private *read-only* one cannot differ
+                // from a shared one -- nothing can write through it -- and it
+                // is how EGL reads a compositor's dma-buf format table, so it
+                // is served as the shared pages.
                 return EINVAL;
             }
             if off != 0 {
@@ -4840,10 +6028,54 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
             if want == 0 || f.at == 0 || want > page_up(f.len) {
                 return EINVAL;
             }
+            // **With a space, the memfd's pages go at an arena address**, the
+            // way anonymous memory already does. Handing back `f.at` -- the
+            // backing's own heap address -- is only an address the guest can
+            // hold when the heap happens to sit below 4 GiB, and for a 32-bit
+            // guest on a machine whose heap is above it the answer was
+            // `0x1479b0000`: the guest kept the low 32 bits, and Mesa drew
+            // every frame of a game into whatever it owned at `0x479b0000` --
+            // malloc's chunks, a library's read-only page. glibc reported it
+            // as tcache corruption, as an invalid free, and as a fault on a
+            // page that was never the buffer, three symptoms with one cause.
+            //
+            // Each mapping is its own view, as on Linux; unmapping one frees
+            // nothing (`Copied`), because the pages are the memfd's.
+            let backing = f.at;
+            let arena = unsafe { guest_slot() }.as_mut().and_then(|sp| {
+                sp.tables.as_ref()?;
+                let at = arena_take(sp, want as u64)?;
+                let t = sp.tables.as_mut()?;
+                let mut off = 0u64;
+                while off < want as u64 {
+                    if !t.map_page(at + off, backing + off, prot & PROT_WRITE != 0, true) {
+                        return None;
+                    }
+                    off += 4096;
+                }
+                sp.maps.push(Mapping { at, len: want, from: Source::Copied });
+                Some(at)
+            });
+            if let Some(at) = arena {
+                f.maps += 1;
+                return at;
+            }
+            if guest_root() != 0 {
+                return ENOMEM;
+            }
             let at = f.at;
+            // **Every mapping of a memfd is the same pages**, so its rights are
+            // a property of those pages, not of one mapping. A second,
+            // read-only mapping must not take writing away from a first one
+            // that is still live -- on Linux they are independent views.
+            let already = unsafe { guest_slot() }.as_ref().is_some_and(|sp| {
+                sp.maps.iter().any(|m| {
+                    matches!(m.from, Source::Shared) && m.at < at + want as u64 && at < m.at + m.len as u64
+                })
+            });
             let perm = crate::mem::paging::Perm {
                 present: true,
-                write: prot & PROT_WRITE != 0,
+                write: prot & PROT_WRITE != 0 || already,
                 exec: false,
                 user: true,
             };
@@ -4874,6 +6106,15 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
         }
         let Some(sp) = (unsafe { guest_slot() }).as_ref() else { return ENOMEM };
         match sp.fds.get(fd as usize).and_then(|f| f.as_ref()) {
+            Some(super::fs::Fd::Disk(b)) => {
+                let mut f = b.borrow_mut();
+                let from = (off as usize).min(f.size);
+                let to = from.saturating_add(len as usize).min(f.size);
+                let mut v = alloc::vec![0u8; to - from];
+                let got = f.read_at(from, &mut v);
+                v.truncate(got);
+                Some(v)
+            }
             Some(super::fs::Fd::File(b)) => {
                 let f = b.borrow();
                 // A mapping may run past the end of the file, and the tail is
@@ -4904,6 +6145,27 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
             // Its own memory, laid out again. Nothing is claimed and nothing
             // is recorded, because whatever already holds these pages still
             // holds them and will still free them.
+            //
+            // **But an anonymous mapping laid over it is new memory, and new
+            // memory reads as zero.** Linux replaces the pages; these are the
+            // same pages, so the old contents survived -- and a `.bss` laid
+            // over a reservation, or an arena re-laid after a trim, then
+            // starts with whatever the last tenant left. glibc's `calloc`
+            // trusts fresh heap memory to be zero and skips clearing it, so
+            // the symptom is not here at all: it is a structure that came
+            // back from `calloc` holding stale pointers, freed thousands of
+            // calls later, and reported by the allocator as tcache
+            // corruption. Opened for writing first, since the pages may be
+            // read-only or absent by now and this kernel enforces that on
+            // itself too.
+            if anon {
+                let n = page_up(len as usize);
+                let rw = crate::mem::paging::Perm { present: true, write: true, exec: false, user: true };
+                if !crate::mem::paging::protect(addr, n, rw) {
+                    return ENOMEM;
+                }
+                unsafe { core::ptr::write_bytes(addr as *mut u8, 0, n) };
+            }
             (addr, None)
         } else if crate::mem::fixed::claim(addr, len as usize).is_ok() {
             // Whatever the last tenant left. `alloc_pages` zeroes and this
@@ -4918,7 +6180,72 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
         // A non-fixed `addr` is a hint, and this ignores it. Linux is entitled
         // to as well, every allocator copes, and honouring it would spend a
         // placement claim on a suggestion.
-        let Some(phys) = alloc_pages(len as usize) else { return ENOMEM };
+        // **Anonymous memory in a guest with its own tables is page by page,
+        // always**, not only when no contiguous run can be found: a range
+        // built of single pages can be given back a page at a time, and
+        // `munmap` of part of one is what glibc's thread arenas and LLVM's JIT
+        // do to align a reservation. Contiguous, those trims could only be
+        // accepted and the range kept, and a 32-bit guest's 1.4 GiB arena ran
+        // out under a game's options dialog -- `malloc` handed gallium a NULL.
+        let anon_paged = backing.is_none() && unsafe { guest_slot() }.as_ref().is_some_and(|sp| sp.tables.is_some());
+        let contiguous = if anon_paged { None } else { alloc_pages(len as usize) };
+        let Some(phys) = contiguous else {
+            // No contiguous run that size. With a space the arena is mapped a
+            // page at a time anyway, so contiguity was never needed -- for
+            // anonymous memory. A file's bytes are copied in after this point,
+            // so a file mapping that cannot be had whole is refused instead.
+            if backing.is_some() {
+                crate::kprintln!("  [mmap] no contiguous run for a {:#x}-byte file mapping", len);
+                return ENOMEM;
+            }
+            let want = page_up(len as usize) as u64;
+            let paged = unsafe { guest_slot() }.as_mut().and_then(|sp| {
+                sp.tables.as_ref()?;
+                let Some(at) = arena_take(sp, want) else {
+                    crate::kprintln!("  [mmap] the 32-bit arena has no {:#x}-byte gap left", want);
+                    arena_report(sp);
+                    return None;
+                };
+                let mut off = 0u64;
+                while off < want {
+                    let ok = alloc_pages(4096).is_some_and(|p| {
+                        sp.tables.as_mut().is_some_and(|t| t.map_page(at + off, p, true, true))
+                            || {
+                                free_pages(p, 4096);
+                                false
+                            }
+                    });
+                    if !ok {
+                        free_paged(sp, at, off);
+                        arena_give(sp, at, want);
+                        return None;
+                    }
+                    off += 4096;
+                }
+                Some(at)
+            });
+            match paged {
+                Some(at) => {
+                    // Fresh pages from the heap carry what the last owner left.
+                    unsafe { core::ptr::write_bytes(at as *mut u8, 0, want as usize) };
+                    let perm = crate::mem::paging::Perm {
+                        present: prot != 0,
+                        write: prot & PROT_WRITE != 0,
+                        exec: prot & PROT_EXEC != 0,
+                        user: true,
+                    };
+                    let _ = crate::mem::paging::protect(at, want as usize, perm);
+                    if let Some(sp) = unsafe { guest_slot() }.as_mut() {
+                        sp.maps.push(Mapping { at, len: want as usize, from: Source::Paged });
+                    }
+                    return at;
+                }
+                None => {
+                    crate::kprintln!("  [mmap] out of memory for {:#x} bytes", len);
+                    return ENOMEM;
+                }
+            }
+        };
         // **With a space, the guest is told an arena address rather than the
         // heap address the pages actually have.** That is the last thing
         // standing between this and `fork`: a child gets its parent's mappings
@@ -4926,8 +6253,11 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
         // different number in each of them.
         let want = page_up(len as usize) as u64;
         let arena = unsafe { guest_slot() }.as_mut().and_then(|sp| {
+            sp.tables.as_ref()?;
+            // Out of arena is out of memory, said as Linux says it, rather
+            // than mapping over the stack a 32-bit guest keeps just above it.
+            let at = arena_take(sp, want)?;
             let t = sp.tables.as_mut()?;
-            let at = sp.mmap_next;
             let mut off = 0u64;
             while off < want {
                 if !t.map_page(at + off, phys + off, true, true) {
@@ -4938,7 +6268,6 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
                 }
                 off += 4096;
             }
-            sp.mmap_next = at + want;
             Some(at)
         });
         match arena {
@@ -5038,6 +6367,58 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u6
     }
 }
 
+/// `madvise`. Only `MADV_DONTNEED` changes anything a program can see.
+///
+/// **It is a promise about contents, not a hint.** On a private anonymous
+/// mapping Linux drops the pages, and the next touch reads zero. glibc shrinks
+/// a thread's arena with exactly this and, when the arena grows back over the
+/// same addresses, treats everything above its old top as fresh -- so `calloc`
+/// skips clearing it. Answering 0 and changing nothing (which this did for
+/// 32-bit guests) left that memory holding freed chunks' old links, handed
+/// out as zeroed structures; the program followed them much later and glibc
+/// reported `unaligned tcache chunk`, nowhere near the cause.
+///
+/// So the range is zeroed where it is anonymous memory the guest holds and can
+/// write. A memfd or the framebuffer is shared, and Linux keeps their contents
+/// across `DONTNEED`, so those are left alone; every other advice is a hint
+/// this kernel has no use for and is accepted.
+pub(super) fn sys_madvise(at: u64, len: u64, advice: u64) -> u64 {
+    const MADV_DONTNEED: u64 = 4;
+    if at % PAGE != 0 {
+        return EINVAL;
+    }
+    if advice != MADV_DONTNEED || len == 0 {
+        return 0;
+    }
+    let n = page_up(len as usize);
+    if !owns(at, n) {
+        return ENOMEM;
+    }
+    let shared = unsafe { guest_slot() }.as_ref().is_some_and(|sp| {
+        sp.maps.iter().any(|m| {
+            matches!(m.from, Source::Shared | Source::Device)
+                && at < m.at + page_up(m.len) as u64
+                && m.at < at + n as u64
+        })
+    });
+    if shared {
+        return 0;
+    }
+    let mut page = at;
+    while page < at + n as u64 {
+        // A page the guest has made read-only or absent keeps its contents:
+        // it cannot have been written since, and opening it to clear it
+        // would change rights the guest chose.
+        if let Some(p) = crate::mem::paging::query(page) {
+            if p.present && p.write {
+                unsafe { core::ptr::write_bytes(page as *mut u8, 0, PAGE as usize) };
+            }
+        }
+        page += PAGE;
+    }
+    0
+}
+
 /// Put a mapping's pages back where they came from, rights first.
 ///
 /// **Rights first, always.** A page handed back still carrying its U bit is
@@ -5071,6 +6452,8 @@ fn give_back(at: u64, len: usize, from: Option<Source>) {
             crate::mem::paging::protect(at, page_up(len), crate::mem::paging::Perm::RWX);
         }
         Some(Source::Copied) => {}
+        // Freed by `free_paged`, which can see the guest's tables; this cannot.
+        Some(Source::Paged) => {}
         // The backing, at its own address. Nothing is done about the guest's
         // mapping of it: those page tables belong to the guest's `Space` and
         // die with it, so unmapping here would be tidying something that is
@@ -5086,12 +6469,31 @@ fn give_back(at: u64, len: usize, from: Option<Source>) {
 /// approximated: splitting one allocation into two is not something the heap
 /// underneath can express, and silently unmapping more than was asked is worse
 /// than saying no.
-fn sys_munmap(at: u64, len: u64) -> u64 {
+pub(super) fn sys_munmap(at: u64, len: u64) -> u64 {
     let sp = unsafe { guest_slot() };
     let Some(sp) = sp.as_mut() else { return EINVAL };
-    match sp.maps.iter().position(|m| m.at == at && m.len == len as usize) {
+    if at % 4096 != 0 || len == 0 {
+        return EINVAL;
+    }
+    // The record's length and the guest's are compared page-rounded: the
+    // guest passes whatever it asked `mmap` for, and compared as given, every
+    // mapping of an odd length -- every library a linker maps -- could never
+    // be unmapped at all.
+    let want = page_up(len as usize);
+    match sp.maps.iter().position(|m| m.at == at && page_up(m.len) == want) {
         Some(i) => {
             let m = sp.maps.remove(i);
+            // Another mapping of the same memfd pages is still live: those
+            // pages keep their rights until the last view of them goes. Taking
+            // the U bit off here killed the survivor -- Mesa maps a Wayland
+            // buffer, and a page fault at its first write was the result.
+            if matches!(m.from, Source::Shared)
+                && sp.maps.iter().any(|o| {
+                    matches!(o.from, Source::Shared) && o.at < m.at + m.len as u64 && m.at < o.at + o.len as u64
+                })
+            {
+                return 0;
+            }
             // **Close it before giving it back.** `teardown` does this for a
             // guest that exits still holding mappings, and this path was
             // missed: an explicit unmap returned pages to the allocator with
@@ -5099,10 +6501,45 @@ fn sys_munmap(at: u64, len: u64) -> u64 {
             // memory -- kernel or otherwise -- came with ring-3 access
             // attached. A `diag all` caught it and `diag paging` alone did
             // not, because it only shows up once something else has run.
-            give_back(m.at, m.len, Some(m.from));
+            if m.from == Source::Paged {
+                free_paged(sp, m.at, page_up(m.len) as u64);
+            } else {
+                give_back(m.at, m.len, Some(m.from));
+            }
+            // An arena address goes back on the free list once its pages have.
+            if matches!(m.from, Source::Backed(_) | Source::Copied | Source::Paged) && sp.tables.is_some() {
+                arena_give(sp, m.at, page_up(m.len) as u64);
+            }
             0
         }
-        None => EINVAL,
+        // **Part of a mapping: accepted, and the pages kept.** The heap cannot
+        // free part of an allocation, so the honest options were to refuse --
+        // which `ld.so` meets every time it trims a reservation, and then
+        // reports as a failed load -- or to keep the pages mapped until the
+        // whole mapping or the guest goes. This is the second: it costs
+        // memory, not correctness, except that the guest can still read what
+        // it unmapped rather than faulting there.
+        None => {
+            let end = at + want as u64;
+            let Some(i) = sp.maps.iter().position(|m| at >= m.at && end <= m.at + page_up(m.len) as u64) else {
+                return EINVAL;
+            };
+            // Page-by-page memory can be trimmed exactly: those pages freed,
+            // that range back in the arena, and the record split around it.
+            if sp.maps[i].from == Source::Paged && sp.tables.is_some() {
+                let m = sp.maps.remove(i);
+                let m_end = m.at + page_up(m.len) as u64;
+                free_paged(sp, at, want as u64);
+                arena_give(sp, at, want as u64);
+                if at > m.at {
+                    sp.maps.push(Mapping { at: m.at, len: (at - m.at) as usize, from: Source::Paged });
+                }
+                if end < m_end {
+                    sp.maps.push(Mapping { at: end, len: (m_end - end) as usize, from: Source::Paged });
+                }
+            }
+            0
+        }
     }
 }
 
@@ -5121,7 +6558,7 @@ fn sys_munmap(at: u64, len: u64) -> u64 {
 ///
 /// The range must be one the loader gave this guest. Linux answers `ENOMEM`
 /// for a range with no mapping under it, so that is what comes back.
-fn sys_mprotect(at: u64, len: u64, prot: u64) -> u64 {
+pub(super) fn sys_mprotect(at: u64, len: u64, prot: u64) -> u64 {
     if at % PAGE != 0 {
         return EINVAL;
     }
@@ -5165,7 +6602,7 @@ fn sys_mprotect(at: u64, len: u64, prot: u64) -> u64 {
 ///
 /// Reading `GS` is refused for the smaller reason that it hands out a kernel
 /// pointer to code that has no business with one.
-fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
+pub(super) fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
     match code {
         ARCH_SET_FS => {
             unsafe { crate::cpu::wrmsr(IA32_FS_BASE, addr) };
@@ -5195,9 +6632,12 @@ fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
 pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
     // A doomed guest asks for nothing more. Here and again on the way out,
     // which bounds how long a task outlives its doom by one syscall's work.
+    big_lock();
     unsafe { die_if_doomed() };
     let nr = f.rax;
     let args = [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9];
+    super::prof::enter(nr, &args);
+    let t0 = super::prof::start();
 
     let (ret, served) = match nr {
         SYS_WRITE => (sys_write(f.rdi, f.rsi, f.rdx as usize), true),
@@ -5253,6 +6693,8 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_ACCESS => (sys_access(f.rdi, f.rsi), true),
         SYS_FACCESSAT => (sys_access(f.rsi, f.rdx), true),
         SYS_FTRUNCATE => (sys_ftruncate(f.rdi, f.rsi), true),
+        285 => (sys_fallocate(f.rdi, f.rsi, f.rdx, f.r10), true),
+        27 => (sys_mincore(f.rdi, f.rsi, f.rdx), true),
         SYS_MEMFD_CREATE => (sys_memfd_create(f.rdi, f.rsi), true),
         SYS_EPOLL_CREATE => (sys_epoll_create(f.rdi), true),
         SYS_EPOLL_CREATE1 => (sys_epoll_create1(f.rdi), true),
@@ -5268,11 +6710,12 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_PSELECT6 => (sys_pselect6(f.rdi, f.rsi, f.rdx, f.r10, f.r8), true),
         SYS_SENDFILE => (sys_sendfile(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_GETCWD => (sys_getcwd(f.rdi, f.rsi), true),
+        80 => (sys_chdir(f.rdi), true),
         SYS_MKDIR => (sys_name_op(f.rdi, b'm'), true),
         SYS_RMDIR => (sys_name_op(f.rdi, b'r'), true),
         SYS_UNLINK => (sys_name_op(f.rdi, b'u'), true),
         SYS_NANOSLEEP => (sys_nanosleep(f.rdi), true),
-        SYS_CLOCK_NANOSLEEP => (sys_nanosleep(f.rdx), true),
+        SYS_CLOCK_NANOSLEEP => (sys_clock_nanosleep(f.rdi, f.rsi, f.rdx), true),
         // **Accepted and never delivered, which is the honest shape.** A
         // handler is recorded nowhere because nothing here can raise a signal
         // at a guest: there is no other process to send one, no terminal to
@@ -5289,6 +6732,12 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         }
         SYS_RT_SIGRETURN => (super::signal::sigreturn(f), true),
         SYS_KILL => (super::signal::kill(f.rdi as i64, f.rsi), true),
+        // To the thread group rather than the one thread: signals here are
+        // pending per process. What `raise` and `abort` need is that the
+        // signal arrives at all -- answering `ENOSYS` left glibc's `abort`
+        // with nothing but its final `hlt`, a fault where a program should
+        // have died of SIGABRT.
+        SYS_TGKILL => (super::signal::kill(f.rdi as i64, f.rdx), true),
         // No parent, and no group but the one. `getppid` answering zero is
         // what a process reparented to nothing reports.
         SYS_GETPPID => (super::fork::parent_pid(), true),
@@ -5321,13 +6770,13 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         // Returns into a different program rather than to its caller, so the
         // frame it was handed is the thing it edits.
         SYS_EXECVE => (super::load::exec(f), true),
-        SYS_FUTEX => (sys_futex(f.rdi, f.rsi, f.rdx, f.r10), true),
+        SYS_FUTEX => (futex(f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9, false), true),
         SYS_GETTID => (super::thread::current_tid(), true),
         // A thread yielding to another is a thing this kernel can actually do,
         // which is unusual in this file: most scheduling calls are answered
         // with a shape rather than an action.
         SYS_SCHED_YIELD => {
-            crate::task::yield_now();
+            wait_turn();
             (0, true)
         }
         // One process, and it is the guest. Reporting a pid at all is what
@@ -5342,10 +6791,14 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_BRK => (sys_brk(f.rdi), true),
         SYS_MMAP => (sys_mmap(f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9), true),
         SYS_MPROTECT => (sys_mprotect(f.rdi, f.rsi, f.rdx), true),
+        SYS_MADVISE => (sys_madvise(f.rdi, f.rsi, f.rdx), true),
         SYS_MUNMAP => (sys_munmap(f.rdi, f.rsi), true),
         SYS_ARCH_PRCTL => (sys_arch_prctl(f.rdi, f.rsi), true),
         SYS_EXIT | SYS_EXIT_GROUP => {
             record(Call { nr, args, ret: 0, served: true, path: [0; PATH_SNIP], path_len: 0 });
+            if nr == SYS_EXIT_GROUP {
+                exit_group_from_thread(f.rdi);
+            }
             // Does not return. The host's stack and callee-saved registers
             // were parked by `glados_enter_guest`, so this is a longjmp back
             // into whoever started the guest -- there is no unwinder here and
@@ -5359,6 +6812,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         _ => (ENOSYS, false),
     };
     record(Call { nr, args, ret, served, path: [0; PATH_SNIP], path_len: 0 });
+    super::prof::bill(super::prof::row(nr, false), t0);
     // The display server's turn, on the guest's own task -- see `sky::server`
     // for why it runs here and nowhere else. A request just written is
     // answered before the client next looks.
@@ -5378,11 +6832,17 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
     if nr != SYS_RT_SIGRETURN {
         super::signal::deliver(f);
     }
+    if matches!(nr, SYS_MMAP | SYS_MUNMAP | SYS_MPROTECT | SYS_BRK | 25 /* mremap */) {
+        tlb_shootdown();
+    }
+    super::prof::leave();
+    wake_nappers();
+    big_unlock();
     unsafe { die_if_doomed() };
 }
 
 extern "sysv64" {
-    fn glados_leave_guest(code: u64) -> !;
+    pub(super) fn glados_leave_guest(code: u64) -> !;
 }
 
 /// Set on the way out so an exit code of zero is still distinguishable from
@@ -5443,7 +6903,6 @@ pub fn limit() -> u64 {
     LIMIT.load(Ordering::Acquire)
 }
 
-static DEADLINE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Whether the running guest has outstayed its welcome.
 ///
@@ -5459,8 +6918,11 @@ pub fn overran(now: u64) -> bool {
     if doomed() != 0 {
         return true;
     }
-    let d = DEADLINE.load(Ordering::Relaxed);
-    d != 0 && now >= d && GUEST_RUNNING.load(Ordering::Relaxed)
+    // The running task's own session's deadline. One per machine, this was
+    // the deadline of whichever session started last, so a second session
+    // starting reset the first one's clock.
+    let d = super::session::current().map(super::session::deadline_of).unwrap_or(0);
+    d != 0 && now >= d
 }
 
 /// What a task ending at a deadline or a doom check ends with.
@@ -5515,7 +6977,11 @@ pub struct Fault {
     pub cr2: u64,
 }
 
-static LAST_FAULT: Racy<Option<Fault>> = Racy::new(None);
+/// Per task: the fault the session that task ran ended with. Written by the
+/// main thread's own kill, or adopted from a thread whose crash ended the
+/// process, and read by whoever ran the session -- on the same task.
+static LAST_FAULT: Racy<[Option<Fault>; crate::task::MAX_TASKS]> =
+    Racy::new([None; crate::task::MAX_TASKS]);
 
 /// The same three addresses said in words, resolved while the space was still
 /// installed.
@@ -5525,7 +6991,8 @@ static LAST_FAULT: Racy<Option<Fault>> = Racy::new(None);
 /// three times about a guest that had just died. The strings are made in
 /// `run`, one line earlier, which is the only moment both the fault and the
 /// map it should be read against exist together.
-static FAULT_AT: Racy<Option<(String, String, String)>> = Racy::new(None);
+static FAULT_AT: Racy<[Option<(String, String, String)>; crate::task::MAX_TASKS]> =
+    Racy::new([const { None }; crate::task::MAX_TASKS]);
 
 /// The words around the guest's stack pointer when it died, each said in
 /// words as well as in hex.
@@ -5536,10 +7003,11 @@ static FAULT_AT: Racy<Option<(String, String, String)>> = Racy::new(None);
 /// is freed by the teardown two lines after the guest returns. Sixteen words
 /// either side is enough to hold a small frame and the return address above
 /// it, and small enough that the report stays readable.
-static FAULT_STACK: Racy<Option<Vec<(u64, u64, String)>>> = Racy::new(None);
+static FAULT_STACK: Racy<[Option<Vec<(u64, u64, String)>>; crate::task::MAX_TASKS]> =
+    Racy::new([const { None }; crate::task::MAX_TASKS]);
 
 pub fn fault_stack() -> Option<Vec<(u64, u64, String)>> {
-    unsafe { (*FAULT_STACK.get()).clone() }
+    unsafe { (*FAULT_STACK.get())[me()].clone() }
 }
 
 /// Each general-purpose register, named, with what it points at.
@@ -5549,19 +7017,20 @@ pub fn fault_stack() -> Option<Vec<(u64, u64, String)>> {
 /// resolved at print time and answered "no guest" fifteen times about a guest
 /// that had just died, which is the identical mistake made twice, once for
 /// three addresses and once for fifteen.
-static FAULT_REGS: Racy<Option<Vec<(&'static str, u64, String)>>> = Racy::new(None);
+static FAULT_REGS: Racy<[Option<Vec<(&'static str, u64, String)>>; crate::task::MAX_TASKS]> =
+    Racy::new([const { None }; crate::task::MAX_TASKS]);
 
 pub fn fault_regs() -> Option<Vec<(&'static str, u64, String)>> {
-    unsafe { (*FAULT_REGS.get()).clone() }
+    unsafe { (*FAULT_REGS.get())[me()].clone() }
 }
 
 pub fn last_fault() -> Option<Fault> {
-    unsafe { *LAST_FAULT.get() }
+    unsafe { (*LAST_FAULT.get())[me()] }
 }
 
 /// Where the rip, the faulting address and the stack pointer were, in words.
 pub fn fault_where() -> Option<(String, String, String)> {
-    unsafe { (*FAULT_AT.get()).clone() }
+    unsafe { (*FAULT_AT.get())[me()].clone() }
 }
 
 /// Which of the guest's own ranges an address falls in.
@@ -5570,6 +7039,142 @@ pub fn fault_where() -> Option<(String, String, String)> {
 /// "inside the interpreter, at +0x2000", and that is the difference between a
 /// fault report and a diagnosis -- the same reason `cpu::code::locate` exists
 /// for the kernel's own faults.
+/// Which file each file-backed mapping came from: (address, length, file
+/// offset, path). For naming a crash site, and nothing else reads it.
+///
+/// A side table rather than a field on `Mapping`, because `Mapping` is copied
+/// by `fork` and compared by `munmap` and neither should care about a name.
+/// Never pruned while a guest runs, so a stale entry can name a library that
+/// has since been unmapped; the newest matching entry wins, which is the one
+/// that was there last.
+pub static MAP_NAMES: Racy<Vec<(u64, u64, u64, String)>> = Racy::new(Vec::new());
+
+/// Give back a `Paged` mapping's pages: each one looked up in the guest's
+/// tables, its rights restored and freed, then the translation removed.
+fn free_paged(sp: &mut Space, at: u64, len: u64) {
+    let Some(t) = sp.tables.as_mut() else { return };
+    let mut off = 0;
+    while off < len {
+        if let Some(phys) = t.phys_of(at + off) {
+            crate::mem::paging::release_to_heap(phys, 4096);
+            free_pages(phys, 4096);
+        }
+        t.unmap_page(at + off);
+        off += 4096;
+    }
+}
+
+/// What a full arena is full of, once per guest: bytes by kind of mapping,
+/// and the free list's shape. Out of arena and out of memory are different
+/// failures, and fragmentation is a third.
+fn arena_report(sp: &Space) {
+    static SAID: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if SAID.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let mut by = [0u64; 7];
+    let mut n = [0usize; 7];
+    for m in &sp.maps {
+        let k = match m.from {
+            Source::Heap => 0,
+            Source::Fixed => 1,
+            Source::Device => 2,
+            Source::Shared => 3,
+            Source::Copied => 4,
+            Source::Backed(_) => 5,
+            Source::Paged => 6,
+        };
+        by[k] += page_up(m.len) as u64;
+        n[k] += 1;
+    }
+    let names = ["heap", "fixed", "device", "memfd", "copied", "backed", "paged"];
+    for k in 0..7 {
+        if n[k] > 0 {
+            crate::kprintln!("    {:<7} {:>5} mapping(s) {:>6} MiB", names[k], n[k], by[k] >> 20);
+        }
+    }
+    let free: u64 = sp.arena_free.iter().map(|&(_, l)| l).sum();
+    let big = sp.arena_free.iter().map(|&(_, l)| l).max().unwrap_or(0);
+    crate::kprintln!(
+        "    arena cursor {:#x} of {:#x}; free list {} gap(s), {} MiB, largest {} KiB",
+        sp.mmap_next, sp.mmap_end, sp.arena_free.len(), free >> 20, big >> 10
+    );
+}
+
+/// Take `want` bytes of arena: first fit from what `munmap` gave back, then
+/// the cursor. `None` is out of arena, which the caller says as `ENOMEM`.
+pub(super) fn arena_take(sp: &mut Space, want: u64) -> Option<u64> {
+    if let Some(i) = sp.arena_free.iter().position(|&(_, l)| l >= want) {
+        let (a, l) = sp.arena_free[i];
+        if l == want {
+            sp.arena_free.remove(i);
+        } else {
+            sp.arena_free[i] = (a + want, l - want);
+        }
+        return Some(a);
+    }
+    let at = sp.mmap_next;
+    if at.checked_add(want)? > sp.mmap_end {
+        return None;
+    }
+    sp.mmap_next = at + want;
+    Some(at)
+}
+
+/// Give an arena range back: its page-table entries cleared and flushed --
+/// a stale translation would hand the next tenant the last one's pages --
+/// and the range filed, merged with its neighbours.
+fn arena_give(sp: &mut Space, at: u64, len: u64) {
+    // A name for a range that is no longer that file. Left behind, the next
+    // tenant -- llvmpipe's JIT, most often -- was profiled as libMiles or a
+    // font, and a hot spot named after the wrong file sends the reader to
+    // the wrong source.
+    unsafe { &mut *MAP_NAMES.get() }.retain(|&(a, l, _, _)| a + l <= at || a >= at + len);
+    let Some(t) = sp.tables.as_mut() else { return };
+    let mut off = 0;
+    while off < len {
+        t.unmap_page(at + off);
+        off += 4096;
+    }
+    let i = sp.arena_free.partition_point(|&(a, _)| a < at);
+    sp.arena_free.insert(i, (at, len));
+    if i + 1 < sp.arena_free.len() && sp.arena_free[i].0 + sp.arena_free[i].1 == sp.arena_free[i + 1].0 {
+        sp.arena_free[i].1 += sp.arena_free[i + 1].1;
+        sp.arena_free.remove(i + 1);
+    }
+    if i > 0 && sp.arena_free[i - 1].0 + sp.arena_free[i - 1].1 == sp.arena_free[i].0 {
+        sp.arena_free[i - 1].1 += sp.arena_free[i].1;
+        sp.arena_free.remove(i);
+    }
+}
+
+/// Note a file mapping that succeeded.
+pub(super) fn note_map(at: u64, len: u64, fd: u64, off: u64) {
+    if (at as i64) < 0 {
+        return;
+    }
+    let name = unsafe { guest_slot() }.as_ref().and_then(|sp| match sp.fds.get(fd as usize)?.as_ref()? {
+        super::fs::Fd::Disk(b) => Some(b.borrow().path.clone()),
+        super::fs::Fd::File(b) => Some(b.borrow().path.clone()),
+        _ => None,
+    });
+    if let Some(n) = name {
+        let t = unsafe { &mut *MAP_NAMES.get() };
+        if t.len() < 4096 {
+            t.push((at, len, off, n));
+        }
+    }
+}
+
+/// A code address as `file+offset`, the form `addr2line` and `nm` take.
+pub fn name_code(v: u64) -> Option<String> {
+    let t = unsafe { &*MAP_NAMES.get() };
+    t.iter().rev().find(|(a, l, _, _)| v >= *a && v < a + l).map(|(a, _, off, n)| {
+        let short = n.rsplit('/').next().unwrap_or(n);
+        alloc::format!("{}+{:#x}", short, v - a + off)
+    })
+}
+
 pub fn locate(at: u64) -> alloc::string::String {
     let Some(sp) = (unsafe { guest_slot() }).as_ref() else {
         return alloc::string::String::from("no guest");
@@ -5587,22 +7192,26 @@ pub fn locate(at: u64) -> alloc::string::String {
         })
         .or_else(|| {
             sp.maps.iter().find_map(|m| {
-                (at >= m.at && at < m.at.saturating_add(m.len as u64))
-                    .then(|| alloc::format!("a mapping at {:#x} +{:#x}", m.at, at - m.at))
+                (at >= m.at && at < m.at.saturating_add(m.len as u64)).then(|| {
+                    let kind = match m.from {
+                        Source::Heap => "heap",
+                        Source::Fixed => "fixed",
+                        Source::Device => "device",
+                        Source::Shared => "memfd",
+                        Source::Copied => "copied",
+                        Source::Backed(_) => "backed",
+                        Source::Paged => "paged",
+                    };
+                    let rights = crate::mem::paging::query(at & !(PAGE - 1))
+                        .map(|p| alloc::format!("{}{}{}", if p.present { "p" } else { "-" }, if p.write { "w" } else { "-" }, if p.user { "u" } else { "-" }))
+                        .unwrap_or_else(|| alloc::string::String::from("unmapped"));
+                    alloc::format!("a {} mapping at {:#x} len {:#x} +{:#x} [{}]", kind, m.at, m.len, at - m.at, rights)
+                })
             })
         })
         .unwrap_or_else(|| alloc::string::String::from("nothing this guest owns"))
 }
 
-/// Whether a guest is on the stack right now.
-///
-/// A plain atomic that Rust both writes and reads, rather than a look at the
-/// stack pointer `glados_enter_guest` parked. That indirection is deliberate:
-/// the fault handler asks this question from inside an interrupt gate on an
-/// IST stack, having just come from ring 3, and it must not depend on reading
-/// a `static mut` whose only writer is assembly. The first version did, and it
-/// took a #GP inside the read on exactly that path.
-static GUEST_RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// **Per task, and one flag for the machine was the bug that halted it.**
 /// `GUEST_RUNNING` answered "is a guest running" for everybody, and the kill
@@ -5638,13 +7247,11 @@ static DOOM: [core::sync::atomic::AtomicU64; crate::task::MAX_TASKS] =
 static TASK_FAULT: Racy<[Option<Fault>; crate::task::MAX_TASKS]> =
     Racy::new([None; crate::task::MAX_TASKS]);
 
-/// The task running the session's first guest, the one `linux run` started.
-static MAIN_TASK: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(usize::MAX);
-
+/// The task running the first guest of the running task's session -- the one
+/// `linux run` or a job started. `None` outside a session, which is what the
+/// shell's own task always is.
 pub fn main_task() -> Option<usize> {
-    let t = MAIN_TASK.load(Ordering::Relaxed);
-    (t != usize::MAX).then_some(t)
+    super::session::main_task_of(super::session::current()?)
 }
 
 fn me() -> usize {
@@ -5700,7 +7307,18 @@ pub fn as_guest(enter: impl FnOnce() -> u64) -> u64 {
     DOOM[t].store(0, Ordering::Release);
     unsafe { (*TASK_FAULT.get())[t] = None };
     IN_GUEST[t].store(true, Ordering::Release);
+    // Any core may run it: see `BIG`. The pin it had comes back after, so a
+    // shell that ran a guest in the foreground is the shell on core 0 again.
+    let pin = crate::task::pin_of(t);
+    if SPREAD.load(Ordering::Relaxed) {
+        crate::task::set_pin(t, -1);
+    }
     let code = enter();
+    // Every way out of a guest lands here, the longjmps included, and one of
+    // them may have left from inside a syscall still holding the lock.
+    super::prof::leave();
+    big_unlock();
+    crate::task::set_pin(t, pin);
     IN_GUEST[t].store(false, Ordering::Release);
     DOOM[t].store(0, Ordering::Release);
     code
@@ -5711,7 +7329,7 @@ pub fn as_guest(enter: impl FnOnce() -> u64) -> u64 {
 ///
 /// # Safety
 /// Longjmps; only where `exit_group` itself could be served.
-unsafe fn die_if_doomed() {
+pub(super) unsafe fn die_if_doomed() {
     let d = doomed();
     if d != 0 {
         unsafe { glados_leave_guest(d) };
@@ -5763,8 +7381,28 @@ pub fn signal_of_vector(v: u8) -> u32 {
 ///
 /// # Safety
 /// Only from a fault handler, and only when `running` is true.
+/// The first crashing thread's stack, copied raw at the moment of the fault.
+///
+/// Raw because this is filled from the fault path, where allocating and
+/// printing are both off the table; `run` names the words afterwards. The
+/// first crash only, since the first is the cause and the rest are the
+/// process coming down around it.
+pub static CRASH: Racy<(bool, u64, usize, [u32; 4096])> = Racy::new((false, 0, 0, [0; 4096]));
+
 pub unsafe fn kill(f: Fault) -> ! {
     let vector = f.regs.vector;
+    {
+        let c = unsafe { &mut *CRASH.get() };
+        if !c.0 && abi32() {
+            let base = f.regs.rsp & !3;
+            let mut n = 0;
+            while n < c.3.len() && reachable(base + n as u64 * 4, 4, false) {
+                c.3[n] = unsafe { core::ptr::read_unaligned((base + n as u64 * 4) as *const u32) };
+                n += 1;
+            }
+            *c = (true, base, n, c.3);
+        }
+    }
     // Copied out before the longjmp, which abandons the stack this arrived on.
     // Into the faulting task's own cell: a child's crash is its parent's to
     // read through `wait4`, and writing it over the session's report would
@@ -5772,14 +7410,31 @@ pub unsafe fn kill(f: Fault) -> ! {
     let t = me();
     unsafe { (*TASK_FAULT.get())[t] = Some(f) };
     if main_task() == Some(t) {
-        unsafe { *LAST_FAULT.get() = Some(f) };
+        unsafe { (*LAST_FAULT.get())[t] = Some(f) };
     }
     unsafe { kill_with(FAULTED | vector) }
 }
 
 /// Record a fault as the session's, for a thread whose crash ends the process.
 pub fn adopt_fault(f: Fault) {
-    unsafe { *LAST_FAULT.get() = Some(f) };
+    if let Some(m) = main_task() {
+        unsafe { (*LAST_FAULT.get())[m.min(crate::task::MAX_TASKS - 1)] = Some(f) };
+    }
+}
+
+/// `exit_group` called by a thread rather than by the main thread: the whole
+/// process ends, as on Linux. The main thread is doomed with the code -- its
+/// end is what tears the session down and dooms every other thread -- and
+/// this thread then leaves the way any `exit` does.
+pub(super) fn exit_group_from_thread(code: u64) {
+    if let Some(m) = main_task() {
+        if m != me() {
+            doom(m, (code & 0xFF) | EXITED);
+            if let Some(s) = super::session::current() {
+                super::session::begin_exit(s);
+            }
+        }
+    }
 }
 
 /// The longjmp both reasons share.
@@ -5809,7 +7464,10 @@ unsafe fn kill_with(code: u64) -> ! {
     // alignment it cannot have.
     unsafe {
         core::arch::asm!(
-            "mov rsp, [rip + GLADOS_HOST_RSP]",
+            "cli",
+            "swapgs",
+            "mov rsp, gs:[16]",
+            "swapgs",
             "pop r15",
             "pop r14",
             "pop r13",
@@ -5829,8 +7487,29 @@ unsafe fn kill_with(code: u64) -> ! {
 /// Jumps to an address derived from a file. Everything in the module docs
 /// about stage 0 containing bugs rather than malice applies here and nowhere
 /// more directly.
-pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
+pub unsafe fn run(entry: u64, stack_top: u64, want: u64, bits32: bool) -> u64 {
+    // A session of its own, which is what lets two of these run at once: its
+    // deadline, its main task, its trace and its processes are its own, and
+    // the end of this one sweeps only them. Callers ask `linux::busy` first,
+    // so running out here is a race between two starts, answered plainly.
+    let Some(sess) = super::session::claim() else {
+        crate::kprintln!("  every Linux session is in use ({} at once)", super::session::MAX);
+        return 0;
+    };
+    // **And a syscall stack of its own.** The main thread's syscalls ran on
+    // one static 16 KiB stack, which is correct for exactly one session: a
+    // second main thread blocked in a syscall beside the first would be
+    // pushing onto the frame the first is suspended in.
+    let sys_layout = core::alloc::Layout::from_size_align(16 * 1024, 16).unwrap();
+    let sys_stack = unsafe { alloc::alloc::alloc(sys_layout) };
+    if sys_stack.is_null() {
+        super::session::release(sess);
+        return 0;
+    }
     arm();
+    unsafe {
+        (*core_entry()).syscall_stack = sys_stack as u64 + 16 * 1024;
+    };
     // The guest is about to be allowed to write `FS`, and `FS` is a register
     // of this machine that the kernel goes on using afterwards. Parked here
     // rather than inside `arch_prctl`, so a guest that sets it forty times
@@ -5850,17 +7529,20 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
         core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags))
     };
     unsafe {
-        *LAST_FAULT.get() = None;
-        *FAULT_AT.get() = None;
-        *FAULT_REGS.get() = None;
+        (*LAST_FAULT.get())[me()] = None;
+        (*FAULT_AT.get())[me()] = None;
+        (*FAULT_REGS.get())[me()] = None;
+        (*FAULT_STACK.get())[me()] = None;
+        (*MAP_NAMES.get()).clear();
     }
-    GUEST_RUNNING.store(true, Ordering::Relaxed);
     // Zero means no deadline, and `overran` already reads a zero `DEADLINE`
     // as "nothing to enforce", so the two agree without a second condition.
-    let want = limit();
-    DEADLINE.store(
+    // The caller chooses: a foreground run passes `limit()`, a background job
+    // passes zero, because a job runs on its own task and a runaway there
+    // costs a share of a core rather than the shell.
+    super::session::set_deadline(
+        sess,
         if want == 0 { 0 } else { crate::dev::lapic::ticks() + want },
-        Ordering::Relaxed,
     );
     // Scheduled input is measured from here, which is the only moment that
     // means anything to it: a script armed at the prompt has no idea how long
@@ -5874,10 +7556,19 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
     // longjmp back to, and the main thread returns onto a stack that is not
     // its own.
     crate::task::ring3_active(true, unsafe {
-        core::ptr::read(core::ptr::addr_of!(GLADOS_SYSCALL_STACK))
+        (*core_entry()).syscall_stack
     });
-    MAIN_TASK.store(me(), Ordering::Relaxed);
-    let code = as_guest(|| unsafe { glados_enter_guest(entry, stack_top) });
+    super::session::set_main(sess, me(), current_guest());
+    super::session::enter(sess);
+    super::i386::begin(bits32);
+    let code = as_guest(|| unsafe {
+        if bits32 {
+            super::i386::glados_enter_guest32(entry, stack_top)
+        } else {
+            glados_enter_guest(entry, stack_top)
+        }
+    });
+    super::i386::begin(false);
     crate::task::ring3_active(false, 0);
     // **Every thread has to be gone before the space is.** A child still
     // running would be reading regions `teardown` is about to hand back, and
@@ -5893,17 +7584,16 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
     // had already cleared the flag. `SIGKILL`, as a terminal hangup ends a
     // shell's jobs. A child that does not notice inside the bound is still
     // doomed, and the timer ends it at its next tick at ring 3.
-    super::thread::begin_exit();
-    super::fork::doom_all(SIGNALED | 9);
+    super::session::begin_exit(sess);
+    super::thread::doom_session(sess, code | EXITED);
+    super::fork::doom_all(sess, SIGNALED | 9);
     let give_up = crate::dev::lapic::ticks() + 200;
-    while (super::thread::live() > 0 || super::fork::live() > 0)
+    while (super::thread::live_in(sess) > 0 || super::fork::live_in(sess) > 0)
         && crate::dev::lapic::ticks() < give_up
     {
-        crate::task::yield_now();
+        wait_turn();
     }
-    MAIN_TASK.store(usize::MAX, Ordering::Relaxed);
-    DEADLINE.store(0, Ordering::Relaxed);
-    GUEST_RUNNING.store(false, Ordering::Relaxed);
+    super::session::set_deadline(sess, 0);
     if flags & (1 << 9) != 0 {
         crate::cpu::enable_interrupts();
     }
@@ -5911,9 +7601,9 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
     // reads. This is the only point where the fault and the map it has to be
     // read against are both alive.
     unsafe {
-        *FAULT_AT.get() =
+        (*FAULT_AT.get())[me()] =
             last_fault().map(|f| (locate(f.regs.rip), locate(f.cr2), locate(f.regs.rsp)));
-        *FAULT_REGS.get() = last_fault().map(|f| {
+        (*FAULT_REGS.get())[me()] = last_fault().map(|f| {
             let g = f.regs;
             [
                 ("rax", g.rax), ("rbx", g.rbx), ("rcx", g.rcx),
@@ -5926,24 +7616,96 @@ pub unsafe fn run(entry: u64, stack_top: u64) -> u64 {
             .map(|(n, v)| (n, v, locate(v)))
             .collect()
         });
-        *FAULT_STACK.get() = last_fault().and_then(|f| {
-            let base = f.regs.rsp & !7;
+        (*FAULT_STACK.get())[me()] = last_fault().and_then(|f| {
+            // A 32-bit guest's stack is 4-byte words, and reading it 8 at a
+            // time pairs every return address with its neighbour. Deep, and
+            // filtered to words that land in a mapped file: those are the
+            // candidate return addresses, which is the backtrace a program
+            // that called `abort` has no other way to leave behind.
+            let w = if abi32() { 4u64 } else { 8 };
+            let base = f.regs.rsp & !(w - 1);
             let mut out = Vec::new();
-            for i in 0..24u64 {
-                let at = base + i * 8;
-                // Read only what the guest actually owns and can be read: the
-                // stack pointer of a program that died badly is not
-                // necessarily a stack pointer.
-                if !reachable(at, 8, false) {
-                    continue;
+            for i in 0..2048u64 {
+                let at = base + i * w;
+                if !reachable(at, w as usize, false) {
+                    break;
                 }
-                let v = core::ptr::read_unaligned(at as *const u64);
-                out.push((at, v, locate(v)));
+                let v = if w == 4 {
+                    core::ptr::read_unaligned(at as *const u32) as u64
+                } else {
+                    core::ptr::read_unaligned(at as *const u64)
+                };
+                if let Some(n) = name_code(v) {
+                    out.push((at, v, n));
+                    if out.len() >= 48 {
+                        break;
+                    }
+                }
             }
             (!out.is_empty()).then_some(out)
         });
+        // Where, as well as the stack: a background job has no `linux run`
+        // to print the fault afterwards, so it is said here, once.
+        if let Some(f) = last_fault() {
+            crate::kprintln!(
+                "  fault {:#04x} at rip {:#x} ({}), reaching for {:#x} ({}), error {:#x}",
+                f.regs.vector, f.regs.rip,
+                name_code(f.regs.rip).unwrap_or_else(|| locate(f.regs.rip)),
+                f.cr2, locate(f.cr2), f.regs.err
+            );
+        }
+        if let (Some(sid), Some(_)) = (super::session::current(), last_fault()) {
+            let tail = super::session::peek_tail(sid);
+            crate::kprintln!("  the session's last calls:");
+            for c in tail.iter().rev().take(25).rev() {
+                crate::kprintln!(
+                    "    {:<16} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} -> {:#x}",
+                    name_of(c.nr), c.args[0], c.args[1], c.args[2], c.args[3], c.args[4], c.args[5], c.ret
+                );
+            }
+        }
+        if let Some(ws) = (*FAULT_STACK.get())[me()].as_ref() {
+            crate::kprintln!("  return addresses on the stack:");
+            for (at, v, n) in ws {
+                crate::kprintln!("    {:#010x}: {:#010x} {}", at, v, n);
+            }
+        }
+        let c = &mut *CRASH.get();
+        if c.0 {
+            crate::kprintln!("  the first crash's stack, from {:#x}:", c.1);
+            let mut shown = 0;
+            for i in 0..c.2 {
+                if let Some(n) = name_code(c.3[i] as u64) {
+                    crate::kprintln!("    +{:#06x}: {:#010x} {}", i * 4, c.3[i], n);
+                    shown += 1;
+                    if shown >= 64 {
+                        break;
+                    }
+                }
+            }
+            c.0 = false;
+        }
     }
     teardown();
+    // The session's trace becomes this task's, for whoever ran it to read.
+    let tail = super::session::take_tail(sess);
+    if MISSES.load(Ordering::Relaxed) && !tail.is_empty() {
+        crate::kprintln!("  the last {} call(s):", tail.len());
+        for c in &tail {
+            match c.path() {
+                Some(p) => crate::kprintln!("  {:>4} {:<16} {} -> {}", c.nr & !(1 << 31), name_of(c.nr), p, c.ret as i64),
+                None => crate::kprintln!(
+                    "  {:>4} {:<16} {:#x} {:#x} {:#x} {:#x} -> {}",
+                    c.nr & !(1 << 31), name_of(c.nr), c.args[0], c.args[1], c.args[2], c.args[3], c.ret as i64
+                ),
+            }
+        }
+    }
+    unsafe { (*TASK_TRACE.get())[me()] = super::session::take_trace(sess) };
+    super::session::leave();
+    super::session::release(sess);
+    // After `leave`: nothing can enter a syscall on this stack any more.
+    unsafe { alloc::alloc::dealloc(sys_stack, sys_layout) };
     code
 }
 
@@ -6050,10 +7812,15 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // claim that earns its place is the failure mode: Linux answers the
     // *unchanged* break rather than an error, and an implementation returning
     // -ENOMEM would hand libc 0xFFFFFFFFFFFFFFF4 as a heap address.
-    {
-        let region = 0x10_0000u64;
+    //
+    // **Real pages, because growing the break now writes.** A grown break
+    // reads as zero, as Linux's does, and this check's region used to be a
+    // fake at `0x100000` -- so the first `brk` past the old break zeroed 8 KiB
+    // of whatever the machine keeps there, and `diag linux` took QEMU down
+    // with no message at all.
+    if let Some(region) = alloc_pages(4096 * 4) {
         let fake = Region { at: region, len: 4096 * 4 };
-        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         let first = sys_brk(0);
         let grown = sys_brk(region + 8192);
         let refused = sys_brk(region + 1_000_000);
@@ -6071,6 +7838,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         // Teardown would wrmsr FS from a Space whose saved value is zero, and
         // this check installed one by hand rather than through `run`.
         unsafe { *guest_slot() = None };
+        free_pages(region, 4096 * 4);
     }
 
     // mmap's refusals, and the two shapes that stopped being refusals. Two of
@@ -6078,7 +7846,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // than about the call, which is why they went the way `ET_EXEC` went.
     {
         let fake = Region { at: 0x10_0000, len: 4096 };
-        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         out.push((
             "a zero-length mapping is EINVAL, as Linux has it",
             sys_mmap(0, 0, 3, MAP_ANONYMOUS, u64::MAX, 0) == EINVAL,
@@ -6122,7 +7890,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; SYSINFO_LEN];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: SYSINFO_LEN };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
 
         let bare = sys_time(0);
         let through = sys_time(at);
@@ -6178,7 +7946,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; 64];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 64 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         out.push((
             "pread on a stream is ESPIPE, the same answer lseek gives it",
             sys_pread64(0, at, 8, 0) == ESPIPE,
@@ -6207,7 +7975,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0xAAu8; 160];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 160 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         name_guest(&["/tmp/g/bb"], "/tmp/g/bb", None);
         // Three separate strings rather than one rewritten in place: the last
         // time claims here shared a buffer, the first one's write took the NUL
@@ -6269,7 +8037,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // on its own code.
     if let Some(two) = alloc_pages(8192) {
         let mine = Region { at: two, len: 8192 };
-        install(Regions { image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         let reserved =
             sys_mmap(two, 8192, 0, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0) == two;
         let gone = crate::mem::paging::query(two).is_some_and(|p| !p.present);
@@ -6295,7 +8063,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; 144];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 144 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         // The empty path has to live *inside* what the guest owns, because
         // `read_cstr` bounds-checks it like any other guest pointer. Pointing
         // at a local outside the region answered `EFAULT` before any of the
@@ -6333,7 +8101,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; 512];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 512 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
 
         // Three disjoint slices of the one region: the paths have to live
         // inside what the guest owns, because `read_cstr` bounds-checks them
@@ -6375,13 +8143,22 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             "an absolute path ignores dirfd, so a closed one is not an error",
             sys_statat(99, abs_p, sbuf, 0) == 0,
         ));
-        // `..` is still refused, and that has to survive the new base: a tree
-        // with O(1) copies has no single parent to walk back to, so a relative
-        // path cannot be used to climb out of the directory it was opened on.
+        // `..` is lexical: it drops the previous component of the path as
+        // written. It was refused, on the grounds that a tree with O(1) copies
+        // has no single parent -- true of a node, and beside the point for a
+        // path, which names its parent in its own text. The refusal cost a
+        // real program its data directory: the Source engine resolves
+        // `bin/../game` and reported its game as not installed.
         put(32, "../lib/geom.ai&xi", &mut buf);
         out.push((
-            "a relative path may not climb out with .. , as resolve refuses it",
-            sys_statat(fd, rel_p, sbuf, 0) == ENOENT,
+            "a relative path may step back with .. , which drops a component",
+            sys_statat(fd, rel_p, sbuf, 0) == 0,
+        ));
+        // And it cannot climb past the root, which is where Linux stops too.
+        put(32, "../../../../lib/geom.ai&xi", &mut buf);
+        out.push((
+            "and stepping back past the root stays at the root",
+            sys_statat(fd, rel_p, sbuf, 0) == 0,
         ));
         teardown();
     }
@@ -6399,7 +8176,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut buf = [0u8; 32];
         let at = buf.as_mut_ptr() as u64;
         let owned = Region { at, len: 32 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
 
         // 50 ms as a timespec, which at TIMER_HZ is five ticks.
         buf[0..8].copy_from_slice(&0u64.to_le_bytes());
@@ -6431,7 +8208,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     if let Some(two) = alloc_pages(8192) {
         let img = Region { at: two, len: 4096 };
         let interp = Region { at: two + 4096, len: 4096 };
-        install(Regions { image: img, stack: img, brk: img, interp: Some(interp), image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: img, stack: img, brk: img, interp: Some(interp), image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         // PROT_READ. A real `ld.so` does exactly this to its own RELRO, which
         // is how the page that halted the machine got its rights.
         let asked = sys_mprotect(two + 4096, 4096, 1) == 0;
@@ -6452,10 +8229,27 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // pointing at 0x100000 would mark the low megabyte.
     if let Some(own) = alloc_pages(8192) {
         let mine = Region { at: own, len: 8192 };
-        install(Regions { image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: mine, stack: mine, brk: mine, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
+        unsafe { core::ptr::write_bytes(own as *mut u8, 0xA5, 8192) };
         out.push((
             "MAP_FIXED over memory the guest already holds answers that address",
             sys_mmap(own, 4096, 3, MAP_ANONYMOUS | MAP_FIXED, u64::MAX, 0) == own,
+        ));
+        // glibc's `calloc` trusts this: a `.bss` or a re-laid arena that kept
+        // its last tenant's bytes is a zeroed structure full of stale pointers.
+        let page = |at: u64| unsafe { core::slice::from_raw_parts(at as *const u8, 4096) };
+        out.push((
+            "and the anonymous memory laid there reads as zero, as Linux's would",
+            page(own).iter().all(|&b| b == 0) && page(own + 4096).iter().all(|&b| b == 0xA5),
+        ));
+        unsafe { core::ptr::write_bytes(own as *mut u8, 0x5A, 4096) };
+        out.push((
+            "MADV_DONTNEED on anonymous memory leaves it reading as zero",
+            sys_madvise(own, 4096, 4) == 0 && page(own).iter().all(|&b| b == 0),
+        ));
+        out.push((
+            "and every other advice is accepted and changes nothing",
+            sys_madvise(own + 4096, 4096, 3) == 0 && page(own + 4096).iter().all(|&b| b == 0xA5),
         ));
         out.push((
             "and records nothing, because something already holds those pages",
@@ -6470,7 +8264,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 
     {
         let fake = Region { at: 0x10_0000, len: 4096 };
-        install(Regions { image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: fake, stack: fake, brk: fake, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
 
         let at = sys_mmap(0, 8192, 3, MAP_ANONYMOUS, u64::MAX, 0);
         let got = (at as i64) > 0 && at % 4096 == 0;
@@ -6479,8 +8273,8 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let zeroed = got && unsafe { core::slice::from_raw_parts(at as *const u8, 8192) }.iter().all(|b| *b == 0);
         out.push(("an anonymous mapping is page-aligned and zeroed", got && zeroed));
         out.push((
-            "a partial unmap is refused rather than approximated",
-            sys_munmap(at, 4096) == EINVAL,
+            "a partial unmap is accepted and keeps the pages, since the heap cannot free part of one",
+            sys_munmap(at, 4096) == 0,
         ));
         out.push(("unmapping the whole thing gives it back", sys_munmap(at, 8192) == 0));
         out.push((
@@ -6497,7 +8291,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         // GET_FS writes eight bytes through a guest pointer, so it is bounds
         // checked now, so the destination has to be a range the guest owns.
         let owned = Region { at, len: 8 };
-        install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         let was = unsafe { crate::cpu::rdmsr(IA32_FS_BASE) };
         let set = sys_arch_prctl(ARCH_SET_FS, 0xDEAD_0000);
         let got = sys_arch_prctl(ARCH_GET_FS, at);
@@ -6529,7 +8323,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         let mut backing = [0u64; 64];
         let at = backing.as_mut_ptr() as u64;
         let one = Region { at, len: 512 };
-        install(Regions { image: one, stack: one, brk: one, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+        install(Regions { arena_extra: [(0, 0); 7], image: one, stack: one, brk: one, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
         out.push(("a range inside what the loader gave out is owned", owns(at, 8)));
         out.push(("a range that runs off the end is not", !owns(at + 508, 8)));
         out.push(("a range below it is not", !owns(at - 8, 8)));
@@ -6565,7 +8359,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             if !mem.is_null() {
                 let at = mem as u64;
                 let owned = Region { at, len: 4096 };
-                install(Regions { image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false }, None);
+                install(Regions { arena_extra: [(0, 0); 7], image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
                 out.push(("a page the guest owns starts reachable", reachable(at, 8, true)));
                 out.push((
                     "mprotect to PROT_NONE is accepted",
@@ -6612,16 +8406,21 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             build_stack(p, p as u64, 64, &["x"], Aux::default()).is_none()
         },
     ));
-    let mut big = [0u8; 512];
+    // Room for whatever `linux env` has added, which this frame carries: at
+    // 512 bytes these claims passed on a fresh boot and failed after a game's
+    // environment had been set, which is a claim about the shell's history
+    // rather than about the frame.
+    const BIG: usize = 8192;
+    let mut big = alloc::vec![0u8; BIG];
     let aux = Aux { phdr: 0x1000, phent: 56, phnum: 2, entry: 0x1078, base: 0 };
     let sp = {
         let p = big.as_mut_ptr();
-        build_stack(p, p as u64, 512, &["cat", "/ai/about"], aux)
+        build_stack(p, p as u64, BIG, &["cat", "/ai/about"], aux)
     };
     out.push((
         "and one large enough answers a 16-byte-aligned pointer inside itself",
         sp.is_some_and(|v| v % 16 == 0 && v >= big.as_ptr() as u64
-            && v < big.as_ptr() as u64 + 512),
+            && v < big.as_ptr() as u64 + BIG as u64),
     ));
     out.push((
         "argc and the argv pointers are where the ABI says, and the strings are real",
@@ -6687,17 +8486,17 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push((
         "AT_RANDOM points at sixteen bytes inside this stack, since libc reads its guard there",
         auxv(AT_RANDOM).is_some_and(|r| {
-            r >= big.as_ptr() as u64 && r + 16 <= big.as_ptr() as u64 + 512
+            r >= big.as_ptr() as u64 && r + 16 <= big.as_ptr() as u64 + BIG as u64
         }),
     ));
     out.push((
         "a header table no segment covers omits the whole group rather than pointing at nothing",
         {
-            let mut small = [0u8; 512];
+            let mut small = alloc::vec![0u8; BIG];
             let none = Aux { phdr: 0, phent: 56, phnum: 2, entry: 0, base: 0 };
             let s2 = {
                 let p = small.as_mut_ptr();
-                build_stack(p, p as u64, 512, &["x"], none)
+                build_stack(p, p as u64, BIG, &["x"], none)
             };
             s2.is_some_and(|v| unsafe {
                 let p = v as *const u64;
@@ -6903,6 +8702,32 @@ pub fn build_stack(
     args: &[&str],
     aux: Aux,
 ) -> Option<u64> {
+    build_stack_w(base, guest_base, size, args, aux, 8)
+}
+
+/// The same stack in 4-byte words, for a 32-bit guest: argc, every pointer and
+/// every auxiliary pair are the width of the guest's `long`. One builder with a
+/// width rather than two copies, because the layout -- strings at the top, the
+/// random bytes under them, argc at the stack pointer -- is the part the ABI
+/// fixes and two copies of it are two chances to disagree.
+pub fn build_stack32(
+    base: *mut u8,
+    guest_base: u64,
+    size: usize,
+    args: &[&str],
+    aux: Aux,
+) -> Option<u64> {
+    build_stack_w(base, guest_base, size, args, aux, 4)
+}
+
+fn build_stack_w(
+    base: *mut u8,
+    guest_base: u64,
+    size: usize,
+    args: &[&str],
+    aux: Aux,
+    word: usize,
+) -> Option<u64> {
     let bottom = base as usize;
     let mut top = bottom.checked_add(size)?;
     // Where the guest will see an address the kernel is writing at.
@@ -6991,33 +8816,41 @@ pub fn build_stack(
     // eight bytes. It read as an alignment fix and was a tautology, which is
     // the more expensive kind of dead code because it stops anybody looking.
     let words = 1 + ptrs.len() + 1 + envs.len() + 1 + pairs.len() * 2;
-    let sp = top.checked_sub(words * 8)? & !0xF;
+    let sp = top.checked_sub(words * word)? & !0xF;
     if sp < bottom {
         return None;
     }
-    unsafe {
-        let p = sp as *mut u64;
-        p.write(ptrs.len() as u64);
-        for (i, v) in ptrs.iter().enumerate() {
-            p.add(1 + i).write(*v);
+    // A word at index `i`, at the guest's own width.
+    let put_w = |i: usize, v: u64| unsafe {
+        if word == 4 {
+            (sp as *mut u32).add(i).write(v as u32);
+        } else {
+            (sp as *mut u64).add(i).write(v);
         }
-        p.add(1 + ptrs.len()).write(0); // argv terminator
-        let e0 = 2 + ptrs.len();
-        for (i, v) in envs.iter().enumerate() {
-            p.add(e0 + i).write(*v);
-        }
-        p.add(e0 + envs.len()).write(0); // envp terminator
-        let a0 = e0 + envs.len() + 1;
-        for (i, (k, v)) in pairs.iter().enumerate() {
-            p.add(a0 + i * 2).write(*k);
-            p.add(a0 + i * 2 + 1).write(*v);
-        }
+    };
+    put_w(0, ptrs.len() as u64);
+    for (i, v) in ptrs.iter().enumerate() {
+        put_w(1 + i, *v);
+    }
+    put_w(1 + ptrs.len(), 0); // argv terminator
+    let e0 = 2 + ptrs.len();
+    for (i, v) in envs.iter().enumerate() {
+        put_w(e0 + i, *v);
+    }
+    put_w(e0 + envs.len(), 0); // envp terminator
+    let a0 = e0 + envs.len() + 1;
+    for (i, (k, v)) in pairs.iter().enumerate() {
+        put_w(a0 + i * 2, *k);
+        put_w(a0 + i * 2 + 1, *v);
     }
     Some(seen(sp))
 }
 
 /// Name the calls stage 0 knows about, for a trace a person has to read.
 pub fn name_of(nr: u64) -> &'static str {
+    if nr & super::i386::TAG != 0 {
+        return super::i386::name_of(nr & !super::i386::TAG);
+    }
     match nr {
         SYS_READ => "read",
         SYS_WRITE => "write",
@@ -7110,6 +8943,7 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_BRK => "brk",
         SYS_MMAP => "mmap",
         SYS_MPROTECT => "mprotect",
+        SYS_MADVISE => "madvise",
         SYS_MUNMAP => "munmap",
         SYS_EXIT => "exit",
         SYS_ARCH_PRCTL => "arch_prctl",

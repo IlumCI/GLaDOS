@@ -47,8 +47,24 @@ use alloc::vec::Vec;
 /// and both spellings would be the same thing said twice. `self` is what
 /// programs actually use.
 pub fn is_dir(path: &str) -> bool {
-    matches!(path, "/proc" | "/proc/self")
+    matches!(
+        path,
+        "/proc" | "/proc/self" | "/sys" | "/sys/devices" | "/sys/devices/system"
+            | "/sys/devices/system/cpu" | "/sys/devices/system/cpu/cpu0"
+            | "/sys/devices/system/cpu/cpu0/cpufreq"
+    ) || super::drm::sys_is_dir(path)
 }
+
+/// The one `/sys` file there is: the rate the timestamp counter runs at.
+///
+/// **A fact this machine measured**, which is what earns it a file under the
+/// rule above. Boot calibrates the TSC against the PIT, and a program reading
+/// `cpuinfo_max_freq` is almost always doing what Source's `tier0` does with
+/// it -- scaling `rdtsc` into seconds -- for which the TSC's own rate is the
+/// right answer and a turbo ceiling would be the wrong one. Found as the file
+/// the engine asked for immediately before "Unable to determine CPU
+/// Frequency" and exiting.
+const CPU_MAX_FREQ: &str = "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq";
 
 /// Whether this path is one this module answers at all.
 ///
@@ -71,7 +87,8 @@ pub fn is_file(path: &str) -> bool {
     matches!(
         path,
         "/proc/self/exe" | "/proc/self/cmdline" | "/proc/self/environ" | "/proc/self/maps"
-    )
+            | "/proc/meminfo" | CPU_MAX_FREQ
+    ) || super::drm::sys_is_file(path)
 }
 
 /// Where a synthetic symlink points.
@@ -84,7 +101,7 @@ pub fn is_file(path: &str) -> bool {
 pub fn link(path: &str) -> Option<String> {
     match path {
         "/proc/self/exe" => syscall::guest_image(),
-        _ => None,
+        _ => super::drm::sys_link(path),
     }
 }
 
@@ -95,7 +112,11 @@ pub fn read(path: &str) -> Option<Vec<u8>> {
         // and what a program expecting to read its own image relies on.
         "/proc/self/exe" => {
             let real = syscall::guest_image()?;
-            crate::sysbox::read_blob(&real)
+            super::disk::program_bytes(&real)
+        }
+        CPU_MAX_FREQ => {
+            let mhz = crate::time::tsc_mhz();
+            (mhz != 0).then(|| format!("{}\n", mhz * 1000).into_bytes())
         }
         // Both of these are NUL-separated with a trailing NUL, which is the
         // detail that matters: a reader splits on the separator and a missing
@@ -103,7 +124,31 @@ pub fn read(path: &str) -> Option<Vec<u8>> {
         "/proc/self/cmdline" => Some(joined(&syscall::guest_argv())),
         "/proc/self/environ" => Some(joined(&syscall::environ())),
         "/proc/self/maps" => Some(maps().into_bytes()),
-        _ => None,
+        // **Every field here is one this machine knows**, which is what
+        // admits the file under the rule above: total and free are the
+        // kernel heap's, the same figures `sysinfo` already answers, and
+        // buffers, cache and swap are zero because there is no page cache and
+        // no swap -- zero is the true value, not a placeholder. The Source
+        // engine reads this file to size its caches and does not check that
+        // the open worked; without it, it parsed a stream that was never
+        // opened and faulted.
+        "/proc/meminfo" => {
+            let (used, total) = crate::mem::heap::HEAP.stats();
+            let kib = |b: usize| b / 1024;
+            let free = total.saturating_sub(used);
+            Some(
+                format!(
+                    "MemTotal:       {:>8} kB\nMemFree:        {:>8} kB\nMemAvailable:   {:>8} kB\n\
+                     Buffers:               0 kB\nCached:                0 kB\n\
+                     SwapTotal:             0 kB\nSwapFree:              0 kB\n",
+                    kib(total),
+                    kib(free),
+                    kib(free)
+                )
+                .into_bytes(),
+            )
+        }
+        _ => super::drm::sys_read(path),
     }
 }
 
@@ -176,7 +221,7 @@ pub fn entries(dir: &str) -> Vec<(String, bool, usize)> {
         "/proc/self" => {
             alloc::vec![file("exe"), file("cmdline"), file("environ"), file("maps")]
         }
-        _ => Vec::new(),
+        _ => super::drm::sys_entries(dir),
     }
 }
 
@@ -190,7 +235,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     ));
     out.push((
         "and nothing outside them is claimed, so the store still answers for every other path",
-        !claims("/proc/meminfo") && !claims("/proc/stat") && !claims("/tmp/x") && !claims("/"),
+        !claims("/proc/stat") && !claims("/tmp/x") && !claims("/"),
     ));
     // The rule the module exists to hold. `/proc/cpuinfo` and friends are
     // formats whose honest content is mostly "I do not know", and a text file

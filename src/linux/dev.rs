@@ -61,10 +61,17 @@ pub enum Node {
     /// what it is. Naming them `keyboard` and `mouse` would be friendlier and
     /// would mean nothing enumerated them.
     Input(super::input::Dev),
+    /// The ALSA control and playback devices -- see `snd`.
+    Snd(super::snd::Node),
+    /// `/dev/dri/renderD128`, the GPU -- see `drm`.
+    Drm,
+    /// A sync file: a fence the GPU signals, as a descriptor that polls
+    /// readable once it has. Made by a submit, never opened by path.
+    Fence,
 }
 
 pub fn is_dir(path: &str) -> bool {
-    matches!(path, "/dev" | "/dev/input")
+    matches!(path, "/dev" | "/dev/input" | "/dev/snd") || (path == "/dev/dri" && super::drm::present().is_some())
 }
 
 /// Which node a path names, as a pure function of the path.
@@ -81,6 +88,12 @@ pub fn node(path: &str) -> Option<Node> {
         "/dev/fb0" => Some(Node::Fb),
         "/dev/input/event0" => Some(Node::Input(super::input::Dev::Keyboard)),
         "/dev/input/event1" => Some(Node::Input(super::input::Dev::Pointer)),
+        "/dev/snd/controlC0" => Some(Node::Snd(super::snd::Node::Control)),
+        "/dev/snd/pcmC0D0p" => Some(Node::Snd(super::snd::Node::Playback)),
+        // Only when there is a GPU behind it: a render node that opens and
+        // then answers `ENODEV` to everything would be chosen by a library
+        // that would otherwise have fallen back to software.
+        super::drm::NODE if super::drm::present().is_some() => Some(Node::Drm),
         _ => None,
     }
 }
@@ -97,9 +110,15 @@ pub fn entries(dir: &str) -> Vec<(String, bool, usize)> {
             let mut v: Vec<_> =
                 ["fb0", "null", "random", "urandom", "zero"].iter().map(|n| file(n)).collect();
             v.insert(2, ("input".to_string(), true, 0usize));
+            v.push(("snd".to_string(), true, 0usize));
+            if super::drm::present().is_some() {
+                v.insert(0, ("dri".to_string(), true, 0usize));
+            }
             v
         }
+        "/dev/dri" if super::drm::present().is_some() => alloc::vec![file("renderD128")],
         "/dev/input" => alloc::vec![file("event0"), file("event1")],
+        "/dev/snd" => alloc::vec![file("controlC0"), file("pcmC0D0p")],
         _ => Vec::new(),
     }
 }
@@ -111,6 +130,16 @@ pub fn entries(dir: &str) -> Vec<(String, bool, usize)> {
 /// size is doing something legal. Everything else is zero, which is what Linux
 /// reports for a character device and is true here in the sense that matters:
 /// there are no bytes sitting anywhere waiting to be read.
+/// What `stat` reports as `st_rdev`. Only the render node needs a true one:
+/// libdrm finds its `/sys` description from the major and minor, and nothing
+/// that reads the others has been seen to look.
+pub fn rdev(n: Node) -> u64 {
+    match n {
+        Node::Drm => super::drm::RDEV,
+        _ => 0,
+    }
+}
+
 pub fn size(n: Node) -> usize {
     match n {
         Node::Fb => fb().map(|f| f.3).unwrap_or(0),
@@ -311,7 +340,7 @@ pub fn read(n: Node, at: usize, buf: &mut [u8]) -> usize {
         // Read through `sys_read` rather than here, because an event stream
         // needs the descriptor's own cursor advanced and a blocking caller put
         // to sleep, neither of which fits a call that takes an offset.
-        Node::Input(_) => 0,
+        Node::Input(_) | Node::Snd(_) | Node::Drm | Node::Fence => 0,
     }
 }
 
@@ -331,6 +360,7 @@ pub fn write(n: Node, at: usize, buf: &[u8]) -> usize {
         // taken and discarded rather than refused, because a refusal makes a
         // library conclude the device is broken and stop reading it.
         Node::Input(_) => buf.len(),
+        Node::Snd(_) | Node::Drm | Node::Fence => 0,
         Node::Fb => {
             let Some((base, _, _, len, _, _)) = fb() else { return 0 };
             if at >= len {
@@ -367,6 +397,12 @@ pub fn hold_screen(on: bool) {
     if HOLDING.swap(on, Ordering::AcqRel) == on {
         return;
     }
+    // Which session took it, so a *different* session ending does not hand
+    // the screen back from under the one still drawing on it.
+    HOLDER.store(
+        if on { super::session::current().unwrap_or(usize::MAX) } else { usize::MAX },
+        Ordering::Release,
+    );
     if on {
         *GUEST_LEASE.lock_irq() = crate::gfx::lease::take(crate::gfx::lease::Owner::Guest);
         // Blanked on the way in, for the reason `port::with_screen` gives: a
@@ -381,6 +417,19 @@ pub fn hold_screen(on: bool) {
         // order -- the order this function used to have to get right itself.
         let lease = GUEST_LEASE.lock_irq().take();
         drop(lease);
+    }
+}
+
+static HOLDER: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// Give the screen back if session `sess` holds it. `None` -- a teardown with
+/// no session, as the selftests do -- releases it unconditionally, which is
+/// what every teardown did before there was more than one session.
+pub fn release_screen(sess: Option<usize>) {
+    use core::sync::atomic::Ordering;
+    let holder = HOLDER.load(Ordering::Acquire);
+    if sess.is_none() || holder == usize::MAX || Some(holder) == sess {
+        hold_screen(false);
     }
 }
 

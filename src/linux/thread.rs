@@ -52,15 +52,17 @@
 
 use crate::sync::Racy;
 use alloc::alloc::{alloc, Layout};
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// How many guest threads may exist at once.
 ///
-/// Eight against `MAX_TASKS` of 24, leaving room for the shell, the clock, the
-/// resident mind and the agent. A ninth `clone` is `EAGAIN`, which is what
-/// Linux answers when it is out of task structures and what every threading
-/// library already handles.
-pub const MAX_THREADS: usize = 8;
+/// Forty-eight. It was eight, and a GL program on four cores needs that many
+/// before it has started one of its own: llvmpipe runs a rasterizer per core.
+/// See `task::MAX_TASKS` for what that cost. Past the limit `clone` is
+/// `EAGAIN`, which is what Linux answers when it is out of task structures --
+/// and which a library that waits for its new thread to report in does not
+/// always handle, so the limit has to be one a real program does not reach.
+pub const MAX_THREADS: usize = 48;
 
 /// Sixteen KiB, the same as the main guest's, and for the same reason: the
 /// dispatcher is ordinary Rust that formats and prints, so a stack sized for
@@ -103,6 +105,38 @@ pub struct Work {
     /// notification. A thread library given a kernel that ignores this waits
     /// forever on a thread that finished.
     pub ctid: u64,
+    /// The guest entry the thread's process lives in, and its session. A
+    /// thread shares its process's memory, so it must speak for the same
+    /// entry and walk the same tables; `run_thread` installs both.
+    pub guest: usize,
+    pub session: usize,
+    /// A 32-bit thread: every register it resumes with, its TLS descriptors
+    /// and its `%gs`. `None` for a 64-bit one, which resumes with registers
+    /// cleared at `rip`/`rsp` as it always has.
+    pub regs32: Option<Regs32>,
+    pub tls32: [u64; 3],
+    pub gs: u16,
+}
+
+/// What a 32-bit thread resumes with. On i386 a clone's child gets *every*
+/// register its parent had at the `int 0x80`, except `eax` (zero, which is
+/// how it knows it is the child) and `esp` (its new stack) -- glibc's
+/// `clone.S` pops the thread function off the new stack through registers it
+/// expects to find intact. Widened to u64 so the entry stub reads them with
+/// plain loads; offsets are fixed by `glados_enter_guest32_regs`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Regs32 {
+    pub eip: u64,
+    pub esp: u64,
+    pub eflags: u64,
+    pub eax: u64,
+    pub ebx: u64,
+    pub ecx: u64,
+    pub edx: u64,
+    pub esi: u64,
+    pub edi: u64,
+    pub ebp: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -141,18 +175,47 @@ pub fn live() -> usize {
 /// checks on the way into every syscall, which bounds how long a thread
 /// outlives `exit_group` by however long it takes to make one -- and the run
 /// deadline is the backstop for a thread that makes none.
-static EXITING: AtomicU64 = AtomicU64::new(0);
-
+///
+/// **Per session now.** One flag for the machine meant one session's
+/// `exit_group` stopped every other session's threads at their next syscall.
 pub fn exiting() -> bool {
-    EXITING.load(Ordering::Acquire) != 0
+    super::session::current().is_some_and(super::session::exiting)
 }
 
 pub fn begin_exit() {
-    EXITING.store(1, Ordering::Release);
+    if let Some(s) = super::session::current() {
+        super::session::begin_exit(s);
+    }
+}
+
+/// Tell every running thread of session `s` to end itself with `code`.
+///
+/// **Setting `exiting` was never enough on its own.** It makes the next futex
+/// wait answer `EINTR`, and glibc answers `EINTR` from a futex by waiting
+/// again -- so a thread parked in a lock spun forever on a flag that asked it
+/// to stop and gave it no way to, and outlived the memory it was running in.
+/// A doom is the mechanism that actually ends a task: it lands at the next
+/// syscall boundary, in any wait loop's deadline check, or from the timer at
+/// ring 3.
+pub fn doom_session(s: usize, code: u64) {
+    for slot in unsafe { &*SLOTS.get() }.iter() {
+        if slot.live && slot.work.is_some_and(|w| w.session == s) {
+            if let Some(t) = slot.task {
+                super::syscall::doom(t, code);
+            }
+        }
+    }
+}
+
+/// How many threads of session `s` are running, its main thread excluded.
+pub fn live_in(s: usize) -> usize {
+    unsafe { &*SLOTS.get() }
+        .iter()
+        .filter(|x| x.live && x.work.is_some_and(|w| w.session == s))
+        .count()
 }
 
 pub fn reset() {
-    EXITING.store(0, Ordering::Release);
     LIVE.store(0, Ordering::Release);
     let s = unsafe { &mut *SLOTS.get() };
     for slot in s.iter_mut() {
@@ -175,7 +238,6 @@ pub fn is_thread(flags: u64) -> bool {
 
 /// Start a thread. Answers its tid, or an errno.
 pub fn spawn(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64, rip: u64) -> Result<u64, u64> {
-    const EAGAIN: u64 = (-11i64) as u64;
     const EINVAL: u64 = (-22i64) as u64;
     if stack == 0 || stack % 16 != 0 {
         // Linux does not check this and a misaligned stack is a `movaps` fault
@@ -191,7 +253,37 @@ pub fn spawn(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64, rip: u64) -
         fs: if flags & CLONE_SETTLS != 0 { tls } else { 0 },
         tid,
         ctid: if flags & CLONE_CHILD_CLEARTID != 0 { ctid } else { 0 },
+        guest: super::syscall::current_guest(),
+        session: super::session::current().unwrap_or(usize::MAX),
+        regs32: None,
+        tls32: [0; 3],
+        gs: 0,
     };
+    start(work, flags, ptid)
+}
+
+/// A 32-bit thread, for `linux::i386`'s `clone`.
+pub fn spawn32(flags: u64, ptid: u64, ctid: u64, regs: Regs32, tls32: [u64; 3], gs: u16) -> Result<u64, u64> {
+    let tid = super::fork::next_id();
+    let work = Work {
+        rip: regs.eip,
+        rsp: regs.esp,
+        fs: 0,
+        tid,
+        ctid: if flags & CLONE_CHILD_CLEARTID != 0 { ctid } else { 0 },
+        guest: super::syscall::current_guest(),
+        session: super::session::current().unwrap_or(usize::MAX),
+        regs32: Some(regs),
+        tls32,
+        gs,
+    };
+    start(work, flags, ptid)
+}
+
+/// Give `work` a pool slot and a task, whichever width it is.
+fn start(work: Work, flags: u64, ptid: u64) -> Result<u64, u64> {
+    const EAGAIN: u64 = (-11i64) as u64;
+    let tid = work.tid;
 
     let idx = {
         let s = unsafe { &mut *SLOTS.get() };
@@ -273,7 +365,11 @@ pub fn current_tid() -> u64 {
 /// Where a guest thread's `clone` is answered and its life is spent.
 fn body() {
     loop {
+        // Under the guest lock: `clone` fills this slot from a syscall,
+        // possibly on another core.
+        crate::linux::syscall::big_lock();
         let work = my_slot().and_then(|i| unsafe { (*SLOTS.get())[i].work });
+        crate::linux::syscall::big_unlock();
         let Some(w) = work else {
             // Parked. `hlt` rather than a spin, so an idle pool costs one
             // wake-up per timer tick instead of every scheduler round.

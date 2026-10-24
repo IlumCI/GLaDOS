@@ -237,3 +237,22 @@ statistics described in words.
 
 The voice itself (`src/voice/synth.rs`) is a formant synthesiser written
 here; no recording of any speaker was used to build it.
+
+## Keyboard map (from 1.4.3)
+
+`assets/xkb/us.xkb` is a US keymap compiled from xkeyboard-config 2.48 with
+`xkbcli compile-keymap --rules evdev --model pc105 --layout us`. Skywalker
+sends it to Wayland clients as the `wl_keyboard` keymap. xkeyboard-config is
+the work of many contributors under several permissive notices of the X11
+kind; every one of them is reproduced in `licenses/xkeyboard-config.txt`, as
+they ask. The first, representative of the rest:
+
+    Permission to use, copy, modify, distribute, and sell this software and
+    its documentation for any purpose is hereby granted without fee, provided
+    that the above copyright notice appear in all copies and that both that
+    copyright notice and this permission notice appear in supporting
+    documentation, and that the name of the copyright holder(s) not be used
+    in advertising or publicity pertaining to distribution of the software
+    without specific, written prior permission. The copyright holder(s) makes
+    no representations about the suitability of this software for any
+    purpose. It is provided "as is" without express or implied warranty.

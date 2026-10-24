@@ -103,6 +103,83 @@ const GUEST_BRK: usize = 256 * 1024;
 /// image this loader will place -- chosen so the spacing does not have to be
 /// revisited the first time somebody raises that cap.
 const GUEST_IMAGE_AT: u64 = crate::mem::space::WINDOW + 0x1000_0000;
+
+/// Where each of a guest's regions goes. Fixed per ABI rather than chosen, for
+/// the reason the 64-bit constants give: `fork` hands a child its parent's
+/// memory at the same addresses.
+#[derive(Clone, Copy)]
+pub struct Layout {
+    pub image: u64,
+    pub interp: u64,
+    pub brk: u64,
+    pub stack: u64,
+    /// The `mmap` arena, and where it must stop.
+    pub mmap: u64,
+    pub mmap_end: u64,
+    /// Further holes, handed to the arena's free list as they are.
+    pub extra: [(u64, u64); 7],
+}
+
+const LAYOUT64: Layout = Layout {
+    image: GUEST_IMAGE_AT,
+    interp: GUEST_INTERP_AT,
+    brk: GUEST_BRK_AT,
+    stack: GUEST_STACK_AT,
+    mmap: syscall::GUEST_MMAP_AT,
+    mmap_end: crate::mem::space::WINDOW * 2,
+    extra: [(0, 0); 7],
+};
+
+/// A 32-bit guest's layout, inside the hole below 4 GiB.
+///
+/// **Everything a 32-bit program can name is below 4 GiB, and in this kernel
+/// those addresses are physical memory.** So it lives where `fixed::hole32`
+/// found nothing at all -- no RAM of any kind, no device -- and its own tables
+/// map heap pages there. The hole is measured on every load rather than once,
+/// because the bus can change (a device woken by `gpu wake` brings BARs).
+///
+/// Image, interpreter and break at the bottom, the stack at the top with a
+/// megabyte of nothing above and below it, and the arena between them.
+fn layout32() -> Result<Layout, &'static str> {
+    let ecam = crate::net::ecam().ok_or("no PCI configuration space, so devices cannot be avoided")?;
+    let mut devs = crate::dev::pci::bars32_ranges(ecam);
+    // Configuration space, a megabyte a bus.
+    devs.push((ecam, ecam + 256 * 0x10_0000));
+    if let Some((base, _, _, len, _, _)) = super::dev::fb() {
+        devs.push((base, base + len as u64));
+    }
+    let holes = crate::mem::fixed::holes32(&devs);
+    crate::mem::fixed::set_holes32(&holes);
+    let total: u64 = holes.iter().map(|(a, e)| e - a).sum();
+    crate::kprintln!(
+        "  32-bit address space: {} hole(s) below 4 GiB, {} MiB, largest {} MiB",
+        holes.len(), total >> 20, holes.first().map(|(a, e)| (e - a) >> 20).unwrap_or(0)
+    );
+    let hole = holes.first().copied();
+    let (lo, hi) = hole.ok_or(
+        "nothing below 4 GiB is free of memory and devices -- under QEMU, \
+         -machine max-ram-below-4g=1G leaves a hole a 32-bit guest can use",
+    )?;
+    if hi - lo < 0x2000_0000 {
+        return Err("the hole below 4 GiB is under 512 MiB, too small for a 32-bit guest");
+    }
+    let stack = hi - 0x10_0000 - GUEST_STACK as u64;
+    Ok(Layout {
+        image: lo,
+        interp: lo + 0x0400_0000,
+        brk: lo + 0x0800_0000,
+        stack,
+        mmap: lo + 0x0900_0000,
+        mmap_end: stack - 0x10_0000,
+        extra: {
+            let mut e = [(0u64, 0u64); 7];
+            for (i, h) in holes.iter().skip(1).take(7).enumerate() {
+                e[i] = *h;
+            }
+            e
+        },
+    })
+}
 const GUEST_INTERP_AT: u64 = crate::mem::space::WINDOW + 0x2000_0000;
 const GUEST_BRK_AT: u64 = crate::mem::space::WINDOW + 0x3000_0000;
 const GUEST_STACK_AT: u64 = crate::mem::space::WINDOW + 0x4000_0000;
@@ -200,6 +277,9 @@ pub struct Guest {
     /// `/proc/self/exe`, neither of which is answerable once the stack the
     /// kernel built has been handed over.
     pub argv: Vec<alloc::string::String>,
+    /// A 32-bit program, entered through the compatibility code segment and
+    /// served by `int 0x80`.
+    pub bits32: bool,
 }
 
 /// One image in memory: what it said about itself and where it went.
@@ -372,7 +452,9 @@ fn map_image(s: &mut crate::mem::space::Space, im: &Image) -> Result<(), &'stati
         // `map_page` is right and `map_low`'s `is_free` question would be
         // asked of physical memory that does not exist. Below it -- a fixed
         // image at `0x400000` -- the question is real and has to be asked.
-        let ok = if at + off >= crate::mem::space::WINDOW {
+        let ok = if at + off >= crate::mem::space::WINDOW
+            || crate::mem::fixed::in_hole(at + off, 4096)
+        {
             s.map_page(at + off, phys + off, true, true)
         } else {
             s.map_low(at + off, phys + off, true, true).is_ok()
@@ -390,6 +472,20 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
     // A space is needed *before* placement, because a fixed image backed by
     // heap pages has to be mapped into one and there is nowhere else to put
     // that mapping.
+    let bits32 = elf::parse(bytes).map(|i| i.bits32).unwrap_or(false);
+    let lay = if bits32 {
+        // A 32-bit guest has nowhere to live without a space of its own: its
+        // addresses are physical memory in the kernel's map.
+        if !own_space() {
+            return Err("a 32-bit guest needs a space of its own ('linux space on')");
+        }
+        if !crate::cpu::percpu::owns_gs_freely() {
+            return Err("this processor has neither rdpid nor rdtscp, so a 32-bit guest's GS would be the kernel's");
+        }
+        layout32()?
+    } else {
+        LAYOUT64
+    };
     let mut space = if own_space() {
         match crate::mem::space::Space::sharing_kernel() {
             Some(s) => Some(s),
@@ -400,7 +496,7 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
     };
     let virt = space.is_some();
 
-    let prog = place(bytes, virt.then_some(GUEST_IMAGE_AT))?;
+    let prog = place(bytes, virt.then_some(lay.image))?;
     let (img, base, lo, span) = (&prog.img, prog.base, prog.lo, prog.span);
 
     // The interpreter, if the program named one. Read through `sysbox` rather
@@ -410,9 +506,13 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
     let interp = match img.interp.as_deref() {
         None => None,
         Some(path) => {
-            let bytes = crate::sysbox::read_blob(path)
+            let bytes = super::disk::program_bytes(path)
                 .ok_or("the interpreter this binary names is not in the namespace")?;
-            let p = place(&bytes, virt.then_some(GUEST_INTERP_AT))?;
+            let p = place(&bytes, virt.then_some(lay.interp))?;
+            // Both halves of one process speak one ABI.
+            if p.img.bits32 != bits32 {
+                return Err("the interpreter is not the same width as the program");
+            }
             // An interpreter that itself wants an interpreter is refused
             // rather than followed. Nothing real does it, the recursion has no
             // natural bound, and a loader that chased it would run out of
@@ -444,7 +544,7 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
     let (stack_at, brk_at) = match space.as_mut() {
         Some(sp) => {
             for (backing, at, len) in
-                [(stack.addr(), GUEST_STACK_AT, GUEST_STACK), (brk.addr(), GUEST_BRK_AT, GUEST_BRK)]
+                [(stack.addr(), lay.stack, GUEST_STACK), (brk.addr(), lay.brk, GUEST_BRK)]
             {
                 let mut off = 0u64;
                 while off < len as u64 {
@@ -454,7 +554,7 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
                     off += 4096;
                 }
             }
-            (GUEST_STACK_AT, GUEST_BRK_AT)
+            (lay.stack, lay.brk)
         }
         None => (stack.addr(), brk.addr()),
     };
@@ -478,7 +578,8 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
             .find(|s| img.phoff >= s.offset && end <= s.offset + s.filesz)
             .map(|s| base + (s.vaddr - lo) + (img.phoff - s.offset) as u64)
     });
-    let stack_top = syscall::build_stack(
+    let build = if bits32 { syscall::build_stack32 } else { syscall::build_stack };
+    let stack_top = build(
         stack.addr() as *mut u8,
         stack_at,
         GUEST_STACK,
@@ -523,6 +624,10 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
             interp_mapped: matches!(interp_hold, Some(Image::Mapped { .. })),
             stack_mapped: virt,
             brk_mapped: virt,
+            bits32,
+            mmap_at: lay.mmap,
+            mmap_end: lay.mmap_end,
+            arena_extra: lay.extra,
         },
         space,
         _image: prog.hold,
@@ -539,6 +644,7 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
         },
         span,
         segments,
+        bits32,
     })
 }
 
@@ -570,7 +676,7 @@ pub fn own_space() -> bool {
 /// 0 has no isolation of any kind: a guest that faults halts the machine, and
 /// the fault report will at least name the guest's pages because `load` armed
 /// them.
-pub unsafe fn run(g: &mut Guest) -> u64 {
+pub unsafe fn run(g: &mut Guest, limit: u64) -> u64 {
     syscall::clear_trace();
     // Open exactly the guest's own three regions to ring 3 and nothing else.
     // Every other page in the machine keeps a clear U bit, which is what makes
@@ -652,7 +758,7 @@ pub unsafe fn run(g: &mut Guest) -> u64 {
         }
     }
 
-    let out = unsafe { syscall::run(g.entry, g.stack_top) };
+    let out = unsafe { syscall::run(g.entry, g.stack_top, limit, g.bits32) };
 
     // Clear the root *before* the space drops, and the order is the whole of
     // it: `set_root` puts the kernel's back immediately, and only then may the
@@ -838,6 +944,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         phoff: 64,
         phentsize: 56,
         phnum: segs,
+        bits32: false,
         interp: if interp { Some(alloc::string::String::from("/lib/ld.so")) } else { None },
     };
 

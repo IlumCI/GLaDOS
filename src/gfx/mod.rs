@@ -106,6 +106,19 @@ pub trait DeskApp {
     fn release(&mut self) -> bool {
         false
     }
+    /// Pointer motion over this window with no button held. A program that
+    /// highlights what is under the pointer -- a game's menu -- needs it;
+    /// answering whether a redraw is owed.
+    fn hover(&mut self, _client: theme::Rect, _x: i32, _y: i32) -> bool {
+        false
+    }
+    /// Whether this window keeps its own size rather than being tiled. A
+    /// program that draws at a fixed resolution and is never told a new one
+    /// -- a Wayland client, today -- tiled into a larger slot shows its
+    /// picture in one corner and black everywhere else.
+    fn floats(&self) -> bool {
+        false
+    }
     fn wheel(&mut self, _notches: i32) -> bool {
         false
     }

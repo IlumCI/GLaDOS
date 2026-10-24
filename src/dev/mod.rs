@@ -22,6 +22,7 @@ pub mod rndis;
 pub mod battery;
 pub mod ec;
 pub mod usbhid;
+pub mod virtio;
 pub mod xhci;
 
 /// Interrupt vector assignments.

@@ -40,7 +40,15 @@ pub mod poll;
 pub mod epoll;
 pub mod proc;
 pub mod program;
+pub mod session;
+pub mod i386;
+pub mod disk;
 pub mod syscall;
+pub mod prof;
+pub mod snd;
+pub mod drm;
+pub mod netctl;
+pub mod services;
 
 /// What `diag linux` asks of everything here.
 pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
@@ -54,8 +62,79 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     out.extend(epoll::checks());
     out.extend(signal::checks());
     out.extend(proc::checks());
+    out.extend(snd::checks());
+    out.extend(netctl::checks());
+    out.extend(drm::checks());
+    out.extend(services::checks());
     out.extend(program::checks());
     out.extend(syscall::checks());
     out.extend(load::checks());
+    out.extend(session::checks());
+    out.extend(i386::checks());
+    out.extend(disk::checks());
     out
+}
+
+/// Linux as a `job` runtime.
+pub static RUNTIME: crate::job::Runtime = crate::job::Runtime {
+    name: "linux",
+    kill: |task| syscall::doom(task, syscall::SIGNALED | 9),
+};
+
+/// Why a new Linux session cannot start now, or `None` when it can.
+///
+/// Several may run at once -- each is its own pid namespace with its own
+/// deadline, trace and processes (see `session`) -- up to `session::MAX`,
+/// which is about the fork and thread pools they share rather than memory.
+pub fn busy() -> Option<&'static str> {
+    if session::live_count() >= session::MAX {
+        Some("every Linux session is in use -- 'jobs' lists them, 'kill <n>' ends one")
+    } else {
+        None
+    }
+}
+
+/// Start `path` with `args` as a background job. Answers the job number.
+///
+/// The bytes are read here so a wrong path is refused at the prompt; the load
+/// happens on the job's own task, because a loaded `Guest` holds raw pointers
+/// to its pages and is not a thing to hand between tasks.
+pub fn start_job(path: &str, args: &[&str]) -> Result<u32, &'static str> {
+    if let Some(why) = busy() {
+        return Err(why);
+    }
+    let bytes = disk::program_bytes(path).ok_or("no such program")?;
+    let mut argv: alloc::vec::Vec<alloc::string::String> = alloc::vec![alloc::string::String::from(path)];
+    argv.extend(args.iter().map(|a| alloc::string::String::from(*a)));
+    let title = argv.join(" ");
+    crate::job::start(
+        &RUNTIME,
+        title,
+        alloc::boxed::Box::new(move || {
+            let argv: alloc::vec::Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+            let mut g = match load::load(&bytes, &argv) {
+                Ok(g) => g,
+                Err(why) => return alloc::format!("will not run it: {}", why),
+            };
+            // Safety: the same call `linux run` makes, on a task of its own
+            // and with no deadline -- see `syscall::run`.
+            let r = unsafe { load::run(&mut g, 0) };
+            describe(r, syscall::trace().len())
+        }),
+    )
+}
+
+/// How a session ended, in one line.
+pub fn describe(r: u64, calls: usize) -> alloc::string::String {
+    if r & syscall::OVERRAN != 0 {
+        alloc::format!("killed for running too long after {} syscall(s)", calls)
+    } else if r & syscall::FAULTED != 0 {
+        alloc::format!("killed by fault {:#04x} after {} syscall(s), machine intact", r & 0xFFFF_FFFF, calls)
+    } else if r & syscall::SIGNALED != 0 {
+        alloc::format!("ended by signal {} after {} syscall(s)", r & 0x7F, calls)
+    } else if r & syscall::EXITED != 0 {
+        alloc::format!("exited {} after {} syscall(s)", r & 0xFFFF_FFFF, calls)
+    } else {
+        alloc::format!("returned without exiting -- {} syscall(s)", calls)
+    }
 }

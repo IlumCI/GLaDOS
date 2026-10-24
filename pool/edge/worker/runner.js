@@ -40,6 +40,7 @@ import { decide, FRESH, MAX_RECIPIENTS, backoffMs } from "./flow.js";
 import { signRvnTx, rvnTxid, rvnScript, signLegacyTx, createdAddress, encodePayAll, encodeCtor2, amountOut } from "./treasury.js";
 import { plan, planGas, legsOf } from "./plan.js";
 import { CHAIN as RWA, TOKENS, MENU, rewardOf, DEFAULT as DEFAULT_REWARD } from "./rewards.js";
+import { perRecipientEth, fromWei18 } from "./earn.js";
 import { parseLedger, workByAddress, build, deltas, floorOf, candidates } from "./epoch.js";
 import { worthPaying } from "./cadence.js";
 import { readerData, readerDecode, READ_MAX } from "./reader.js";
@@ -63,6 +64,9 @@ export const CFG = {
   dropAfterMs: 20 * 60_000, maxFailures: 3,
   exchangeUnsentMs: 2 * 3_600_000, exchangeStuckMs: 48 * 3_600_000, deployGas: 900_000, baseGas: 200_000,
   perRecipientGas: 60_000, maxOverhead: 0.1,
+  // How often the live revenue estimate (glados.earn) is repriced. It moves no
+  // money, so it is read lazily and cached between pushes.
+  earnEveryMs: 2 * 60_000,
   // A stock leg is two V3 swaps (WETH->USDG->stock) before its sends; a $GLADOS
   // leg one V2 swap. And the most gas one payout may plan for, under 4663's
   // 32M per-transaction cap with room for the estimate to come in high.
@@ -898,6 +902,7 @@ export class Treasury {
       const snapshot = whole || (await getBig(this.storage, "treasury.snapshot")) || {};
       for (const [k, v] of Object.entries(updates || {})) if (!(snapshot[k] !== undefined && big(snapshot[k]) >= big(v))) snapshot[k] = v;
       next.lastRecipients = paid.recipients.length;
+      next.lastEpochAt = this.now(); // when a distribution last paid, for the page's payout line
       this.epochCache = null;
       await this.save(next, { ...chunked(`treasury.epoch.${next.epochs}`, paid), ...chunked("treasury.snapshot", snapshot) });
       this.log(`epoch ${paid.id} paid ${paid.recipients.length} miner(s) in ${a.hash}`);
@@ -994,6 +999,55 @@ export class Treasury {
       this.log(`estimate refused (${next.failures}): ${e.message}`);
       return null;
     }
+  }
+
+  // A live estimate of one recipient's equal share of the pot, per reward code,
+  // for the page's revenue line. Read-only and best-effort: it never moves
+  // money, is cached for `earnEveryMs`, and a failed read keeps the last figure.
+  // Values are display numbers in the asset's own units: $GLaDOS and the single
+  // stocks (18-decimal tokens); baskets are left out until a later pass, so no
+  // wrong figure is ever shown. Under the gate the caller shows $GLaDOS, which
+  // is covered by `glados`.
+  async earnQuote() {
+    const now = this.now();
+    if (this.earn && now - this.earn.at < this.cfg.earnEveryMs) return this.earn;
+    let byCode = {};
+    // Shared payout facts the page shows alongside the per-wallet figure: how
+    // many miners the last distribution split between, the distribution
+    // cadence, and when the last one paid (null before the first). Read-only.
+    let meta = { recipients: 0, epochMs: this.cfg.epochEveryMs, lastAt: null };
+    try {
+      const state = await this.state();
+      meta.recipients = state.lastRecipients || 0;
+      meta.lastAt = state.lastEpochAt || null;
+      if (state.contract) {
+        const keys = await this.pool.treasury();
+        const [bal, gp] = await Promise.all([
+          this.rpc("eth_getBalance", [keys.evm, "latest"]),
+          this.rpc("eth_gasPrice", []),
+        ]);
+        const recipients = Math.max(1, Math.min(MAX_RECIPIENTS, state.lastRecipients || 1));
+        const perEth = perRecipientEth({ ethWei: big(bal), recipients,
+          baseGas: this.cfg.baseGas, perRecipientGas: this.cfg.perRecipientGas, gasPrice: big(gp) });
+        if (perEth > 0n) {
+          const [r0, r1] = await this.reserves();
+          const [rW, rG] = big(WETH) < big(TOKEN) ? [r0, r1] : [r1, r0];
+          byCode.glados = fromWei18(amountOut(perEth, rW, rG));
+          const singles = Object.entries(MENU).filter(([, m]) => m.tokens.length === 1);
+          const res = await this.multicall(singles.map(([, m]) => ({ to: RWA.quoterV2, data: quoteData(m.tokens[0], perEth) })));
+          singles.forEach(([code], i) => {
+            const q = res[i];
+            const out = q && q.ok && q.data.length >= 66 ? BigInt(q.data.slice(0, 66)) : 0n;
+            if (out > 0n) byCode[code] = fromWei18(out);
+          });
+        }
+      }
+    } catch (e) {
+      this.log(`earn estimate skipped this tick: ${e && e.message ? e.message : e}`);
+      return this.earn || { at: now, byCode: {}, ...meta };
+    }
+    this.earn = { at: now, byCode, ...meta };
+    return this.earn;
   }
 
   async reserves() {

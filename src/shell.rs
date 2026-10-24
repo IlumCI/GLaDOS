@@ -27,6 +27,10 @@ const PROMPT_LEN: usize = PROMPT.len();
 const HISTORY_MAX: usize = 64;
 
 fn prompt() {
+    for n in crate::job::take_notices() {
+        console::set_color(YELLOW);
+        kprint!("\n{}", n);
+    }
     console::set_color(LTGREEN);
     kprint!("\n{}", PROMPT);
     console::set_color(WHITE);
@@ -1973,10 +1977,68 @@ fn gpu_wake(acpi: &Option<Acpi>, act: bool, named: Option<(u8, u8, u8)>) {
     }
 }
 
+/// Every background job, whichever runtime it belongs to.
+fn jobs_cmd() {
+    let rows = crate::job::list();
+    if rows.is_empty() {
+        kprintln!("  no jobs -- 'linux bg <path> [args]' starts one beside the shell");
+        return;
+    }
+    for r in rows {
+        let task = r.task.map(|t| alloc::format!("task {}", t)).unwrap_or_default();
+        kprintln!(
+            "  [{}] {:<8} {:<6} {:>5}s  {:<8} {}",
+            r.id, r.state, r.runtime, r.seconds, task, r.title
+        );
+        if !r.summary.is_empty() {
+            kprintln!("        {}", r.summary);
+        }
+    }
+}
+
 fn gpu_cmd(acpi: &Option<Acpi>, rest: &str) {
     match rest {
         "wake" => return gpu_wake(acpi, false, None),
         "wake now" => return gpu_wake(acpi, true, None),
+        "drm" => return crate::gpu::virtgpu::report(),
+        // Read host-visible GPU memory from the kernel: `gpu drm peek <phys> [words]`.
+        // For looking at a Venus ring's head, tail and status words when a
+        // guest and the host disagree about whose turn it is.
+        t if t.starts_with("drm peek ") => {
+            let mut w = t[9..].split_whitespace();
+            let at = w.next().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok());
+            let n = w.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(16).min(256);
+            let Some(at) = at else { return kprintln!("  usage: gpu drm peek <hex phys> [words]") };
+            let page = at & !0xfff;
+            if !crate::mem::paging::map_range(page, (at + n * 4 + 0xfff - page) & !0xfff, true) {
+                return kprintln!("  cannot map {:#x}", at);
+            }
+            for i in 0..n {
+                let v = unsafe { core::ptr::read_volatile((at + i * 4) as *const u32) };
+                kprintln!("  {:#x}: {:#010x} ({})", at + i * 4, v, v);
+            }
+            return;
+        }
+        t if t.starts_with("drm idle ") => {
+            let us = t[9..].trim().parse::<u64>().unwrap_or(0);
+            crate::linux::drm::RING_IDLE_US.store(us, core::sync::atomic::Ordering::Relaxed);
+            return kprintln!("  Venus ring idle timeout {}", if us == 0 { alloc::string::String::from("as the guest asks") } else { alloc::format!("rewritten to {} us", us) });
+        }
+        "drm trace on" | "drm trace off" => {
+            crate::linux::drm::TRACE.store(rest.ends_with("on"), core::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+        "virtio" => {
+            if crate::gpu::virtgpu::held() {
+                // The probe resets the device, which would pull the queue and
+                // every context out from under the guests using it.
+                return kprintln!("  virtio-gpu is held for /dev/dri -- 'gpu drm' reports on it");
+            }
+            return match acpi.as_ref().and_then(|a| a.mcfg) {
+                Some(ecam) => crate::gpu::virtio::probe(ecam),
+                None => kprintln!("  no MCFG table, so no ECAM base and no PCIe enumeration at all"),
+            }
+        }
         t if t.starts_with("wake now ") => {
             return match parse_bdf(t[9..].trim()) {
                 Some(at) => gpu_wake(acpi, true, Some(at)),
@@ -1991,7 +2053,7 @@ fn gpu_cmd(acpi: &Option<Acpi>, rest: &str) {
         }
         "" => {}
         other => {
-            kprintln!("  usage: gpu | gpu wake | gpu wake now   (got '{}')", other);
+            kprintln!("  usage: gpu | gpu wake | gpu wake now | gpu virtio   (got '{}')", other);
             return;
         }
     }
@@ -2508,7 +2570,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
     // twenty more arms across this match.
     // A sentence that happens to start with a command's name is still a
     // sentence: "help me find the big files" is not the `help` command.
-    if crate::ai::intent::verb_first_language(cmd, rest) {
+    // Not for a subcommand of `linux` the shell owns: `linux feat all off`
+    // carries "all", a function word, and was handed to the chat model as a
+    // sentence.
+    if !shell_owns && crate::ai::intent::verb_first_language(cmd, rest) {
         run_decision(crate::ai::intent::decide(line), boot, acpi, interp);
         return;
     }
@@ -2609,6 +2674,17 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         }
         "mine" => mine_cmd(rest),
         "wlan" | "wifi" => wifi_cmd(rest),
+        "services" => match rest.trim() {
+            "reload" => {
+                crate::linux::services::load();
+                crate::linux::services::report();
+            }
+            "stop" => {
+                crate::linux::services::stop();
+                kprintln!("  every service ended, and none restarts until 'services reload'");
+            }
+            _ => crate::linux::services::report(),
+        },
         "trust" => match rest.trim() {
             "verify" => crate::net::trust::verify_roots(),
             _ => crate::net::trust::report(),
@@ -5238,6 +5314,35 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 run / 1024 / 1024
             );
             mem::fixed::report();
+            // Where a 32-bit guest's private mappings could go: below 4 GiB,
+            // with no memory and no device behind the addresses.
+            if let Some(ecam) = acpi.as_ref().and_then(|a| a.mcfg) {
+                let mut devs = crate::dev::pci::bars32(ecam);
+                devs.push(ecam);
+                match mem::fixed::hole32(&devs) {
+                    Some((at, end)) => kprintln!(
+                        "  32-bit hole  {:#x}..{:#x}  {} MiB, below {} device base(s)",
+                        at, end, (end - at) >> 20, devs.len()
+                    ),
+                    None => kprintln!("  32-bit hole  none -- nothing below 4 GiB is free of memory and devices"),
+                }
+                if rest.trim() == "hole" {
+                    devs.sort();
+                    for d in &devs {
+                        kprintln!("    device base {:#x}", d);
+                    }
+                    let mut last = (0u64, 0u64);
+                    for (at, end) in mem::fixed::described32() {
+                        if at > last.1 + 0x10_0000 || at < 0x0100_0000 && false {
+                            kprintln!("    described {:#x}..{:#x}", last.0, last.1);
+                            last = (at, end);
+                        } else {
+                            last.1 = last.1.max(end);
+                        }
+                    }
+                    kprintln!("    described {:#x}..{:#x}", last.0, last.1);
+                }
+            }
         }
         // **The notice, readable from the machine that carries it.** The BSD arm
         // asks that a binary distribution reproduce it "in the documentation
@@ -5433,6 +5538,35 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             }
         },
         "gpu" => gpu_cmd(acpi, rest.trim()),
+        // Installed programs, read off every disk's `apps/` and `/etc/apps`
+        // -- see `apps`. `apps scan` looks again after a disk changes.
+        "apps" => {
+            if rest.trim() == "scan" {
+                kprintln!("  {} program(s) found", crate::apps::scan());
+            }
+            let list = crate::apps::list();
+            if list.is_empty() {
+                kprintln!("  nothing installed -- an apps/*.app file on a FAT disk, or /etc/apps/<name>, adds one");
+            }
+            for a in list {
+                kprintln!(
+                    "  {:<20} {:?}{}  {}",
+                    a.name,
+                    a.runtime,
+                    if a.gpu { ", gpu" } else { "" },
+                    a.exec
+                );
+            }
+        }
+        "launch" => match crate::apps::launch(rest.trim()) {
+            Ok(id) => kprintln!("  [job {}] {} started", id, rest.trim()),
+            Err(why) => kprintln!("  {}", why),
+        },
+        "jobs" => jobs_cmd(),
+        "kill" => match rest.trim().trim_start_matches('%').parse::<u32>() {
+            Ok(id) => kprintln!("  [job {}] {}", id, crate::job::kill(id)),
+            Err(_) => kprintln!("  usage: kill <job number>   ('jobs' lists them)"),
+        },
         "abstract" => abstract_cmd(rest),
         "study" => study_cmd(rest),
         "work" => work_cmd(rest),
@@ -7105,10 +7239,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         kprintln!("  usage: linux run <path to an ELF in the namespace>");
                         return;
                     };
-                    let Some(bytes) = crate::sysbox::read_blob(path) else {
+                    let Some(bytes) = linux::disk::program_bytes(path) else {
                         kprintln!("  no such blob: {}", path);
                         return;
                     };
+                    if let Some(why) = linux::busy() {
+                        kprintln!("  {}", why);
+                        return;
+                    }
                     // Everything after the path is the guest's argv, with the
                     // path itself as argv[0], which is what a program expects
                     // and what busybox dispatches on.
@@ -7145,13 +7283,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                             // Safety: the whole of stage 0 is this call. The
                             // guest's pages are armed, so a fault at least
                             // names them.
-                            let r = unsafe { linux::load::run(&mut g) };
+                            let r = unsafe { linux::load::run(&mut g, linux::syscall::limit()) };
                             let calls = linux::syscall::trace();
                             for c in &calls {
                                 if let Some(p) = c.path() {
                                     kprintln!(
                                         "  {:>3} {:<16} {} -> {}",
-                                        c.nr, linux::syscall::name_of(c.nr), p, c.ret as i64
+                                        c.nr & !linux::i386::TAG, linux::syscall::name_of(c.nr), p, c.ret as i64
                                     );
                                     continue;
                                 }
@@ -7263,6 +7401,39 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         }
                     }
                 }
+                "bg" => {
+                    let Some(path) = words.next() else {
+                        kprintln!("  usage: linux bg <path> [args...]   -- runs beside the shell");
+                        return;
+                    };
+                    let args: alloc::vec::Vec<&str> = words.collect();
+                    match linux::start_job(path, &args) {
+                        Ok(id) => kprintln!("  [job {}] started -- 'jobs' to see it, 'kill {}' to end it", id, id),
+                        Err(why) => kprintln!("  {}", why),
+                    }
+                }
+                "mount" => {
+                    // linux mount <guest path> <partition>: a FAT volume the
+                    // next guests read in place, by range.
+                    match (words.next(), words.next().and_then(|n| n.parse::<u32>().ok())) {
+                        (Some(at), Some(n)) => match linux::disk::mount(at, n) {
+                            Ok(()) => kprintln!("  partition {} is at {} for guests, read-only, read in place", n, at),
+                            Err(e) => kprintln!("  {}", e),
+                        },
+                        _ => {
+                            for (p, cb) in linux::disk::mounts() {
+                                kprintln!("  {}  FAT, {} B clusters", p, cb);
+                            }
+                            kprintln!("  usage: linux mount <path> <partition>   ('fat' lists partitions)");
+                        }
+                    }
+                }
+                "cwd" => {
+                    if let Some(p) = words.next() {
+                        linux::syscall::set_start_cwd(p);
+                    }
+                    kprintln!("  the next guest starts in {}", linux::syscall::start_cwd());
+                }
                 "env" => {
                     let rest: alloc::vec::Vec<&str> = words.collect();
                     for e in &rest {
@@ -7299,6 +7470,87 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     } else {
                         kprintln!("  off -- guests run on the kernel's root, as they always have");
                     }
+                }
+                "memlog" => {
+                    let on = words.next() != Some("off");
+                    linux::syscall::MEMLOG.store(on, core::sync::atomic::Ordering::Relaxed);
+                    kprintln!("  memory-map calls are {} as they happen", if on { "printed" } else { "not printed" });
+                }
+                "snd" => linux::snd::report(),
+                "waits" => linux::prof::inflight(),
+                "feat" => {
+                    use core::sync::atomic::Ordering::Relaxed;
+                    let name = words.next().unwrap_or("");
+                    let on = words.next() != Some("off");
+                    let flags: [(&str, &core::sync::atomic::AtomicBool); 10] = [
+                        ("kick", &linux::syscall::FEAT_KICK),
+                        ("idle", &crate::sky::server::FEAT_IDLE),
+                        ("desk", &crate::sky::server::FEAT_DESK),
+                        ("big", &linux::syscall::FEAT_BIG),
+                        ("shoot", &linux::syscall::FEAT_SHOOT),
+                        ("nap", &linux::syscall::NAP),
+                        ("spread", &linux::syscall::SPREAD),
+                        ("lock", &crate::sky::server::FEAT_LOCK),
+                        ("hover", &crate::sky::server::FEAT_HOVER),
+                        ("netctl", &crate::sky::server::FEAT_NETCTL),
+                    ];
+                    for (n, f) in flags.iter() {
+                        if name == "all" || name == *n {
+                            f.store(on, Relaxed);
+                        }
+                    }
+                    for (n, f) in flags.iter() {
+                        kprintln!("  {:<8} {}", n, if f.load(Relaxed) { "on" } else { "off" });
+                    }
+                }
+                "nap" => {
+                    let on = words.next() != Some("off");
+                    linux::syscall::NAP.store(on, core::sync::atomic::Ordering::Relaxed);
+                    kprintln!("  a guest's waits {}", if on { "nap until woken or a tick passes" } else { "yield and come straight back" });
+                }
+                // The last calls of every live session, as they stand: what a
+                // guest that has stopped making progress was last asking for.
+                "tail" => {
+                    let n = words.next().and_then(|w| w.parse::<usize>().ok()).unwrap_or(60);
+                    for sid in 0..linux::session::MAX {
+                        let calls = linux::session::take_tail(sid);
+                        if calls.is_empty() {
+                            continue;
+                        }
+                        kprintln!("  session {}: last {} of {}", sid, n.min(calls.len()), calls.len());
+                        for c in calls.iter().rev().take(n).rev() {
+                            kprintln!(
+                                "  {:>3} {:<16} {:#x} {:#x} {:#x} {:#x} {:#x} -> {}",
+                                c.nr & !linux::i386::TAG, linux::syscall::name_of(c.nr),
+                                c.args[0], c.args[1], c.args[2], c.args[3], c.args[4], c.ret as i64
+                            );
+                        }
+                    }
+                }
+                "cores" => {
+                    match words.next() {
+                        Some("one") => linux::syscall::SPREAD.store(false, core::sync::atomic::Ordering::Relaxed),
+                        Some("all") => linux::syscall::SPREAD.store(true, core::sync::atomic::Ordering::Relaxed),
+                        _ => {}
+                    }
+                    kprintln!(
+                        "  guests run on {}",
+                        if linux::syscall::SPREAD.load(core::sync::atomic::Ordering::Relaxed) { "every core" } else { "the core that started them" }
+                    );
+                }
+                "prof" => match words.next() {
+                    Some("on") => {
+                        linux::prof::reset();
+                        linux::prof::ON.store(true, core::sync::atomic::Ordering::Relaxed);
+                        kprintln!("  profiling guests: kernel time per call, ring-3 samples per core");
+                    }
+                    Some("off") => linux::prof::ON.store(false, core::sync::atomic::Ordering::Relaxed),
+                    _ => linux::prof::report(),
+                },
+                "misses" => {
+                    let on = words.next() != Some("off");
+                    linux::syscall::MISSES.store(on, core::sync::atomic::Ordering::Relaxed);
+                    kprintln!("  refused paths are {} as they happen", if on { "printed" } else { "not printed" });
                 }
                 "deadline" => {
                     let arg = words.next().unwrap_or("");
@@ -7391,13 +7643,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         if let Some(p) = c.path() {
                             kprintln!(
                                 "  {:>3} {:<16} {} -> {}",
-                                c.nr, linux::syscall::name_of(c.nr), p, c.ret as i64
+                                c.nr & !linux::i386::TAG, linux::syscall::name_of(c.nr), p, c.ret as i64
                             );
                             continue;
                         }
                         kprintln!(
                             "  {:>3} {:<16} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} -> {}",
-                            c.nr, linux::syscall::name_of(c.nr),
+                            c.nr & !linux::i386::TAG, linux::syscall::name_of(c.nr),
                             c.args[0], c.args[1], c.args[2], c.args[3], c.args[4], c.args[5],
                             c.ret as i64
                         );
@@ -9833,6 +10085,37 @@ fn wifi_cmd(rest: &str) {
             crate::net::ccmp::dump();
             crate::net::wpa2::dump();
         }
+        // The record both managers read: the kernel's own auto-join and
+        // `netd` at ring 3 (see `linux::netctl`).
+        "remember" => {
+            if a.is_empty() {
+                kprintln!("  usage: wifi remember <ssid> [passphrase]");
+            } else if crate::linux::netctl::remember(a, b) {
+                kprintln!("  remembered {} -- joined on its own whenever it is heard", a);
+            } else {
+                kprintln!("  could not write {}", crate::linux::netctl::KNOWN);
+            }
+        }
+        "forget" => {
+            if crate::linux::netctl::forget(a) {
+                kprintln!("  forgot {}", a);
+            } else {
+                kprintln!("  {} was not known", a);
+            }
+        }
+        "known" => {
+            let k = crate::linux::netctl::known();
+            if k.is_empty() {
+                kprintln!("  no known networks. 'wifi remember <ssid> [pass]'");
+            }
+            for (ssid, pass) in k {
+                kprintln!("  {}  {}", ssid, if pass.is_empty() { "open" } else { "with a passphrase" });
+            }
+            kprintln!(
+                "  {}",
+                if crate::linux::netctl::managed() { "netd is deciding (ring 3)" } else { "the kernel decides on its own" }
+            );
+        }
         "leave" => match crate::net::wlan() {
             None => kprintln!("  no wireless driver."),
             Some(w) => {
@@ -9842,6 +10125,7 @@ fn wifi_cmd(rest: &str) {
         },
         _ => {
             kprintln!("  usage: wifi [status] | scan | join <ssid> [pass] | leave");
+            kprintln!("         wifi remember <ssid> [pass] | forget <ssid> | known");
             kprintln!("         wifi rehearse [off]   a synthetic room, for when there is no radio");
             kprintln!("         wifi frames           every frame as hex, for tools/dot11check.py");
         }

@@ -92,6 +92,13 @@ fn plane_rect(x: i32, y: i32) -> (u32, u32, u32, u32) {
     (x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
 }
 
+/// Take the pointer off the screen, keeping what it looks like: a program
+/// holding the pointer (`desk::grab_pointer`) draws its own, or none.
+pub fn hide_cursor() {
+    let image = unsafe { (*CURSOR.get()).image };
+    set_cursor(None, &image);
+}
+
 /// The pointer is at `at` and looks like `image`. Re-presents where it was
 /// and where it is now; the back buffer is untouched. `None` hides it.
 pub fn set_cursor(at: Option<(u32, u32)>, image: &Plane) {

@@ -58,6 +58,7 @@ size cap; guest RAM still has to cover the weights, so raise --memory.
 
 
 import codecs
+import os
 import shutil
 import socket
 import subprocess
@@ -160,7 +161,7 @@ def find_firmware():
     )
 
 
-def monitor(lines):
+def monitor(lines, gap=0.35):
     """Send commands to QEMU's monitor.
 
     The mouse is the reason this exists separately from `capture`: there is no
@@ -180,7 +181,7 @@ def monitor(lines):
             pass
         for line in lines:
             mon.sendall((line + "\n").encode())
-            time.sleep(0.35)
+            time.sleep(gap)
         try:
             mon.recv(4096)
         except OSError:
@@ -485,6 +486,15 @@ def main():
     esp_on_nvme = "--esp-on-nvme" in argv
     if esp_on_nvme:
         argv.remove("--esp-on-nvme")
+    # A different NVMe disk image: a large FAT32 volume a guest reads in place
+    # through `linux mount`, which the 192 MB fixture image is far too small
+    # to hold. Opened read-only, since nothing writes it and it may be
+    # gigabytes of somebody's installed software.
+    nvme_image = None
+    if "--nvme-image" in argv:
+        i = argv.index("--nvme-image")
+        nvme_image = Path(argv[i + 1]).resolve()
+        del argv[i:i + 2]
     esp_image = None
     if "--esp-image" in argv:
         i = argv.index("--esp-image")
@@ -813,6 +823,10 @@ def main():
     # finds no bootloader and reports "Not Found", which looks nothing like
     # "you forgot to copy the build".
     built = ROOT / "target/x86_64-unknown-uefi/release/glados.efi"
+    # `GLADOS_EFI` boots another build -- an A/B against an older commit,
+    # built in a worktree, without disturbing this tree's artifact.
+    if os.environ.get("GLADOS_EFI"):
+        built = Path(os.environ["GLADOS_EFI"])
     if not built.exists():
         built = ROOT / "target/x86_64-unknown-uefi/debug/glados.efi"
     if not built.exists():
@@ -874,7 +888,7 @@ def main():
     # be larger than 3 MiB and reserves the last MiB for a GPT backup header
     # it will not find; 192 MiB is what the development machine has, so a CI
     # boot and a local one look at the same topology instead of two.
-    if not esp_on_nvme:
+    if not esp_on_nvme and nvme_image is None:
         nvme = ROOT / ".qemu/nvme.img"
         if not nvme.exists():
             nvme.parent.mkdir(parents=True, exist_ok=True)
@@ -990,7 +1004,8 @@ def main():
         # volume it booted from, and anything that writes the ESP from a running
         # machine is untestable. OVMF enumerates NVMe as a boot device, so
         # nothing else has to change.
-        "-drive", f"file={esp_image if esp_on_nvme else ROOT / '.qemu/nvme.img'},if=none,id=nvm0,format=raw",
+        "-drive", (f"file={nvme_image},if=none,id=nvm0,format=raw,readonly=on" if nvme_image else
+                   f"file={esp_image if esp_on_nvme else ROOT / '.qemu/nvme.img'},if=none,id=nvm0,format=raw"),
         "-device", "nvme,serial=GLADOSQEMU0001,drive=nvm0",
         # A USB controller to develop against. QEMU emulates xHCI faithfully
         # enough to bring up rings and enumerate, which is the whole reason the
@@ -1007,7 +1022,12 @@ def main():
         # screen is legible, and a GUI that has never been looked at is a GUI
         # nobody has tested.
         "-monitor", f"tcp:127.0.0.1:{MONITOR_PORT},server=on,wait=off",
-        *(["-display", "sdl", "-name", "GLaDOS"] if window else ["-display", "none"]),
+        # `GLADOS_DISPLAY=gtk,gl=on` is a window someone can play in (sdl,gl=on
+        # opened a window and the guest never booted): the GPU
+        # path needs the display to hand QEMU an OpenGL context, which
+        # `egl-headless` does for a test and a plain `sdl` window does not.
+        *(["-display", os.environ["GLADOS_DISPLAY"], "-name", "GLaDOS"] if os.environ.get("GLADOS_DISPLAY") else
+          ["-display", "sdl", "-name", "GLaDOS"] if window else ["-display", "none"]),
         *(["-vga", "none", "-device", f"VGA,xres={res[0]},yres={res[1]}"] if res else
           ["-vga", "none", "-device", "VGA,xres=1920,yres=1080"] if hd else []),
         "-no-reboot",
@@ -1178,7 +1198,11 @@ def main():
                     if line.startswith("@mouse ") or line.startswith("@shot "):
                         verb, arg = line.split(None, 1)
                         if verb == "@mouse":
-                            monitor([arg])
+                            # `a ; b` sends both 50 ms apart in one beat --
+                            # the only way to land a double-click inside the
+                            # desktop's 400 ms, since every beat costs 0.4 s.
+                            parts = [p.strip() for p in arg.split(";")]
+                            monitor(parts, gap=0.05 if len(parts) > 1 else 0.35)
                             print(f"[drive] mouse: {arg}")
                         else:
                             try:

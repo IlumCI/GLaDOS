@@ -68,6 +68,11 @@ pub enum WinState {
     Normal,
     Maximised,
     Minimised,
+    /// The whole screen, taskbar included, with no border or caption: what a
+    /// program asks for with `xdg_toplevel.set_fullscreen`. The one state
+    /// allowed to cover the taskbar, because a game asking for the screen is
+    /// asking for exactly that; Super-Tab and the Super key still work.
+    Fullscreen,
 }
 
 pub struct MenuItem {
@@ -329,6 +334,9 @@ impl Window {
     fn frame(&self, screen: Rect) -> Rect {
         match self.state {
             WinState::Maximised => screen,
+            WinState::Fullscreen => super::primary()
+                .map(|fb| Rect::new(0, 0, fb.width(), fb.height()))
+                .unwrap_or(screen),
             _ => self.rect,
         }
     }
@@ -482,6 +490,11 @@ pub enum Op {
     /// windows of one client are two windows.
     OpenTagged { title: String, icon: usize, app: alloc::boxed::Box<dyn super::DeskApp>, w: u32, h: u32 },
     Retitle { tag: u64, title: String },
+    /// A floating program window's client area to this size: a client that
+    /// committed a buffer of a new size, which a fixed-size window has no
+    /// other way to say.
+    Resize { tag: u64, w: u32, h: u32 },
+    Fullscreen { tag: u64, on: bool },
     Close { tag: u64 },
 }
 
@@ -546,6 +559,8 @@ pub fn drain_ops() {
             }
             Op::OpenTagged { title, icon, app, w, h } => open_app(&title, icon, app, w, h),
             Op::Retitle { tag, title } => retitle_tagged(tag, &title),
+            Op::Resize { tag, w, h } => resize_tagged(tag, w, h),
+            Op::Fullscreen { tag, on } => fullscreen_tagged(tag, on),
             Op::Close { tag } => {
                 close_tagged(tag);
             }
@@ -837,7 +852,9 @@ fn icon_rects(fb: &Framebuffer) -> Vec<(Rect, usize)> {
     let mut out = Vec::new();
     let mut x = 10u32;
     let mut y = 14u32;
-    for (k, _) in ICONS.iter().enumerate() {
+    // The machine's own icons, then one per installed program.
+    let count = ICONS.len() + crate::apps::names().len();
+    for k in 0..count {
         if y + ICON_H > fb.height().saturating_sub(task_h()) {
             // Wrap to a second column, as the 98 desktop did. The terminal
             // reserves only the first column, so overflow icons sit behind
@@ -864,8 +881,19 @@ fn icon_at(fb: &Framebuffer, x: i32, y: i32) -> Option<usize> {
 fn draw_icons(fb: &Framebuffer, hover: Hover) {
     for (r, k) in icon_rects(fb) {
         let px = r.x + (r.w - icon_px()) / 2;
-        pictogram(fb, k, px, r.y, icon_px());
-        let (label, _) = ICONS[k];
+        // An installed program wears its own picture when its entry names
+        // one, and the Programs pictogram when it does not.
+        let s = icon_px();
+        let drawn = k >= ICONS.len()
+            && crate::apps::with_picture(k - ICONS.len(), |img| {
+                super::scale::draw(fb, img, px as i32, r.y as i32, s, s, 255)
+            })
+            .is_some();
+        if !drawn {
+            pictogram(fb, if k < ICONS.len() { k } else { ICO_PROGRAMS }, px, r.y, s);
+        }
+        let names = crate::apps::names();
+        let label: &str = if k < ICONS.len() { ICONS[k].0 } else { names.get(k - ICONS.len()).map(|s| s.as_str()).unwrap_or("") };
         let tw = theme::text_w_of(label);
         let tx = r.x + (r.w.saturating_sub(tw)) / 2;
         let ty = r.y + icon_px() + 6;
@@ -1287,6 +1315,7 @@ pub fn open_app(title: &str, icon: usize, app: Box<dyn DeskApp>, w: u32, h: u32)
     // is born usable, and the edge dragging added alongside means it stays
     // that way.
     let inner = app.min_size();
+    let floats = app.floats();
     let need_w = inner.0 + theme::frame_w() * 2;
     let need_h = inner.1 + theme::title_h() + theme::frame_w() * 2;
     let (w, h) = (
@@ -1306,7 +1335,7 @@ pub fn open_app(title: &str, icon: usize, app: Box<dyn DeskApp>, w: u32, h: u32)
         image: Default::default(),
         arrive: None,
         shown: Default::default(),
-        tiled: tile_new(),
+        tiled: tile_new() && !floats,
         slide: None,
             title: String::from(title),
             icon,
@@ -2394,12 +2423,104 @@ pub fn cursor_home() {
     }
 }
 
+/// The window holding the pointer, by tag, or zero: a Wayland client's
+/// pointer lock. While it holds, buttons go to that window wherever the
+/// cursor is, the cursor stays put, and the client reads relative motion
+/// itself -- see `sky::seat`.
+static GRAB: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn grab_pointer(tag: u64) {
+    GRAB.store(tag, core::sync::atomic::Ordering::Release);
+}
+
+/// Lift a grab if one of `tags` holds it.
+pub fn release_pointer_of(tags: &[u64]) {
+    let g = GRAB.load(core::sync::atomic::Ordering::Acquire);
+    if g != 0 && tags.contains(&g) {
+        GRAB.store(0, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// A button for the window holding the grab, at the middle of it -- where
+/// the pointer is does not matter to a client that has locked it.
+fn grabbed_button(tag: u64, right: bool, down: bool) {
+    with(|d| {
+        let Some(f) = d.focus() else { return };
+        let w = &mut d.windows[f];
+        if let Content::App(a) = &mut w.content {
+            if a.tag() != tag {
+                return;
+            }
+            let r = Rect::new(0, 0, w.rect.w, w.rect.h);
+            let (cx, cy) = (w.rect.w as i32 / 2, w.rect.h as i32 / 2);
+            match (right, down) {
+                (false, true) => {
+                    a.press(r, cx, cy);
+                }
+                (true, true) => {
+                    a.right_press(r, cx, cy);
+                }
+                _ => {
+                    a.release();
+                }
+            }
+        }
+    });
+}
+
+/// Motion over an application window with no button held.
+fn app_hover_at(x: i32, y: i32) {
+    let Some(i) = window_at(x, y) else { return };
+    let Some(fb) = super::primary() else { return };
+    let screen = screen_rect(&fb);
+    let redraw = with(|d| {
+        let w = &mut d.windows[i];
+        let frame = w.frame(screen);
+        let has_menus = !w.menus.is_empty();
+        let (_, _, client) = chrome(frame, has_menus);
+        if !contains(client, x, y) {
+            return false;
+        }
+        match &mut w.content {
+            Content::App(a) => a.hover(Rect::new(0, 0, client.w, client.h), x - client.x as i32, y - client.y as i32),
+            _ => false,
+        }
+    })
+    .unwrap_or(false);
+    if redraw {
+        super::render::invalidate();
+    }
+}
+
 pub fn poll_mouse() {
     use crate::dev::mouse;
     if !mouse::present() || !ready() {
         return;
     }
     let s = mouse::take();
+    let feat = crate::sky::server::FEAT_DESK.load(core::sync::atomic::Ordering::Relaxed);
+    let grab = if feat { GRAB.load(core::sync::atomic::Ordering::Acquire) } else { 0 };
+    let focus_tag = if grab == 0 { None } else { with(|d| d.focus().and_then(|f| match &d.windows[f].content {
+        Content::App(a) => Some(a.tag()),
+        _ => None,
+    }))
+    .flatten() };
+    if grab != 0 && focus_tag == Some(grab) {
+        crate::cpu::without_interrupts(|| {
+            if let Some(_claim) = Claim::take() {
+                super::compose::hide_cursor();
+            }
+        });
+        let was = unsafe { *BUTTONS.get() };
+        unsafe { *BUTTONS.get() = (s.left, s.right) };
+        if s.left != was.0 {
+            grabbed_button(grab, false, s.left);
+        }
+        if s.right != was.1 {
+            grabbed_button(grab, true, s.right);
+        }
+        return;
+    }
     if !s.moved {
         // Nothing new, but a paint may be owed from a turn the pacing refused.
         if unsafe { *CURSOR_PENDING.get() } {
@@ -2471,6 +2592,9 @@ pub fn poll_mouse() {
     // be noise.
     if !s.left {
         update_hover(x, y);
+        if feat {
+            app_hover_at(x, y);
+        }
     }
     // Pick the glyph after the event has been acted on, so a press that
     // started a resize is already reflected in the mode.
@@ -2863,7 +2987,13 @@ fn press_at(x: i32, y: i32) {
         with(|d| d.mode = Mode::Normal);
         if double {
             if let Some(k) = icon_at(&fb, x, y) {
-                launch(ICONS[k].1);
+                if k < ICONS.len() {
+                    launch(ICONS[k].1);
+                } else if let Some(name) = crate::apps::names().get(k - ICONS.len()) {
+                    // A program, started beside the shell on its own task:
+                    // the command only queues it, so the desktop never waits.
+                    queue_command(&alloc::format!("launch {}", name));
+                }
             }
         }
         super::render::invalidate();
@@ -3098,6 +3228,42 @@ pub fn close_tagged(tag: u64) -> usize {
 }
 
 /// Retitle the window whose program carries this tag.
+/// Put a tagged window on the whole screen, or take it back off.
+pub fn fullscreen_tagged(tag: u64, on: bool) {
+    with(|d| {
+        for w in d.windows.iter_mut() {
+            if matches!(&w.content, Content::App(a) if a.tag() == tag) {
+                w.state = if on { WinState::Fullscreen } else { WinState::Normal };
+            }
+        }
+    });
+    super::render::invalidate();
+}
+
+/// Fit a floating tagged window around a client area of `w` by `h`, kept on
+/// screen. A tiled one keeps its slot; that is the layout's to decide.
+pub fn resize_tagged(tag: u64, w: u32, h: u32) {
+    let Some(fb) = super::primary() else { return };
+    let screen = screen_rect(&fb);
+    let (fw, fh) = (
+        (w + theme::frame_w() * 2).min(screen.w),
+        (h + theme::title_h() + theme::frame_w() * 2).min(screen.h),
+    );
+    with(|d| {
+        for win in d.windows.iter_mut() {
+            if win.tiled || !matches!(&win.content, Content::App(a) if a.tag() == tag) {
+                continue;
+            }
+            let r = &mut win.rect;
+            r.w = fw;
+            r.h = fh;
+            r.x = r.x.min(screen.x + screen.w - fw);
+            r.y = r.y.min(screen.y + screen.h - fh);
+        }
+    });
+    super::render::invalidate();
+}
+
 pub fn retitle_tagged(tag: u64, title: &str) {
     if tag == 0 {
         return;
@@ -5011,9 +5177,13 @@ pub fn draw() {
     super::render::damaged(damage.len() as u64, damage.area());
     super::compose::present_region(&damage);
     // Put the pointer back where it was. Without this every keystroke that
-    // repaints would blink the arrow out until the mouse next moved.
+    // repaints would blink the arrow out until the mouse next moved -- unless
+    // a program holds the pointer, which is exactly when it must stay off:
+    // a game's every frame was putting the desktop's arrow back over it.
     if let Some((px, py)) = unsafe { *POS.get() } {
-        cursor_show(&real, px, py);
+        if GRAB.load(core::sync::atomic::Ordering::Acquire) == 0 {
+            cursor_show(&real, px, py);
+        }
     }
     let ended = crate::time::rdtsc();
     super::render::frame_timed(started, presenting, ended);
@@ -5261,7 +5431,7 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
         // stale. `render verify` found it on the first hover over Terminal.
         let pad = 8;
         let b = Rect::new(b.x.saturating_sub(pad), b.y.saturating_sub(pad), b.w + 2 * pad, b.h + 2 * pad);
-        out.push(Layer { id: LayerId::Icons, bounds: b, stamp: Stamp::of((d.hover, theme::scale())), parts: Vec::new() });
+        out.push(Layer { id: LayerId::Icons, bounds: b, stamp: Stamp::of((d.hover, theme::scale(), crate::apps::GENERATION.load(core::sync::atomic::Ordering::Relaxed))), parts: Vec::new() });
     }
 
     let focus = d.focus();
@@ -6282,7 +6452,7 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
                 with_window_shape(&fb, win, frame, || paint_window_body(&fb, d, i, win, frame, active, hot));
             }
             with_window_shape(&fb, win, frame, || console_over(&fb, win));
-            if active {
+            if active && win.state != WinState::Fullscreen {
                 let maxed = win.state == WinState::Maximised;
                 let alpha = unsafe { (*FOCUS_RING.get()).2 };
                 focus_ring(&fb, frame, if maxed { 0 } else { win.round }, alpha, !maxed);
@@ -6496,6 +6666,7 @@ pub fn trace(event: &str) {
                 WinState::Normal => "normal",
                 WinState::Maximised => "max",
                 WinState::Minimised => "min",
+                WinState::Fullscreen => "full",
             };
             crate::serial_println!(
                 "[desk] {} {} {} {}x{}+{}+{}",

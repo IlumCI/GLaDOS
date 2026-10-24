@@ -63,11 +63,14 @@ struct Slot {
     /// lands after the lookups are blinded has nobody to be seen by and is
     /// swept by the same doom.
     quarantined: bool,
+    /// The session this child belongs to: its pid namespace, and the session
+    /// whose end sweeps it.
+    session: usize,
 }
 
 static SLOTS: Racy<[Slot; MAX_CHILDREN]> = Racy::new(
     [Slot { task: None, stack: 0, guest: 0, parent: 0, work: None, live: false,
-            pid: 0, status: None, quarantined: false };
+            pid: 0, status: None, quarantined: false, session: usize::MAX };
         MAX_CHILDREN],
 );
 
@@ -87,6 +90,16 @@ pub fn live() -> usize {
     LIVE.load(Ordering::Acquire)
 }
 
+/// How many children of session `s` are running.
+pub fn live_in(s: usize) -> usize {
+    unsafe { &*SLOTS.get() }.iter().filter(|x| x.live && x.session == s).count()
+}
+
+/// The session the running task is in, or none -- which matches no slot.
+fn here() -> usize {
+    super::session::current().unwrap_or(usize::MAX)
+}
+
 /// Forget every child. Called from `teardown`, and it clears the *work* only.
 ///
 /// Deliberately not the tasks or their stacks: a pool task that has been
@@ -100,27 +113,24 @@ pub fn live() -> usize {
 /// the next `fork` while its tenant is alive, and zeroing the count would make
 /// `live` lie about it. It ends at its next safe point and tidies its own
 /// slot then, exactly as it would have inside the bound.
-pub fn reset() {
+///
+/// Only session `sess`'s slots: another session's children are not this
+/// session's to forget, and clearing their exit statuses would answer their
+/// parents' `wait4` with `ECHILD`.
+pub fn reset(sess: usize) {
     let s = unsafe { SLOTS.get() };
-    let mut still = 0;
     for slot in s.iter_mut() {
-        if slot.live {
-            still += 1;
+        if slot.session != sess || slot.live {
             continue;
         }
         slot.work = None;
         slot.status = None;
         slot.pid = 0;
         slot.quarantined = false;
+        slot.session = usize::MAX;
     }
-    LIVE.store(still, Ordering::Release);
-    MAIN_QUARANTINED.store(false, Ordering::Release);
+    LIVE.store(s.iter().filter(|x| x.live).count(), Ordering::Release);
 }
-
-/// Whether the session's first guest, pid 1, has been sealed into a quarantine
-/// field. It has no `Slot`, so its flag lives here.
-static MAIN_QUARANTINED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
 
 /// Seal a process and everyone connected to it by parent or child -- so its
 /// parent, its children and its siblings, transitively -- into one quarantine
@@ -141,6 +151,8 @@ static MAIN_QUARANTINED: core::sync::atomic::AtomicBool =
 /// process is.
 pub fn quarantine(target_guest: usize) -> usize {
     let s = unsafe { SLOTS.get() };
+    let sess = here();
+    let main = super::session::main_guest_of(sess).unwrap_or(usize::MAX);
     // The connected component over parent/child links, to a fixpoint. Bounded
     // by the slot count plus the main guest, so the walk terminates.
     let mut field: Vec<usize> = alloc::vec![target_guest];
@@ -148,7 +160,7 @@ pub fn quarantine(target_guest: usize) -> usize {
     while grew {
         grew = false;
         for slot in s.iter() {
-            if !slot.live {
+            if !slot.live || slot.session != sess {
                 continue;
             }
             if !(field.contains(&slot.guest) || field.contains(&slot.parent)) {
@@ -168,12 +180,12 @@ pub fn quarantine(target_guest: usize) -> usize {
     // itself: sealing it ends the whole session, there being nothing above it
     // to be isolated from.
     let mut sealed = 0;
-    if field.contains(&0) {
-        MAIN_QUARANTINED.store(true, Ordering::Release);
+    if field.contains(&main) {
+        super::session::quarantine_main(sess, true);
         sealed += 1;
     }
     for slot in s.iter_mut() {
-        if slot.live && field.contains(&slot.guest) {
+        if slot.live && slot.session == sess && field.contains(&slot.guest) {
             slot.quarantined = true;
             sealed += 1;
         }
@@ -183,13 +195,13 @@ pub fn quarantine(target_guest: usize) -> usize {
     // point -- a syscall boundary, a wait loop, or the timer finding it at ring
     // 3 -- so a member spinning without syscalls is ended by the timer just as
     // `SIGKILL` reaches one.
-    if field.contains(&0) {
+    if field.contains(&main) {
         if let Some(t) = syscall::main_task() {
             syscall::doom(t, syscall::SIGNALED | 9);
         }
     }
     for slot in s.iter() {
-        if slot.live && field.contains(&slot.guest) {
+        if slot.live && slot.session == sess && field.contains(&slot.guest) {
             if let Some(t) = slot.task {
                 syscall::doom(t, syscall::SIGNALED | 9);
             }
@@ -204,10 +216,10 @@ pub fn quarantine(target_guest: usize) -> usize {
 /// A child forked but not yet entered is not in a guest, so it cannot be
 /// doomed -- it is cancelled instead: its work withdrawn before its task ever
 /// picks it up, its entry freed, and its parent told it was killed.
-pub fn doom_all(code: u64) {
+pub fn doom_all(sess: usize, code: u64) {
     let s = unsafe { SLOTS.get() };
     for slot in s.iter_mut() {
-        if !slot.live {
+        if !slot.live || slot.session != sess {
             continue;
         }
         if slot.work.take().is_some() {
@@ -226,14 +238,15 @@ pub fn doom_all(code: u64) {
 /// The task running the guest `pid` names, for a `SIGKILL` that has to reach a
 /// child which may never make another syscall.
 pub fn task_of_pid(pid: i64) -> Option<usize> {
+    let sess = here();
     if pid == 1 {
-        return (!MAIN_QUARANTINED.load(Ordering::Acquire))
+        return (!super::session::main_quarantined(sess))
             .then(syscall::main_task)
             .flatten();
     }
     unsafe { &*SLOTS.get() }
         .iter()
-        .find(|x| x.live && x.work.is_none() && x.pid == pid as u64 && !x.quarantined)
+        .find(|x| x.live && x.work.is_none() && x.pid == pid as u64 && !x.quarantined && x.session == sess)
         .and_then(|x| x.task)
 }
 
@@ -469,6 +482,7 @@ fn fork_with(f: &Frame, stack: Option<u64>, settid: Option<u64>) -> u64 {
         s[idx].live = true;
         s[idx].pid = pid;
         s[idx].status = None;
+        s[idx].session = here();
     }
     LIVE.fetch_add(1, Ordering::Release);
 
@@ -504,10 +518,12 @@ fn body() {
         // which reads as a hung `wait4` rather than as a dead scheduler.
         crate::cpu::enable_interrupts();
         let me = crate::task::current();
+        crate::linux::syscall::big_lock();
         let found = {
             let s = unsafe { SLOTS.get() };
             s.iter().position(|x| x.task == Some(me) && x.work.is_some())
         };
+        crate::linux::syscall::big_unlock();
         let Some(i) = found else {
             // `hlt` rather than a spin, so an idle pool costs one wake per
             // timer tick instead of one per scheduler round -- `thread`'s
@@ -516,9 +532,9 @@ fn body() {
             crate::task::yield_now();
             continue;
         };
-        let (work, stack, guest) = {
+        let (work, stack, guest, sess) = {
             let s = unsafe { SLOTS.get() };
-            (s[i].work.take().unwrap(), s[i].stack, s[i].guest)
+            (s[i].work.take().unwrap(), s[i].stack, s[i].guest, s[i].session)
         };
 
         // Flags around the run, for the reason `run_thread` records: `syscall`
@@ -539,6 +555,7 @@ fn body() {
         // parent's memory at every address they share -- which is all of them.
         let prev = syscall::current_guest();
         syscall::set_current_guest(guest);
+        super::session::enter(sess);
         crate::task::set_root(me, syscall::guest_root());
         crate::task::ring3_active(true, stack);
         // Recorded above, installed here. See `set_syscall_stack`:
@@ -549,6 +566,7 @@ fn body() {
         crate::task::ring3_active(false, 0);
         crate::task::set_root(me, 0);
         syscall::set_current_guest(prev);
+        super::session::leave();
 
         // Said, because nothing else will say it: the parent learns only a
         // signal number from `wait4`, and a person watching learns nothing.
@@ -621,17 +639,22 @@ pub fn parent_pid() -> u64 {
 }
 
 pub fn guest_of_pid(pid: i64) -> Option<usize> {
+    let sess = here();
     if pid == 1 {
         // Sealed pid 1 is gone to the rest of the machine, as every sealed
-        // process is.
-        return (!MAIN_QUARANTINED.load(Ordering::Acquire)).then_some(0);
+        // process is. Pid 1 is *this session's* first guest: each session is
+        // a pid namespace, and nothing in one can name a process in another.
+        if super::session::main_quarantined(sess) {
+            return None;
+        }
+        return super::session::main_guest_of(sess);
     }
     if pid <= 0 {
         return None;
     }
     let s = unsafe { SLOTS.get() };
     s.iter()
-        .find(|x| x.pid == pid as u64 && !x.quarantined)
+        .find(|x| x.pid == pid as u64 && !x.quarantined && x.session == sess)
         .map(|x| x.guest)
 }
 
@@ -660,10 +683,11 @@ pub fn wait(pid: i64, status: u64, options: u64) -> u64 {
     }
 
     loop {
+        let sess = here();
         let found = {
             let s = unsafe { SLOTS.get() };
             s.iter()
-                .position(|x| x.pid != 0 && !x.live && x.status.is_some()
+                .position(|x| x.pid != 0 && !x.live && x.status.is_some() && x.session == sess
                     && !x.quarantined && (pid <= 0 || x.pid == pid as u64))
         };
         if let Some(i) = found {
@@ -682,7 +706,8 @@ pub fn wait(pid: i64, status: u64, options: u64) -> u64 {
         }
         let any = {
             let s = unsafe { SLOTS.get() };
-            s.iter().any(|x| x.pid != 0 && !x.quarantined && (pid <= 0 || x.pid == pid as u64))
+            s.iter().any(|x| x.pid != 0 && !x.quarantined && x.session == sess
+                && (pid <= 0 || x.pid == pid as u64))
         };
         if !any {
             return ECHILD;
@@ -706,6 +731,6 @@ pub fn wait(pid: i64, status: u64, options: u64) -> u64 {
             // harder to read in a trace than one that refuses.
             return ECHILD;
         }
-        crate::task::yield_now();
+        syscall::wait_turn();
     }
 }

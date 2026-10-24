@@ -92,6 +92,8 @@ pub fn ready(fd: &Fd) -> u16 {
             }
         }
         Fd::Dir(_) => POLLIN,
+        // A file on disk is read in place and never waits.
+        Fd::Disk(_) => POLLIN,
         // Always ready both ways, like a regular file: there is nothing to
         // wait for in memory that is already there.
         Fd::Memfd(_) => POLLIN | POLLOUT,
@@ -207,6 +209,15 @@ pub fn ready(fd: &Fd) -> u16 {
                 super::dev::Node::Null => POLLIN | POLLOUT,
                 super::dev::Node::Zero => POLLIN | POLLOUT,
                 super::dev::Node::Random => POLLIN,
+                super::dev::Node::Snd(super::snd::Node::Playback) => {
+                    if super::snd::writable() { POLLOUT } else { 0 }
+                }
+                super::dev::Node::Snd(super::snd::Node::Control) => 0,
+                // No events are delivered on the node itself.
+                super::dev::Node::Drm => 0,
+                super::dev::Node::Fence => {
+                    if super::drm::fence_ready(b.at as u64) { POLLIN } else { 0 }
+                }
             }
         }
     }

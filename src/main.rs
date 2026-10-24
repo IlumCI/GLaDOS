@@ -24,6 +24,7 @@ mod ai;
 mod brain;
 mod voice;
 mod app;
+mod apps;
 mod cpu;
 mod crypto;
 mod diag;
@@ -33,6 +34,7 @@ mod edit;
 mod fmt;
 mod gfx;
 mod gpu;
+mod job;
 mod json;
 mod aiksi;
 mod linux;
@@ -768,6 +770,13 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         let line = mine::boot::apply(p);
         kprintln!("
 [miner] {}", line);
+    }
+
+    // What is installed, so the desktop can offer it. Read off every FAT
+    // volume's `apps/`, so a disk that is not there costs nothing.
+    let n = apps::scan();
+    if n > 0 {
+        kprintln!("[apps] {} installed program(s) -- on the desktop, and 'apps' lists them", n);
     }
 
     gfx::console::set_default_channel(gfx::console::USER);
