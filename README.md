@@ -3,6 +3,8 @@
 A from-scratch, non-Unix, ring-0 operating system in Rust, built around a
 language model that runs inside the kernel.
 
+![The GLaDOS desktop: the Aperture sun over rim-lit hills, and a terminal](docs/img/desktop-1.4.png)
+
 Inside the kernel there is no privilege boundary and nothing to marshal across
 one. The consequence that matters is what a tool call becomes: the sampler
 picks a name from the live applet table under a grammar compiled from that
@@ -12,9 +14,12 @@ parsed in between.
 **There are two stories on this machine and neither is a retreat from the
 other.** The kernel has no boundary because removing it is the whole idea. A
 program written somewhere else has not earned the machine, so it gets ring 3,
-its own page-table root and a syscall surface -- 93 of Linux's roughly 350,
-enough that unmodified busybox, an SDL2 program and a dynamic linker all run
-here without knowing where they are.
+its own page-table root and a syscall surface -- 95 of Linux's roughly 350 for
+64-bit programs and a table of its own for 32-bit ones, enough that unmodified
+busybox, glibc's dynamic linker, SDL2 programs and Mesa all run here without
+knowing where they are. Mesa is the interesting one: through a render node this
+kernel serves, it does Vulkan and OpenGL on a real graphics card, and nothing
+in the kernel knows what Vulkan is.
 
 It boots as a UEFI application, which means it *is* the kernel. Firmware
 already delivers long mode, CPL 0 and an identity map, so the boot path has no
@@ -23,7 +28,7 @@ that exists is for running other people's programs rather than for starting
 this one. The model, tokenizer and root certificates are read before
 `ExitBootServices`, because that call is the last moment a filesystem exists.
 
-297 files of Rust, about 228,000 lines, of which about 23,000 are a symbol
+313 files of Rust, about 241,000 lines, of which about 25,000 are a symbol
 table generated from the linker map. What is in the kernel that this project
 did not write is Rust's `core` and, for fonts only, `fontdue` and the crates
 beneath it, all vendored and listed in `NOTICE.md`. TempleOS is the obvious
@@ -53,14 +58,17 @@ Works, and verified:
 | Memory | Physical frame allocator, identity paging to 4 GiB, coalescing heap |
 | Tasks | Cooperative and preemptive at 100 Hz, `sysv64` context switch |
 | Ring 3 | Guests at CPL 3 on a page-table root of their own, entered by `iretq` and left by `sysretq`, with a guest fault ending the guest and not the machine |
-| Linux ABI | 93 syscalls: `fork`, `execve`, `wait4`, threads and futexes, signals with a real `ucontext` on the guest's stack, pipes, `epoll`, Unix sockets with `SCM_RIGHTS`, `memfd`, `/proc`, `/dev/fb0`, evdev |
-| Ported | Unmodified busybox under both musl and glibc, QuickJS, an SDL2 program drawing through the framebuffer |
-| Wayland | Skywalker, a Wayland server inside the kernel: a real libwayland client opens a desktop window and draws in it |
-| Graphics | GOP framebuffer, a Frutiger Aero desktop, window manager, taskbar, ten apps |
-| Text | 325 glyphs at 8x8, UTF-8 in the console, Latin-1, Greek, box drawing and maths |
+| Linux ABI | 95 syscalls for 64-bit programs and a separate i386 table for 32-bit ones: `fork`, `execve`, `wait4`, threads and futexes, signals with a real `ucontext` on the guest's stack, pipes, `epoll`, Unix sockets with `SCM_RIGHTS`, `memfd`, `/proc`, `/dev/fb0`, evdev, ALSA |
+| Ported | Unmodified busybox under both musl and glibc, QuickJS, SDL2 programs, 32-bit glibc programs, Mesa |
+| GPU | `/dev/dri/renderD128` speaks Linux's virtio-gpu interface; unmodified Mesa Venus does Vulkan and Zink does OpenGL 4.6 on the host's GPU, from ring 3 |
+| Jobs | Guests run as background jobs beside the shell (`linux bg`, `jobs`, `kill`), several sessions at once, each with its own process IDs, their threads spread over every core |
+| Wayland | Skywalker, a Wayland server inside the kernel: windows, damage, frame callbacks, `xdg_shell`, a keyboard and pointer, full screen, pointer lock, and dma-buf feedback naming the render node |
+| Launcher | Installed programs are desktop icons: an entry file on any FAT volume names the runtime, the files and the icon, and a double-click runs it |
+| Graphics | A compositor that repaints only what changed: anti-aliased shapes, OKLab gradients, glass, shadows, tiling and animated windows, Flip 3D, eleven apps, a wallpaper that follows the brain's mood |
+| Text | Noto Sans and Cascadia Code through `fontdue`, with Noto's kerning; a 325-glyph 8x8 bitmap font for boot and the fault path |
 | Storage | NVMe, content-addressed object store, Merkle trees, snapshots, ranged write gate |
 | Network | ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS, TLS 1.3 with chain validation |
-| Drivers | e1000, RTL8168, xHCI (USB 3), CDC-ECM USB Ethernet, USB keyboards and mice |
+| Drivers | e1000, RTL8168, xHCI (USB 3), CDC-ECM USB Ethernet, USB keyboards and mice, HD Audio, virtio-gpu, the Intel AX210 family up to a scan |
 | Crypto | SHA-1/256/384, HMAC/HKDF, AES, ChaCha20-Poly1305, X25519, RSA, ECDSA |
 | Model | Qwen3, Qwen3.5 hybrids and SmolLM2, int8, in-kernel inference |
 | Routing | Constrained decoding over the live applet table, plus a closed-form probe |
@@ -68,10 +76,10 @@ Works, and verified:
 | Initiative | A resident task that decides for itself when to act, when to speak up, and when to stay quiet |
 | Conversation | Plain language at the prompt: requests become exact commands offered with y/n, questions are answered from the machine's own clock, memory and files, and what you tell it about yourself is kept |
 | Brain | The adult fruit fly (FlyWire, 138,639 neurons) or a compiled-in worm, as integer spiking neurons matching a Python oracle spike for spike; senses from OS events, neuromodulators, sleep, and an affect the rest of the machine reads |
-| Voice | Kokoro-82M in the kernel, checked stage by stage against the reference; HD Audio output with volume |
+| Voice | Kokoro-82M in the kernel, checked stage by stage against the reference; HD Audio output with volume, shared with guests through ALSA |
 | Research | A ledger that takes a hypothesis and its predictions before the experiment runs, and a preregistered introspection test |
 | Language | Aiksi: lexer, parser, tree-walking interpreter, records, types, capabilities |
-| Codegen | An x86-64 back end for the integer subset, checked against the interpreter |
+| Codegen | An x86-64 back end for integer functions, calls and recursion included, checked against the interpreter on value, step count and error text |
 | Formats | Detection and structure for text, markdown, json, jsonl, xml, csv, ini and eight languages |
 | Power | Digital thermal sensor, measured frequency, HWP governors, all behind a CPUID gate |
 | ACPI | An AML interpreter: namespace, evaluator, operation regions, embedded controller |
@@ -79,12 +87,12 @@ Works, and verified:
 | Training | Gradients, Adam, QDoRA over the classifier and over every q/k/v site |
 | Self-modification | Variant lineage, a judge council, an append-only ledger, O(1) rollback |
 | Updates | Signed staged images swapped before `ExitBootServices`, with rollback |
-| SMP | Per-core GDT/TSS/APIC, a real spinlock, shared heap and console, tasks that migrate |
+| SMP | Per-core GDT/TSS/APIC, a real spinlock, shared heap and console; guests at ring 3 on every core, the kernel side of them under one lock |
 | Accounting | Every allocation billed to the task that made it, with peak and outstanding |
 | Mining | SHA-256d, yespower, NeoScrypt and BLAKE2s in ring 0 against upstream's own vectors; four coins at once on parallel slices, standing down for the model |
 | Pool | Stratum V1 upstream, one downstream connection carrying several coins, shares validated by recomputation, PPLNS on a ledger that survives a restart |
 | Self-repair | A failing boot check marks its subsystem unavailable instead of halting; a repair is chosen by the fault's own signature, judged by re-running the check, and survives a reboot -- withdrawing itself if it prevents one |
-| Faults | Reports name the function, from a 13,817-symbol table built out of the linker map |
+| Faults | Reports name the function, from a 24,844-symbol table built out of the linker map |
 | Guests | Names the hypervisor from its PCI ids and says what it has configured wrongly |
 
 Does not work yet:
@@ -100,21 +108,22 @@ Does not work yet:
   does not work yet; the firmware asserts while the station context is being
   set up. The WPA2 supplicant is complete and checked against IEEE 802.11i
   vectors at every boot.
-- **Real tasks on more than one core.** The machinery is done and proven: every
-  core has its own descriptor table, task-state segment, per-core block and
-  idle task, the scheduler carries a task between cores and back, and `diag
-  migrate` demonstrates one running on two of them. What is missing is the
-  audit. Preemption on one core means two tasks never execute at the same
-  instant; on two cores they genuinely overlap, so every `Racy` reachable from
-  two different tasks becomes a live race, the namespace tree among them. So
-  every task this kernel spawns *but the mining slices* is pinned to core 0 on
-  purpose. Unpinning before the audit buys a kernel that passes every test and
-  corrupts something later, so the opt-in **is** the audit: `mine::client` is
-  the one caller of `unpin`, and earning it meant reducing that miner's shared
-  surface to a single object and converting its journal from a `Racy` to a
-  `Spin`. The evidence is arithmetic rather than a passing test, since four
-  slices summed to 256% of one slice's hash rate and tasks sharing a core sum
-  to 100% however many there are. The other 91 `Racy`s are untouched.
+- **Kernel tasks on more than one core.** Every core has its own descriptor
+  table, task-state segment, per-core block and idle task, and the scheduler
+  carries a task between cores. What runs on all of them is *guests*: a
+  program's ring-3 threads spread over every core, while the kernel side of
+  every guest syscall takes one big lock, so the roughly two hundred `Racy`
+  statics behind it are still reached by one core at a time. That is the old
+  big kernel lock, deliberately -- auditing each of those statics is the work
+  still owed. Kernel tasks stay on core 0, apart from the mining slices and the
+  brain, which are placed on cores of their own.
+- **A native GPU driver.** The graphics card is reached through virtio-gpu,
+  which means a virtual machine on a Linux host with the host's GPU behind it.
+  A driver for the laptop's own NVIDIA part on bare metal is the next step.
+- **A 3D program's first frame, about half the time.** It stops inside frame
+  presentation, waiting on the host for a present that never completes.
+  Restarting it usually gets past it. Frame rates were measured standing
+  still, not moving through a scene.
 - **A hardware entropy source.** The generator is a fast-key-erasure ChaCha20
   DRBG fed by keyboard and mouse interrupt timing and by NVMe completion
   latency, and it refuses to answer for key material until it has seen enough
@@ -131,14 +140,15 @@ Does not work yet:
 - **An authored application reaching adoption.** The machine writes drafts and
   never adopts one. The planner's output is likewise stringified into a report
   rather than gating how much the loop attempts.
-- **Input to a Wayland client.** Skywalker serves surfaces, buffers, damage,
-  frame callbacks and `xdg_shell`, so a client's window appears and draws.
-  There is no `wl_seat` yet, so no key or pointer event reaches it, and a
-  client still holds the shell until it exits.
+- **A model-invoked program in the background.** The shell can put a guest
+  in the background; the agent cannot yet, so a program the model runs holds
+  the terminal until it exits.
 
 ---
 
 ## A nervous system, a voice, and a temper
+
+![The wallpaper as the mood moves: a white test chamber when content, the sun at rest, drained to grey when upset, eclipsed asleep](docs/img/moods.png)
 
 - **The brain.** A connectome runs as integer leaky integrate-and-fire neurons
   in its own task, matched spike for spike against `tools/connectome.py`. The
@@ -155,6 +165,8 @@ Does not work yet:
 - **Watching it.** `brain` at the shell, or the Oracle's Brain tab: how it
   feels and why, what it senses, what it is driven to do, its chemistry and
   its mood over the last two minutes. `brain poke pain` to try it.
+
+  ![The Oracle's Brain tab: the compiled-in worm, agitated, driven by a noxious input](docs/img/brain.png)
 - **A finding.** The published fly model holds a heat- or smell-ignited
   state of about 10,000 neurons that never ends, carried by a 477-neuron core
   in the antennal lobe found from the wiring alone. Short-term synaptic
@@ -227,10 +239,12 @@ Four judges have to agree, each covering a different way a variant can be bad:
   passes. Comparing two percentages would call both of those a win. The floor
   is symmetric, because "not significantly worse" alone once adopted a routing
   rule on a measured four repairs against ten breaks.
-- **J2, its own goals.** The four goals the machine sets itself are cached
-  along the path the frozen baseline walks for them. A variant that reroutes
-  "list the files in /tmp" toward something that mutates the disk is
-  catastrophic, and aggregate accuracy would never show it.
+- **J2, its own goals.** Eight goals the machine sets itself, each declared
+  with the applet it ought to reach, are decoded again under the candidate. A
+  goal the incumbent already routes wrongly is not protected, and no goal may
+  reach an applet that changes things. A variant that reroutes "list the files
+  in /ai" to `mv` is catastrophic, aggregate accuracy would never show it, and
+  the transcript now names where the goal went.
 - **J3, structure.** Finite factors, positive scales, finite logits across
   every cached decision. This catches the variant whose validation accuracy
   improved while carrying a scale that overflows on the first unfamiliar
@@ -301,8 +315,8 @@ implemented, and nothing else was. The thirty-one after those are the one place
 this discipline was relaxed, and it is worth saying which way: processes,
 pipes, `epoll` and `memfd` were implemented for targets that have *not* run
 here yet -- Wine's server loop and a Wayland client -- rather than because a
-trace demanded them. SDL2 is the only one of that group that has since been
-run and confirmed. The shape of the findings was the useful part twice over. `ls` ran perfectly on its first attempt -- opened the
+trace demanded them. The Wayland client and SDL2 have since run and been
+confirmed; Wine has not. The shape of the findings was the useful part twice over. `ls` ran perfectly on its first attempt -- opened the
 directory, walked it, `lstat`ed every entry, exited 0 -- and printed nothing at
 all, because everything it had to say went through `writev`. A program that
 works and is silent is the worst shape a missing syscall can take.
@@ -347,10 +361,59 @@ response.
 
 **What this does not get you, said plainly.** There is no isolation from a
 *hostile* guest worth the name, and stage 0 said so: contained bugs, not
-malice. There is no scheduler that puts a guest on a second core. A guest that
-makes no syscalls receives no signals, because delivery happens on the way out
+malice. A guest's threads do run on every core now, but the kernel side of
+all of them is serialised behind one lock. A guest that makes no syscalls
+receives no signals, because delivery happens on the way out
 of one -- a program spinning in a loop cannot be interrupted, which on Linux it
 could, and the run deadline is what ends a runaway instead.
+
+---
+
+## A graphics card, from ring 3
+
+![glinfo drawing through Zink on an RTX 3050, from a 32-bit program at ring 3](docs/img/gpu-zink.gif)
+
+**Every OpenGL on Linux is a userspace library, and so is every Vulkan
+driver.** That fact makes graphics mostly not kernel work. `/dev/dri/renderD128`
+speaks Linux's `virtio_gpu` interface: GEM buffers, blob mappings, context
+creation and command submission. Unmodified Mesa Venus, running as an ordinary
+Linux program, does all of Vulkan through it, and under QEMU with KVM that
+reaches the host's RTX 3050. A million-element compute dispatch comes back with
+every element checked. Mesa's Zink puts OpenGL 4.6 on top of that Vulkan, so a
+32-bit GL program reports `zink Vulkan 1.4 (NVIDIA GeForce RTX 3050)` and draws
+in a Skywalker window at about 50 frames a second.
+
+A 32-bit 3D game went from about 1 frame a second on the CPU to 27 to 38 on the
+GPU. Four things decided it:
+
+- **The host has to honour the guest's cache types.** NVIDIA's write-combined
+  memory is written by the GPU without snooping. Under QEMU's default every
+  guest page is write-back, a CPU read gets stale lines, and about a fifth of a
+  compute result came back as the pattern written before the dispatch.
+  `-accel kvm,honor-guest-pat=on`, and each blob is mapped with the type the
+  host reports.
+- **EGL has to find a GPU to ask for**, so Skywalker advertises
+  `zwp_linux_dmabuf_v1` with a feedback naming the render node. Zink then
+  presents through Venus's Wayland WSI onto `wl_shm`.
+- **A sleep may not run short.** `nanosleep` rounded anything under a 10 ms
+  tick to nothing, and Venus gives up on a host ring after 1024 waits it
+  believes took seconds.
+- **A submit must not hold every other thread.** Waiting for the host with the
+  guest lock held made every Venus notify a round trip for the whole program,
+  and that one change, with the compositor being woken at once, took the game
+  from 19.6 frames a second to 27 to 38.
+
+The host's ring threads sometimes go to sleep with commands unread, and the
+cause is not found. The kernel sees every ring Venus creates, so a watchdog
+notifies any ring that has work and has not moved across two looks.
+
+**Installed programs are desktop icons.** An `apps/*.app` file on any FAT
+volume names the program, its runtime, what to mount and copy, its environment
+and its icon. Boot puts it on the desktop and in the Program Manager, a
+double-click runs it as a background job, and `gpu=yes` adds the Zink
+environment only when a render node exists. `runtime=` is the seam a Windows or
+BSD runtime is meant to plug into later. A program already running is not
+started a second time.
 
 ---
 
@@ -386,8 +449,11 @@ until the language was wired to the network, and a denylist grants by default,
 so the builtin anyone forgets is the one that matters.
 
 **A code generator exists for the integer subset.** `src/aiksi/jit.rs` compiles
-one function of integer arithmetic, `if`, `while` and `return` to x86-64, emits
-it into a page-aligned heap buffer and enters it through a `sysv64` pointer.
+a program of integer functions -- arithmetic, `if`, `while`, `return`, and calls
+between them, recursion included -- to x86-64, emits it into a page-aligned
+heap buffer and enters it through a `sysv64` pointer. On `fib(18)` it is 52
+times faster than the tree walk, agreeing with it on the value and on all
+83,606 steps.
 Everything outside that slice is refused rather than approximated. It runs only
 inside the differential harness and never on a live path, because a code
 generation bug in a ring-0 image with no fault recovery gets exactly one
@@ -435,6 +501,7 @@ The kernel reads three files from the EFI System Partition:
 <ESP>/GLADOS/roots.der          root certificates (optional)
 <ESP>/GLADOS/voice.bin          the neural voice (optional; tools/kokoro.py)
 <ESP>/GLADOS/brain.bin          the adult fly (optional; tools/connectome.py build fly)
+<ESP>/GLADOS/FW/                Intel Wi-Fi firmware (optional; tools/wifi_fw.py stage)
 ```
 
 Without `roots.der`, TLS still encrypts but authenticates nothing.
@@ -468,7 +535,8 @@ could never be run and contradicted, so none is written.
 SmolLM2-135M also works, and it is the quickest checkpoint to develop against.
 
 The release ISO for the 0.6B stamps an 8,192-token context and carries the
-voice and the fly; it wants 8 GB of memory.
+voice and the fly; it wants 8 GB of memory. Every image carries its Wi-Fi
+firmware, so there is nothing to download beside it.
 
 ---
 
@@ -484,7 +552,7 @@ The artifact is `target/x86_64-unknown-uefi/release/glados.efi`.
 
 ### Booting it in a virtual machine
 
-Download the ISO from [releases](https://github.com/IlumCI/sanctum/releases)
+Download the ISO from [releases](https://github.com/IlumCI/GLaDOS/releases)
 and give the guest these four settings. Three of them are the difference
 between a working machine and a shell with nothing behind it.
 
@@ -522,7 +590,7 @@ qemu-system-x86_64 \
   -machine q35 -cpu max -smp 4 -m 4G \
   -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
   -drive if=pflash,format=raw,file=OVMF_VARS.fd \
-  -cdrom glados-1.3.6.iso \
+  -cdrom glados-1.4.3-qwen3-0.6b.iso \
   -drive file=store.img,if=none,id=d0,format=raw \
   -device nvme,serial=glados,drive=d0 \
   -netdev user,id=n0 -device e1000,netdev=n0
@@ -530,8 +598,8 @@ qemu-system-x86_64 \
 
 `OVMF_VARS.fd` must be a **writable copy**, not the system one. Create the
 store with `qemu-img create -f raw store.img 8G`; without it the machine boots
-and has nowhere to keep anything. On Windows, `-accel whpx` is about 160 times
-faster than the interpreter; on Linux use `-accel kvm`.
+and has nowhere to keep anything. Add `-accel kvm` on Linux, or `-accel whpx`
+on Windows; either is about 160 times faster than the interpreter.
 
 #### VirtualBox
 
@@ -571,9 +639,10 @@ checkpoint, so it never disturbs deploy staging. **It prefers the release
 artifact**, so a debug build alone leaves a stale binary staged and the change
 under test never boots.
 
-Pass `--qemu-extra "-accel whpx -cpu max"`. WHPX is the Windows hypervisor and
-it is about 160 times faster than TCG on this workload; `-cpu max` alongside it
-is what exposes AVX2, without which the trainer declines. It also raises
+Pass `--qemu-extra "-accel kvm -cpu host"` on Linux, or `"-accel whpx -cpu max"`
+on Windows. A hypervisor accelerator is about 160 times faster than TCG on this
+workload, and the CPU model alongside it is what exposes AVX2, without which the
+trainer declines. It also raises
 unmasked SSE exceptions faithfully where TCG does not, which is how a real bug
 in per-task FPU initialisation was found.
 
@@ -666,15 +735,16 @@ python tools/drive.py --iso glados.iso "ls /"
 **There is no `cargo test`.** This is a `no_std` UEFI binary with no host test
 runner, so verification is the boot selftests plus driving QEMU.
 
-At boot the system runs twenty-six selftest sections, printing `ok` or `FAIL`
-per line: heap, timer, clock, the namespace's Merkle addressing, fifteen sets
+At boot the system runs about thirty selftest sections -- count the
+`[selftest]` headings in a boot log, the only figure that cannot go stale --
+printing `ok` or `FAIL` per line: heap, timer, clock, the namespace's Merkle addressing, fifteen sets
 of published cipher vectors, fault handling, running machine code from the
 heap, file type detection, the glyph table and the UTF-8 decoder, constrained
 decoding, the agent loop, the linear probe, the situation planner, the
 initiative policy, the self-modification gate, corpus bundles, QDoRA adapters,
 the backward kernels, and the trainer's arithmetic.
 
-**A hundred and one** suites can be re-run on demand with `diag all` or `diag <name>`.
+**A hundred and two** suites can be re-run on demand with `diag all` or `diag <name>`.
 Registration is deliberately awkward: `SLOTS` is one number, and a suite added
 without a slot in the results table fails a compile-time assertion rather than
 silently never recording a verdict. That guard has earned its place -- it once
@@ -689,11 +759,11 @@ rather than remembered:
 
 ```bash
 python tools/drive.py "initiative off" "agent stop" "diag"   # then count
-grep -n "const SLOTS" src/diag.rs                            # 101, asserted
+grep -n "const SLOTS" src/diag.rs                            # 102, asserted
 ```
 
 **A bare `diag` is not a clean sweep.** It prints the table with `-` beside
-everything that has not run and a tally reading `0 passed, 0 failed, 101 not
+everything that has not run and a tally reading `0 passed, 0 failed, 102 not
 run`, which is easy to read as the opposite of what it is. `diag all` runs
 them.
 
@@ -812,7 +882,9 @@ it without written permission.
 The reservation above covers this project's own work. `NOTICE.md` lists
 everything else and its licence: the vendored font crates (MIT, Apache-2.0,
 Zlib), the two typefaces (OFL), and the Intel register layouts in
-`src/dev/iwx/`, used under the BSD arm of Intel's dual licence. The GPL-2.0
+`src/dev/iwx/`, used under the BSD arm of Intel's dual licence. The images
+carry Intel's Wi-Fi firmware unmodified, with `LICENCE.iwlwifi_firmware` beside
+it. The GPL-2.0
 Realtek tables this section used to describe are gone, with the driver that
 needed them.
 
