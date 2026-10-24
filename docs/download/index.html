@@ -50,7 +50,7 @@
 <div id="sidebar">
 <div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.4.3</td></tr><tr><td>Released</td><td>2026-10-24</td></tr><tr><td>Images</td><td>3</td></tr></table><ul><li><a href="../download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.4.3">Release notes</a></li></ul></div></div>
 <div class="box"><div class="t">Project information</div><div class="bd"><table class="facts"><tr><td>Development status</td><td>3 - Alpha</td></tr><tr><td>Environment</td><td>Console, framebuffer</td></tr><tr><td>Intended audience</td><td>Developers, science/research</td></tr><tr><td>Licence</td><td>Other/proprietary, all rights reserved</td></tr><tr><td>Natural language</td><td>English</td></tr><tr><td>Operating system</td><td>x86-64 UEFI, bare metal</td></tr><tr><td>Programming language</td><td>Rust, Python</td></tr><tr><td>Topic</td><td>Operating systems, kernels, artificial intelligence</td></tr></table></div></div>
-<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>30</td></tr><tr><td>Downloads</td><td>1281</td></tr><tr><td>Source</td><td>198 files, ~132,000 lines</td></tr></table></div></div>
+<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>23</td></tr><tr><td>Downloads</td><td>706</td></tr><tr><td>Source</td><td>198 files, ~132,000 lines</td></tr></table></div></div>
 <div class="box"><div class="t">Developers</div><div class="bd"><table class="facts"><tr><td>IlumCI</td><td>project admin, developer</td></tr></table></div></div>
 <div class="box"><div class="t">Documentation</div><div class="bd"><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/kernel.html">The kernel</a></li><li><a href="../wiki/model.html">The model</a></li><li><a href="../wiki/agent.html">The agent</a></li><li><a href="../wiki/rsi.html">Self-improvement</a></li><li><a href="../wiki/aiksi.html">Aiksi, the language</a></li><li><a href="../wiki/">All 18 articles</a></li></ul></div></div>
 </div>
@@ -93,25 +93,24 @@
 
 <div class="scroll">
 <!--download-table-->
-<table class="dl"><thead><tr><th>File</th><th>Model</th><th>Context</th><th>Size</th><th>Notes</th></tr></thead><tbody><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.4.3/glados-1.4.3-qwen3-0.6b.iso">glados-1.4.3-qwen3-0.6b.iso</a></td><td>Qwen3-0.6B</td><td>512</td><td class="size">864 MB</td><td>The middle size.</td></tr><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.4.3/glados-1.4.3-qwen35-2b-8k.iso">glados-1.4.3-qwen35-2b-8k.iso</a></td><td>Qwen3.5-2B hybrid</td><td>8192</td><td class="size">1.8 GB</td><td>The same weights with room for a long conversation before the cache becomes a ring.</td></tr><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.4.3/glados-1.4.3-qwen35-2b-32k.iso">glados-1.4.3-qwen35-2b-32k.iso</a></td><td>Qwen3.5-2B hybrid</td><td>32768</td><td class="size">1.8 GB</td><td>The longest context shipped. Three layers in four are linear, so the cache grows far more slowly with context than a dense model&#x27;s.</td></tr></tbody></table>
+<table class="dl"><thead><tr><th>File</th><th>Model</th><th>Context</th><th>Size</th><th>Notes</th></tr></thead><tbody><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.4.3/glados-1.4.3-qwen3-0.6b.iso">glados-1.4.3-qwen3-0.6b.iso</a></td><td>Qwen3-0.6B</td><td>8192</td><td class="size">864 MB</td><td>The middle size, with the neural voice and the adult fruit fly&#x27;s brain on board.</td></tr><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.4.3/glados-1.4.3-qwen35-2b-8k.iso">glados-1.4.3-qwen35-2b-8k.iso</a></td><td>Qwen3.5-2B hybrid</td><td>8192</td><td class="size">1.8 GB</td><td>The same weights with room for a long conversation before the cache becomes a ring.</td></tr><tr><td><a href="https://github.com/IlumCI/GLaDOS/releases/download/v1.4.3/glados-1.4.3-qwen35-2b-32k.iso">glados-1.4.3-qwen35-2b-32k.iso</a></td><td>Qwen3.5-2B hybrid</td><td>32768</td><td class="size">1.8 GB</td><td>The longest context shipped. Three layers in four are linear, so the cache grows far more slowly with context than a dense model&#x27;s.</td></tr></tbody></table>
 <!--/download-table-->
 </div>
 
 <div class="note"><strong>Start with Qwen3-0.6B.</strong> It asks the least of the machine, and memory is the constraint that actually bites: the weights are read in before the firmware hands over, so there has to be room for them before anything else happens. A machine short on RAM does not run slowly, it fails to load.</div>
 
-<h3 id="spec-06b">glados-1.3.7-qwen3-0.6b.iso</h3>
+<h3 id="spec-06b">glados-1.4.3-qwen3-0.6b.iso</h3>
 <div class="imgspec">
-<p>The one to take first. Qwen3-0.6B is a dense model of about 600 million parameters, quantised to int8, and it writes real sentences: an 0.6B with its attention path wired correctly is fluent, and fluency is how you tell the wiring is right. It answers questions, routes commands to applets, and drives the agent loop.</p>
+<p>The one to take first. Qwen3-0.6B is a dense model of about 600 million parameters, quantised to int8, and it writes real sentences: an 0.6B with its attention path wired correctly is fluent, and fluency is how you tell the wiring is right. It answers questions, routes commands to applets, and drives the agent loop. It is also the only image carrying the neural voice and the adult fruit fly's connectome; the 2B images are at GitHub's size limit and use the built-in voice and the worm instead.</p>
 <dl>
 <dt>Model</dt><dd>Qwen3-0.6B, dense, int8, about 570 MB of weights</dd>
-<dt>Context</dt><dd>512 tokens before the cache becomes a ring and starts evicting the oldest turns</dd>
-<dt>Memory</dt><dd>2 GB is enough. The KV cache costs 112 MiB of kernel heap at this context.</dd>
-<dt>Good for</dt><dd>Everything except long conversations. This is the checkpoint the desktop, the shell and the agent are developed against.</dd>
-<dt>Caveat</dt><dd>512 tokens is short. The system turn alone, which carries the instructions and the applet list, is around 120 to 155 of them.</dd>
+<dt>Context</dt><dd>8192 tokens before the cache becomes a ring and starts evicting the oldest turns</dd>
+<dt>Memory</dt><dd>8 GB. The weights, the voice and the 138,639-neuron fly are all read in before the firmware hands over.</dd>
+<dt>Good for</dt><dd>Everything. This is the checkpoint the desktop, the shell and the agent are developed against.</dd>
 </dl>
 </div>
 
-<h3 id="spec-2b8k">glados-1.3.7-qwen35-2b-8k.iso</h3>
+<h3 id="spec-2b8k">glados-1.4.3-qwen35-2b-8k.iso</h3>
 <div class="imgspec">
 <p>A Qwen3.5 hybrid of about two billion parameters. <strong>Hybrid</strong> means the layers are not all the same: three in four are linear attention and the fourth is full attention. That is why a model three times the size ships with sixteen times the context. A linear layer keeps a fixed-size recurrent state instead of a cache that grows with every token, so context costs far less here than the arithmetic for a dense model would suggest.</p>
 <dl>
@@ -123,7 +122,7 @@
 </dl>
 </div>
 
-<h3 id="spec-2b32k">glados-1.3.7-qwen35-2b-32k.iso</h3>
+<h3 id="spec-2b32k">glados-1.4.3-qwen35-2b-32k.iso</h3>
 <div class="imgspec">
 <p>The same weights as the 8k image. <strong>The two files differ in four bytes</strong>, which are the context length stamped into the header; the kernel sizes its cache from that field at load. Nothing was retrained and nothing was reconverted. If you want to know how that is done, it is <code>tools/ctxstamp.py</code>, and the claim that a stamped file is byte-identical to a fully reconverted one is checked rather than assumed.</p>
 <dl>
@@ -138,7 +137,7 @@
 
 <h2 class="sect" id="latest">Always getting the newest version</h2>
 <div class="panel">
-<p>The links in the table above are pinned to 1.3.7. There is deliberately no fixed "latest" URL for an individual image, because the filename carries the version, and a URL that silently changed what it served would be a poor thing to put in a script.</p>
+<p>The links in the table above are pinned to 1.4.3. There is deliberately no fixed "latest" URL for an individual image, because the filename carries the version, and a URL that silently changed what it served would be a poor thing to put in a script.</p>
 
 <p>So, three ways, in order of how much you want to type:</p>
 
@@ -178,7 +177,7 @@ sha256sum -c SHA256SUMS --ignore-missing
 shasum -a 256 -c SHA256SUMS --ignore-missing</code></pre>
 
 <pre><code># Windows PowerShell -- prints the hash, compare it against SHA256SUMS yourself
-Get-FileHash .\glados-1.3.7-qwen3-0.6b.iso -Algorithm SHA256</code></pre>
+Get-FileHash .\glados-1.4.3-qwen3-0.6b.iso -Algorithm SHA256</code></pre>
 
 <p class="small">CI records each image's digest as it is built and re-reads it from the release afterwards, because an upload of 1.9 GB that changes the bytes is a thing that can happen and a digest taken before the upload would not catch it.</p>
 </div>
@@ -242,7 +241,7 @@ cp /usr/share/OVMF/OVMF_VARS.fd ./vars.fd</code></pre>
   -accel kvm \
   -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
   -drive if=pflash,format=raw,unit=1,file=./vars.fd \
-  -cdrom glados-1.3.7-qwen3-0.6b.iso</code></pre>
+  -cdrom glados-1.4.3-qwen3-0.6b.iso</code></pre>
 <p>Raise <code>-m</code> to <code>5G</code> or <code>8G</code> for the 2B images.</p></li>
 
 <li><p><strong>Use the right accelerator for your host</strong>, or everything will be emulated. The difference is not subtle: on this project's own workload the Windows hypervisor measured about <strong>160 times faster</strong> than emulation, taking a boot plus four commands from over 24 minutes to 61 seconds.</p>
@@ -320,7 +319,8 @@ sudo dd if=glados-1.4.3.iso of=/dev/sdX bs=4M status=progress oflag=sync</code><
 <li><code>if</code>, <code>dhcp</code>, <code>dns example.com</code>, then <code>https example.com /</code> fetches a page over a TLS 1.3 connection this kernel negotiated itself, down to the X25519 key exchange.</li>
 <li><code>battery</code> reads a charge by interpreting the AML your own firmware ships in its DSDT, because on a laptop there is no other way to get one. In a virtual machine there is no battery to read.</li>
 <li><code>agent &lt;goal&gt;</code> hands the model a goal and a step budget. It picks an applet through a grammar that makes wrong names unreachable, reads what the applet prints, and writes a transcript.</li>
-<li><code>doom</code>, if you have a WAD. None ships, for the same reason no weights are in the source repository.</li>
+<li><code>brain</code> shows the fruit fly's nervous system running beside the model: how it feels and why. <code>brain poke pain</code>, and watch the wallpaper.</li>
+<li><code>linux</code> lists the Linux programs installed, and <code>apps</code> the ones on your disks with icons on the desktop; a double-click runs one at ring 3.</li>
 </ul>
 </div>
 
@@ -378,7 +378,7 @@ sudo dd if=glados-1.4.3.iso of=/dev/sdX bs=4M status=progress oflag=sync</code><
 <!--footer-->
 <div id="footer">
   <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This project is independent and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
-  <p>Copyright 2026. All rights reserved. The source is published so it can be read; redistribution and derivatives need asking. One file (<code>src/dev/rtl8188eu_tables.rs</code>) is GPL-2.0 from the Linux kernel and carries its own terms; the diagrams are other people's and are listed on <a href="../credits.html">the credits page</a>.</p>
+  <p>Copyright 2026. All rights reserved. The source is published so it can be read; redistribution and derivatives need asking. What is not ours -- two vendored font crates, two typefaces, Intel's register layouts and Wi-Fi firmware, and the diagrams -- is listed on <a href="../credits.html">the credits page</a>.</p>
   <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-10-24.</p>
 </div>
 <!--/footer-->
