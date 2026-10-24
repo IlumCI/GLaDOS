@@ -1,0 +1,8 @@
+looprung 1
+seq 1
+goal ce93af35a0b0364e0b918caaa96c0e6e685347d9b390091d2a3bd5430253be4f
+kind test
+target src/gpu/src_video.rs
+title a native video codec that encodes a 4x4 pixel buffer to a 4x4 pixel buffer
+witness a claim in `diag gfx` that a video frame of size 4x4 is encoded and decoded correctly, which fails today because the `encode` and `decode` functions are not implemented
+why this is the next thing and not a later one because the video codec must be implemented in a file that can be checked without hardware, and this is the first step toward a functional video codec in the kernel
