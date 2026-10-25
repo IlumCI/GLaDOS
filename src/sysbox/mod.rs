@@ -1235,6 +1235,31 @@ pub fn detach(path: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// Move a name, replacing whatever the destination named.
+///
+/// The node moves whole, so the content keeps its address and a directory
+/// takes its subtree with it; nothing is copied. The caller has already
+/// decided the move is allowed -- this only refuses a destination inside the
+/// source, which the tree could not represent.
+pub fn rename(from: &str, to: &str) -> bool {
+    with(|s| {
+        let a = parse(&s.cwd, from);
+        let b = parse(&s.cwd, to);
+        if b.len() > a.len() && b[..a.len()] == a[..] {
+            return false;
+        }
+        if a == b {
+            return tree::resolve(&s.root, &a).is_some();
+        }
+        note(&s.root, &a);
+        note(&s.root, &b);
+        let Some(n) = tree::remove(&mut s.root, &a) else { return false };
+        let _ = tree::remove(&mut s.root, &b);
+        tree::put(&mut s.root, &b, n).is_ok()
+    })
+    .unwrap_or(false)
+}
+
 /// Print the content address of a path, if it exists.
 pub fn print_hash(path: &str) {
     let h = with(|s| {

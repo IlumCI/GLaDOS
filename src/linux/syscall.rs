@@ -70,6 +70,12 @@ pub const SYS_OPEN: u64 = 2;
 pub const SYS_CLOSE: u64 = 3;
 pub const SYS_STAT: u64 = 4;
 pub const SYS_FSTAT: u64 = 5;
+pub const SYS_STATFS: u64 = 137;
+pub const SYS_PWRITE64: u64 = 18;
+pub const SYS_RENAME: u64 = 82;
+pub const SYS_RENAMEAT: u64 = 264;
+pub const SYS_RENAMEAT2: u64 = 316;
+pub const SYS_FSTATFS: u64 = 138;
 pub const SYS_LSTAT: u64 = 6;
 pub const SYS_LSEEK: u64 = 8;
 pub const SYS_IOCTL: u64 = 16;
@@ -186,6 +192,7 @@ pub(super) const EROFS: u64 = (-30i64) as u64;
 pub(super) const EEXIST: u64 = (-17i64) as u64;
 pub(super) const ERANGE: u64 = (-34i64) as u64;
 pub(super) const ENOTEMPTY: u64 = (-39i64) as u64;
+pub(super) const EXDEV: u64 = (-18i64) as u64;
 pub(super) const ENODEV: u64 = (-19i64) as u64;
 pub(super) const ENOSPC: u64 = (-28i64) as u64;
 /// `O_NONBLOCK`, which on an event device is the difference between a program
@@ -2059,8 +2066,12 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
             return EROFS;
         }
         let is_dir = sysbox::is_dir(&path);
+        // A path that is not there is `ENOENT` whatever the flags say, and only
+        // something that exists and is a file is `ENOTDIR`. LibreOffice opens
+        // its temp directories with `O_DIRECTORY` to learn whether to create
+        // them, and an `ENOTDIR` there ends it with an uncaught exception.
         if flags & O_DIRECTORY != 0 && !is_dir {
-            return ENOTDIR;
+            return if sysbox::blob_len(&path).is_some() { ENOTDIR } else { ENOENT };
         }
         let entry = if is_dir {
             if wants_write {
@@ -2191,6 +2202,73 @@ pub(super) fn sys_name_op(path_at: u64, op: u8) -> u64 {
             if sysbox::detach(&path) { 0 } else { EPERM }
         }
     }
+}
+
+/// `rename`, `renameat` and `renameat2`, over the namespace's own move.
+///
+/// Every program that saves safely writes a temporary file and renames it over
+/// the real one, so a kernel without this has no programs that save:
+/// LibreOffice writes its profile that way and gives up on "cannot move".
+/// Both ends must be inside the jail, and a source on a mounted volume is
+/// `EXDEV`, which is what Linux answers across filesystems and what tells a
+/// program to copy instead. `RENAME_NOREPLACE` is honoured; `RENAME_EXCHANGE`
+/// and `RENAME_WHITEOUT` are refused rather than half done.
+pub(super) fn sys_renameat(olddir: u64, old_at: u64, newdir: u64, new_at: u64, flags: u64) -> u64 {
+    const RENAME_NOREPLACE: u64 = 1;
+    if flags & !RENAME_NOREPLACE != 0 {
+        return EINVAL;
+    }
+    let (a, b) = match (read_cstr(old_at), read_cstr(new_at)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    if a.is_empty() || b.is_empty() {
+        return ENOENT;
+    }
+    let from = match at_path(olddir, &a) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let to = match at_path(newdir, &b) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if super::disk::lookup(&from).is_some() {
+        return EXDEV;
+    }
+    if !super::fs::writable(&from) || !super::fs::writable(&to) {
+        return EROFS;
+    }
+    let src_dir = sysbox::is_dir(&from);
+    if !src_dir && sysbox::blob_len(&from).is_none() {
+        return ENOENT;
+    }
+    let dst_dir = sysbox::is_dir(&to);
+    let dst_there = dst_dir || sysbox::blob_len(&to).is_some();
+    if dst_there && flags & RENAME_NOREPLACE != 0 {
+        return EEXIST;
+    }
+    if dst_dir && !src_dir {
+        return EISDIR;
+    }
+    if src_dir && dst_there && !dst_dir {
+        return ENOTDIR;
+    }
+    if dst_dir && from != to && !sysbox::listing(&to).is_empty() {
+        return ENOTEMPTY;
+    }
+    if sysbox::rename(&from, &to) { 0 } else { EINVAL }
+}
+
+/// A path resolved against a directory descriptor, as `openat` resolves one.
+/// An absolute path ignores the descriptor, which is POSIX.
+fn at_path(dirfd: u64, raw: &str) -> Result<String, u64> {
+    let base = if raw.starts_with('/') {
+        String::from("/")
+    } else {
+        with_fds(|fds, cwd| at_base(fds, dirfd, cwd)).unwrap_or(Err(EBADF))?
+    };
+    super::fs::resolve(&base, raw).ok_or(ENOENT)
 }
 
 /// The working directory, which is `/` and has never been anything else.
@@ -2657,6 +2735,40 @@ fn write_file(fd: u64, buf: u64, len: usize) -> u64 {
         len as u64
     })
     .unwrap_or(EBADF)
+}
+
+/// Write at an offset without moving the cursor, which is `write_file` with the
+/// cursor saved around it -- one descriptor, one task, so nothing can see the
+/// cursor in between. LibreOffice writes every file of its profile this way,
+/// and `ENOSYS` here left each one empty and its first read back an error.
+pub(super) fn sys_pwrite64(fd: u64, buf: u64, len: u64, off: u64) -> u64 {
+    if (off as i64) < 0 {
+        return EINVAL;
+    }
+    let saved = with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::File(body))) => {
+            let mut f = body.borrow_mut();
+            let was = f.at;
+            f.at = off as usize;
+            Ok(was)
+        }
+        Some(Some(super::fs::Fd::Disk(_))) => Err(EBADF),
+        Some(Some(super::fs::Fd::Dir(_))) => Err(EISDIR),
+        Some(Some(_)) => Err(ESPIPE),
+        _ => Err(EBADF),
+    })
+    .unwrap_or(Err(EBADF));
+    let was = match saved {
+        Ok(w) => w,
+        Err(e) => return e,
+    };
+    let r = write_file(fd, buf, len as usize);
+    with_fds(|fds, _| {
+        if let Some(Some(super::fs::Fd::File(body))) = fds.get(fd as usize) {
+            body.borrow_mut().at = was;
+        }
+    });
+    r
 }
 
 /// Gather-write: one call, a vector of buffers.
@@ -5529,6 +5641,72 @@ fn write_stat64(buf: u64, w: &[u8; 144]) -> u64 {
     0
 }
 
+/// `struct statfs` for x86-64, 120 bytes, and the answer for one path.
+///
+/// LibreOffice's configuration manager asks this of every registry file
+/// before it reads it, and an `ENOSYS` there is an uncaught exception at
+/// start-up. Both kinds of file here live in memory or on a FAT volume, so the
+/// type is one of those two and the sizes are the heap's: a namespace file
+/// *is* heap, and a mounted volume is read-only, which `f_flags` says.
+fn write_statfs(buf: u64, on_disk: bool) -> u64 {
+    const MSDOS_SUPER_MAGIC: u64 = 0x4d44;
+    const TMPFS_MAGIC: u64 = 0x0102_1994;
+    const ST_RDONLY: u64 = 1;
+    if !reachable(buf, 120, true) {
+        return EFAULT;
+    }
+    let (used, total) = crate::mem::heap::HEAP.stats();
+    let bs = 4096u64;
+    let blocks = total as u64 / bs;
+    let free = (total.saturating_sub(used)) as u64 / bs;
+    let mut w = [0u64; 15];
+    w[0] = if on_disk { MSDOS_SUPER_MAGIC } else { TMPFS_MAGIC };
+    w[1] = bs;
+    w[2] = blocks;
+    w[3] = if on_disk { 0 } else { free };
+    w[4] = w[3];
+    w[8] = 255; // f_namelen
+    w[9] = bs; // f_frsize
+    w[10] = if on_disk { ST_RDONLY } else { 0 };
+    unsafe { core::ptr::write_unaligned(buf as *mut [u64; 15], w) };
+    0
+}
+
+pub(super) fn sys_statfs(path_at: u64, buf: u64) -> u64 {
+    let raw = match read_cstr(path_at) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
+    let Some(path) = found else { return ENOENT };
+    if let Some(on) = super::disk::lookup(&path) {
+        return if on.is_some() { write_statfs(buf, true) } else { ENOENT };
+    }
+    let known = path == "/"
+        || sysbox::is_dir(&path)
+        || sysbox::blob_len(&path).is_some()
+        || super::dev::node(&path).is_some()
+        || super::dev::is_dir(&path)
+        || super::proc::claims(&path);
+    if !known {
+        return ENOENT;
+    }
+    write_statfs(buf, false)
+}
+
+pub(super) fn sys_fstatfs(fd: u64, buf: u64) -> u64 {
+    let on_disk = with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Disk(_))) => Some(true),
+        Some(Some(_)) => Some(false),
+        _ => None,
+    })
+    .flatten();
+    match on_disk {
+        Some(d) => write_statfs(buf, d),
+        None => EBADF,
+    }
+}
+
 pub(super) fn sys_fstat(fd: u64, buf: u64) -> u64 {
     let found = with_fds(|fds, _| match fds.get(fd as usize) {
         Some(Some(super::fs::Fd::Disk(b))) => {
@@ -6743,6 +6921,8 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_CLOSE => (sys_close(f.rdi), true),
         SYS_LSEEK => (sys_lseek(f.rdi, f.rsi, f.rdx), true),
         SYS_FSTAT => (sys_fstat(f.rdi, f.rsi), true),
+        SYS_STATFS => (sys_statfs(f.rdi, f.rsi), true),
+        SYS_FSTATFS => (sys_fstatfs(f.rdi, f.rsi), true),
         SYS_STAT | SYS_LSTAT => {
             (sys_statat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi, 0), true)
         }
@@ -6750,6 +6930,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_GETDENTS64 => (sys_getdents64(f.rdi, f.rsi, f.rdx), true),
         SYS_IOCTL => (sys_ioctl(f.rdi, f.rsi, f.rdx), true),
         SYS_PREAD64 => (sys_pread64(f.rdi, f.rsi, f.rdx, f.r10), true),
+        SYS_PWRITE64 => (sys_pwrite64(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_SET_ROBUST_LIST => (sys_set_robust_list(f.rdi, f.rsi), true),
         SYS_PRLIMIT64 => (sys_prlimit64(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_GETRANDOM => (sys_getrandom(f.rdi, f.rsi, f.rdx), true),
@@ -6810,6 +6991,12 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_MKDIR => (sys_name_op(f.rdi, b'm'), true),
         SYS_RMDIR => (sys_name_op(f.rdi, b'r'), true),
         SYS_UNLINK => (sys_name_op(f.rdi, b'u'), true),
+        SYS_RENAME => {
+            let at = super::fs::AT_FDCWD as u64;
+            (sys_renameat(at, f.rdi, at, f.rsi, 0), true)
+        }
+        SYS_RENAMEAT => (sys_renameat(f.rdi, f.rsi, f.rdx, f.r10, 0), true),
+        SYS_RENAMEAT2 => (sys_renameat(f.rdi, f.rsi, f.rdx, f.r10, f.r8), true),
         SYS_NANOSLEEP => (sys_nanosleep(f.rdi), true),
         SYS_CLOCK_NANOSLEEP => (sys_clock_nanosleep(f.rdi, f.rsi, f.rdx), true),
         // **Accepted and never delivered, which is the honest shape.** A
@@ -7522,12 +7709,23 @@ pub fn adopt_fault(f: Fault) {
 /// process ends, as on Linux. The main thread is doomed with the code -- its
 /// end is what tears the session down and dooms every other thread -- and
 /// this thread then leaves the way any `exit` does.
+///
+/// **"The process" is the caller's, not the session's first.** This doomed
+/// `main_task()`, which is pid 1's, so a forked child calling `exit_group`
+/// from its own main thread ended its *parent* with the child's code -- and
+/// that is every `posix_spawn` whose `exec` fails, since the child then does
+/// `_exit(127)`. LibreOffice spawns `sh -c paperconf` at start-up, there is no
+/// `sh` here, and the whole office suite died of exit 127. Only pid 1 ending
+/// begins the session's teardown.
 pub(super) fn exit_group_from_thread(code: u64) {
-    if let Some(m) = main_task() {
+    let pid = super::fork::current_pid();
+    if let Some(m) = super::fork::task_of_pid(pid as i64) {
         if m != me() {
             doom(m, (code & 0xFF) | EXITED);
-            if let Some(s) = super::session::current() {
-                super::session::begin_exit(s);
+            if pid == 1 {
+                if let Some(s) = super::session::current() {
+                    super::session::begin_exit(s);
+                }
             }
         }
     }
@@ -8954,10 +9152,13 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_CLOSE => "close",
         SYS_STAT => "stat",
         SYS_FSTAT => "fstat",
+        SYS_STATFS => "statfs",
+        SYS_FSTATFS => "fstatfs",
         SYS_LSTAT => "lstat",
         SYS_LSEEK => "lseek",
         SYS_IOCTL => "ioctl",
         SYS_PREAD64 => "pread64",
+        SYS_PWRITE64 => "pwrite64",
         SYS_SET_ROBUST_LIST => "set_robust_list",
         SYS_PRLIMIT64 => "prlimit64",
         SYS_GETRANDOM => "getrandom",
@@ -9005,6 +9206,9 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_MKDIR => "mkdir",
         SYS_RMDIR => "rmdir",
         SYS_UNLINK => "unlink",
+        SYS_RENAME => "rename",
+        SYS_RENAMEAT => "renameat",
+        SYS_RENAMEAT2 => "renameat2",
         SYS_NANOSLEEP => "nanosleep",
         SYS_CLOCK_NANOSLEEP => "clock_nanosleep",
         SYS_RT_SIGACTION => "rt_sigaction",

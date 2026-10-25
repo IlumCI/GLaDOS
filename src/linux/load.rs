@@ -392,6 +392,16 @@ fn place(bytes: &[u8], arena: Option<u64>) -> Result<Placed, &'static str> {
     Ok(Placed { img, hold, base, lo, span })
 }
 
+/// A region the guest owns ends on a page boundary, because rights are applied
+/// and pages mapped a page at a time, so the tail of the last page past
+/// `memsz` is the guest's as much as the rest of it. glibc's loader depends on
+/// that: its start-up allocator carves out the remainder of the page after its
+/// own `.bss` first, and keeps the `LD_PRELOAD` path and every error message's
+/// pieces there -- so an exact span answered `EFAULT` to both.
+fn whole_pages(n: usize) -> usize {
+    (n + 4095) & !4095
+}
+
 /// The interpreter paths the world actually uses, and which libc each is.
 ///
 /// **Not a list of what is supported.** Nothing in this loader is
@@ -609,14 +619,14 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
         Some((path, p)) => (
             Some((path, p.base, p.base + (p.img.entry - p.lo))),
             Some(p.hold),
-            Some(syscall::Region { at: p.base, len: p.span }),
+            Some(syscall::Region { at: p.base, len: whole_pages(p.span) }),
         ),
     };
 
     Ok(Guest {
         argv: args.iter().map(|a| alloc::string::String::from(*a)).collect(),
         regions: syscall::Regions {
-            image: syscall::Region { at: base, len: span },
+            image: syscall::Region { at: base, len: whole_pages(span) },
             stack: syscall::Region { at: stack_at, len: GUEST_STACK },
             brk: syscall::Region { at: brk_at, len: GUEST_BRK },
             interp: interp_region,

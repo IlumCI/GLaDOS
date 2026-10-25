@@ -40,7 +40,7 @@
 //! now passed.
 
 use alloc::collections::VecDeque;
-use alloc::rc::Rc;
+use alloc::rc::{Rc, Weak};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -132,7 +132,21 @@ pub enum Sock {
 /// find each other by it. A `Vec` because a handful of names is what a Wine
 /// prefix has, and a map would be a second structure to keep in step for no
 /// measurable gain.
-static BOUND: Racy<Vec<(String, Rc<RefCell<Sock>>)>> = Racy::new(Vec::new());
+///
+/// **Weak, so a name dies with the last descriptor for its socket.** It held
+/// the socket itself, which kept a dead process's listener alive and
+/// accepting: LibreOffice's second launch bound its single-instance name,
+/// met `EADDRINUSE`, connected to the first launch's corpse, concluded a copy
+/// was already running and exited 1. On Linux the stale name is a file whose
+/// `connect` is `ECONNREFUSED`, and the program unlinks it and binds again;
+/// there is no file here to unlink, so a dead entry is simply no name. The
+/// kernel's own servers keep their listener in a static, so theirs live.
+static BOUND: Racy<Vec<(String, Weak<RefCell<Sock>>)>> = Racy::new(Vec::new());
+
+/// Drop names whose socket has gone.
+fn prune(table: &mut Vec<(String, Weak<RefCell<Sock>>)>) {
+    table.retain(|(_, w)| w.strong_count() > 0);
+}
 
 /// Forget every bound name. Called when the last guest goes.
 pub fn reset() {
@@ -140,7 +154,9 @@ pub fn reset() {
 }
 
 pub fn bound_names() -> usize {
-    unsafe { BOUND.get() }.len()
+    let t = unsafe { BOUND.get() };
+    prune(t);
+    t.len()
 }
 
 /// Bind a name, or say why not.
@@ -160,11 +176,12 @@ pub fn bind(sock: &Rc<RefCell<Sock>>, path: &str) -> Result<(), i64> {
         }
     }
     let table = unsafe { BOUND.get() };
+    prune(table);
     if table.iter().any(|(p, _)| p == path) {
         return Err(EADDRINUSE);
     }
     *sock.borrow_mut() = Sock::Bound(String::from(path));
-    table.push((String::from(path), Rc::clone(sock)));
+    table.push((String::from(path), Rc::downgrade(sock)));
     Ok(())
 }
 
@@ -193,7 +210,8 @@ pub fn listen(sock: &Rc<RefCell<Sock>>) -> Result<(), i64> {
 pub fn connect(path: &str) -> Result<(Rc<RefCell<Pipe>>, Side), i64> {
     const ECONNREFUSED: i64 = -111;
     let table = unsafe { BOUND.get() };
-    let Some((_, target)) = table.iter().find(|(p, _)| p == path) else {
+    prune(table);
+    let Some(target) = table.iter().find(|(p, _)| p == path).and_then(|(_, w)| w.upgrade()) else {
         return Err(ECONNREFUSED);
     };
     let mut t = target.borrow_mut();
@@ -525,5 +543,21 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 
     unbind("/tmp/t.sock");
     out.push(("the name is free once unbound", bound_names() == names_before));
+
+    // A listener nobody holds any more is no listener: the process that bound
+    // it is gone, so connecting is refused and the name binds again.
+    {
+        let dead = Rc::new(RefCell::new(Sock::Fresh));
+        let _ = bind(&dead, "/tmp/dead.sock").and_then(|_| listen(&dead));
+        drop(dead);
+    }
+    out.push((
+        "a listener whose last holder went is refused, as a dead socket is",
+        connect("/tmp/dead.sock").err() == Some(-111),
+    ));
+    let again = Rc::new(RefCell::new(Sock::Fresh));
+    out.push(("and its name can be bound again", bind(&again, "/tmp/dead.sock").is_ok()));
+    drop(again);
+    out.push(("and frees itself once that one goes too", bound_names() == names_before));
     out
 }

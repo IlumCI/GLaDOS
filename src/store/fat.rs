@@ -305,18 +305,28 @@ fn lfn_part(rec: &[u8], out: &mut Vec<u16>) {
     }
 }
 
+/// An 8.3 name, in the case it was written in.
+///
+/// The record holds capitals only; byte 12 says whether the base (0x08) and
+/// the extension (0x10) were lowercase. Windows and mtools both write
+/// `main.xcd` that way rather than spending a long-name entry on it, so
+/// ignoring the bits listed it as `MAIN.XCD` -- and a program that looks for
+/// `*.xcd` in a listing, as LibreOffice's configuration does, then found none
+/// of its files whose names happened to fit in 8.3.
 fn short_name(rec: &[u8]) -> String {
+    let (lower_base, lower_ext) = (rec[12] & 0x08 != 0, rec[12] & 0x10 != 0);
+    let fold = |b: u8, lower: bool| if lower { b.to_ascii_lowercase() as char } else { b as char };
     let mut s = String::new();
     for &b in &rec[0..8] {
         if b == b' ' {
             break;
         }
-        s.push(b as char);
+        s.push(fold(b, lower_base));
     }
     let ext: String = rec[8..11]
         .iter()
         .take_while(|b| **b != b' ')
-        .map(|b| *b as char)
+        .map(|b| fold(*b, lower_ext))
         .collect();
     if !ext.is_empty() {
         s.push('.');
