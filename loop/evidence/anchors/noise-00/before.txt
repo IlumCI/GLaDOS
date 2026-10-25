@@ -1,20 +1,20 @@
 [rail] v1
-video.rect 73.000 us lower
-video.draw 1692.000 us lower
-video.present 243.000 us lower
-video.fill_present 312.000 us lower
-video.console 132.000 us lower
-video.cursor_move 15.000 us lower
-video.idle_turn 73.000 us lower
-video.small_damage 152.000 us lower
-video.window_move 1143.000 us lower
-core.new 50.000 ns lower
-core.step 15874.000 ps lower
-core.vote 4207.000 ns lower
-core.vote_walk 3985.000 ns lower
-ai.matmul 17.399 gflops higher
+video.rect 192.000 us lower
+video.draw 2190.000 us lower
+video.present 387.000 us lower
+video.fill_present 574.000 us lower
+video.console 175.000 us lower
+video.cursor_move 14.000 us lower
+video.idle_turn 84.000 us lower
+video.small_damage 188.000 us lower
+video.window_move 1535.000 us lower
+core.new 89.000 ns lower
+core.step 20298.000 ps lower
+core.vote 5655.000 ns lower
+core.vote_walk 5354.000 ns lower
+ai.matmul 12.355 gflops higher
 ai.bpb absent mbits lower  -- no checkpoint, or too little history to read
 ai.answer absent mbits lower  -- no checkpoint, or no question fits the window
-smp.one_core 6853.000 mbs higher
-smp.all_cores 48788.000 mbs higher
+smp.one_core 6275.000 mbs higher
+smp.all_cores 35071.000 mbs higher
 [rail] end
