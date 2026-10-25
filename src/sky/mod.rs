@@ -41,9 +41,10 @@
 //! libwayland-client program and stages it with the host's own glibc; it
 //! connects, makes a window, and animates ninety frames on the desktop.
 //!
-//! Next: `wl_seat`, so the window takes the pointer and the keyboard (the
-//! keyboard wants an xkb keymap passed as a descriptor), `wl_output`, and a
-//! client that keeps running beside the shell rather than holding it.
+//! `seat` serves `wl_output` and `wl_seat` (an evdev keyboard with a real xkb
+//! keymap, the window's own pointer, constraints for mouse-look), and
+//! `dmabuf` the feedback that names the render node so EGL finds a GPU. A
+//! client runs beside the shell as a background job.
 
 pub mod client;
 pub mod object;

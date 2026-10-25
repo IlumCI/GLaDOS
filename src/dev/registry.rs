@@ -17,8 +17,8 @@
 //!
 //! `Driver` means a driver claims it and works. `Known` means we recognise the
 //! part and nothing here can drive it. `Partial` is the awkward middle that
-//! this tree keeps landing in: the RTL8188EU dongle is identified, its
-//! registers are readable, its firmware parses, and it cannot carry a frame.
+//! this tree keeps landing in: the AX210 boots its firmware, reads its NVM and
+//! scans, and it cannot join a network.
 //! Filing that under `Driver` would be a lie an operator only discovers when
 //! the network does not work, and filing it under `Known` would throw away the
 //! work. It gets its own level.
@@ -517,17 +517,9 @@ pub static TABLE: &[Entry] = &[
         rule: Match::Ids(0x0BDA, RTL8188EU_IDS_REALTEK),
         role: Role::Wireless,
         what: "Realtek RTL8188EU wireless dongle",
-        // Understated, and the understatement was doing harm: it read as a
-        // driver nobody had started. `xhci` identifies the part, reads its
-        // chip id and runs `bring_up`, which applies all four initialisation
-        // tables including the radio over the register interface; the efuse
-        // decoder, the LLT chain, the firmware container parser, the channel
-        // plan and both descriptor formats are written and asserted at boot.
-        // Bulk endpoints are not missing either -- `xhci` configures and
-        // drives them for CDC and RNDIS already.
-        //
-        // What is left is the sequence that uses those pieces on the wire,
-        // and then `impl Radio`, above which everything is done.
+        // `Partial` once: identified, chip id read, tables applied, firmware
+        // parsed, and never a frame. The driver and its GPL-2.0 tables went
+        // when the dongle died, so the row names the part and nothing more.
         support: Support::Known("the driver was removed when its test hardware died; it never carried a frame, and it was the tree's only GPL-2.0 code"),
     },
     Entry {

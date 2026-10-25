@@ -84,8 +84,11 @@ VARIANTS = {
                     note="Kernel only. Boots to a desktop, reports that it has "
                          "no model, and everything except inference works."),
     # Pre-1.2.26 spellings, kept so the news page can describe old releases.
-    "qwen3-0.6b": dict(model="Qwen3-0.6B", ctx="512", kv="112 MiB", ram="2 GB", order=2,
-                       note="The middle size."),
+    # Stamped to 8192 by release.yml since 1.4.x, and the only image carrying
+    # the neural voice and the adult fly, which is what the 8 GB is for.
+    "qwen3-0.6b": dict(model="Qwen3-0.6B", ctx="8192", kv="", ram="8 GB", order=2,
+                       note="The middle size, with the neural voice and the "
+                            "adult fruit fly's brain on board."),
 }
 
 # The project box, in the shape a forge categorised a project: a fixed list of
@@ -151,7 +154,7 @@ def fetch_releases(path=None):
     """Every release, newest first, as the API returns them."""
     if path:
         with open(path, "r", encoding="utf-8") as fh:
-            return json.load(fh)
+            return published(json.load(fh))
     req = urllib.request.Request(API, headers={
         "Accept": "application/vnd.github+json",
         "User-Agent": "glados-site-generator",
@@ -160,7 +163,21 @@ def fetch_releases(path=None):
     if tok:
         req.add_header("Authorization", "Bearer " + tok)
     with urllib.request.urlopen(req, timeout=30) as r:
-        return json.load(r)
+        return published(json.load(r))
+
+
+def published(releases):
+    """The releases a visitor can see, and only the operating system's.
+
+    The workflow's token sees drafts, so a draft's `untagged-...` page went
+    into the news column as a link nobody else can open. And a `payload-*`
+    release holds inputs CI bakes into the images -- weights, firmware, the
+    connectome -- which are not releases of anything a visitor downloads; the
+    images already carry them, so listing them as news says otherwise.
+    """
+    return [r for r in releases
+            if not r.get("draft")
+            and not r["tag_name"].startswith(("payload-", "miner-"))]
 
 
 def size_str(n):
@@ -453,10 +470,9 @@ def footer_html(p, rel):
         'endorsed by, or connected to Valve in any way.</p>',
         '  <p>Copyright 2026. All rights reserved. The source is published so '
         'it can be read; redistribution and derivatives need asking. '
-        'One file (<code>src/dev/'
-        'rtl8188eu_tables.rs</code>) is GPL-2.0 from the Linux kernel and '
-        'carries its own terms; the diagrams are other people\'s and are '
-        'listed on %s.</p>' % a(p + "credits.html", "the credits page"),
+        'What is not ours -- two vendored font crates, two typefaces, Intel\'s '
+        'register layouts and Wi-Fi firmware, and the diagrams -- is listed on '
+        '%s.</p>' % a(p + "credits.html", "the credits page"),
         '  <p>No cookies, no analytics, no telemetry of any kind.%s</p>'
         % (" Last updated %s." % updated if updated else ""),
         '</div>',
