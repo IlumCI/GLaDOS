@@ -2424,6 +2424,7 @@ pub fn big_lock() {
     }
     let ticket = NEXT_TICKET.fetch_add(1, Ordering::AcqRel);
     let mut spins = 0u32;
+    let t0 = if SERVING.load(Ordering::Acquire) != ticket { crate::time::rdtsc() } else { 0 };
     while SERVING.load(Ordering::Acquire) != ticket {
         let flags: u64;
         unsafe { core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags)) };
@@ -2439,7 +2440,11 @@ pub fn big_lock() {
             crate::cpu::disable_interrupts();
         }
     }
+    if t0 != 0 {
+        super::prof::note_big_wait(crate::time::rdtsc() - t0);
+    }
     BIG.store(me, Ordering::Release);
+    super::prof::held();
 }
 
 /// Take the guest lock unless this task already holds it, and say whether
@@ -2455,6 +2460,9 @@ pub fn big_take() -> bool {
 
 pub fn big_unlock() {
     let me = crate::task::current();
+    if BIG.load(Ordering::Relaxed) == me {
+        super::prof::releasing();
+    }
     if BIG.compare_exchange(me, NOBODY, Ordering::AcqRel, Ordering::Acquire).is_ok() {
         SERVING.fetch_add(1, Ordering::AcqRel);
     }
@@ -2476,6 +2484,17 @@ pub(super) fn sleep_for(sec: u64, nsec: u64) -> u64 {
     if nsec >= 1_000_000_000 {
         return EINVAL;
     }
+    let t0 = crate::time::rdtsc();
+    let r = sleep_for_inner(sec, nsec);
+    let mhz = crate::time::tsc_mhz().max(1);
+    super::prof::note_sleep(
+        sec.saturating_mul(1_000_000_000).saturating_add(nsec),
+        (crate::time::rdtsc() - t0) * 1000 / mhz,
+    );
+    r
+}
+
+fn sleep_for_inner(sec: u64, nsec: u64) -> u64 {
     let hz = crate::TIMER_HZ as u64;
     let want = sec.saturating_mul(hz) + nsec * hz / 1_000_000_000;
     let until = crate::dev::lapic::ticks().saturating_add(want);
@@ -6628,8 +6647,85 @@ pub(super) fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
 
 /// Called from the stub. Not public API: the only caller is three lines of
 /// assembly above, and the `sysv64` pinning is why `rdi` is the frame.
+/// Whether an x86-64 call reads or writes a descriptor, or waits on some:
+/// after these the display server always takes its turn (`pump_after`).
+fn touches_fd(nr: u64) -> bool {
+    // read write close poll readv writev select sendto recvfrom sendmsg
+    // recvmsg epoll_wait ppoll epoll_pwait
+    matches!(nr, 0 | 1 | 3 | 7 | 19 | 20 | 23 | 44 | 45 | 46 | 47 | 232 | 271 | 281)
+}
+
+/// Bytes into a guest's memory without the guest lock, for the calls that
+/// need nothing else (`fast_call`).
+///
+/// `reachable` reads the guest's list of regions, which `munmap` edits under
+/// the lock, so it cannot be asked from here. The page tables can: every page
+/// the write touches must be present, writable and the guest's own -- kernel
+/// memory never carries the user bit -- in the tables the processor is using
+/// now. Interrupts are off from `syscall` until `sysretq`, so a shootdown
+/// another core sends for an unmapping cannot finish between the check and
+/// the write.
+fn put_unlocked(at: u64, bytes: &[u8]) -> bool {
+    let Some(end) = at.checked_add(bytes.len() as u64) else { return false };
+    if bytes.is_empty() || end > 0x0000_8000_0000_0000 {
+        return false;
+    }
+    let mut page = at & !0xfff;
+    while page < end {
+        match crate::mem::paging::query(page) {
+            Some(p) if p.present && p.user && p.write => {}
+            _ => return false,
+        }
+        page += 0x1000;
+    }
+    for (i, b) in bytes.iter().enumerate() {
+        unsafe { core::ptr::write_volatile((at + i as u64) as *mut u8, *b) };
+    }
+    true
+}
+
+/// A clock answered from the TSC alone. `None` for the ones that are not --
+/// the real-time clock reads the CMOS through I/O ports, and two cores
+/// interleaving an index write and a data read there would answer from the
+/// wrong register.
+pub(super) fn tsc_clock(which: u64) -> Option<(u64, u64)> {
+    matches!(which, 1 | 2 | 3 | 4 | 6 | 7).then(|| clock_pair(which)).flatten()
+}
+
+/// The calls that touch nothing shared, answered before the guest lock is
+/// taken. `Some` is the return value; `None` takes the ordinary path.
+///
+/// **Half the calls a game made were these, and every one queued for the
+/// lock.** A 32-bit game on Zink asked the time 44,742 times in twenty
+/// seconds and found the lock taken 60,163 times overall, for 22.8 s of
+/// waiting summed over its threads -- a clock read behind a thread holding the
+/// lock across a GPU ioctl. Not traced, deliberately: the trace is shared and
+/// recording into it is the lock this exists to avoid.
+pub(super) fn fast_clock(which: u64, at: u64, wide: bool) -> Option<u64> {
+    let (sec, nsec) = tsc_clock(which)?;
+    let mut b = [0u8; 16];
+    let n = if wide {
+        b[..8].copy_from_slice(&sec.to_le_bytes());
+        b[8..].copy_from_slice(&nsec.to_le_bytes());
+        16
+    } else {
+        b[..4].copy_from_slice(&(sec as u32).to_le_bytes());
+        b[4..8].copy_from_slice(&(nsec as u32).to_le_bytes());
+        8
+    };
+    Some(if put_unlocked(at, &b[..n]) { 0 } else { EFAULT })
+}
+
 #[no_mangle]
 pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
+    if f.rax == SYS_CLOCK_GETTIME {
+        let t0 = super::prof::start();
+        if let Some(r) = fast_clock(f.rdi, f.rsi, true) {
+            super::prof::bill(super::prof::row(f.rax, false), t0);
+            f.rax = r;
+            return;
+        }
+    }
     // A doomed guest asks for nothing more. Here and again on the way out,
     // which bounds how long a task outlives its doom by one syscall's work.
     big_lock();
@@ -6816,7 +6912,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
     // The display server's turn, on the guest's own task -- see `sky::server`
     // for why it runs here and nowhere else. A request just written is
     // answered before the client next looks.
-    crate::sky::server::pump();
+    crate::sky::server::pump_after(touches_fd(nr));
     f.rax = ret;
     // **On the way out, and this is the only place it can be.** The guest's
     // whole register state is in this frame, its stack pointer is parked in
@@ -6835,9 +6931,9 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
     if matches!(nr, SYS_MMAP | SYS_MUNMAP | SYS_MPROTECT | SYS_BRK | 25 /* mremap */) {
         tlb_shootdown();
     }
-    super::prof::leave();
     wake_nappers();
     big_unlock();
+    super::prof::leave();
     unsafe { die_if_doomed() };
 }
 

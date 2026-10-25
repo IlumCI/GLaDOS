@@ -101,6 +101,34 @@ pub static FEAT_NETCTL: core::sync::atomic::AtomicBool = core::sync::atomic::Ato
 pub static FEAT_IDLE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 pub static FEAT_DESK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
+/// The pump on the way out of a syscall: always after one that touched a
+/// descriptor, otherwise at most every `AFTER_US`.
+///
+/// **It ran after every syscall, and under the guest lock.** A 32-bit game on
+/// Zink made 127,870 of them in twenty seconds -- clocks, futexes, ioctls --
+/// and each turn of the server cost 19 us with every other thread of the game
+/// queued behind it for the lock: 2.4 s of the lock held to serve a client
+/// that had nothing new to say. A request a client just wrote still meets its
+/// answer before the client next looks, because writing it and looking for
+/// the reply are both calls on a descriptor, which pump unconditionally; and
+/// every wait pumps on its own, so a client blocked on the server is served at
+/// the same pace as before.
+pub fn pump_after(touched_fd: bool) {
+    const AFTER_US: u64 = 250;
+    if !touched_fd {
+        let now = crate::time::rdtsc();
+        let gap = AFTER_US * crate::time::tsc_mhz().max(1);
+        let last = LAST_PUMP.load(core::sync::atomic::Ordering::Relaxed);
+        if now.wrapping_sub(last) < gap {
+            return;
+        }
+    }
+    LAST_PUMP.store(crate::time::rdtsc(), core::sync::atomic::Ordering::Relaxed);
+    pump();
+}
+
+static LAST_PUMP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 pub fn pump() {
     // Venus rings the host fell asleep on; see `drm::watch`.
     crate::linux::drm::watch();

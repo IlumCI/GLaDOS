@@ -6376,22 +6376,42 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
         cost(what, now.saturating_sub(*t));
         *t = now;
     };
+    // **Nothing under a full-screen window is painted.** Windows go back to
+    // front, so the last full-screen one that covers the whole area being
+    // repainted hides everything listed before it -- the wall, the icons, the
+    // taskbar and every window under it. A game's every commit damages the
+    // whole screen, and each frame painted all of that first and then covered
+    // it: 2.3 ms of a 21 ms frame spent on pixels nobody could see. Only a
+    // settled window counts -- one arriving or leaving is drawn translucent,
+    // and what is under it shows.
+    let (sx0, sy0, sx1, sy1) = fb.scissor();
+    let covered_from = d.windows.iter().rposition(|w| {
+        if w.state != WinState::Fullscreen || w.shown.get().is_some() {
+            return false;
+        }
+        let f = w.frame(screen);
+        f.x <= sx0 && f.y <= sy0 && f.x + f.w >= sx1 && f.y + f.h >= sy1
+    });
     {
-        wallpaper_cached(&fb);
-        lap(Cost::Wallpaper, &mut t);
-        draw_icons(&fb, d.hover);
-        lap(Cost::Icons, &mut t);
+        if covered_from.is_none() {
+            wallpaper_cached(&fb);
+            lap(Cost::Wallpaper, &mut t);
+            draw_icons(&fb, d.hover);
+            lap(Cost::Icons, &mut t);
+        }
         let focus = d.focus();
         let sel = match d.mode {
             Mode::Taskbar { item } => Some(item),
             _ => None,
         };
-        taskbar(&fb, d, sel);
-        paint_tray_text(&fb);
-        lap(Cost::Taskbar, &mut t);
+        if covered_from.is_none() {
+            taskbar(&fb, d, sel);
+            paint_tray_text(&fb);
+            lap(Cost::Taskbar, &mut t);
+        }
 
         for (i, win) in d.windows.iter().enumerate() {
-            if win.state == WinState::Minimised {
+            if win.state == WinState::Minimised || covered_from.is_some_and(|c| i < c) {
                 continue;
             }
             let active = Some(i) == focus;

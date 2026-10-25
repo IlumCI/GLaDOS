@@ -428,8 +428,29 @@ fn put_ts32(at: u64, sec: u64, nsec: u64) -> u64 {
     0
 }
 
+static CLOCKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
 #[no_mangle]
 pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
+    // clock_gettime and clock_gettime64 on a TSC clock: no lock, no trace
+    // (`syscall::fast_clock`).
+    //
+    // One call in 65,536 goes the ordinary way instead, where its caller's
+    // stack is taken: a program spinning on the clock is otherwise a thread
+    // nobody can see the reason for, since this path records nothing.
+    let nr = f.rax as u32 as u64;
+    if (nr == 265 || nr == 403) && CLOCKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 65536 != 0 {
+        let t0 = super::prof::start();
+        let args = [f.rbx as u32 as u64, f.rcx as u32 as u64, 0, 0, 0, 0];
+        super::prof::enter(nr | TAG, &args);
+        let r = sc::fast_clock(args[0], args[1], nr == 403);
+        super::prof::leave();
+        if let Some(r) = r {
+            super::prof::bill(super::prof::row(nr, true), t0);
+            f.rax = r as u32 as u64;
+            return;
+        }
+    }
     sc::big_lock();
     unsafe { sc::die_if_doomed() };
     let nr = f.rax as u32 as u64;
@@ -614,7 +635,10 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
                 }
             }
         }
-        265 => match sc::clock_pair(b) {
+        265 => match {
+            super::prof::note_stack(f.rsp as u32 as u64, f.rip as u32 as u64);
+            sc::clock_pair(b)
+        } {
             Some((s, ns)) => (put_ts32(c, s, ns), true),
             None => (sc::EINVAL, true),
         },
@@ -672,7 +696,10 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
         329 => (sc::sys_epoll_create1(b), true),
         255 => (sc::sys_epoll_ctl(b, c, d, si), true),
         256 => (sc::sys_epoll_wait(b, c, d, si), true),
-        403 => (sc::sys_clock_gettime(b, c), true),
+        403 => {
+            super::prof::note_stack(f.rsp as u32 as u64, f.rip as u32 as u64);
+            (sc::sys_clock_gettime(b, c), true)
+        }
         // clock_nanosleep_time64: the 64-bit timespec, so the same call as
         // x86-64's, flags and all. It dropped `TIMER_ABSTIME`, which turns a
         // sleep until a time into a sleep for that many seconds.
@@ -696,7 +723,11 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
     sc::record(Call { nr: nr | TAG, args: a, ret, served, path: [0; PATH_SNIP], path_len: 0 });
     super::prof::bill(super::prof::row(nr, true), t0);
     let t1 = super::prof::start();
-    crate::sky::server::pump();
+    // read write close socketcall readv writev _newselect poll epoll_wait
+    // pselect6 ppoll epoll_pwait sendmsg recvmsg ppoll_time64
+    // pselect6_time64: descriptor calls, after which the server always turns.
+    let fd = matches!(nr, 3 | 4 | 6 | 102 | 145 | 146 | 142 | 168 | 256 | 308 | 309 | 319 | 370 | 372 | 413 | 414);
+    crate::sky::server::pump_after(fd);
     super::prof::bill(super::prof::PUMP, t1);
     f.rax = ret as u32 as u64;
     // mmap, mmap2, munmap, mprotect, brk, mremap: anything that may have
@@ -704,9 +735,9 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
     if matches!(nr, 90 | 192 | 91 | 125 | 45 | 163) {
         sc::tlb_shootdown();
     }
-    super::prof::leave();
     sc::wake_nappers();
     sc::big_unlock();
+    super::prof::leave();
     unsafe { sc::die_if_doomed() };
 }
 

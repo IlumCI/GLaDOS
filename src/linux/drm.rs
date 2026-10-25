@@ -267,11 +267,13 @@ fn ioctl_inner(id: usize, req: u64, arg: u64) -> u64 {
             // window's next tenant. Stated rather than solved: Venus unmaps
             // before it closes.
             let ctx = c.ctx.unwrap_or(0);
-            let _ = virtgpu::with(|d| {
-                if let Some(p) = bo.phys {
-                    d.unmap_blob(bo.res, p);
-                }
-                let _ = d.unref(ctx, bo.res);
+            let _ = unlocked(|| {
+                virtgpu::with(|d| {
+                    if let Some(p) = bo.phys {
+                        d.unmap_blob(bo.res, p);
+                    }
+                    let _ = d.unref(ctx, bo.res);
+                })
             });
             0
         }
@@ -279,7 +281,7 @@ fn ioctl_inner(id: usize, req: u64, arg: u64) -> u64 {
         NR_VIRTGPU_GETPARAM => getparam(arg),
         NR_VIRTGPU_GET_CAPS => get_caps(arg),
         NR_VIRTGPU_CONTEXT_INIT => context_init(c, arg),
-        NR_VIRTGPU_RESOURCE_CREATE_BLOB => create_blob(c, arg),
+        NR_VIRTGPU_RESOURCE_CREATE_BLOB => create_blob(id, arg),
         NR_VIRTGPU_RESOURCE_INFO => {
             let Some(b) = read::<16>(arg) else { return EFAULT };
             let h = u32_at(&b, 0);
@@ -290,7 +292,7 @@ fn ioctl_inner(id: usize, req: u64, arg: u64) -> u64 {
             o[12..16].copy_from_slice(&bo.blob_mem.to_le_bytes());
             if write(arg, &o) { 0 } else { EFAULT }
         }
-        NR_VIRTGPU_MAP => map(c, arg),
+        NR_VIRTGPU_MAP => map(id, arg),
         NR_VIRTGPU_EXECBUFFER => execbuffer(c, arg),
         // Waiting for a buffer to go idle. A host blob is never in an
         // execbuffer's buffer list under Venus -- it orders its work through
@@ -482,7 +484,30 @@ fn stream(at: u64, len: usize) -> Option<Vec<u8>> {
     Some(v)
 }
 
-fn create_blob(c: &mut Client, arg: u64) -> u64 {
+/// Run a device call with the guest lock let go, as `execbuffer` does for
+/// its submit.
+///
+/// **A device call under the guest lock waits for the device under it.** The
+/// device has its own lock, and a submit holds that across its round trip to
+/// the host -- which `execbuffer` makes without the guest lock -- so a blob
+/// created or mapped meanwhile queued for the device while every other thread
+/// of the game queued for the guest lock behind it. Whatever the caller holds
+/// from guest state is gone by the time this returns: a client is found
+/// again by id afterwards, never kept across.
+fn unlocked<T>(f: impl FnOnce() -> T) -> T {
+    let held = syscall::holds_big();
+    if held {
+        syscall::big_unlock();
+    }
+    let r = f();
+    if held {
+        syscall::big_lock();
+    }
+    r
+}
+
+fn create_blob(id: usize, arg: u64) -> u64 {
+    let Some(c) = client(id) else { return EBADF };
     let Some(b) = read::<56>(arg) else { return EFAULT };
     let (mem, flags, size) = (u32_at(&b, 0), u32_at(&b, 4), u64_at(&b, 16));
     let (cmd_size, cmd, blob_id) = (u32_at(&b, 28) as usize, u64_at(&b, 32), u64_at(&b, 40));
@@ -501,16 +526,23 @@ fn create_blob(c: &mut Client, arg: u64) -> u64 {
     } else {
         None
     };
-    let made = virtgpu::with(|d| {
-        if let Some(p) = &pre {
-            d.submit(ctx, None, p, false)?;
-        }
-        d.create_blob(ctx, mem, flags, blob_id, size)
+    let made = unlocked(|| {
+        virtgpu::with(|d| {
+            if let Some(p) = &pre {
+                d.submit(ctx, None, p, false)?;
+            }
+            d.create_blob(ctx, mem, flags, blob_id, size)
+        })
     });
     let res = match made {
         Ok(Ok(r)) => r,
         Ok(Err(_)) => return EINVAL,
         Err(_) => return ENODEV,
+    };
+    let Some(c) = client(id) else {
+        // Closed while the host was making it: give it back.
+        let _ = unlocked(|| virtgpu::with(|d| d.unref(ctx, res)));
+        return EBADF;
     };
     let handle = free_handle(&c.bos);
     c.bos.push(Bo { handle, res, size, blob_mem: mem, phys: None, cache: 0 });
@@ -520,19 +552,43 @@ fn create_blob(c: &mut Client, arg: u64) -> u64 {
     if write(arg, &o) { 0 } else { EFAULT }
 }
 
-fn map(c: &mut Client, arg: u64) -> u64 {
+fn map(id: usize, arg: u64) -> u64 {
     let Some(b) = read::<16>(arg) else { return EFAULT };
     let h = u32_at(&b, 8);
+    let Some(c) = client(id) else { return EBADF };
     let Some(bo) = c.bos.iter_mut().find(|b| b.handle == h) else { return EINVAL };
     if bo.phys.is_none() {
         let (res, size) = (bo.res, bo.size);
-        match virtgpu::with(|d| d.map_blob(res, size)) {
+        // The flush too: it walks the whole buffer a cache line at a time,
+        // and touches nothing of the guest's.
+        let got = unlocked(|| {
+            let got = virtgpu::with(|d| d.map_blob(res, size));
+            if let Ok(Ok((p, cache))) = got {
+                if cache & 0x0f != 1 {
+                    flush_lines(p, size);
+                }
+            }
+            got
+        });
+        // Found again: the client and its list may have moved meanwhile.
+        let bo = match client(id).and_then(|c| c.bos.iter_mut().find(|b| b.handle == h && b.res == res)) {
+            Some(bo) => bo,
+            None => {
+                if let Ok(Ok((p, _))) = got {
+                    let _ = unlocked(|| virtgpu::with(|d| d.unmap_blob(res, p)));
+                }
+                return EINVAL;
+            }
+        };
+        match got {
+            // Mapped by another thread while this one waited on the host:
+            // that mapping stands and this one goes back.
+            Ok(Ok((p, _))) if bo.phys.is_some() => {
+                let _ = unlocked(|| virtgpu::with(|d| d.unmap_blob(res, p)));
+            }
             Ok(Ok((p, cache))) => {
                 bo.phys = Some(p);
                 bo.cache = cache & 0x0f;
-                if bo.cache != 1 {
-                    flush_lines(p, size);
-                }
                 LAST_CACHE.store(bo.cache, core::sync::atomic::Ordering::Relaxed);
                 if TRACE.load(core::sync::atomic::Ordering::Relaxed) {
                     crate::kprintln!("[drm] map res {} {} bytes at {:#x}, cache {}", res, size, p, bo.cache);
