@@ -71,7 +71,7 @@ pub enum Node {
 }
 
 pub fn is_dir(path: &str) -> bool {
-    matches!(path, "/dev" | "/dev/input" | "/dev/snd") || (path == "/dev/dri" && super::drm::present().is_some())
+    matches!(path, "/dev" | "/dev/input" | "/dev/snd" | "/dev/pts") || (path == "/dev/dri" && super::drm::present().is_some())
 }
 
 /// Which node a path names, as a pure function of the path.
@@ -99,7 +99,9 @@ pub fn node(path: &str) -> Option<Node> {
 }
 
 pub fn claims(path: &str) -> bool {
-    is_dir(path) || node(path).is_some()
+    // The terminals are opened through `pty` rather than this table, since
+    // each open of `/dev/ptmx` makes a new one; they are still /dev's names.
+    is_dir(path) || node(path).is_some() || path == "/dev/ptmx" || super::pty::slave_number(path).is_some()
 }
 
 /// What a listing of `/dev` answers, in the shape `Dir` wants.
@@ -111,6 +113,8 @@ pub fn entries(dir: &str) -> Vec<(String, bool, usize)> {
                 ["fb0", "null", "random", "urandom", "zero"].iter().map(|n| file(n)).collect();
             v.insert(2, ("input".to_string(), true, 0usize));
             v.push(("snd".to_string(), true, 0usize));
+            v.push(("ptmx".to_string(), false, 0usize));
+            v.push(("pts".to_string(), true, 0usize));
             if super::drm::present().is_some() {
                 v.insert(0, ("dri".to_string(), true, 0usize));
             }
@@ -119,6 +123,7 @@ pub fn entries(dir: &str) -> Vec<(String, bool, usize)> {
         "/dev/dri" if super::drm::present().is_some() => alloc::vec![file("renderD128")],
         "/dev/input" => alloc::vec![file("event0"), file("event1")],
         "/dev/snd" => alloc::vec![file("controlC0"), file("pcmC0D0p")],
+        "/dev/pts" => super::pty::numbers().iter().map(|n| (alloc::format!("{}", n), false, 0usize)).collect(),
         _ => Vec::new(),
     }
 }

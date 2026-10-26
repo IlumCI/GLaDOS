@@ -473,6 +473,7 @@ fn fork_with(f: &Frame, stack: Option<u64>, settid: Option<u64>) -> u64 {
     if !syscall::clone_guest(parent, child, tables, owned) {
         return ENOMEM;
     }
+    syscall::cloexec_copy(parent, child);
 
     {
         let s = unsafe { SLOTS.get() };

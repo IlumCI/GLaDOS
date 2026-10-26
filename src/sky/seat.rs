@@ -107,7 +107,12 @@ fn modifier_bit(code: u32) -> Option<u32> {
 
 impl Client {
     /// What must be said when one of these globals is bound.
-    pub(super) fn seat_bound(&mut self, id: u32, iface: &str) {
+    ///
+    /// **Only events the bound version has.** A client binding `wl_seat` at
+    /// version 1 has no handler for `name`, which arrived in version 2, and
+    /// libwayland aborts a client sent an event it cannot dispatch:
+    /// weston-simple-shm died of SIGABRT on its first roundtrip for this.
+    pub(super) fn seat_bound(&mut self, id: u32, iface: &str, version: u32) {
         match iface {
             WL_OUTPUT => {
                 let (w, h) = crate::gfx::primary().map(|f| (f.width() as i32, f.height() as i32)).unwrap_or((1280, 800));
@@ -120,10 +125,13 @@ impl Client {
                 let mut m = Writer::new(id, 1);
                 m.uint(3).int(w).int(h).int(60_000);
                 self.post(m);
-                let mut s = Writer::new(id, 3);
-                s.int(1);
-                self.post(s);
-                self.post(Writer::new(id, 2)); // done
+                // scale and done are version 2.
+                if version >= 2 {
+                    let mut s = Writer::new(id, 3);
+                    s.int(1);
+                    self.post(s);
+                    self.post(Writer::new(id, 2)); // done
+                }
             }
             // Every window here already has the desktop's frame round it, so
             // a toolkit drawing its own title bar inside that frame draws two.
@@ -138,9 +146,11 @@ impl Client {
                 let mut c = Writer::new(id, 0);
                 c.uint(3); // pointer | keyboard
                 self.post(c);
-                let mut n = Writer::new(id, 1);
-                n.string("seat0");
-                self.post(n);
+                if version >= 2 {
+                    let mut n = Writer::new(id, 1);
+                    n.string("seat0");
+                    self.post(n);
+                }
             }
             _ => {}
         }

@@ -298,7 +298,7 @@ impl Client {
                 }
                 self.objects.create(id, g.iface, version)?;
                 self.bound(id, g.iface);
-                self.seat_bound(id, g.iface);
+                self.seat_bound(id, g.iface, version);
                 self.dmabuf_bound(id, g.iface, version);
                 Ok(())
             }

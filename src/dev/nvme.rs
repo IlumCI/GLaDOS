@@ -505,8 +505,37 @@ pub fn gate_selftest() -> bool {
 
 static CONTROLLER: Racy<Option<Nvme>> = Racy::new(None);
 
+/// The task issuing commands now, or `usize::MAX` for nobody.
+static OWNER: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// The controller, one task at a time.
+///
+/// **It is one submission queue and one completion queue, and two cores used
+/// it at once.** A guest reading its libraries off the root image does so on
+/// whichever core it runs on, while the shell mounting a volume -- or reading
+/// a program, or a FAT file -- reads from its own: their commands interleaved
+/// in the queue, completions were taken by the wrong waiter, and what came
+/// back was another read's data. A session service starting during `linux
+/// mount` failed to load its libraries and exited 127, and the memory those
+/// reads landed in was somebody else's.
+///
+/// Re-entrant for the task holding it, so a call reached from inside another
+/// does not wait on itself. It spins rather than yielding: a holder may have
+/// interrupts off, and a command is short.
 pub fn with<R>(f: impl FnOnce(&mut Nvme) -> R) -> Option<R> {
-    unsafe { CONTROLLER.get().as_mut().map(f) }
+    use core::sync::atomic::Ordering;
+    let me = crate::task::current();
+    let mine = OWNER.load(Ordering::Acquire) == me;
+    if !mine {
+        while OWNER.compare_exchange_weak(usize::MAX, me, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            core::hint::spin_loop();
+        }
+    }
+    let r = unsafe { CONTROLLER.get().as_mut().map(f) };
+    if !mine {
+        OWNER.store(usize::MAX, Ordering::Release);
+    }
+    r
 }
 
 pub fn present() -> bool {

@@ -179,6 +179,12 @@ pub enum Fd {
     Dev(Rc<RefCell<DevFile>>),
     /// A file on a mounted FAT volume, read by range. See `linux::disk`.
     Disk(Rc<RefCell<crate::linux::disk::DiskFile>>),
+    /// A counter one thread writes and another polls (`eventfd`).
+    Event(Rc<RefCell<crate::linux::timer::EventFd>>),
+    /// A deadline a loop waits on beside its sockets (`timerfd`).
+    Timer(Rc<RefCell<crate::linux::timer::TimerFd>>),
+    /// One end of a pseudo-terminal (`/dev/ptmx`, `/dev/pts/N`).
+    Pty(Rc<RefCell<crate::linux::pty::End>>),
 }
 
 /// An open `/dev` node and where its cursor sits.
@@ -325,6 +331,9 @@ impl Fd {
             Fd::Memfd(b) => Fd::Memfd(b.clone()),
             Fd::Dev(b) => Fd::Dev(b.clone()),
             Fd::Disk(b) => Fd::Disk(b.clone()),
+            Fd::Event(b) => Fd::Event(b.clone()),
+            Fd::Timer(b) => Fd::Timer(b.clone()),
+            Fd::Pty(b) => Fd::Pty(b.clone()),
         }
     }
 

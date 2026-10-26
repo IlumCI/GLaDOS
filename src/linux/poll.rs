@@ -97,6 +97,23 @@ pub fn ready(fd: &Fd) -> u16 {
         // Always ready both ways, like a regular file: there is nothing to
         // wait for in memory that is already there.
         Fd::Memfd(_) => POLLIN | POLLOUT,
+        Fd::Event(e) => POLLOUT | if e.borrow().readable() { POLLIN } else { 0 },
+        Fd::Pty(e) => {
+            let e = e.borrow();
+            let p = e.pty.borrow();
+            if e.master {
+                POLLOUT | if p.master_readable() { POLLIN } else { 0 }
+            } else {
+                POLLOUT | if p.slave_readable() { POLLIN } else { 0 }
+            }
+        }
+        Fd::Timer(t) => {
+            if t.borrow_mut().readable(crate::linux::syscall::mono_now()) {
+                POLLIN
+            } else {
+                0
+            }
+        }
         Fd::Socket(s) => {
             let b = s.borrow();
             match b.conn {

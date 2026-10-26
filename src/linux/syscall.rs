@@ -206,6 +206,7 @@ pub(super) const ENOTEMPTY: u64 = (-39i64) as u64;
 pub(super) const EXDEV: u64 = (-18i64) as u64;
 pub(super) const EIO: u64 = (-5i64) as u64;
 pub(super) const ENODATA: u64 = (-61i64) as u64;
+pub(super) const ENXIO: u64 = (-6i64) as u64;
 pub(super) const ENODEV: u64 = (-19i64) as u64;
 pub(super) const ENOSPC: u64 = (-28i64) as u64;
 /// `O_NONBLOCK`, which on an event device is the difference between a program
@@ -1690,6 +1691,27 @@ pub static MEMLOG: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBo
 /// other fd is `-EBADF` rather than silently accepted -- a write to fd 7 that
 /// reported success would be a program whose output vanished.
 pub(super) fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
+    if let Some(r) = write_pty(fd, buf, len) {
+        return r;
+    }
+    if let Some(e) = with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Event(e))) => Some(e.clone()),
+        _ => None,
+    })
+    .flatten()
+    {
+        if len < 8 {
+            return EINVAL;
+        }
+        if !reachable(buf, 8, false) {
+            return EFAULT;
+        }
+        let v = unsafe { core::ptr::read_unaligned(buf as *const u64) };
+        return match e.borrow_mut().add(v) {
+            Ok(()) => 8,
+            Err(()) => if v == u64::MAX { EINVAL } else { EAGAIN },
+        };
+    }
     // **Ask the table, not the number.** This compared `fd` against 1 and 2,
     // which is right until a guest does the one thing every shell does:
     // `close(1)` then `open(...)` hands the file descriptor 1, and a write to
@@ -1935,10 +1957,71 @@ pub(super) fn new_fence_fd(fence: u64) -> u64 {
     .unwrap_or(EBADF)
 }
 
+/// Close-on-exec, per guest and descriptor.
+///
+/// **Kept at last, because there is an `execve` for it to matter to.** It was
+/// accepted and stored nowhere, so every pipe a parent opened close-on-exec to
+/// learn whether its child's `exec` worked stayed open in the child: the
+/// parent read it forever, waiting for an end of file that only the exec
+/// closing it produces. foot hung there, its shell already running inside
+/// it. Every slot assignment clears the bit, so a reused number cannot
+/// inherit it; the calls that take a CLOEXEC flag set it afterwards.
+static CLOEXEC: Racy<alloc::collections::BTreeSet<(usize, u64)>> = Racy::new(alloc::collections::BTreeSet::new());
+
+pub fn cloexec_set(fd: u64, on: bool) {
+    let k = (current_guest(), fd);
+    let set = unsafe { CLOEXEC.get() };
+    if on {
+        set.insert(k);
+    } else {
+        set.remove(&k);
+    }
+}
+
+fn cloexec_get(fd: u64) -> bool {
+    unsafe { CLOEXEC.get() }.contains(&(current_guest(), fd))
+}
+
+/// A child of `fork` has its parent's flags, as it has its descriptors.
+pub fn cloexec_copy(parent: usize, child: usize) {
+    let set = unsafe { CLOEXEC.get() };
+    set.retain(|(g, _)| *g != child);
+    let mine: Vec<u64> = set.iter().filter(|(g, _)| *g == parent).map(|(_, f)| *f).collect();
+    for f in mine {
+        set.insert((child, f));
+    }
+}
+
+/// At `execve`: close every flagged descriptor of this guest.
+pub fn close_on_exec() {
+    let g = current_guest();
+    let set = unsafe { CLOEXEC.get() };
+    let doomed: Vec<u64> = set.iter().filter(|(gg, _)| *gg == g).map(|(_, f)| *f).collect();
+    set.retain(|(gg, _)| *gg != g);
+    with_fds(|fds, _| {
+        for f in doomed {
+            if let Some(slot) = fds.get_mut(f as usize) {
+                if let Some(old) = slot.take() {
+                    old.flush();
+                }
+            }
+        }
+    });
+}
+
+/// Set the flag on what a creating call returned, if it asked for it.
+fn with_cloexec(r: u64, want: bool) -> u64 {
+    if want && (r as i64) >= 0 {
+        cloexec_set(r, true);
+    }
+    r
+}
+
 pub(super) fn place_fd(fds: &mut Vec<Option<super::fs::Fd>>, entry: super::fs::Fd) -> u64 {
     match fds.iter().position(|f| f.is_none()) {
         Some(slot) => {
             fds[slot] = Some(entry);
+            cloexec_set(slot as u64, false);
             slot as u64
         }
         None => {
@@ -1946,6 +2029,7 @@ pub(super) fn place_fd(fds: &mut Vec<Option<super::fs::Fd>>, entry: super::fs::F
                 return EMFILE;
             }
             fds.push(Some(entry));
+            cloexec_set((fds.len() - 1) as u64, false);
             (fds.len() - 1) as u64
         }
     }
@@ -2031,6 +2115,36 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
         // per write is the objection. A character device is not in the store,
         // so the objection does not apply -- and `/dev/fb0` opened read-only
         // is a framebuffer nothing can draw on.
+        // A pseudo-terminal: `/dev/ptmx` makes one and answers its master,
+        // `/dev/pts/N` opens the slave of one that exists and is unlocked.
+        if path == "/dev/ptmx" || path == "/dev/tty" || path.starts_with("/dev/pts/") {
+            let nonblock = flags & O_NONBLOCK != 0;
+            let end = if path == "/dev/ptmx" {
+                super::pty::open_master(nonblock)
+            } else if path == "/dev/tty" {
+                // The controlling terminal: the slave this process's stdin is,
+                // if it is one.
+                match with_fds(|fds, _| match fds.first() {
+                    Some(Some(super::fs::Fd::Pty(e))) => Some(e.borrow().pty.borrow().num),
+                    _ => None,
+                })
+                .flatten()
+                {
+                    Some(n) => match super::pty::open_slave(n, nonblock) {
+                        Ok(e) => e,
+                        Err(e) => return e as u64,
+                    },
+                    None => return ENXIO,
+                }
+            } else {
+                let Some(n) = super::pty::slave_number(&path) else { return ENOENT };
+                match super::pty::open_slave(n, nonblock) {
+                    Ok(e) => e,
+                    Err(e) => return e as u64,
+                }
+            };
+            return place_fd(fds, super::fs::Fd::Pty(end));
+        }
         if let Some(n) = super::dev::node(&path) {
             if flags & O_DIRECTORY != 0 {
                 return ENOTDIR;
@@ -2432,6 +2546,409 @@ pub(super) fn sys_chdir(path_at: u64) -> u64 {
         }
         None => EBADF,
     }
+}
+
+enum Waitable {
+    Event(alloc::rc::Rc<core::cell::RefCell<super::timer::EventFd>>),
+    Timer(alloc::rc::Rc<core::cell::RefCell<super::timer::TimerFd>>),
+}
+
+fn waitable(fd: u64) -> Option<Waitable> {
+    with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Event(e))) => Some(Waitable::Event(e.clone())),
+        Some(Some(super::fs::Fd::Timer(t))) => Some(Waitable::Timer(t.clone())),
+        _ => None,
+    })
+    .flatten()
+}
+
+fn read_event_or_timer(fd: u64, buf: u64, len: u64) -> Option<u64> {
+    let w = waitable(fd)?;
+    if len < 8 {
+        return Some(EINVAL);
+    }
+    loop {
+        let (got, nonblock) = match &w {
+            Waitable::Event(e) => {
+                let mut e = e.borrow_mut();
+                (e.take(), e.nonblock)
+            }
+            Waitable::Timer(t) => {
+                let mut t = t.borrow_mut();
+                (t.take(mono_ns()), t.nonblock)
+            }
+        };
+        if let Some(v) = got {
+            unsafe { core::ptr::write_unaligned(buf as *mut u64, v) };
+            return Some(8);
+        }
+        if nonblock {
+            return Some(EAGAIN);
+        }
+        if overran(crate::dev::lapic::ticks()) {
+            unsafe { kill_blocked() }
+        }
+        crate::sky::server::pump();
+        wait_turn();
+    }
+}
+
+fn pty_of(fd: u64) -> Option<alloc::rc::Rc<core::cell::RefCell<super::pty::End>>> {
+    with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Pty(e))) => Some(e.clone()),
+        _ => None,
+    })
+    .flatten()
+}
+
+fn read_pty(fd: u64, buf: u64, len: u64) -> Option<u64> {
+    let end = pty_of(fd)?;
+    let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
+    loop {
+        let (master, nonblock, pty) = {
+            let e = end.borrow();
+            (e.master, e.nonblock, e.pty.clone())
+        };
+        let got = if master {
+            match pty.borrow_mut().master_read(out) {
+                Some(Ok(n)) => Some(n as u64),
+                Some(Err(())) => Some(EIO),
+                None => None,
+            }
+        } else {
+            pty.borrow_mut().slave_read(out).map(|n| n as u64)
+        };
+        if let Some(r) = got {
+            return Some(r);
+        }
+        if nonblock {
+            return Some(EAGAIN);
+        }
+        if overran(crate::dev::lapic::ticks()) {
+            unsafe { kill_blocked() }
+        }
+        crate::sky::server::pump();
+        wait_turn();
+    }
+}
+
+fn write_pty(fd: u64, buf: u64, len: usize) -> Option<u64> {
+    let end = pty_of(fd)?;
+    if len == 0 {
+        return Some(0);
+    }
+    if !reachable(buf, len, false) {
+        return Some(EFAULT);
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(buf as *const u8, len) };
+    let (master, pty) = {
+        let e = end.borrow();
+        (e.master, e.pty.clone())
+    };
+    if master {
+        // Typed at the terminal. A key that means a signal goes to the
+        // foreground process group.
+        let (sig, pgrp) = {
+            let mut p = pty.borrow_mut();
+            (p.input(bytes), p.pgrp)
+        };
+        if let (Some(s), true) = (sig, pgrp != 0) {
+            super::signal::kill(pgrp as i64, s);
+        }
+        return Some(len as u64);
+    }
+    let wrote = pty.borrow_mut().slave_write(bytes);
+    Some(match wrote {
+        Some(n) => n as u64,
+        None => EAGAIN,
+    })
+}
+
+/// The terminal ioctls, on either end.
+fn pty_ioctl(fd: u64, req: u64, arg: u64) -> Option<u64> {
+    let end = pty_of(fd)?;
+    let (master, pty) = {
+        let e = end.borrow();
+        (e.master, e.pty.clone())
+    };
+    let need = |n: usize, write: bool| reachable(arg, n, write);
+    Some(match req {
+        // TCGETS
+        0x5401 => {
+            if !need(super::pty::TERMIOS_LEN, true) {
+                return Some(EFAULT);
+            }
+            let t = pty.borrow().termios();
+            unsafe { core::ptr::copy_nonoverlapping(t.as_ptr(), arg as *mut u8, t.len()) };
+            0
+        }
+        // TCSETS, TCSETSW, TCSETSF (the last also flushes pending input)
+        0x5402..=0x5404 => {
+            if !need(super::pty::TERMIOS_LEN, false) {
+                return Some(EFAULT);
+            }
+            let mut t = [0u8; super::pty::TERMIOS_LEN];
+            unsafe { core::ptr::copy_nonoverlapping(arg as *const u8, t.as_mut_ptr(), t.len()) };
+            let mut p = pty.borrow_mut();
+            if req == 0x5404 {
+                p.flush(true, false);
+            }
+            p.set_termios(&t);
+            0
+        }
+        // TCGETS2: the same, as `struct termios2` -- the 36 bytes and the
+        // input and output speeds. glibc 2.42 implements `tcgetattr` with
+        // this and not TCGETS, so without it every terminal read ENOTTY and
+        // `isatty` was false on a terminal.
+        0x802C_542A => {
+            if !need(44, true) {
+                return Some(EFAULT);
+            }
+            let t = pty.borrow().termios();
+            unsafe {
+                core::ptr::copy_nonoverlapping(t.as_ptr(), arg as *mut u8, t.len());
+                core::ptr::write_unaligned((arg + 36) as *mut u32, 38_400);
+                core::ptr::write_unaligned((arg + 40) as *mut u32, 38_400);
+            }
+            0
+        }
+        // TCSETS2, TCSETSW2, TCSETSF2: the speeds are taken and mean nothing.
+        0x402C_542B..=0x402C_542D => {
+            if !need(44, false) {
+                return Some(EFAULT);
+            }
+            let mut t = [0u8; super::pty::TERMIOS_LEN];
+            unsafe { core::ptr::copy_nonoverlapping(arg as *const u8, t.as_mut_ptr(), t.len()) };
+            let mut p = pty.borrow_mut();
+            if req == 0x402C_542D {
+                p.flush(true, false);
+            }
+            p.set_termios(&t);
+            0
+        }
+        // TIOCGWINSZ
+        0x5413 => {
+            if !need(8, true) {
+                return Some(EFAULT);
+            }
+            let w = pty.borrow().winsize;
+            unsafe {
+                for (i, v) in w.iter().enumerate() {
+                    core::ptr::write_unaligned((arg + i as u64 * 2) as *mut u16, *v);
+                }
+            }
+            0
+        }
+        // TIOCSWINSZ: and the foreground group is told, as SIGWINCH.
+        0x5414 => {
+            if !need(8, false) {
+                return Some(EFAULT);
+            }
+            let mut w = [0u16; 4];
+            for (i, v) in w.iter_mut().enumerate() {
+                *v = unsafe { core::ptr::read_unaligned((arg + i as u64 * 2) as *const u16) };
+            }
+            let pgrp = {
+                let mut p = pty.borrow_mut();
+                let changed = p.winsize != w;
+                p.winsize = w;
+                if changed { p.pgrp } else { 0 }
+            };
+            if pgrp != 0 {
+                super::signal::kill(pgrp as i64, 28); // SIGWINCH
+            }
+            0
+        }
+        // TIOCGPGRP, TIOCGSID
+        0x540F | 0x5429 => {
+            if !need(4, true) {
+                return Some(EFAULT);
+            }
+            let g = pty.borrow().pgrp.max(1);
+            unsafe { core::ptr::write_unaligned(arg as *mut u32, g) };
+            0
+        }
+        // TIOCSPGRP
+        0x5410 => {
+            if !need(4, false) {
+                return Some(EFAULT);
+            }
+            pty.borrow_mut().pgrp = unsafe { core::ptr::read_unaligned(arg as *const u32) };
+            0
+        }
+        // TIOCSCTTY: becoming the controlling terminal; the caller leads it.
+        0x540E => {
+            let mut p = pty.borrow_mut();
+            if p.pgrp == 0 {
+                p.pgrp = super::fork::current_pid() as u32;
+            }
+            0
+        }
+        // TIOCNOTTY, TCXONC, TCSBRK, TCSBRKP: nothing to stop or break.
+        0x5422 | 0x540A | 0x5409 | 0x5425 => 0,
+        // TCFLSH: 0 input, 1 output, 2 both.
+        0x540B => {
+            let mut p = pty.borrow_mut();
+            p.flush(arg != 1, arg != 0);
+            0
+        }
+        // FIONREAD / TIOCINQ, TIOCOUTQ
+        0x541B | 0x5411 => {
+            if !need(4, true) {
+                return Some(EFAULT);
+            }
+            let n = pty.borrow().readable_bytes(master) as u32;
+            unsafe { core::ptr::write_unaligned(arg as *mut u32, n) };
+            0
+        }
+        // TIOCGPTN: the master's terminal number, for ptsname.
+        0x8004_5430 if master => {
+            if !need(4, true) {
+                return Some(EFAULT);
+            }
+            let n = pty.borrow().num;
+            unsafe { core::ptr::write_unaligned(arg as *mut u32, n) };
+            0
+        }
+        // TIOCSPTLCK: lock or unlock the slave.
+        0x4004_5431 if master => {
+            if !need(4, false) {
+                return Some(EFAULT);
+            }
+            pty.borrow_mut().locked = unsafe { core::ptr::read_unaligned(arg as *const u32) } != 0;
+            0
+        }
+        // TIOCGPTLCK
+        0x8004_5439 if master => {
+            if !need(4, true) {
+                return Some(EFAULT);
+            }
+            let l = pty.borrow().locked as u32;
+            unsafe { core::ptr::write_unaligned(arg as *mut u32, l) };
+            0
+        }
+        // TIOCGPTPEER: the slave as a descriptor, without a path.
+        0x5441 if master => {
+            let n = pty.borrow().num;
+            match super::pty::open_slave(n, arg & O_NONBLOCK != 0) {
+                Ok(e) => install_fd(super::fs::Fd::Pty(e)),
+                Err(e) => e as u64,
+            }
+        }
+        // FIONBIO
+        0x5421 => {
+            if !need(4, false) {
+                return Some(EFAULT);
+            }
+            end.borrow_mut().nonblock = unsafe { core::ptr::read_unaligned(arg as *const u32) } != 0;
+            0
+        }
+        _ => ENOTTY,
+    })
+}
+
+/// `eventfd` and `eventfd2`.
+pub(super) fn sys_eventfd(init: u64, flags: u64) -> u64 {
+    const EFD_SEMAPHORE: u64 = 1;
+    const EFD_NONBLOCK: u64 = 0o4000;
+    const EFD_CLOEXEC: u64 = 0o2000000;
+    if flags & !(EFD_SEMAPHORE | EFD_NONBLOCK | EFD_CLOEXEC) != 0 {
+        return EINVAL;
+    }
+    let e = super::timer::EventFd { count: init & 0xFFFF_FFFF, semaphore: flags & EFD_SEMAPHORE != 0, nonblock: flags & EFD_NONBLOCK != 0 };
+    install_fd(super::fs::Fd::Event(alloc::rc::Rc::new(core::cell::RefCell::new(e))))
+}
+
+/// `timerfd_create` on the clocks this kernel keeps.
+pub(super) fn sys_timerfd_create(clock: u64, flags: u64) -> u64 {
+    const TFD_NONBLOCK: u64 = 0o4000;
+    const TFD_CLOEXEC: u64 = 0o2000000;
+    if flags & !(TFD_NONBLOCK | TFD_CLOEXEC) != 0 {
+        return EINVAL;
+    }
+    // REALTIME, MONOTONIC, BOOTTIME and their ALARM forms (8, 9).
+    if !matches!(clock, 0 | 1 | 7 | 8 | 9) {
+        return EINVAL;
+    }
+    let t = super::timer::TimerFd::new(clock, flags & TFD_NONBLOCK != 0);
+    install_fd(super::fs::Fd::Timer(alloc::rc::Rc::new(core::cell::RefCell::new(t))))
+}
+
+fn timer_of(fd: u64) -> Result<alloc::rc::Rc<core::cell::RefCell<super::timer::TimerFd>>, u64> {
+    match waitable(fd) {
+        Some(Waitable::Timer(t)) => Ok(t),
+        Some(_) => Err(EINVAL),
+        None => Err(if with_fds(|fds, _| matches!(fds.get(fd as usize), Some(Some(_)))) == Some(true) { EINVAL } else { EBADF }),
+    }
+}
+
+fn read_ts(at: u64) -> Result<u64, u64> {
+    if !reachable(at, 16, false) {
+        return Err(EFAULT);
+    }
+    let sec = unsafe { core::ptr::read_unaligned(at as *const i64) };
+    let nsec = unsafe { core::ptr::read_unaligned((at + 8) as *const i64) };
+    if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
+        return Err(EINVAL);
+    }
+    Ok((sec as u64).saturating_mul(1_000_000_000).saturating_add(nsec as u64))
+}
+
+fn write_itimerspec(at: u64, (value, interval): (u64, u64)) -> u64 {
+    if at == 0 {
+        return 0;
+    }
+    if !reachable(at, 32, true) {
+        return EFAULT;
+    }
+    unsafe {
+        core::ptr::write_unaligned(at as *mut u64, interval / 1_000_000_000);
+        core::ptr::write_unaligned((at + 8) as *mut u64, interval % 1_000_000_000);
+        core::ptr::write_unaligned((at + 16) as *mut u64, value / 1_000_000_000);
+        core::ptr::write_unaligned((at + 24) as *mut u64, value % 1_000_000_000);
+    }
+    0
+}
+
+/// `timerfd_settime`: `struct itimerspec` is the interval, then the value.
+/// An absolute deadline on the real-time clock is moved onto the monotonic
+/// one at the moment it is set, which is exact unless the wall clock is
+/// stepped afterwards -- and nothing here steps it.
+pub(super) fn sys_timerfd_settime(fd: u64, flags: u64, new: u64, old: u64) -> u64 {
+    const TFD_TIMER_ABSTIME: u64 = 1;
+    let t = match timer_of(fd) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let (interval, value) = match (read_ts(new), read_ts(new + 16)) {
+        (Ok(i), Ok(v)) => (i, v),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    let now = mono_ns();
+    let abs = if flags & TFD_TIMER_ABSTIME != 0 && value != 0 {
+        let clock = t.borrow().clock;
+        let base = match clock {
+            0 | 8 => clock_pair(0).map(|(s, n)| s.saturating_mul(1_000_000_000) + n).unwrap_or(now),
+            _ => now,
+        };
+        Some(now.saturating_add(value.saturating_sub(base)))
+    } else {
+        None
+    };
+    let was = t.borrow_mut().set(now, value, interval, abs);
+    write_itimerspec(old, was)
+}
+
+pub(super) fn sys_timerfd_gettime(fd: u64, cur: u64) -> u64 {
+    let t = match timer_of(fd) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    if cur == 0 {
+        return EFAULT;
+    }
+    let now_val = t.borrow_mut().get(mono_ns());
+    write_itimerspec(cur, now_val)
 }
 
 /// `fchdir`: into the directory an open descriptor names. `mkdir -p` walks
@@ -3122,10 +3639,12 @@ fn install_fd(entry: super::fs::Fd) -> u64 {
     with_fds(|fds, _| match fds.iter().position(|f| f.is_none()) {
         Some(i) => {
             fds[i] = Some(entry);
+            cloexec_set(i as u64, false);
             i as u64
         }
         None if fds.len() < MAX_FDS => {
             fds.push(Some(entry));
+            cloexec_set((fds.len() - 1) as u64, false);
             (fds.len() - 1) as u64
         }
         None => EMFILE,
@@ -3207,6 +3726,10 @@ pub(super) fn do_pipe(at: u64, flags: u64) -> u64 {
             }
         });
         return w;
+    }
+    if flags & 0o2000000 != 0 {
+        cloexec_set(r, true);
+        cloexec_set(w, true);
     }
     unsafe {
         core::ptr::write_unaligned(at as *mut i32, r as i32);
@@ -3611,6 +4134,10 @@ pub(super) fn sys_socketpair(domain: u64, kind: u64, _proto: u64, sv: u64) -> u6
     let fb = install_fd(mk(b, super::unix::Side::B));
     if fb > MAX_FDS as u64 {
         return fb;
+    }
+    if kind & 0o2000000 != 0 {
+        cloexec_set(fa, true);
+        cloexec_set(fb, true);
     }
     unsafe {
         core::ptr::write(sv as *mut u32, fa as u32);
@@ -4441,6 +4968,11 @@ pub(super) fn sys_uname(buf: u64) -> u64 {
 /// actually moves. A caller timing something short with `REALTIME` will
 /// measure zero, and that is a property of the hardware rather than of this
 /// call.
+/// The guest's CLOCK_MONOTONIC, in nanoseconds, for timers elsewhere.
+pub fn mono_now() -> u64 {
+    mono_ns()
+}
+
 /// Nanoseconds of TSC time, never less than the last answer.
 fn mono_ns() -> u64 {
     static LAST_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -4597,14 +5129,18 @@ pub(super) fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
     }
     match cmd {
         0 => sys_dup(fd, None).max_free_from(arg), // F_DUPFD
-        1 => 0,                                    // F_GETFD, nothing is close-on-exec
-        2 => 0,                                    // F_SETFD, accepted and not stored
+        1 => cloexec_get(fd) as u64,               // F_GETFD
+        2 => {
+            cloexec_set(fd, arg & 1 != 0);         // F_SETFD
+            0
+        }
         // F_GETFL and F_SETFL: a device keeps its blocking mode, which is
         // how libasound turns a stream it opened non-blocking back into a
         // blocking one. Elsewhere no flag it could set applies.
         3 => with_fds(|fds, _| match fds.get(fd as usize) {
             Some(Some(super::fs::Fd::Dev(b))) => 2 | if b.borrow().nonblock { O_NONBLOCK } else { 0 },
             Some(Some(super::fs::Fd::Unix(_, nb))) => 2 | if nb.get() { O_NONBLOCK } else { 0 },
+            Some(Some(super::fs::Fd::Pty(e))) => 2 | if e.borrow().nonblock { O_NONBLOCK } else { 0 },
             _ => 0,
         })
         .unwrap_or(0),
@@ -4612,6 +5148,7 @@ pub(super) fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
             with_fds(|fds, _| match fds.get(fd as usize) {
                 Some(Some(super::fs::Fd::Dev(b))) => b.borrow_mut().nonblock = arg & O_NONBLOCK != 0,
                 Some(Some(super::fs::Fd::Unix(_, nb))) => nb.set(arg & O_NONBLOCK != 0),
+                Some(Some(super::fs::Fd::Pty(e))) => e.borrow_mut().nonblock = arg & O_NONBLOCK != 0,
                 _ => {}
             });
             0
@@ -4619,7 +5156,7 @@ pub(super) fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
         // Record locks, in both widths. One process at a time owns any file
         // it writes here, so there is nobody to lock against.
         5 | 6 | 7 | 12 | 13 | 14 => 0,
-        1030 => sys_dup(fd, None).max_free_from(arg), // F_DUPFD_CLOEXEC
+        1030 => with_cloexec(sys_dup(fd, None).max_free_from(arg), true), // F_DUPFD_CLOEXEC
         // File seals on a memfd: accepted and not enforced. A client seals
         // its buffer so the compositor can trust its size, and the compositor
         // here copies a commit out under its own bounds check anyway.
@@ -5158,6 +5695,7 @@ pub(super) fn sys_dup(from: u64, to: Option<u64>) -> u64 {
             old.flush();
         }
         fds[slot] = Some(copy);
+        cloexec_set(slot as u64, false);
         slot as u64
     })
     .unwrap_or(EBADF)
@@ -5426,6 +5964,14 @@ pub(super) fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
     }
     if !reachable(buf, len as usize, true) {
         return EFAULT;
+    }
+    // A counter or a clock: eight bytes, the count or the expirations, and
+    // a wait while there are none unless the descriptor is non-blocking.
+    if let Some(r) = read_event_or_timer(fd, buf, len) {
+        return r;
+    }
+    if let Some(r) = read_pty(fd, buf, len) {
+        return r;
     }
     // An event device is read through its own path, because two things here do
     // not fit a call that takes an offset: the cursor is a sequence number
@@ -6154,6 +6700,11 @@ pub(super) fn sys_fstat(fd: u64, buf: u64) -> u64 {
         // The standard three report as pipes, which is the only answer that
         // agrees with the rest of this module: `lseek` on them is `ESPIPE` and
         // `read` on stdin is a permanent end of file.
+        Some(Some(super::fs::Fd::Pty(e))) => {
+            let e = e.borrow();
+            let n = e.pty.borrow().num as u64;
+            Some((super::fs::Kind::Char, 0, 0x7000 + n, if e.master { (5 << 8) | 2 } else { (136 << 8) | n }))
+        }
         Some(Some(_)) => Some((super::fs::Kind::Fifo, 0, 1, 0)),
         _ => None,
     })
@@ -6206,6 +6757,12 @@ pub(super) fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 
             Some(n) => write_stat(buf, super::fs::Kind::File, n.size, super::fs::ino_of(&path)),
             None => ENOENT,
         };
+    }
+    if path == "/dev/ptmx" {
+        return write_stat_rdev(buf, super::fs::Kind::Char, 0, super::fs::ino_of(&path), (5 << 8) | 2);
+    }
+    if let Some(n) = super::pty::slave_number(&path) {
+        return write_stat_rdev(buf, super::fs::Kind::Char, 0, super::fs::ino_of(&path), (136 << 8) | n as u64);
     }
     if let Some(n) = super::dev::node(&path) {
         return write_stat_rdev(buf, super::fs::Kind::Char, super::dev::size(n), super::fs::ino_of(&path), super::dev::rdev(n));
@@ -6387,6 +6944,9 @@ pub(super) fn sys_ioctl(fd: u64, req: u64, arg: u64) -> u64 {
     let known = with_fds(|fds, _| matches!(fds.get(fd as usize), Some(Some(_)))).unwrap_or(false);
     if !known {
         return EBADF;
+    }
+    if let Some(r) = pty_ioctl(fd, req, arg) {
+        return r;
     }
     if let Some(d) = node.flatten().and_then(super::dev::is_input) {
         return input_ioctl(d, req, arg);
@@ -7349,8 +7909,8 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
     let (ret, served) = match nr {
         SYS_WRITE => (sys_write(f.rdi, f.rsi, f.rdx as usize), true),
         SYS_READ => (sys_read(f.rdi, f.rsi, f.rdx), true),
-        SYS_OPEN => (sys_openat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi, f.rdx), true),
-        SYS_OPENAT => (sys_openat(f.rdi, f.rsi, f.rdx, f.r10), true),
+        SYS_OPEN => (with_cloexec(sys_openat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi, f.rdx), f.rsi & 0o2000000 != 0), true),
+        SYS_OPENAT => (with_cloexec(sys_openat(f.rdi, f.rsi, f.rdx, f.r10), f.rdx & 0o2000000 != 0), true),
         SYS_CLOSE => (sys_close(f.rdi), true),
         SYS_LSEEK => (sys_lseek(f.rdi, f.rsi, f.rdx), true),
         SYS_FSTAT => (sys_fstat(f.rdi, f.rsi), true),
@@ -7383,14 +7943,14 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         // in the trace go away.
         SYS_WRITEV => (sys_writev(f.rdi, f.rsi, f.rdx), true),
         SYS_READV => (sys_readv(f.rdi, f.rsi, f.rdx), true),
-        SYS_SOCKET => (sys_socket(f.rdi, f.rsi, f.rdx), true),
+        SYS_SOCKET => (with_cloexec(sys_socket(f.rdi, f.rsi, f.rdx), f.rsi & 0o2000000 != 0), true),
         SYS_CONNECT => (sys_connect(f.rdi, f.rsi, f.rdx), true),
         SYS_BIND => (sys_bind(f.rdi, f.rsi, f.rdx), true),
         SYS_SENDMSG => (sys_sendmsg(f.rdi, f.rsi, f.rdx), true),
         SYS_RECVMSG => (sys_recvmsg(f.rdi, f.rsi, f.rdx), true),
         SYS_LISTEN => (sys_listen(f.rdi), true),
         SYS_ACCEPT => (sys_accept4(f.rdi, f.rsi, f.rdx, 0), true),
-        SYS_ACCEPT4 => (sys_accept4(f.rdi, f.rsi, f.rdx, f.r10), true),
+        SYS_ACCEPT4 => (with_cloexec(sys_accept4(f.rdi, f.rsi, f.rdx, f.r10), f.r10 & 0o2000000 != 0), true),
         SYS_SOCKETPAIR => (sys_socketpair(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_SENDTO => (sys_send(f.rdi, f.rsi, f.rdx), true),
         SYS_RECVFROM => (sys_recv(f.rdi, f.rsi, f.rdx), true),
@@ -7409,9 +7969,9 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_FTRUNCATE => (sys_ftruncate(f.rdi, f.rsi), true),
         285 => (sys_fallocate(f.rdi, f.rsi, f.rdx, f.r10), true),
         27 => (sys_mincore(f.rdi, f.rsi, f.rdx), true),
-        SYS_MEMFD_CREATE => (sys_memfd_create(f.rdi, f.rsi), true),
+        SYS_MEMFD_CREATE => (with_cloexec(sys_memfd_create(f.rdi, f.rsi), f.rsi & 1 != 0), true),
         SYS_EPOLL_CREATE => (sys_epoll_create(f.rdi), true),
-        SYS_EPOLL_CREATE1 => (sys_epoll_create1(f.rdi), true),
+        SYS_EPOLL_CREATE1 => (with_cloexec(sys_epoll_create1(f.rdi), f.rdi & 0o2000000 != 0), true),
         SYS_EPOLL_CTL => (sys_epoll_ctl(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_EPOLL_WAIT => (sys_epoll_wait(f.rdi, f.rsi, f.rdx, f.r10), true),
         // The signal mask cannot matter here, for the reason `ppoll` gives.
@@ -7430,6 +7990,17 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_UNLINK => (sys_name_op(f.rdi, b'u'), true),
         SYS_MKDIRAT => (sys_name_op_at(f.rdi, f.rsi, b'm'), true),
         SYS_FCHDIR => (sys_fchdir(f.rdi), true),
+        283 => (with_cloexec(sys_timerfd_create(f.rdi, f.rsi), f.rsi & 0o2000000 != 0), true),
+        // Sessions and process groups: one process group per process, named
+        // by its pid, which is what a shell's job control asks for and what
+        // a terminal's foreground group is set to.
+        109 => (0, true),                                  // setpgid
+        112 => (super::fork::current_pid(), true),        // setsid
+        121 | 124 => (if f.rdi == 0 { super::fork::current_pid() } else { f.rdi }, true), // getpgid, getsid
+        284 => (sys_eventfd(f.rdi, 0), true),
+        286 => (sys_timerfd_settime(f.rdi, f.rsi, f.rdx, f.r10), true),
+        287 => (sys_timerfd_gettime(f.rdi, f.rsi), true),
+        290 => (with_cloexec(sys_eventfd(f.rdi, f.rsi), f.rsi & 0o2000000 != 0), true),
         SYS_UMASK => (sys_umask(f.rdi), true),
         // One process group, led by the process asking.
         SYS_GETPGRP => (super::fork::current_pid(), true),
@@ -7508,7 +8079,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_CLOCK_GETTIME => (sys_clock_gettime(f.rdi, f.rsi), true),
         SYS_DUP => (sys_dup(f.rdi, None), true),
         SYS_DUP2 => (sys_dup(f.rdi, Some(f.rsi)), true),
-        SYS_DUP3 => (sys_dup3(f.rdi, f.rsi, f.rdx), true),
+        SYS_DUP3 => (with_cloexec(sys_dup3(f.rdi, f.rsi, f.rdx), f.rdx & 0o2000000 != 0), true),
         // `rcx` is where `syscall` stashed the return address, which is where
         // the child resumes: a cloned thread does not start at an entry point,
         // it returns from `clone` on a different stack with `rax` zero.
@@ -9441,6 +10012,18 @@ pub fn set_env(entry: &str) {
     }
 }
 
+/// The environment an `execve` was handed, for the stack it is about to
+/// build on this task. Taken once.
+static EXEC_ENV: Racy<[Option<Vec<String>>; crate::task::MAX_TASKS]> = Racy::new([const { None }; crate::task::MAX_TASKS]);
+
+pub fn set_exec_env(env: Vec<String>) {
+    unsafe { (*EXEC_ENV.get())[me()] = Some(env) };
+}
+
+fn take_exec_env() -> Option<Vec<String>> {
+    unsafe { (*EXEC_ENV.get())[me()].take() }
+}
+
 /// What a guest will be given, the fixed five and the added ones.
 ///
 /// **An added variable replaces a fixed one of the same name.** They were
@@ -9529,7 +10112,7 @@ fn build_stack_w(
         }
         Some(seen(*top))
     };
-    let env = environ();
+    let env = take_exec_env().unwrap_or_else(environ);
     let mut envs = alloc::vec::Vec::with_capacity(env.len());
     for e in env.iter().rev() {
         envs.push(put(&mut top, e)?);

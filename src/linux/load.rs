@@ -850,15 +850,21 @@ pub fn exec(f: &mut syscall::Frame) -> u64 {
         Ok(v) => v,
         Err(e) => return e,
     };
-    // The environment is read and then **not used**, which is a deviation
-    // worth stating rather than hiding: this machine's environment is
-    // `syscall::environ`, five variables each a fact about it, and a guest
-    // handing over its own would replace facts with whatever it inherited.
-    // Read anyway so an unreachable pointer is still `EFAULT`, which is what
-    // a caller checking its own arguments expects.
-    if f.rdx != 0 && read_vec(f.rdx).is_err() {
-        return EFAULT;
-    }
+    // **The new program gets the environment it was handed**, as on Linux.
+    // This read it and used the machine's own instead, on the argument that
+    // the machine's five variables are facts and an inherited copy might not
+    // be -- but a terminal sets TERM for its shell and a shell exports what
+    // its user exported, and every one of those vanished at the first exec.
+    // A null environment is the machine's, which is what Linux gives an
+    // `execve` passed nothing.
+    let envp = if f.rdx != 0 {
+        match read_vec(f.rdx) {
+            Ok(v) => Some(v),
+            Err(_) => return EFAULT,
+        }
+    } else {
+        None
+    };
 
     let Some(bytes) = super::disk::program_bytes(&path) else { return ENOENT };
     let args: Vec<&str> = if argv.is_empty() {
@@ -870,11 +876,17 @@ pub fn exec(f: &mut syscall::Frame) -> u64 {
     // `execve` returns to a caller that is still whole, which is the one thing
     // every program using it relies on -- it is how a shell reports "command
     // not found" from the child rather than losing it.
+    if let Some(e) = envp {
+        syscall::set_exec_env(e);
+    }
     let mut g = match load(&bytes, &args) {
         Ok(g) => g,
         Err(_) => return ENOEXEC,
     };
 
+    // The point of no return: the new image is loaded, so the descriptors
+    // marked close-on-exec go now, as Linux closes them.
+    syscall::close_on_exec();
     let regions = g.regions;
     if !syscall::replace_guest(regions, g.space.take()) {
         return ENOMEM;
