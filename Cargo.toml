@@ -78,3 +78,15 @@ opt-level = 3
 lto = true
 # Keep symbols: the QEMU gdb stub is our only source-level debugger.
 debug = true
+
+# For iterating: release's optimisation without its link. Fat LTO makes the
+# whole crate one codegen unit, so a one-line edit costs the full ~2.5 min;
+# without it the units build in parallel and incrementally. `drive.py` boots
+# whichever of `release` and `quick` is newer. Commit-time checks and anything
+# timed (`bench report`, `mine bench`) stay on `release`: LTO moves those
+# numbers, and a rail compared across the two profiles measures the profile.
+[profile.quick]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true

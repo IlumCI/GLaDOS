@@ -31,6 +31,50 @@ just runs.
    the same package source, which is what makes this a user-facing feature
    rather than a build step.
 
+**State on 2026-10-27, and the next step.** Items 1-3 are done (`b436ded`,
+`c7f761a`, `e7233c5`), and 4 is mostly done: popups, subsurfaces, wheel,
+decorations, focus (`0743f6a`). LibreOffice, foot and bash, and a GTK 4 app
+all start. What stops several GUI apps at once is memory:
+
+- **Demand paging for anonymous `mmap` -- next.** glibc gives each thread a
+  malloc arena by mapping 128 MiB `PROT_NONE` and trimming it to 64 MiB;
+  Mesa, Qt and every thread stack reserve large and touch little. Here
+  `sys_mmap` backs every page up front (the `anon_paged` branch, a page at a
+  time under the guest's own tables), so a GTK 4 app with a dozen threads
+  asked for gigabytes, `[mmap] out of memory` filled the screen, and the
+  kernel heap ran dry with three programs running. Plan:
+  1. In the `anon_paged` branch, take the arena address and write each leaf
+     as a **non-present entry with a software marker** (an available bit,
+     e.g. bit 9, plus the rights in the usual bits) instead of allocating.
+     The rights then live in the entry, so `mprotect` keeps working on a
+     page nobody has touched -- `paging::protect` must keep the marker and
+     rewrite only the rights on a non-present entry.
+  2. `glados_fault_entry` returns for a `#PF` (vector 14) whose `cr2`
+     walks to a marked entry whose rights allow the access (error code bits
+     W and U against the marker's rights): allocate a zeroed page, install
+     it with `cmpxchg` on the entry (two threads may fault the same page;
+     the loser frees its page), `invlpg`, return. `glados_fault_common`
+     ends in `ud2` today; it needs a return path that pops the fifteen
+     registers, drops vector and error code, and `iretq`s. From ring 0
+     too: the kernel writing a `read` result into an untouched guest page
+     is the same fault.
+  3. `reachable` treats a marked page as reachable (or faults it in), or
+     every syscall into fresh memory answers `EFAULT`.
+  4. `munmap`/`free_paged`/teardown free only present frames; `fork`'s copy
+     copies a marked entry as a marked entry.
+  5. Proof: three GUI programs at once (FeatherPad, `gtk4-widget-factory`,
+     LibreOffice) and the heap figure in `mem` before and after.
+- Then: run each test app (FeatherPad, `gtk4-widget-factory`, mpv, imv,
+  `weston-simple-*`) and fix what each names; inotify; a real clipboard.
+- **No GNOME apps.** GTK 4 is tested with its own demos (`gtk4-demos`).
+
+**Iterating faster.** `cargo build --profile quick` (no LTO) rebuilds in
+about 45 s against 2.5 min for release, and `drive.py` boots whichever of the
+two is newer. A guest that resets now pauses, so `drive.py` reports
+`STOPPED` within seconds and writes every vCPU's registers to
+`.qemu/regs.txt` instead of sitting out its timeout. Still to do: start
+several apps in one boot, and wait for a window rather than a fixed beat.
+
 ## 0b. sci-fish, the guest shell
 
 The Linux side's own shell: **sci-fish** ("sci-fi sh"). It should look like

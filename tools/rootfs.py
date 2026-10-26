@@ -69,9 +69,11 @@ PACKAGES = [
     "fish",
     # One program per toolkit, so "a Wayland program works" is measured
     # across the ways one can be written rather than on one: GTK 3
-    # (LibreOffice), GTK 4 and libadwaita, Qt 6, a native client, video,
-    # and weston's own demo clients, which exercise one protocol each.
-    "foot", "gtk4-demos", "gnome-calculator", "qt6-wayland", "featherpad",
+    # (LibreOffice), GTK 4 (its own widget factory), Qt 6, a native client,
+    # video, and weston's own demo clients, which exercise one protocol each.
+    # Nothing from GNOME's application set: GTK 4 is tested through the
+    # toolkit's own demos, not through somebody's desktop.
+    "foot", "gtk4-demos", "qt6-wayland", "featherpad",
     "imv", "mpv", "weston",
     "libreoffice-fresh",
 ]

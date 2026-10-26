@@ -188,6 +188,63 @@ def monitor(lines, gap=0.35):
             pass
 
 
+def monitor_ask(cmd, wait=1.0):
+    """One monitor command, answered: what QEMU printed back."""
+    with socket.create_connection(("127.0.0.1", MONITOR_PORT), timeout=3) as mon:
+        mon.settimeout(1.0)
+        try:
+            mon.recv(65536)
+        except OSError:
+            pass
+        mon.sendall((cmd + "\n").encode())
+        time.sleep(wait)
+        out = b""
+        try:
+            while True:
+                d = mon.recv(65536)
+                if not d:
+                    break
+                out += d
+        except OSError:
+            pass
+    return out.decode("utf-8", "replace")
+
+
+def vm_stopped(proc):
+    """Why the guest is no longer running, or None while it is.
+
+    Asked only when the serial line has gone quiet, so a working guest costs
+    nothing. A paused-on-shutdown VM is a reset (a triple fault, under
+    `-no-reboot`) or a power-off; an exited QEMU is QEMU itself dying.
+    """
+    if proc.poll() is not None:
+        return f"QEMU exited with status {proc.returncode}"
+    try:
+        st = monitor_ask("info status", wait=0.3)
+    except OSError:
+        return None
+    if "paused (shutdown)" in st:
+        return "the guest reset or powered off (paused on shutdown)"
+    if "internal-error" in st or "guest-panicked" in st:
+        return st.strip().splitlines()[-2] if st.strip() else "stopped"
+    return None
+
+
+def dump_regs(dest=".qemu/regs.txt"):
+    """Every vCPU's registers, for a guest that just stopped. Symbolise a RIP
+    with `llvm-symbolizer --obj=target/.../deps/glados-*.efi --inlining`."""
+    try:
+        text = monitor_ask("info registers -a", wait=1.5)
+    except OSError as e:
+        print(f"[drive] could not read registers: {e}", file=sys.stderr)
+        return
+    Path(dest).write_text(text, encoding="utf-8")
+    for line in text.splitlines():
+        if line.startswith("CPU#") or line.startswith("RIP=") or line.startswith("CR0="):
+            print(f"[drive]   {line[:100]}", file=sys.stderr)
+    print(f"[drive] registers -> {dest}", file=sys.stderr)
+
+
 def capture(dest):
     """Ask QEMU's monitor for a screenshot, and convert it to PNG.
 
@@ -829,6 +886,13 @@ def main():
     # finds no bootloader and reports "Not Found", which looks nothing like
     # "you forgot to copy the build".
     built = ROOT / "target/x86_64-unknown-uefi/release/glados.efi"
+    # The `quick` profile (no LTO, for iterating) wins when it is the newer of
+    # the two, and says so: booting the older one is the stale-binary trap
+    # this file already warns about for debug builds.
+    quick = ROOT / "target/x86_64-unknown-uefi/quick/glados.efi"
+    if quick.exists() and (not built.exists() or quick.stat().st_mtime > built.stat().st_mtime):
+        built = quick
+        print("[drive] booting the quick build (newer than release)", file=sys.stderr)
     # `GLADOS_EFI` boots another build -- an A/B against an older commit,
     # built in a worktree, without disturbing this tree's artifact.
     if os.environ.get("GLADOS_EFI"):
@@ -1036,7 +1100,13 @@ def main():
           ["-display", "sdl", "-name", "GLaDOS"] if window else ["-display", "none"]),
         *(["-vga", "none", "-device", f"VGA,xres={res[0]},yres={res[1]}"] if res else
           ["-vga", "none", "-device", "VGA,xres=1920,yres=1080"] if hd else []),
-        "-no-reboot",
+        # Pause rather than exit when the guest resets, which with
+        # `-no-reboot` alone it did: a triple fault took QEMU and every
+        # register with it, and this harness then sat out its whole timeout
+        # reading a closed socket as a quiet guest. Paused, the monitor still
+        # answers, so `vm_stopped` sees it within seconds and `dump_regs`
+        # keeps the state that says why.
+        "-no-reboot", "-action", "shutdown=pause",
         *qemu_late,
     ]
 
@@ -1077,6 +1147,8 @@ def main():
     # depend on a prompt coming back afterwards. See the beat below.
     force_send = False
 
+    quiet_since = time.time()
+    stopped = None
     try:
         while time.time() < deadline:
             try:
@@ -1085,6 +1157,15 @@ def main():
                 chunk = b""
             except OSError:
                 break
+            if chunk:
+                quiet_since = time.time()
+            elif time.time() - quiet_since > 3.0:
+                quiet_since = time.time()
+                stopped = vm_stopped(proc)
+                if stopped:
+                    print(f"\n[drive] STOPPED: {stopped}", file=sys.stderr)
+                    dump_regs()
+                    break
             if chunk:
                 buf += chunk
                 emit(chunk)
@@ -1340,8 +1421,11 @@ def main():
             proc.kill()
 
     if not sent_all:
-        print(f"\n[drive] TIMEOUT after {timeout}s with {len(queue)} commands unsent",
-              file=sys.stderr)
+        if stopped:
+            print(f"\n[drive] guest stopped with {len(queue)} commands unsent", file=sys.stderr)
+        else:
+            print(f"\n[drive] TIMEOUT after {timeout}s with {len(queue)} commands unsent",
+                  file=sys.stderr)
         # A guest crash usually leaves its cause in QEMU's own log -- a `-d
         # int` trace carries the vector and RIP of every exception. Discarding
         # stderr here is how a fault stays mysterious.
