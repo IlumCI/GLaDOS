@@ -647,6 +647,39 @@ impl Client {
         }
     }
 
+    /// Tell a toplevel whether it has the keyboard, through its configure
+    /// states, which is how a client learns it is the active window.
+    ///
+    /// **GTK reads activity from `activated` and from nothing else.** Every
+    /// key reached LibreOffice, `wl_keyboard.enter` included, and none was
+    /// typed: GTK took the window for a background one, since the first
+    /// configure carries no states and nothing ever sent another. Zero by
+    /// zero keeps the size the client chose; a full-screen window keeps the
+    /// screen's.
+    pub(super) fn activate(&mut self, surface: u32, on: bool) {
+        let Some((&xdg, x)) = self.scene.xdg.iter().find(|(_, x)| x.surface == surface) else { return };
+        let Some(tid) = x.toplevel else { return };
+        let Some(t) = self.scene.toplevels.get(&tid) else { return };
+        let (w, h) = if t.full {
+            crate::gfx::primary().map(|f| (f.width() as i32, f.height() as i32)).unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
+        let mut states: Vec<u8> = Vec::new();
+        if t.full {
+            states.extend_from_slice(&2u32.to_le_bytes());
+        }
+        if on {
+            states.extend_from_slice(&4u32.to_le_bytes());
+        }
+        let mut c = Writer::new(tid, 0);
+        c.int(w);
+        c.int(h);
+        c.array(&states);
+        self.post(c);
+        self.configure(xdg);
+    }
+
     fn configure(&mut self, xdg: u32) {
         self.serial += 1;
         let serial = self.serial;

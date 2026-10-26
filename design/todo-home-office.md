@@ -22,6 +22,17 @@ a rung that stands on the one before it.
   - Placing an order is an operator grant, never the model's own decision.
   - Paper trading comes first.
 
+## 1b. A real clock in the taskbar
+
+Replace the tray's `up 46.2s` with the date and time, including seconds and
+milliseconds, for example `2026-10-26 15:42:07.318`.
+- Read the RTC once at boot for the wall time, then advance it from the TSC,
+  which is the same source CLOCK_MONOTONIC uses.
+- Timer ticks are not usable here: the uptime counter is built on them, and
+  they stall when the boot processor is busy.
+- The display has to follow the time zone. Store it in `/etc/desk`, the same
+  file as the other desktop settings.
+
 ## 2. A package manager: OrangeBox, command `orange`
 
 A wrapper over an existing distribution's packages. Which one is still to

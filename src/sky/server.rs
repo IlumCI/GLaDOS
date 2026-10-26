@@ -145,6 +145,8 @@ pub fn pump() {
         client.publish(surface::XDG_WM_BASE, 1);
         client.publish(super::seat::WL_OUTPUT, 3);
         client.publish(super::seat::WL_SEAT, 5);
+        client.publish(super::seat::DATA_MANAGER, 3);
+        client.publish(super::seat::KDE_DECORATION_MANAGER, 1);
         // Names the GPU, so Mesa's EGL renders on it; see `dmabuf`.
         if super::dmabuf::offered() {
             client.publish(super::dmabuf::DMABUF, 4);

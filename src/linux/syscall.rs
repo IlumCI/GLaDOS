@@ -4084,12 +4084,48 @@ pub(super) fn sys_uname(buf: u64) -> u64 {
 /// actually moves. A caller timing something short with `REALTIME` will
 /// measure zero, and that is a property of the hardware rather than of this
 /// call.
+/// Nanoseconds of TSC time, never less than the last answer.
+fn mono_ns() -> u64 {
+    static LAST_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let mhz = crate::time::tsc_mhz().max(1) as u128;
+    let now = (crate::time::rdtsc() as u128 * 1000 / mhz) as u64;
+    LAST_NS.fetch_max(now, Ordering::Relaxed).max(now)
+}
+
+/// Unix nanoseconds minus `mono_ns`, taken from the RTC at the first ask.
+/// Zero means not yet taken; a real offset is never zero.
+static WALL_OFFSET: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 pub(super) fn clock_pair(which: u64) -> Option<(u64, u64)> {
     match which {
         // CLOCK_REALTIME and its coarse twin.
+        //
+        // **The RTC once, then the TSC.** This read the CMOS clock on every
+        // call: one-second resolution with the microseconds always zero, a
+        // slow port read on the locked path, and `None` -- so `EINVAL` --
+        // whenever the RTC was mid-update. LibreOffice's GTK timer source
+        // compares wall times to the microsecond and never saw one move, so
+        // its scheduler never ran: no repaint, no status bar, and no typed
+        // character ever reached the page. The offset is taken at the first
+        // ask and never re-read, so this clock does not step under a running
+        // program; it drifts with the TSC, which is what the monotonic clocks
+        // already trust.
         0 | 5 => {
-            let dt = crate::dev::rtc::now()?;
-            Some((crate::dev::rtc::unix_seconds(&dt) as u64, 0))
+            let off = match WALL_OFFSET.load(Ordering::Acquire) {
+                0 => {
+                    let dt = crate::dev::rtc::now()?;
+                    let unix_ns = crate::dev::rtc::unix_seconds(&dt) as u64 * 1_000_000_000;
+                    let o = unix_ns.wrapping_sub(mono_ns());
+                    // The first writer wins, so two cores asking at once agree.
+                    match WALL_OFFSET.compare_exchange(0, o, Ordering::AcqRel, Ordering::Acquire) {
+                        Ok(_) => o,
+                        Err(other) => other,
+                    }
+                }
+                o => o,
+            };
+            let ns = mono_ns().wrapping_add(off);
+            Some((ns / 1_000_000_000, ns % 1_000_000_000))
         }
         // MONOTONIC_COARSE: the tick, which is what "coarse" promises.
         6 => {
@@ -4108,10 +4144,17 @@ pub(super) fn clock_pair(which: u64) -> Option<(u64, u64)> {
         // passed", skipped the notify, and waited for a host that had
         // already gone to sleep -- forever, with both sides idle. The same
         // bargain is in every protocol that rate-limits a doorbell by time.
+        //
+        // **And never less than it last said.** The TSC read is the core's
+        // own, and a thread that moves between cores whose counters disagree
+        // by a hair sees time step back. GTK's frame clock treats that as a
+        // fault and says so on every frame -- a flood that filled the console
+        // and starved the harness -- and a monotonic clock that is not
+        // monotonic is a bug whatever reads it. One `fetch_max`, so the fast
+        // path stays off the guest lock.
         1 | 2 | 3 | 4 | 7 => {
-            let mhz = crate::time::tsc_mhz().max(1) as u128;
-            let ns = crate::time::rdtsc() as u128 * 1000 / mhz;
-            Some(((ns / 1_000_000_000) as u64, (ns % 1_000_000_000) as u64))
+            let ns = mono_ns();
+            Some((ns / 1_000_000_000, ns % 1_000_000_000))
         }
         _ => None,
     }
@@ -6867,7 +6910,12 @@ fn put_unlocked(at: u64, bytes: &[u8]) -> bool {
 /// interleaving an index write and a data read there would answer from the
 /// wrong register.
 pub(super) fn tsc_clock(which: u64) -> Option<(u64, u64)> {
-    matches!(which, 1 | 2 | 3 | 4 | 6 | 7).then(|| clock_pair(which)).flatten()
+    // The wall clocks join once their offset exists; the first ask takes
+    // the locked path, since reading the RTC is port I/O.
+    let wall_ready = WALL_OFFSET.load(Ordering::Relaxed) != 0;
+    (matches!(which, 1 | 2 | 3 | 4 | 6 | 7) || (wall_ready && matches!(which, 0 | 5)))
+        .then(|| clock_pair(which))
+        .flatten()
 }
 
 /// The calls that touch nothing shared, answered before the guest lock is

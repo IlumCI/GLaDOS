@@ -877,7 +877,21 @@ fn wait_until(ms: u64, mut done: impl FnMut() -> bool) -> bool {
         if ticks() >= deadline {
             return false;
         }
-        unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+        // **Halt only with interrupts on.** A guest's `connect` arrives here
+        // from a syscall, and `syscall` clears IF through `FMASK`, so `hlt`
+        // there is a core stopped for good -- no timer to end the wait, the
+        // guest lock still held, and every other guest thread and the
+        // compositor queued behind it. LibreOffice's start-up connect froze
+        // the whole desktop exactly so.
+        let rflags: u64;
+        unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags, options(nomem, preserves_flags)) };
+        if rflags & (1 << 9) != 0 {
+            unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+        } else {
+            for _ in 0..2000 {
+                core::hint::spin_loop();
+            }
+        }
     }
 }
 
