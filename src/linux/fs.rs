@@ -150,7 +150,12 @@ pub enum Fd {
     /// `Sock::Stream` and its side are two facts with one lifetime, and
     /// `accept` produces a descriptor whose socket is brand new while
     /// `connect` mutates one that already existed.
-    Unix(Rc<RefCell<crate::linux::unix::Sock>>),
+    ///
+    /// **The flag beside it is `O_NONBLOCK`**, shared by every name for this
+    /// end as Linux shares it across `dup`. It was not kept at all, so a
+    /// program that set it and read until `EAGAIN` -- libdbus, GLib, every
+    /// event loop -- blocked on the read meant to find the buffer empty.
+    Unix(Rc<RefCell<crate::linux::unix::Sock>>, Rc<core::cell::Cell<bool>>),
     /// One end of a pipe.
     ///
     /// The transport underneath is a Unix socket's, with one direction taken
@@ -276,6 +281,11 @@ impl Drop for DevFile {
 }
 
 impl Fd {
+    /// A Unix socket descriptor, blocking or not.
+    pub fn unix(sock: crate::linux::unix::Sock, nonblock: bool) -> Fd {
+        Fd::Unix(Rc::new(RefCell::new(sock)), Rc::new(core::cell::Cell::new(nonblock)))
+    }
+
     pub fn is_dir(&self) -> bool {
         matches!(self, Fd::Dir(_))
     }
@@ -309,7 +319,7 @@ impl Fd {
             Fd::Socket(b) => Fd::Socket(b.clone()),
             // Another name for one end, which is what `dup` on a socket means
             // everywhere: two descriptors, one connection.
-            Fd::Unix(b) => Fd::Unix(b.clone()),
+            Fd::Unix(b, nb) => Fd::Unix(b.clone(), nb.clone()),
             Fd::Pipe(b) => Fd::Pipe(b.clone()),
             Fd::Epoll(b) => Fd::Epoll(b.clone()),
             Fd::Memfd(b) => Fd::Memfd(b.clone()),
@@ -345,7 +355,7 @@ impl Fd {
         // `EAGAIN` forever where it was owed a zero. Nothing had noticed
         // because every fixture so far closed both ends by exiting, and
         // teardown frees the whole table at once.
-        if let Fd::Unix(b) = self {
+        if let Fd::Unix(b, _) = self {
             if Rc::strong_count(b) > 1 {
                 return false;
             }

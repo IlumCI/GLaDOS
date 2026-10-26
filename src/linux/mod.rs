@@ -102,6 +102,15 @@ pub fn busy() -> Option<&'static str> {
 /// happens on the job's own task, because a loaded `Guest` holds raw pointers
 /// to its pages and is not a thing to hand between tasks.
 pub fn start_job(path: &str, args: &[&str]) -> Result<u32, &'static str> {
+    start_job_as(path, args, false)
+}
+
+/// A supervised service: a job whose console output goes to the service log.
+pub fn start_service_job(path: &str, args: &[&str]) -> Result<u32, &'static str> {
+    start_job_as(path, args, true)
+}
+
+fn start_job_as(path: &str, args: &[&str], quiet: bool) -> Result<u32, &'static str> {
     if let Some(why) = busy() {
         return Err(why);
     }
@@ -118,6 +127,9 @@ pub fn start_job(path: &str, args: &[&str]) -> Result<u32, &'static str> {
                 Ok(g) => g,
                 Err(why) => return alloc::format!("will not run it: {}", why),
             };
+            if quiet {
+                session::ask_quiet();
+            }
             // Safety: the same call `linux run` makes, on a task of its own
             // and with no deadline -- see `syscall::run`.
             let r = unsafe { load::run(&mut g, 0) };

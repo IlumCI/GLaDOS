@@ -1787,6 +1787,10 @@ pub(super) fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
     // at all and still got the full length back. A write that reports success
     // and produces no output is the worst shape this call can take, because
     // the guest has no way to find out.
+    if super::session::quiet() {
+        super::services::log(bytes);
+        return len as u64;
+    }
     crate::kprint!("{}", alloc::string::String::from_utf8_lossy(bytes));
     len as u64
 }
@@ -2896,13 +2900,15 @@ pub(super) fn sys_clock_nanosleep(clock: u64, flags: u64, req: u64) -> u64 {
         return EINVAL;
     }
     let Some((ns, nn)) = clock_pair(clock) else { return EINVAL };
-    let want = sec as u128 * 1_000_000_000 + nsec as u128;
-    let now = ns as u128 * 1_000_000_000 + nn as u128;
+    // In 64 bits, for the reason `mono_ns` gives: nanoseconds since 1970
+    // fit until 2554.
+    let want = sec.saturating_mul(1_000_000_000).saturating_add(nsec);
+    let now = ns.saturating_mul(1_000_000_000).saturating_add(nn);
     if want <= now {
         return 0;
     }
     let d = want - now;
-    sleep_for((d / 1_000_000_000) as u64, (d % 1_000_000_000) as u64)
+    sleep_for(d / 1_000_000_000, d % 1_000_000_000)
 }
 
 /// Write through a descriptor that names a file.
@@ -3130,10 +3136,19 @@ fn install_fd(entry: super::fs::Fd) -> u64 {
 /// The `AF_UNIX` socket a descriptor names, if it is one.
 fn unix_sock(fd: u64) -> Option<alloc::rc::Rc<core::cell::RefCell<super::unix::Sock>>> {
     with_fds(|fds, _| match fds.get(fd as usize) {
-        Some(Some(super::fs::Fd::Unix(b))) => Some(b.clone()),
+        Some(Some(super::fs::Fd::Unix(b, _))) => Some(b.clone()),
         _ => None,
     })
     .flatten()
+}
+
+/// Whether a Unix socket descriptor is in non-blocking mode.
+fn unix_nonblock(fd: u64) -> bool {
+    with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Unix(_, nb))) => nb.get(),
+        _ => false,
+    })
+    .unwrap_or(false)
 }
 
 /// The pipe end a descriptor names, if it is one.
@@ -3558,13 +3573,13 @@ pub(super) fn sys_accept4(fd: u64, addr: u64, alen: u64, flags: u64) -> u64 {
                         core::ptr::write(alen as *mut u32, 2);
                     }
                 }
-                let entry = super::fs::Fd::Unix(alloc::rc::Rc::new(core::cell::RefCell::new(
-                    super::unix::Sock::Stream { pipe, side },
-                )));
+                // `SOCK_NONBLOCK` is the *new* socket's mode; whether this
+                // call waits is the listener's own.
+                let entry = super::fs::Fd::unix(super::unix::Sock::Stream { pipe, side }, flags & SOCK_NONBLOCK != 0);
                 return install_fd(entry);
             }
             Ok(None) => {
-                if flags & SOCK_NONBLOCK != 0 {
+                if unix_nonblock(fd) {
                     return EAGAIN;
                 }
                 if unsafe { kill_if_overdue() } {
@@ -3587,11 +3602,8 @@ pub(super) fn sys_socketpair(domain: u64, kind: u64, _proto: u64, sv: u64) -> u6
         return EFAULT;
     }
     let (a, b) = super::unix::pair();
-    let mk = |pipe, side| {
-        super::fs::Fd::Unix(alloc::rc::Rc::new(core::cell::RefCell::new(
-            super::unix::Sock::Stream { pipe, side },
-        )))
-    };
+    let nonblock = kind & 0o4000 != 0;
+    let mk = |pipe, side| super::fs::Fd::unix(super::unix::Sock::Stream { pipe, side }, nonblock);
     let fa = install_fd(mk(a, super::unix::Side::A));
     if fa > MAX_FDS as u64 {
         return fa;
@@ -3880,6 +3892,114 @@ fn unix_stream(fd: u64) -> Option<(alloc::rc::Rc<core::cell::RefCell<super::unix
     }
 }
 
+/// `getsockopt`, answering what this kernel actually knows.
+///
+/// It answered 0 and wrote nothing, which is worse than refusing: the caller
+/// reads its own uninitialised buffer as the answer. For `SO_PEERCRED` that
+/// buffer is the peer's identity, and D-Bus's EXTERNAL authentication compares
+/// it with the uid the client claims -- so every connection to a session bus
+/// was refused on garbage. Every guest is root, here as in `getuid`.
+fn sys_getsockopt(fd: u64, level: u64, name: u64, val: u64, lenp: u64) -> u64 {
+    const SOL_SOCKET: u64 = 1;
+    const SO_TYPE: u64 = 3;
+    const SO_ERROR: u64 = 4;
+    const SO_SNDBUF: u64 = 7;
+    const SO_RCVBUF: u64 = 8;
+    const SO_PEERCRED: u64 = 17;
+    const SO_ACCEPTCONN: u64 = 30;
+    const SO_DOMAIN: u64 = 39;
+    const ENOPROTOOPT: u64 = (-92i64) as u64;
+    if with_fds(|fds, _| matches!(fds.get(fd as usize), Some(Some(_)))) != Some(true) {
+        return EBADF;
+    }
+    if !reachable(lenp, 4, true) {
+        return EFAULT;
+    }
+    let room = unsafe { core::ptr::read_unaligned(lenp as *const u32) } as usize;
+    let unix = unix_sock(fd).is_some();
+    let answer: Vec<u8> = match (level, name) {
+        (SOL_SOCKET, SO_PEERCRED) => {
+            let mut b = Vec::with_capacity(12);
+            b.extend_from_slice(&(super::fork::current_pid() as u32).to_le_bytes());
+            b.extend_from_slice(&0u32.to_le_bytes());
+            b.extend_from_slice(&0u32.to_le_bytes());
+            b
+        }
+        (SOL_SOCKET, SO_TYPE) => 1u32.to_le_bytes().to_vec(), // SOCK_STREAM
+        (SOL_SOCKET, SO_DOMAIN) => (if unix { 1u32 } else { 2u32 }).to_le_bytes().to_vec(),
+        (SOL_SOCKET, SO_ERROR) => 0u32.to_le_bytes().to_vec(),
+        (SOL_SOCKET, SO_SNDBUF) | (SOL_SOCKET, SO_RCVBUF) => 212_992u32.to_le_bytes().to_vec(),
+        (SOL_SOCKET, SO_ACCEPTCONN) => {
+            let listening = unix_sock(fd).is_some_and(|s| matches!(&*s.borrow(), super::unix::Sock::Listening { .. }));
+            (listening as u32).to_le_bytes().to_vec()
+        }
+        // A TCP option is a number, and zero is the default for every one a
+        // program reads back (TCP_NODELAY off, no keepalive).
+        (6, _) => 0u32.to_le_bytes().to_vec(),
+        _ => return ENOPROTOOPT,
+    };
+    let n = answer.len().min(room);
+    if n > 0 && !reachable(val, n, true) {
+        return EFAULT;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(answer.as_ptr(), val as *mut u8, n);
+        core::ptr::write_unaligned(lenp as *mut u32, n as u32);
+    }
+    0
+}
+
+/// `getsockname` and `getpeername` for a Unix socket: the family, and the
+/// bound name when this end has one. Abstract and unnamed ends answer the
+/// family alone, which is what Linux answers for an unnamed socket.
+fn sys_sockname(fd: u64, addr: u64, lenp: u64, peer: bool) -> u64 {
+    let Some(sock) = unix_sock(fd) else { return if peer { ENOTCONN } else { 0 } };
+    if !reachable(lenp, 4, true) {
+        return EFAULT;
+    }
+    let room = unsafe { core::ptr::read_unaligned(lenp as *const u32) } as usize;
+    let name = match (&*sock.borrow(), peer) {
+        (super::unix::Sock::Bound(p), false) | (super::unix::Sock::Listening { path: p, .. }, false) => p.clone(),
+        (super::unix::Sock::Stream { .. }, _) | (_, false) => String::new(),
+        _ => return ENOTCONN,
+    };
+    let mut b = Vec::with_capacity(2 + name.len() + 1);
+    b.extend_from_slice(&1u16.to_le_bytes()); // AF_UNIX
+    if !name.is_empty() {
+        b.extend_from_slice(name.as_bytes());
+        b.push(0);
+    }
+    let n = b.len().min(room);
+    if n > 0 && !reachable(addr, n, true) {
+        return EFAULT;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(b.as_ptr(), addr as *mut u8, n);
+        core::ptr::write_unaligned(lenp as *mut u32, b.len() as u32);
+    }
+    0
+}
+
+/// `clock_getres`: the TSC clocks resolve to a nanosecond, the coarse one to
+/// a tick. A clock this kernel does not keep is EINVAL, as for `gettime`.
+fn sys_clock_getres(which: u64, at: u64) -> u64 {
+    let ns: u64 = match which {
+        0..=4 | 7 => 1,
+        5 | 6 => 1_000_000_000 / crate::TIMER_HZ as u64,
+        _ => return EINVAL,
+    };
+    if at != 0 {
+        if !reachable(at, 16, true) {
+            return EFAULT;
+        }
+        unsafe {
+            core::ptr::write_unaligned(at as *mut u64, 0);
+            core::ptr::write_unaligned((at + 8) as *mut u64, ns);
+        }
+    }
+    0
+}
+
 pub(super) fn sys_sendmsg(fd: u64, hdr: u64, _flags: u64) -> u64 {
     let Some((pipe, side)) = unix_stream(fd) else { return ENOTCONN };
     let (iov, cnt, ctl, ctl_len) = match msghdr_in(hdr, false) {
@@ -3928,7 +4048,7 @@ pub(super) fn sys_recvmsg(fd: u64, hdr: u64, flags: u64) -> u64 {
             Err(-11) => {}
             Err(e) => return e as u64,
         }
-        if flags & MSG_DONTWAIT != 0 {
+        if flags & MSG_DONTWAIT != 0 || unix_nonblock(fd) {
             return EAGAIN;
         }
         if overran(crate::dev::lapic::ticks()) {
@@ -3964,9 +4084,7 @@ pub(super) fn sys_socket(domain: u64, kind: u64, proto: u64) -> u64 {
         if proto != 0 {
             return EPROTONOSUPPORT;
         }
-        let entry = super::fs::Fd::Unix(alloc::rc::Rc::new(core::cell::RefCell::new(
-            super::unix::Sock::Fresh,
-        )));
+        let entry = super::fs::Fd::unix(super::unix::Sock::Fresh, kind & 0o4000 != 0);
         return install_fd(entry);
     }
     if domain != 2 {
@@ -4063,6 +4181,13 @@ pub(super) fn sys_connect(fd: u64, at: u64, len: u64) -> u64 {
 const SOCK_TIMEOUT_MS: u64 = 10_000;
 
 pub(super) fn sys_send(fd: u64, buf: u64, len: u64) -> u64 {
+    // A connected Unix socket takes `sendto` with no address exactly as it
+    // takes `write`. It answered ENOTSOCK, which no D-Bus client survives:
+    // the first thing one sends on a new connection is a single zero byte,
+    // by `sendto`.
+    if unix_stream(fd).is_some() {
+        return sys_write(fd, buf, len as usize);
+    }
     if len == 0 {
         return 0;
     }
@@ -4082,6 +4207,9 @@ pub(super) fn sys_send(fd: u64, buf: u64, len: u64) -> u64 {
 }
 
 pub(super) fn sys_recv(fd: u64, buf: u64, len: u64) -> u64 {
+    if unix_stream(fd).is_some() {
+        return sys_read(fd, buf, len);
+    }
     if len == 0 {
         return 0;
     }
@@ -4316,8 +4444,15 @@ pub(super) fn sys_uname(buf: u64) -> u64 {
 /// Nanoseconds of TSC time, never less than the last answer.
 fn mono_ns() -> u64 {
     static LAST_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-    let mhz = crate::time::tsc_mhz().max(1) as u128;
-    let now = (crate::time::rdtsc() as u128 * 1000 / mhz) as u64;
+    // **No 128-bit division**: this target links `__udivti3` and it answers
+    // garbage (CLAUDE.md, "Numbers, in four rungs"). Written as one, the
+    // clock read 2^64-7 nanoseconds after its first call, the clamp held it
+    // there, and every timeout a program measured was a century long -- the
+    // D-Bus daemon closed new connections as unauthenticated for that.
+    // Whole microseconds and the remainder, each in 64 bits.
+    let mhz = crate::time::tsc_mhz().max(1);
+    let tsc = crate::time::rdtsc();
+    let now = (tsc / mhz) * 1000 + (tsc % mhz) * 1000 / mhz;
     LAST_NS.fetch_max(now, Ordering::Relaxed).max(now)
 }
 
@@ -4357,10 +4492,13 @@ pub(super) fn clock_pair(which: u64) -> Option<(u64, u64)> {
             Some((ns / 1_000_000_000, ns % 1_000_000_000))
         }
         // MONOTONIC_COARSE: the tick, which is what "coarse" promises.
+        // The same timeline as MONOTONIC, rounded down to a tick: it was the
+        // tick count itself, which starts at the kernel's boot rather than the
+        // TSC's, so the two clocks a program compares disagreed by seconds.
         6 => {
-            let t = crate::dev::lapic::ticks();
-            let hz = crate::TIMER_HZ as u64;
-            Some((t / hz, (t % hz) * (1_000_000_000 / hz)))
+            let tick = 1_000_000_000 / crate::TIMER_HZ as u64;
+            let ns = mono_ns() / tick * tick;
+            Some((ns / 1_000_000_000, ns % 1_000_000_000))
         }
         // MONOTONIC, raw, boottime and the two process clocks -- answered
         // from the TSC, to the nanosecond.
@@ -4466,14 +4604,15 @@ pub(super) fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
         // blocking one. Elsewhere no flag it could set applies.
         3 => with_fds(|fds, _| match fds.get(fd as usize) {
             Some(Some(super::fs::Fd::Dev(b))) => 2 | if b.borrow().nonblock { O_NONBLOCK } else { 0 },
+            Some(Some(super::fs::Fd::Unix(_, nb))) => 2 | if nb.get() { O_NONBLOCK } else { 0 },
             _ => 0,
         })
         .unwrap_or(0),
         4 => {
-            with_fds(|fds, _| {
-                if let Some(Some(super::fs::Fd::Dev(b))) = fds.get(fd as usize) {
-                    b.borrow_mut().nonblock = arg & O_NONBLOCK != 0;
-                }
+            with_fds(|fds, _| match fds.get(fd as usize) {
+                Some(Some(super::fs::Fd::Dev(b))) => b.borrow_mut().nonblock = arg & O_NONBLOCK != 0,
+                Some(Some(super::fs::Fd::Unix(_, nb))) => nb.set(arg & O_NONBLOCK != 0),
+                _ => {}
             });
             0
         }
@@ -5353,6 +5492,7 @@ pub(super) fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
             let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
             match super::unix::read(&pipe, side, out) {
                 Ok(n) => return n as u64,
+                Err(-11) if unix_nonblock(fd) => return EAGAIN,
                 Err(-11) => {}
                 Err(e) => return e as u64,
             }
@@ -7260,7 +7400,10 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         // three its own way -- refusing would stop programs that set them as a
         // formality, which is most of them.
         SYS_SETSOCKOPT => (0, true),
-        SYS_GETSOCKOPT => (0, true),
+        SYS_GETSOCKOPT => (sys_getsockopt(f.rdi, f.rsi, f.rdx, f.r10, f.r8), true),
+        51 => (sys_sockname(f.rdi, f.rsi, f.rdx, false), true),
+        52 => (sys_sockname(f.rdi, f.rsi, f.rdx, true), true),
+        229 => (sys_clock_getres(f.rdi, f.rsi), true),
         SYS_ACCESS => (sys_access(f.rdi, f.rsi), true),
         SYS_FACCESSAT => (sys_access(f.rsi, f.rdx), true),
         SYS_FTRUNCATE => (sys_ftruncate(f.rdi, f.rsi), true),

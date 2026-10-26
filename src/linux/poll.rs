@@ -113,7 +113,7 @@ pub fn ready(fd: &Fd) -> u16 {
                 None => 0,
             }
         }
-        Fd::Unix(s) => {
+        Fd::Unix(s, _) => {
             let b = s.borrow();
             match &*b {
                 // A listening socket is *readable* when somebody is waiting,
@@ -325,19 +325,19 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     }));
     out.push((
         "a fresh socket pair can be written and has nothing to read",
-        ready(&Fd::Unix(sa.clone())) == POLLOUT,
+        ready(&Fd::Unix(sa.clone(), alloc::rc::Rc::new(core::cell::Cell::new(false)))) == POLLOUT,
     ));
     unix::write(&a, Side::A, b"hello").ok();
     out.push((
         "and the far end reads ready once bytes are in it",
-        ready(&Fd::Unix(sb.clone())) & POLLIN != 0,
+        ready(&Fd::Unix(sb.clone(), alloc::rc::Rc::new(core::cell::Cell::new(false)))) & POLLIN != 0,
     ));
     out.push((
         "while the sending end still has nothing of its own to read",
-        ready(&Fd::Unix(sa.clone())) & POLLIN == 0,
+        ready(&Fd::Unix(sa.clone(), alloc::rc::Rc::new(core::cell::Cell::new(false)))) & POLLIN == 0,
     ));
     unix::close(&a, Side::A);
-    let hung = ready(&Fd::Unix(sb.clone()));
+    let hung = ready(&Fd::Unix(sb.clone(), alloc::rc::Rc::new(core::cell::Cell::new(false))));
     out.push((
         "a departed peer shows as a hangup, so a program learns of it without attempting a read",
         hung & POLLHUP != 0,
@@ -395,14 +395,14 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     }));
     out.push((
         "a listening socket with nobody waiting is not ready",
-        ready(&Fd::Unix(listener.clone())) == 0,
+        ready(&Fd::Unix(listener.clone(), alloc::rc::Rc::new(core::cell::Cell::new(false)))) == 0,
     ));
     if let unix::Sock::Listening { waiting, .. } = &mut *listener.borrow_mut() {
         waiting.push_back(unix::pair().0);
     }
     out.push((
         "and reads ready once a connection is queued, which is the signal accept is written against",
-        ready(&Fd::Unix(listener.clone())) == POLLIN,
+        ready(&Fd::Unix(listener.clone(), alloc::rc::Rc::new(core::cell::Cell::new(false)))) == POLLIN,
     ));
 
     // ---- what an entry is told ----

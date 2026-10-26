@@ -2675,6 +2675,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         "mine" => mine_cmd(rest),
         "wlan" | "wifi" => wifi_cmd(rest),
         "services" => match rest.trim() {
+            "log" => crate::linux::services::print_log(),
             "reload" => {
                 crate::linux::services::load();
                 crate::linux::services::report();
@@ -7424,7 +7425,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     // An EROFS image at / is the guests' root filesystem.
                     match (words.next(), words.next().and_then(|n| n.parse::<u32>().ok())) {
                         (Some(at), Some(n)) => match linux::disk::mount(at, n) {
-                            Ok(()) if at == "/" => kprintln!("  partition {} is the guests' root filesystem, under /proc, /dev, /run, /tmp and the namespace", n),
+                            Ok(()) if at == "/" => {
+                                kprintln!("  partition {} is the guests' root filesystem, under /proc, /dev, /run, /tmp and the namespace", n);
+                                linux::services::begin_session();
+                                kprintln!("  session: {} for runtime files, the session bus at {}", linux::services::RUNTIME_DIR, linux::services::SESSION_BUS);
+                            }
                             Ok(()) => kprintln!("  partition {} is at {} for guests, read-only, read in place", n, at),
                             Err(e) => kprintln!("  {}", e),
                         },
