@@ -59,7 +59,7 @@ MKFS = OUT / "tools" / "x" / "usr" / "bin" / "mkfs.erofs"
 PACKAGES = [
     "filesystem", "glibc", "bash", "coreutils",
     "fontconfig", "ttf-liberation", "ttf-dejavu",
-    "gtk3", "adwaita-icon-theme", "hicolor-icon-theme",
+    "gtk3", "adwaita-icon-theme", "adwaita-icon-theme-legacy", "hicolor-icon-theme",
     "shared-mime-info", "xkeyboard-config", "gsettings-desktop-schemas",
     "dbus",
     # The ordinary userland a script or a person expects to find.
@@ -172,6 +172,18 @@ def readable():
                     p.chmod(m | 0o400)
 
 
+def settings():
+    """Defaults the image ships, written where the programs read them.
+
+    GTK 3's icon theme is AdwaitaLegacy, the PNG set: Adwaita itself is SVG
+    now, and the gdk-pixbuf pinned above decodes SVG only through a loader
+    this image does not carry -- so GTK found no `image-missing` and aborted
+    on its first icon."""
+    gtk = TREE / "etc/gtk-3.0"
+    gtk.mkdir(parents=True, exist_ok=True)
+    (gtk / "settings.ini").write_text("[Settings]\ngtk-icon-theme-name=AdwaitaLegacy\n")
+
+
 def data_hooks():
     """What package scripts would have produced that is data rather than a
     service: compiled schemas and the MIME database."""
@@ -211,6 +223,7 @@ def build(reuse=False):
         if i % 25 == 0:
             print(f"  {i} unpacked")
     readable()
+    settings()
     data_hooks()
     image()
     size = IMAGE.stat().st_size
