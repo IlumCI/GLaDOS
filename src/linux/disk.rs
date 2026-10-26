@@ -120,19 +120,45 @@ fn under(path: &str) -> Option<(usize, &str)> {
         return Some(hit);
     }
     let (i, root) = m.iter().enumerate().find(|(_, x)| x.prefix.is_empty())?;
-    if own(path) || crate::sysbox::blob_len(path).is_some() {
+    if own(path) || super::ns::blob_len(path).is_some() || super::ns::whited_out(path) {
         return None;
     }
-    // A directory in the namespace that the image also has is the image's,
-    // so a walk through `/usr` or `/etc` keeps going; one only the namespace
-    // has stays the namespace's.
-    if crate::sysbox::is_dir(path) {
+    // A directory in the guest's layer that the image also has is the
+    // image's, so a walk through `/usr` or `/etc` keeps going (and `entries`
+    // merges the layer's files into its listing); one only the layer has
+    // stays the layer's.
+    if super::ns::is_dir(path) {
         let Vol::Erofs(img) = &root.vol else { return None };
         if !img.lookup(path, true).is_ok_and(|n| n.is_dir()) {
             return None;
         }
     }
     Some((i, path))
+}
+
+/// Whether the guests' root filesystem is an image.
+pub fn root_mounted() -> bool {
+    unsafe { MOUNTS.get() }.iter().any(|m| m.prefix.is_empty())
+}
+
+/// Whether a path is answered by the root image rather than a named mount.
+/// Those are the paths a write may copy up into the guest's layer; a named
+/// mount is read-only all the way down.
+pub fn root_claims(path: &str) -> bool {
+    under(path).is_some_and(|(i, _)| unsafe { MOUNTS.get()[i].prefix.is_empty() })
+}
+
+/// The root image's own answer for a path, ignoring the guest's layer but
+/// honouring its whiteouts: what `mkdir`, `unlink` and `rename` need to know
+/// about the file underneath. `None` with no root image or nothing there.
+pub fn image_lookup(path: &str, follow: bool) -> Option<Node> {
+    if own(path) || super::ns::whited_out(path) {
+        return None;
+    }
+    let m = unsafe { MOUNTS.get() };
+    let root = m.iter().find(|x| x.prefix.is_empty())?;
+    let Vol::Erofs(img) = &root.vol else { return None };
+    img.lookup(path, follow).ok().map(erofs_node)
 }
 
 /// Whether a path is on a mounted volume at all.
@@ -226,10 +252,13 @@ pub fn entries(path: &str) -> Vec<(String, bool, usize)> {
             .unwrap_or_default(),
         Vol::Erofs(img) => {
             let Some(ino) = n.inode else { return Vec::new() };
-            img.dir(&ino)
+            let base = path.trim_end_matches('/');
+            let mut out: Vec<(String, bool, usize)> = img
+                .dir(&ino)
                 .map(|d| {
                     d.into_iter()
                         .filter(|(name, _, _)| name != "." && name != "..")
+                        .filter(|(name, _, _)| !super::ns::whited_out(&alloc::format!("{}/{}", base, name)))
                         .filter_map(|(name, nid, _)| {
                             let mut c = img.inode(nid).ok()?;
                             if c.is_link() {
@@ -240,7 +269,17 @@ pub fn entries(path: &str) -> Vec<(String, bool, usize)> {
                         })
                         .collect()
                 })
-                .unwrap_or_default()
+                .unwrap_or_default();
+            // The guest's own files at this directory: what it wrote wins
+            // over the image's entry of the same name.
+            if super::ns::layered() && m.prefix.is_empty() {
+                for e in super::ns::listing(path) {
+                    out.retain(|x| x.0 != e.0);
+                    out.push(e);
+                }
+                out.sort_by(|a, b| a.0.cmp(&b.0));
+            }
+            out
         }
     }
 }
@@ -351,7 +390,7 @@ pub fn program_bytes(path: &str) -> Option<Vec<u8>> {
     if claims(path) {
         return read_all(path);
     }
-    crate::sysbox::read_blob(path)
+    super::ns::read_blob(path)
 }
 
 /// What `diag linux` can check with no volume mounted.

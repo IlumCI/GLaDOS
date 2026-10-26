@@ -62,6 +62,11 @@ PACKAGES = [
     "gtk3", "adwaita-icon-theme", "hicolor-icon-theme",
     "shared-mime-info", "xkeyboard-config", "gsettings-desktop-schemas",
     "dbus",
+    # The ordinary userland a script or a person expects to find.
+    "grep", "sed", "gawk", "findutils", "diffutils", "which", "less", "nano",
+    "tar", "gzip", "xz", "file", "procps-ng", "util-linux",
+    # The shell sci-fish starts from.
+    "fish",
     "libreoffice-fresh",
 ]
 

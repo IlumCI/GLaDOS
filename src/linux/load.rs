@@ -860,7 +860,7 @@ pub fn exec(f: &mut syscall::Frame) -> u64 {
         return EFAULT;
     }
 
-    let Some(bytes) = crate::sysbox::read_blob(&path) else { return ENOENT };
+    let Some(bytes) = super::disk::program_bytes(&path) else { return ENOENT };
     let args: Vec<&str> = if argv.is_empty() {
         alloc::vec![path.as_str()]
     } else {

@@ -7235,6 +7235,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             let mut words = rest.split_whitespace();
             match words.next().unwrap_or("") {
                 "run" => {
+                    // Split as a shell would, so `bash -c 'echo a b'` hands
+                    // bash one argument rather than three fragments of quote.
+                    let quoted = guest_words(rest.trim_start().strip_prefix("run").unwrap_or(""));
+                    let mut words = quoted.iter().map(|w| w.as_str());
                     let Some(path) = words.next() else {
                         kprintln!("  usage: linux run <path to an ELF in the namespace>");
                         return;
@@ -7402,6 +7406,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                 }
                 "bg" => {
+                    let quoted = guest_words(rest.trim_start().strip_prefix("bg").unwrap_or(""));
+                    let mut words = quoted.iter().map(|w| w.as_str());
                     let Some(path) = words.next() else {
                         kprintln!("  usage: linux bg <path> [args...]   -- runs beside the shell");
                         return;
@@ -10949,4 +10955,49 @@ fn readable_listing(text: &str) -> Option<alloc::string::String> {
         out.push('\n');
     }
     Some(out)
+}
+
+/// A guest's argv from a typed line: words split on whitespace, with single
+/// quotes taken literally, double quotes grouping, and a backslash escaping
+/// the next character outside single quotes. What a POSIX shell does for the
+/// cases a person types; no expansion of any kind, since there is nothing here
+/// to expand against.
+pub fn guest_words(line: &str) -> alloc::vec::Vec<alloc::string::String> {
+    let mut out = alloc::vec::Vec::new();
+    let mut cur = alloc::string::String::new();
+    let mut started = false;
+    let mut chars = line.chars();
+    let (mut single, mut double) = (false, false);
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !double => {
+                single = !single;
+                started = true;
+            }
+            '"' if !single => {
+                double = !double;
+                started = true;
+            }
+            '\\' if !single => {
+                if let Some(n) = chars.next() {
+                    cur.push(n);
+                    started = true;
+                }
+            }
+            c if c.is_whitespace() && !single && !double => {
+                if started {
+                    out.push(core::mem::take(&mut cur));
+                    started = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        out.push(cur);
+    }
+    out
 }

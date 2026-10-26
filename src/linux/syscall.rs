@@ -73,6 +73,17 @@ pub const SYS_FSTAT: u64 = 5;
 pub const SYS_STATFS: u64 = 137;
 pub const SYS_PWRITE64: u64 = 18;
 pub const SYS_RENAME: u64 = 82;
+pub const SYS_MKDIRAT: u64 = 258;
+pub const SYS_FCHDIR: u64 = 81;
+pub const SYS_UMASK: u64 = 95;
+pub const SYS_GETPGRP: u64 = 111;
+pub const SYS_GETRESUID: u64 = 118;
+pub const SYS_GETRESGID: u64 = 120;
+pub const SYS_PRCTL: u64 = 157;
+pub const SYS_FADVISE64: u64 = 221;
+pub const SYS_STATX: u64 = 332;
+pub const SYS_UNLINKAT: u64 = 263;
+pub const SYS_UTIMENSAT: u64 = 280;
 pub const SYS_RENAMEAT: u64 = 264;
 pub const SYS_RENAMEAT2: u64 = 316;
 pub const SYS_FSTATFS: u64 = 138;
@@ -193,6 +204,8 @@ pub(super) const EEXIST: u64 = (-17i64) as u64;
 pub(super) const ERANGE: u64 = (-34i64) as u64;
 pub(super) const ENOTEMPTY: u64 = (-39i64) as u64;
 pub(super) const EXDEV: u64 = (-18i64) as u64;
+pub(super) const EIO: u64 = (-5i64) as u64;
+pub(super) const ENODATA: u64 = (-61i64) as u64;
 pub(super) const ENODEV: u64 = (-19i64) as u64;
 pub(super) const ENOSPC: u64 = (-28i64) as u64;
 /// `O_NONBLOCK`, which on an event device is the difference between a program
@@ -1962,7 +1975,24 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
         let Some(path) = super::fs::resolve(&base, &raw) else { return ENOENT };
         // A mounted volume, read in place by range. Before everything else,
         // so a mount point shadows whatever the namespace has at that path.
-        if super::disk::claims(&path) {
+        // **A write to the root image goes to the guest's layer.** The file
+        // is copied up first unless the open truncates it, so what the guest
+        // then reads back is what it wrote over what was there. A file that
+        // does not exist yet is simply created in the layer. A named mount
+        // stays read-only all the way down.
+        if wants_write && super::disk::root_claims(&path) && super::ns::writable(&path) {
+            if let Some(Some(n)) = super::disk::lookup(&path) {
+                if n.is_dir {
+                    return EISDIR;
+                }
+                if flags & (O_CREAT | O_EXCL) == (O_CREAT | O_EXCL) {
+                    return EEXIST;
+                }
+                if flags & O_TRUNC == 0 && !super::ns::copy_up(&path) {
+                    return EIO;
+                }
+            }
+        } else if super::disk::claims(&path) {
             if wants_write {
                 return EROFS;
             }
@@ -2066,13 +2096,13 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
         if wants_write && !super::fs::writable(&path) {
             return EROFS;
         }
-        let is_dir = sysbox::is_dir(&path);
+        let is_dir = super::ns::is_dir(&path);
         // A path that is not there is `ENOENT` whatever the flags say, and only
         // something that exists and is a file is `ENOTDIR`. LibreOffice opens
         // its temp directories with `O_DIRECTORY` to learn whether to create
         // them, and an `ENOTDIR` there ends it with an uncaught exception.
         if flags & O_DIRECTORY != 0 && !is_dir {
-            return if sysbox::blob_len(&path).is_some() { ENOTDIR } else { ENOENT };
+            return if super::ns::blob_len(&path).is_some() { ENOTDIR } else { ENOENT };
         }
         let entry = if is_dir {
             if wants_write {
@@ -2080,14 +2110,14 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
             }
             super::fs::Fd::Dir(alloc::rc::Rc::new(core::cell::RefCell::new(super::fs::Dir {
                 path: path.clone(),
-                entries: sysbox::listing(&path),
+                entries: super::ns::listing(&path),
                 at: 0,
             })))
         } else {
             // Asked before the copy is made, not after: the point is to not
             // allocate the file, so a check that reads it first and then
             // measures has already lost.
-            let size = sysbox::blob_len(&path);
+            let size = super::ns::blob_len(&path);
             if size.is_none() && flags & O_CREAT == 0 {
                 return ENOENT;
             }
@@ -2110,7 +2140,7 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
             let data = if flags & O_TRUNC != 0 || size.is_none() {
                 alloc::vec::Vec::new()
             } else {
-                match sysbox::read_blob(&path) {
+                match super::ns::read_blob(&path) {
                     Some(d) => d,
                     None => return ENOENT,
                 }
@@ -2161,6 +2191,20 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
 /// the jail, then ask the tree. Splitting them would put the `EROFS` check in
 /// three places, which is how one of them ends up missing it.
 pub(super) fn sys_name_op(path_at: u64, op: u8) -> u64 {
+    sys_name_op_at(super::fs::AT_FDCWD as u64, path_at, op)
+}
+
+/// `mkdirat`, and `unlinkat` with or without `AT_REMOVEDIR`. coreutils asks
+/// for these and not the bare calls, so `mkdir -p` and `rm` answered ENOSYS.
+pub(super) fn sys_unlinkat(dirfd: u64, path_at: u64, flags: u64) -> u64 {
+    const AT_REMOVEDIR: u64 = 0x200;
+    if flags & !AT_REMOVEDIR != 0 {
+        return EINVAL;
+    }
+    sys_name_op_at(dirfd, path_at, if flags & AT_REMOVEDIR != 0 { b'r' } else { b'u' })
+}
+
+pub(super) fn sys_name_op_at(dirfd: u64, path_at: u64, op: u8) -> u64 {
     let raw = match read_cstr(path_at) {
         Ok(v) => v,
         Err(e) => return e,
@@ -2168,41 +2212,90 @@ pub(super) fn sys_name_op(path_at: u64, op: u8) -> u64 {
     if raw.is_empty() {
         return ENOENT;
     }
-    let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
-    let Some(path) = found else { return ENOENT };
+    let path = match at_path(dirfd, &raw) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
     if !super::fs::writable(&path) {
         return EROFS;
     }
-    let is_dir = sysbox::is_dir(&path);
+    // The root image underneath, when there is one: a directory it has
+    // exists, a file it has can be deleted -- which leaves a whiteout, since
+    // the image itself cannot forget anything.
+    let below = super::disk::image_lookup(&path, false);
+    let is_dir = super::ns::is_dir(&path) || below.as_ref().is_some_and(|n| n.is_dir);
     match op {
         b'm' => {
-            if is_dir || sysbox::blob_len(&path).is_some() {
+            if is_dir || super::ns::blob_len(&path).is_some() || below.is_some() {
                 return EEXIST;
             }
-            if sysbox::make_dir(&path) { 0 } else { EPERM }
+            if super::ns::make_dir(&path) { 0 } else { EPERM }
         }
         b'r' => {
             if !is_dir {
-                return ENOTDIR;
+                let there = super::ns::blob_len(&path).is_some() || below.is_some();
+                return if there { ENOTDIR } else { ENOENT };
             }
             // `rmdir` removes an empty directory and nothing else. The tree
             // would happily detach a full one, and that would be a recursive
-            // delete wearing the name of the safe call.
-            if !sysbox::listing(&path).is_empty() {
+            // delete wearing the name of the safe call. Empty means empty in
+            // both: the merged listing, not the layer's alone.
+            let empty = if below.is_some() {
+                super::disk::entries(&path).is_empty()
+            } else {
+                super::ns::listing(&path).is_empty()
+            };
+            if !empty {
                 return ENOTEMPTY;
             }
-            if sysbox::detach(&path) { 0 } else { EPERM }
+            if super::ns::is_dir(&path) && !super::ns::detach(&path) {
+                return EPERM;
+            }
+            if below.is_some() && !super::ns::white_out(&path) {
+                return EPERM;
+            }
+            0
         }
         _ => {
             if is_dir {
                 return EISDIR;
             }
-            if sysbox::blob_len(&path).is_none() {
+            let upper = super::ns::blob_len(&path).is_some();
+            if !upper && below.is_none() {
                 return ENOENT;
             }
-            if sysbox::detach(&path) { 0 } else { EPERM }
+            if upper && !super::ns::detach(&path) {
+                return EPERM;
+            }
+            if below.is_some() && !super::ns::white_out(&path) {
+                return EPERM;
+            }
+            0
         }
     }
+}
+
+/// `utimensat`: set a file's times. Nothing here keeps times -- every file
+/// reports the epoch -- so this answers whether the file is there and stores
+/// nothing, which is what `touch` needs to finish. A null path with a
+/// descriptor is `futimens`.
+pub(super) fn sys_utimensat(dirfd: u64, path_at: u64) -> u64 {
+    if path_at == 0 {
+        return with_fds(|fds, _| if matches!(fds.get(dirfd as usize), Some(Some(_))) { 0 } else { EBADF }).unwrap_or(EBADF);
+    }
+    let raw = match read_cstr(path_at) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let path = match at_path(dirfd, &raw) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let there = matches!(super::disk::lookup(&path), Some(Some(_)))
+        || super::ns::blob_len(&path).is_some()
+        || super::ns::is_dir(&path)
+        || super::dev::node(&path).is_some();
+    if there { 0 } else { ENOENT }
 }
 
 /// `rename`, `renameat` and `renameat2`, over the namespace's own move.
@@ -2234,18 +2327,34 @@ pub(super) fn sys_renameat(olddir: u64, old_at: u64, newdir: u64, new_at: u64, f
         Ok(p) => p,
         Err(e) => return e,
     };
-    if super::disk::lookup(&from).is_some() {
+    // A named mount is read-only, and Linux answers a move off another
+    // filesystem with EXDEV, which tells a program to copy.
+    if super::disk::claims(&from) && !super::disk::root_claims(&from) {
         return EXDEV;
     }
     if !super::fs::writable(&from) || !super::fs::writable(&to) {
         return EROFS;
     }
-    let src_dir = sysbox::is_dir(&from);
-    if !src_dir && sysbox::blob_len(&from).is_none() {
-        return ENOENT;
+    // A file on the root image moves by being copied up first; the image's
+    // copy is then whited out, so the old name is gone as a move promises. A
+    // directory there answers EXDEV: moving a tree out of an image is a copy
+    // of the whole tree, which is the program's to do.
+    let from_below = super::disk::image_lookup(&from, false);
+    if super::ns::blob_len(&from).is_none() && super::ns::is_dir(&from) == false {
+        match &from_below {
+            Some(n) if n.is_dir => return EXDEV,
+            Some(_) => {
+                if !super::ns::copy_up(&from) {
+                    return EIO;
+                }
+            }
+            None => return ENOENT,
+        }
     }
-    let dst_dir = sysbox::is_dir(&to);
-    let dst_there = dst_dir || sysbox::blob_len(&to).is_some();
+    let src_dir = super::ns::is_dir(&from);
+    let to_below = super::disk::image_lookup(&to, false);
+    let dst_dir = super::ns::is_dir(&to) || to_below.as_ref().is_some_and(|n| n.is_dir);
+    let dst_there = dst_dir || super::ns::blob_len(&to).is_some() || to_below.is_some();
     if dst_there && flags & RENAME_NOREPLACE != 0 {
         return EEXIST;
     }
@@ -2255,10 +2364,16 @@ pub(super) fn sys_renameat(olddir: u64, old_at: u64, newdir: u64, new_at: u64, f
     if src_dir && dst_there && !dst_dir {
         return ENOTDIR;
     }
-    if dst_dir && from != to && !sysbox::listing(&to).is_empty() {
+    if dst_dir && from != to && !super::ns::listing(&to).is_empty() {
         return ENOTEMPTY;
     }
-    if sysbox::rename(&from, &to) { 0 } else { EINVAL }
+    if !super::ns::rename(&from, &to) {
+        return EINVAL;
+    }
+    if from_below.is_some() && from != to {
+        super::ns::white_out(&from);
+    }
+    0
 }
 
 /// A path resolved against a directory descriptor, as `openat` resolves one.
@@ -2301,7 +2416,7 @@ pub(super) fn sys_chdir(path_at: u64) -> u64 {
     let Some(path) = found else { return ENOENT };
     let is_dir = match super::disk::lookup(&path) {
         Some(on) => on.is_some_and(|n| n.is_dir),
-        None => sysbox::is_dir(&path) || super::dev::is_dir(&path) || super::proc::is_dir(&path) || path == "/",
+        None => super::ns::is_dir(&path) || super::dev::is_dir(&path) || super::proc::is_dir(&path) || path == "/",
     };
     if !is_dir {
         return ENOTDIR;
@@ -2313,6 +2428,117 @@ pub(super) fn sys_chdir(path_at: u64) -> u64 {
         }
         None => EBADF,
     }
+}
+
+/// `fchdir`: into the directory an open descriptor names. `mkdir -p` walks
+/// down this way, one component at a time, and stopped at the first.
+pub(super) fn sys_fchdir(fd: u64) -> u64 {
+    let path = with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Dir(d))) => Ok(d.borrow().path.clone()),
+        Some(Some(_)) => Err(ENOTDIR),
+        _ => Err(EBADF),
+    })
+    .unwrap_or(Err(EBADF));
+    match path {
+        Ok(p) => match unsafe { guest_slot() }.as_mut() {
+            Some(sp) => {
+                sp.cwd = p;
+                0
+            }
+            None => EBADF,
+        },
+        Err(e) => e,
+    }
+}
+
+/// The file-creation mask. Kept and handed back, and applied to nothing,
+/// because nothing here stores a mode a guest chose: every file reports 0644
+/// or 0755. Answering the previous value is the whole contract.
+static UMASK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0o022);
+
+pub(super) fn sys_umask(mask: u64) -> u64 {
+    UMASK.swap(mask & 0o777, Ordering::Relaxed)
+}
+
+/// `getresuid` and `getresgid`: real, effective and saved, all root -- the
+/// same answer `getuid` and friends give.
+fn sys_getres(r: u64, e: u64, sv: u64) -> u64 {
+    for p in [r, e, sv] {
+        if p != 0 && !reachable(p, 4, true) {
+            return EFAULT;
+        }
+    }
+    for p in [r, e, sv] {
+        if p != 0 {
+            unsafe { core::ptr::write_unaligned(p as *mut u32, 0) };
+        }
+    }
+    0
+}
+
+/// `prctl`. A thread's name is the one thing programs set unasked (GLib and
+/// LibreOffice name every thread), so `PR_SET_NAME` is accepted and
+/// `PR_GET_NAME` answers a fixed name; everything else is EINVAL, which is
+/// what a kernel without the option answers.
+fn sys_prctl(op: u64, arg: u64) -> u64 {
+    const PR_SET_NAME: u64 = 15;
+    const PR_GET_NAME: u64 = 16;
+    match op {
+        PR_SET_NAME => 0,
+        PR_GET_NAME => {
+            if !reachable(arg, 16, true) {
+                return EFAULT;
+            }
+            let mut b = [0u8; 16];
+            b[..5].copy_from_slice(b"guest");
+            unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), arg as *mut u8, 16) };
+            0
+        }
+        _ => EINVAL,
+    }
+}
+
+/// `statx`, built from `stat` rather than beside it, so the two cannot
+/// disagree about a file: the 144-byte `struct stat` is written into the
+/// caller's 256-byte buffer first, read back, and laid out again as the
+/// newer structure. The mask asked for is not consulted -- the basic set is
+/// always answered, which is what `STATX_BASIC_STATS` says it is.
+pub(super) fn sys_statx(dirfd: u64, path_at: u64, flags: u64, buf: u64) -> u64 {
+    if !reachable(buf, 256, true) {
+        return EFAULT;
+    }
+    let r = sys_statat(dirfd, path_at, buf, flags & (AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW));
+    if r != 0 {
+        return r;
+    }
+    let rd = |o: u64| unsafe { core::ptr::read_unaligned((buf + o) as *const u64) };
+    let (dev, ino, nlink) = (rd(0), rd(8), rd(16));
+    let mode = rd(24) as u32;
+    let (uid, gid) = (rd(28) as u32, rd(32) as u32);
+    let (rdev, size, blksize, blocks) = (rd(40), rd(48), rd(56), rd(64));
+    let (at, atn, mt, mtn, ct, ctn) = (rd(72), rd(80), rd(88), rd(96), rd(104), rd(112));
+    let mut x = [0u8; 256];
+    let put32 = |x: &mut [u8; 256], o: usize, v: u32| x[o..o + 4].copy_from_slice(&v.to_le_bytes());
+    let put64 = |x: &mut [u8; 256], o: usize, v: u64| x[o..o + 8].copy_from_slice(&v.to_le_bytes());
+    put32(&mut x, 0, 0x7ff); // STATX_BASIC_STATS
+    put32(&mut x, 4, blksize as u32);
+    put32(&mut x, 16, nlink as u32);
+    put32(&mut x, 20, uid);
+    put32(&mut x, 24, gid);
+    x[28..30].copy_from_slice(&(mode as u16).to_le_bytes());
+    put64(&mut x, 32, ino);
+    put64(&mut x, 40, size);
+    put64(&mut x, 48, blocks);
+    for (o, sec, ns) in [(64, at, atn), (96, ct, ctn), (112, mt, mtn)] {
+        put64(&mut x, o, sec);
+        put32(&mut x, o + 8, ns as u32);
+    }
+    put32(&mut x, 128, ((rdev >> 8) & 0xfff) as u32);
+    put32(&mut x, 132, (rdev & 0xff) as u32);
+    put32(&mut x, 136, ((dev >> 8) & 0xfff) as u32);
+    put32(&mut x, 140, (dev & 0xff) as u32);
+    unsafe { core::ptr::copy_nonoverlapping(x.as_ptr(), buf as *mut u8, 256) };
+    0
 }
 
 pub(super) fn sys_getcwd(buf: u64, len: u64) -> u64 {
@@ -3958,7 +4184,9 @@ pub(super) fn sys_access(path_at: u64, mode: u64) -> u64 {
     // installed.
     if let Some(on) = super::disk::lookup(&path) {
         let Some(n) = on else { return ENOENT };
-        if mode & 2 != 0 {
+        // Writable when it is the root image and the guest has a layer to
+        // copy it up into; a named mount never is.
+        if mode & 2 != 0 && !(super::disk::root_claims(&path) && super::ns::writable(&path)) {
             return EROFS;
         }
         if mode & 1 != 0 && !n.is_dir {
@@ -3969,7 +4197,7 @@ pub(super) fn sys_access(path_at: u64, mode: u64) -> u64 {
     if super::dev::node(&path).is_some() || super::dev::is_dir(&path) || super::proc::claims(&path) {
         return 0;
     }
-    if !sysbox::is_dir(&path) && sysbox::blob_len(&path).is_none() {
+    if !super::ns::is_dir(&path) && super::ns::blob_len(&path).is_none() {
         return ENOENT;
     }
     // W_OK is bit 1. X_OK is granted on directories and refused on files,
@@ -3977,7 +4205,7 @@ pub(super) fn sys_access(path_at: u64, mode: u64) -> u64 {
     if mode & 2 != 0 && !super::fs::writable(&path) {
         return EACCES;
     }
-    if mode & 1 != 0 && !sysbox::is_dir(&path) {
+    if mode & 1 != 0 && !super::ns::is_dir(&path) {
         return EACCES;
     }
     0
@@ -4782,6 +5010,14 @@ pub(super) fn sys_dup(from: u64, to: Option<u64>) -> u64 {
                 None => return EMFILE,
             },
         };
+        // **Replacing a descriptor closes it, and closing commits.** Dropping
+        // the old entry here skipped the commit, so `echo hi > file` lost its
+        // file: bash opens it, `dup2`s it onto stdout, writes, then `dup2`s
+        // the saved stdout back over it -- and the last name for the body went
+        // with no flush, leaving nothing in the namespace.
+        if let Some(old) = fds[slot].take() {
+            old.flush();
+        }
         fds[slot] = Some(copy);
         slot as u64
     })
@@ -5350,8 +5586,8 @@ pub(super) fn sys_readlinkat(dirfd: u64, path_at: u64, buf: u64, size: u64) -> u
         // a crash it cannot explain.
         return if super::proc::claims(&path)
             || matches!(super::disk::lookup(&path), Some(Some(_)))
-            || sysbox::blob_len(&path).is_some()
-            || sysbox::is_dir(&path)
+            || super::ns::blob_len(&path).is_some()
+            || super::ns::is_dir(&path)
         {
             EINVAL
         } else {
@@ -5733,8 +5969,8 @@ pub(super) fn sys_statfs(path_at: u64, buf: u64) -> u64 {
         return if on.is_some() { write_statfs(buf, true) } else { ENOENT };
     }
     let known = path == "/"
-        || sysbox::is_dir(&path)
-        || sysbox::blob_len(&path).is_some()
+        || super::ns::is_dir(&path)
+        || super::ns::blob_len(&path).is_some()
         || super::dev::node(&path).is_some()
         || super::dev::is_dir(&path)
         || super::proc::claims(&path);
@@ -5848,14 +6084,14 @@ pub(super) fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 
         let n = super::proc::read(&path).map(|d| d.len()).unwrap_or(0);
         return write_stat(buf, super::fs::Kind::File, n, super::fs::ino_of(&path));
     }
-    if sysbox::is_dir(&path) {
+    if super::ns::is_dir(&path) {
         return write_stat(buf, super::fs::Kind::Dir, 0, super::fs::ino_of(&path));
     }
     // `blob_len` rather than `read_blob`: the only field wanted here is the
     // size, and reading the blob to find it copies the whole file into the
     // heap and drops it. `stat` on a large checkpoint is an ordinary thing for
     // a program to do and was an allocation of the whole checkpoint.
-    match sysbox::blob_len(&path) {
+    match super::ns::blob_len(&path) {
         Some(n) => write_stat(buf, super::fs::Kind::File, n, super::fs::ino_of(&path)),
         None => ENOENT,
     }
@@ -7049,6 +7285,46 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_MKDIR => (sys_name_op(f.rdi, b'm'), true),
         SYS_RMDIR => (sys_name_op(f.rdi, b'r'), true),
         SYS_UNLINK => (sys_name_op(f.rdi, b'u'), true),
+        SYS_MKDIRAT => (sys_name_op_at(f.rdi, f.rsi, b'm'), true),
+        SYS_FCHDIR => (sys_fchdir(f.rdi), true),
+        SYS_UMASK => (sys_umask(f.rdi), true),
+        // One process group, led by the process asking.
+        SYS_GETPGRP => (super::fork::current_pid(), true),
+        SYS_GETRESUID | SYS_GETRESGID => (sys_getres(f.rdi, f.rsi, f.rdx), true),
+        SYS_PRCTL => (sys_prctl(f.rdi, f.rsi), true),
+        // Advice about access patterns: there is no page cache to advise.
+        SYS_FADVISE64 => (0, true),
+        SYS_STATX => (sys_statx(f.rdi, f.rsi, f.rdx, f.r8), true),
+        // Extended attributes: none, on any file. ENODATA for a named one and
+        // an empty list, which is what a filesystem without them answers and
+        // what `ls -l` probes for ACLs on every entry.
+        191..=193 => (ENODATA, true),
+        // sigaltstack: signal handlers here always run on the stack the
+        // guest was on, so there is no alternate one to install. The old
+        // stack reads back as disabled, which is the truth, and a new one is
+        // accepted and not used -- handlers that would have run on it run
+        // on the ordinary stack, which is where they run on any thread that
+        // never set one.
+        131 => {
+            const SS_DISABLE: u64 = 2;
+            if f.rsi != 0 {
+                if !reachable(f.rsi, 24, true) {
+                    (EFAULT, true)
+                } else {
+                    unsafe {
+                        core::ptr::write_unaligned(f.rsi as *mut u64, 0);
+                        core::ptr::write_unaligned((f.rsi + 8) as *mut u64, SS_DISABLE);
+                        core::ptr::write_unaligned((f.rsi + 16) as *mut u64, 0);
+                    }
+                    (0, true)
+                }
+            } else {
+                (0, true)
+            }
+        }
+        194..=196 => (0, true),
+        SYS_UNLINKAT => (sys_unlinkat(f.rdi, f.rsi, f.rdx), true),
+        SYS_UTIMENSAT => (sys_utimensat(f.rdi, f.rsi), true),
         SYS_RENAME => {
             let at = super::fs::AT_FDCWD as u64;
             (sys_renameat(at, f.rdi, at, f.rsi, 0), true)
@@ -9276,6 +9552,17 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_MKDIR => "mkdir",
         SYS_RMDIR => "rmdir",
         SYS_UNLINK => "unlink",
+        SYS_MKDIRAT => "mkdirat",
+        SYS_FCHDIR => "fchdir",
+        SYS_UMASK => "umask",
+        SYS_GETPGRP => "getpgrp",
+        SYS_GETRESUID => "getresuid",
+        SYS_GETRESGID => "getresgid",
+        SYS_PRCTL => "prctl",
+        SYS_FADVISE64 => "fadvise64",
+        SYS_STATX => "statx",
+        SYS_UNLINKAT => "unlinkat",
+        SYS_UTIMENSAT => "utimensat",
         SYS_RENAME => "rename",
         SYS_RENAMEAT => "renameat",
         SYS_RENAMEAT2 => "renameat2",

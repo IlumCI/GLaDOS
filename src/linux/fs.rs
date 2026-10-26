@@ -58,7 +58,9 @@ pub const WRITE_ROOT: &str = "/tmp";
 /// relative path cannot climb out by being written differently. `resolve`
 /// refuses `..` outright, which is what makes one check enough.
 pub fn writable(path: &str) -> bool {
-    path == WRITE_ROOT || path.starts_with("/tmp/")
+    // `/tmp` alone until a root image gives a guest a layer of its own to
+    // write into; `ns::writable` holds the rule for both cases.
+    path == WRITE_ROOT || super::ns::writable(path)
 }
 
 /// `AT_FDCWD`, the descriptor that means "relative to the working directory".
@@ -375,7 +377,7 @@ impl Fd {
         }
         f.dirty = false;
         let data = f.data.clone();
-        crate::sysbox::write_blob(&f.path, data)
+        super::ns::write_blob(&f.path, data)
     }
 }
 
