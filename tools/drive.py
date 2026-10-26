@@ -491,6 +491,12 @@ def main():
     # to hold. Opened read-only, since nothing writes it and it may be
     # gigabytes of somebody's installed software.
     nvme_image = None
+    # --nvme-rw: attach --nvme-image writable. Read-only stays the default,
+    # because the usual image is somebody's game install and a stray store
+    # format would overwrite it; a disk meant to carry a store asks for this.
+    nvme_rw = "--nvme-rw" in argv
+    if nvme_rw:
+        argv.remove("--nvme-rw")
     if "--nvme-image" in argv:
         i = argv.index("--nvme-image")
         nvme_image = Path(argv[i + 1]).resolve()
@@ -1004,7 +1010,7 @@ def main():
         # volume it booted from, and anything that writes the ESP from a running
         # machine is untestable. OVMF enumerates NVMe as a boot device, so
         # nothing else has to change.
-        "-drive", (f"file={nvme_image},if=none,id=nvm0,format=raw,readonly=on" if nvme_image else
+        "-drive", (f"file={nvme_image},if=none,id=nvm0,format=raw{'' if nvme_rw else ',readonly=on'}" if nvme_image else
                    f"file={esp_image if esp_on_nvme else ROOT / '.qemu/nvme.img'},if=none,id=nvm0,format=raw"),
         "-device", "nvme,serial=GLADOSQEMU0001,drive=nvm0",
         # A USB controller to develop against. QEMU emulates xHCI faithfully
