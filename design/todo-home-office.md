@@ -3,6 +3,55 @@
 Asked for on 2026-10-25. The order below is the order to build in. Each part is
 a rung that stands on the one before it.
 
+## 0. Applications run without hand-staging (in progress, first)
+
+Every LibreOffice hurdle was the OS failing to provide something a Linux app
+takes for granted: a file under `/usr/share`, a dlopen'd library, a writable
+cache, a case-preserving name, a symlink, a session service, a protocol. Each
+was fixed by hand for one app. The OS has to provide all of it, so any app
+just runs.
+
+1. **A real root filesystem for guests.** Build a distribution root on the
+   host (Arch packages, resolved with `pacman -Sp` and unpacked, so no root
+   is needed) into an **EROFS** image: Linux's read-only filesystem, with
+   symlinks, modes and owners, and simple when uncompressed. The kernel gets
+   an EROFS reader and mounts it at `/` for guests.
+2. **A writable layer over it.** `/tmp`, `/home`, `/etc`, `/var`, the
+   profile directories and caches: writes go to an overlay (memory first,
+   then persistent on the store), reads fall through to the image.
+3. **Session services started by the OS.** A D-Bus session bus,
+   `XDG_RUNTIME_DIR` and the XDG directories, writable font caches,
+   settings storage (dconf or GSettings' keyfile backend).
+4. **Wayland completeness.** `xdg_popup` (no menu can open today), a real
+   clipboard, cursor shapes, text-input-v3, subsurfaces as needed; XWayland
+   later, for X11-only apps.
+5. **System-call coverage by sweep.** Run many apps, not one; implement
+   what the `-ENOSYS` trace and the throw/exit shim name.
+6. **The `orange` package manager** installs into the writable layer from
+   the same package source, which is what makes this a user-facing feature
+   rather than a build step.
+
+## 0b. sci-fish, the guest shell
+
+The Linux side's own shell: **sci-fish** ("sci-fi sh"). It should look like
+oh-my-zsh, with a themed, informative prompt showing git status, the exit
+code of the last command and the time a command took. It should feel and
+behave like fish:
+- suggestions from history as you type;
+- syntax highlighting while typing;
+- tab completion that knows commands and their options;
+- sane scripting (no word-splitting surprises);
+- a web-free `config` for themes.
+
+It is the program a Linux terminal window starts. It ships on the root
+image, so nothing has to be installed for it.
+
+Open decision: build it as a configured fish (fish ships in Arch, so it is
+a package plus a theme and a prompt), or write our own. Fish first is the
+fast way to the feel; a rewrite only if fish's own limits get in the way.
+Either way it needs a guest terminal: a pty and a terminal window that
+renders its escape codes.
+
 ## 1. Office work, with the model helping (in progress)
 
 - **LibreOffice in a Linux guest.** The host's build and its library closure

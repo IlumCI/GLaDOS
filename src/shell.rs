@@ -7413,16 +7413,18 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                 }
                 "mount" => {
-                    // linux mount <guest path> <partition>: a FAT volume the
-                    // next guests read in place, by range.
+                    // linux mount <guest path> <partition>: a FAT volume or
+                    // an EROFS image the next guests read in place, by range.
+                    // An EROFS image at / is the guests' root filesystem.
                     match (words.next(), words.next().and_then(|n| n.parse::<u32>().ok())) {
                         (Some(at), Some(n)) => match linux::disk::mount(at, n) {
+                            Ok(()) if at == "/" => kprintln!("  partition {} is the guests' root filesystem, under /proc, /dev, /run, /tmp and the namespace", n),
                             Ok(()) => kprintln!("  partition {} is at {} for guests, read-only, read in place", n, at),
                             Err(e) => kprintln!("  {}", e),
                         },
                         _ => {
-                            for (p, cb) in linux::disk::mounts() {
-                                kprintln!("  {}  FAT, {} B clusters", p, cb);
+                            for (p, kind, bs) in linux::disk::mounts() {
+                                kprintln!("  {}  {}, {} B blocks", p, kind, bs);
                             }
                             kprintln!("  usage: linux mount <path> <partition>   ('fat' lists partitions)");
                         }

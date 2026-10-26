@@ -437,6 +437,8 @@ pub const MODE_FIFO: u32 = 0o010_600;
 /// real system. Writable in the mode bits because they genuinely are, and this
 /// module has no owners to check it against anyway.
 pub const MODE_CHAR: u32 = 0o020_666;
+/// A symbolic link, which only the root image carries: the namespace has none.
+pub const MODE_LINK: u32 = 0o120_777;
 
 /// What kind of thing a `stat` is describing.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -452,6 +454,8 @@ pub enum Kind {
     /// program makes before touching `/dev/fb0`, and a driver reporting a
     /// regular file gets skipped.
     Char,
+    /// A symbolic link, as `lstat` reports one. Its size is the target's length.
+    Link,
 }
 
 impl Kind {
@@ -461,6 +465,7 @@ impl Kind {
             Kind::Dir => MODE_DIR,
             Kind::Fifo => MODE_FIFO,
             Kind::Char => MODE_CHAR,
+            Kind::Link => MODE_LINK,
         }
     }
 }

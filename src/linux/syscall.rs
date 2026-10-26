@@ -201,6 +201,7 @@ const O_NONBLOCK: u64 = 0o4000;
 
 /// `AT_EMPTY_PATH`: operate on the descriptor rather than on a path under it.
 const AT_EMPTY_PATH: u64 = 0x1000;
+const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 pub(super) const EAFNOSUPPORT: u64 = (-97i64) as u64;
 pub(super) const EPROTONOSUPPORT: u64 = (-93i64) as u64;
 pub(super) const ENOTSOCK: u64 = (-88i64) as u64;
@@ -5328,7 +5329,13 @@ pub(super) fn sys_readlinkat(dirfd: u64, path_at: u64, buf: u64, size: u64) -> u
         None => None,
     };
     let Some(path) = found else { return ENOENT };
-    let Some(target) = super::proc::link(&path) else {
+    // A link in the root image. Its target is copied as written: relative
+    // targets stay relative, which is what `realpath` builds on.
+    let target = match super::disk::link_target(&path) {
+        Some(Some(t)) => Some(t),
+        _ => super::proc::link(&path),
+    };
+    let Some(target) = target else {
         // **A directory is not a symlink, and saying it does not exist is a
         // different claim.** `blob_len` answers for a blob and nothing else,
         // so every directory on the way to a file answered `ENOENT` here --
@@ -5815,8 +5822,10 @@ pub(super) fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 
         None => None,
     };
     let Some(path) = found else { return ENOENT };
-    if let Some(on) = super::disk::lookup(&path) {
+    let on = if flags & AT_SYMLINK_NOFOLLOW != 0 { super::disk::lookup_nofollow(&path) } else { super::disk::lookup(&path) };
+    if let Some(on) = on {
         return match on {
+            Some(n) if n.is_link => write_stat(buf, super::fs::Kind::Link, n.size, super::fs::ino_of(&path)),
             Some(n) if n.is_dir => write_stat(buf, super::fs::Kind::Dir, 0, super::fs::ino_of(&path)),
             Some(n) => write_stat(buf, super::fs::Kind::File, n.size, super::fs::ino_of(&path)),
             None => ENOENT,
@@ -6971,9 +6980,10 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_FSTAT => (sys_fstat(f.rdi, f.rsi), true),
         SYS_STATFS => (sys_statfs(f.rdi, f.rsi), true),
         SYS_FSTATFS => (sys_fstatfs(f.rdi, f.rsi), true),
-        SYS_STAT | SYS_LSTAT => {
-            (sys_statat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi, 0), true)
-        }
+        SYS_STAT => (sys_statat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi, 0), true),
+        // `lstat` is `stat` that does not follow a link in the last component,
+        // which mattered for the first time once the root image had links.
+        SYS_LSTAT => (sys_statat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi, AT_SYMLINK_NOFOLLOW), true),
         SYS_NEWFSTATAT => (sys_statat(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_GETDENTS64 => (sys_getdents64(f.rdi, f.rsi, f.rdx), true),
         SYS_IOCTL => (sys_ioctl(f.rdi, f.rsi, f.rdx), true),
@@ -9013,9 +9023,21 @@ pub fn set_env(entry: &str) {
 }
 
 /// What a guest will be given, the fixed five and the added ones.
+///
+/// **An added variable replaces a fixed one of the same name.** They were
+/// concatenated, so `HOME=/tmp` arrived *after* the fixed `HOME=/`, and
+/// `getenv` answers the first match: every program saw `/` whatever it was
+/// told. LibreOffice built its profile path from that and failed to start
+/// with "user installation could not be completed".
 pub fn environ() -> Vec<String> {
-    let mut out: Vec<String> = ENVIRON.iter().map(|e| String::from(*e)).collect();
-    out.extend(unsafe { EXTRA_ENV.get() }.iter().cloned());
+    let extra = unsafe { EXTRA_ENV.get() };
+    let name = |e: &str| String::from(e.split_once('=').map_or(e, |(n, _)| n));
+    let mut out: Vec<String> = ENVIRON
+        .iter()
+        .filter(|f| !extra.iter().any(|x| name(x) == name(f)))
+        .map(|e| String::from(*e))
+        .collect();
+    out.extend(extra.iter().cloned());
     out
 }
 
