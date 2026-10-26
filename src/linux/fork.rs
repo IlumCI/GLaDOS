@@ -589,7 +589,14 @@ fn body() {
         // every fork leaked a whole process and a shell running commands in a
         // loop would have run the heap dry. The root is off by now, which is
         // the order `Space` needs: tables are freed only once nothing walks
-        // them.
+        // them -- this task's, and also every thread the child made, which is
+        // why they are ended and waited for first: a thread of the child still
+        // running would be scheduled onto tables `release_guest` just freed.
+        // `execve` had the identical hole and `thread::doom_guest` says what it
+        // cost.
+        while super::thread::doom_guest(guest, code) > 0 {
+            syscall::wait_turn();
+        }
         syscall::release_guest(guest);
 
         let parent = {

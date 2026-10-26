@@ -215,6 +215,33 @@ pub fn live_in(s: usize) -> usize {
         .count()
 }
 
+/// End every other thread of guest entry `g`, and answer how many are still
+/// running.
+///
+/// **`execve` needs this and did not have it.** Linux ends a process's other
+/// threads before it swaps the memory under them (`de_thread`), and this
+/// kernel swapped the memory and left them running on page tables it had
+/// just freed. The first one scheduled afterwards loaded a root whose tables
+/// had gone back to the heap, the processor could not even read the IDT to
+/// report that, and the machine reset with nothing printed -- a GTK4 program
+/// starting up was enough. A doom ends a thread at its next safe point, so
+/// the caller waits on the count rather than assuming.
+pub fn doom_guest(g: usize, code: u64) -> usize {
+    let me = crate::task::current();
+    let mut left = 0;
+    for slot in unsafe { &*SLOTS.get() }.iter() {
+        if slot.live && slot.work.is_some_and(|w| w.guest == g) {
+            if let Some(t) = slot.task {
+                if t != me {
+                    super::syscall::doom(t, code);
+                    left += 1;
+                }
+            }
+        }
+    }
+    left
+}
+
 pub fn reset() {
     LIVE.store(0, Ordering::Release);
     let s = unsafe { &mut *SLOTS.get() };

@@ -3822,12 +3822,14 @@ pub(super) fn sys_epoll_wait(epfd: u64, evs: u64, maxevents: u64, timeout: u64) 
         return EINVAL;
     }
     let bytes = maxevents as usize * super::epoll::EV_LEN;
-    if !reachable(evs, bytes, true) {
-        return EFAULT;
-    }
     let limit = super::poll::ticks_for_ms(timeout as u32 as i32 as i64);
     let start = crate::dev::lapic::ticks();
     loop {
+        // Every pass, for `do_poll`'s reason: the wait lets another thread
+        // unmap the buffer under this one.
+        if !reachable(evs, bytes, true) {
+            return EFAULT;
+        }
         // Copied out before asking, because answering for a member reaches the
         // descriptor table and the set must not be borrowed across that.
         let entries: alloc::vec::Vec<super::epoll::Watch> = set.borrow().entries().to_vec();
@@ -5796,14 +5798,18 @@ pub(super) fn do_poll(fds: u64, nfds: u64, limit: Option<u64>) -> u64 {
         return EINVAL;
     }
     let bytes = nfds as usize * PFD_LEN;
-    // Writable, because `revents` is written back into the guest's own array.
-    // That is the whole calling convention: the guest keeps one array across
-    // many calls and the kernel touches only the last field of each entry.
-    if bytes > 0 && !reachable(fds, bytes, true) {
-        return EFAULT;
-    }
     let start = crate::dev::lapic::ticks();
     loop {
+        // Writable, because `revents` is written back into the guest's own
+        // array: the guest keeps one array across many calls and the kernel
+        // touches only the last field of each entry. Asked on every pass and
+        // not once before the loop, because the wait below lets the guest's
+        // other threads run, and one of them unmapping the array while this
+        // one sleeps turned the next pass's read into a kernel page fault --
+        // GTK4 did exactly that.
+        if bytes > 0 && !reachable(fds, bytes, true) {
+            return EFAULT;
+        }
         let mut n = 0u64;
         for i in 0..nfds as usize {
             let at = fds + (i * PFD_LEN) as u64;
@@ -5941,6 +5947,11 @@ fn do_select(nfds: u64, rp: u64, wp: u64, ep: u64, limit: Option<u64>) -> u64 {
         if n > 0 || expired(start, limit) {
             for (slot, p) in [rp, wp, ep].iter().enumerate() {
                 if *p != 0 && nb > 0 {
+                    // Asked again: the sets were reachable when they were read,
+                    // and the waits since let another thread unmap them.
+                    if !reachable(*p, nb, true) {
+                        return EFAULT;
+                    }
                     unsafe {
                         core::ptr::copy_nonoverlapping(out[slot].as_ptr(), *p as *mut u8, nb)
                     };

@@ -884,16 +884,37 @@ pub fn exec(f: &mut syscall::Frame) -> u64 {
         Err(_) => return ENOEXEC,
     };
 
+    // Every other thread of this process ends before its memory does, as
+    // Linux's `execve` ends them. They are doomed, which lands at each one's
+    // next safe point, and waited for: until the last has left, one of them
+    // may be scheduled onto the old tables, and those are freed below. A
+    // thread that will not stop in five seconds fails the call rather than
+    // the machine -- the caller is still whole, which is what `execve`
+    // promises on every failure.
+    let guest = syscall::current_guest();
+    let since = crate::dev::lapic::ticks();
+    while super::thread::doom_guest(guest, 0) > 0 {
+        if crate::dev::lapic::ticks().wrapping_sub(since) > 5 * crate::TIMER_HZ as u64 {
+            return syscall::EAGAIN;
+        }
+        syscall::wait_turn();
+    }
+
     // The point of no return: the new image is loaded, so the descriptors
     // marked close-on-exec go now, as Linux closes them.
     syscall::close_on_exec();
     let regions = g.regions;
+    // Off the old root first, for the reason `run` clears its root before its
+    // space drops: `replace_guest` frees those tables, and this task's record
+    // still naming them means a preemption before the new root is set below
+    // resumes it onto freed memory.
+    let me = crate::task::current();
+    crate::task::set_root(me, 0);
     if !syscall::replace_guest(regions, g.space.take()) {
         return ENOMEM;
     }
     syscall::name_guest(&args, &path, g.interp.as_ref().map(|(p, _, _)| p.as_str()));
 
-    let me = crate::task::current();
     let root = syscall::guest_root();
     if root != 0 {
         crate::task::set_root(me, root);
