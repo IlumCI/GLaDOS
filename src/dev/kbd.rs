@@ -295,10 +295,27 @@ pub fn last_was_routed() -> bool {
 /// `offer` runs with no lock held -- it is the desktop, and it takes the
 /// desktop's own claim -- so `IN_FLIGHT` is what stops the shell reading a
 /// key behind the one being routed.
+/// When the compositor last offered to route, in timer ticks: while that is
+/// recent, a keystroke is its to route and not the shell's to take.
+static ROUTER_AT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Whether the compositor is routing keys now. Half a second of silence and
+/// the shell takes them again, so a stalled desktop cannot lock out typing.
+fn router_live() -> bool {
+    // Paused routing is nobody's: the selftests pause it to read keys back
+    // themselves, and a recent turn from before the pause is not a router.
+    if PAUSED.load(Ordering::Acquire) {
+        return false;
+    }
+    let at = ROUTER_AT.load(Ordering::Relaxed);
+    at != 0 && crate::dev::lapic::ticks().saturating_sub(at) < crate::TIMER_HZ as u64 / 2
+}
+
 pub fn route(mut offer: impl FnMut(u8) -> Option<u8>) {
     if PAUSED.load(Ordering::Acquire) {
         return;
     }
+    ROUTER_AT.store(crate::dev::lapic::ticks().max(1), Ordering::Relaxed);
     loop {
         let k = {
             let _ring = RING.lock_irq();
@@ -339,6 +356,16 @@ pub fn pop() -> Option<u8> {
     }
     let byte = unsafe { BUF.get()[tail] };
     let serial = unsafe { MARK.get()[tail] };
+    // **A keystroke is the compositor's while it is routing.** The shell's
+    // idle loop polls far more often than the compositor composes, so it
+    // took whichever keys arrived between two routing turns -- typing into
+    // a focused window, half the letters landed at the prompt instead. The
+    // desktop hands back what it refuses (`SHELL`, above), which is how a
+    // key meant for the terminal still reaches it. Serial bytes never go
+    // through the desktop and are taken here as before.
+    if !serial && router_live() {
+        return None;
+    }
     TAIL.store((tail + 1) % CAP, Ordering::Release);
     set_from_serial(serial);
     Some(byte)

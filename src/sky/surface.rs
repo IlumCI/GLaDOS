@@ -64,6 +64,8 @@ pub const XDG_POSITIONER: &str = "xdg_positioner";
 pub const XDG_SURFACE: &str = "xdg_surface";
 pub const XDG_TOPLEVEL: &str = "xdg_toplevel";
 pub const XDG_POPUP: &str = "xdg_popup";
+pub const WL_SUBCOMPOSITOR: &str = "wl_subcompositor";
+pub const WL_SUBSURFACE: &str = "wl_subsurface";
 
 /// The two formats every server must offer, and the only two this one does.
 pub const ARGB8888: u32 = 0;
@@ -89,6 +91,8 @@ pub fn handles(iface: &str) -> bool {
             | XDG_SURFACE
             | XDG_TOPLEVEL
             | XDG_POPUP
+            | WL_SUBCOMPOSITOR
+            | WL_SUBSURFACE
     )
 }
 
@@ -164,6 +168,16 @@ struct Buffer {
     format: u32,
 }
 
+/// A surface's own committed picture, alpha kept: what a popup or a
+/// subsurface contributes to its window, and the toplevel's base under them.
+/// Premultiplied ARGB, as `wl_shm` defines both formats (XRGB is opaque).
+#[derive(Clone, Default)]
+struct Content {
+    w: u32,
+    h: u32,
+    px: Vec<u32>,
+}
+
 #[derive(Default)]
 struct Surface {
     /// What `attach` said since the last commit: `Some(None)` is an explicit
@@ -177,6 +191,10 @@ struct Surface {
     damage_all: bool,
     /// The xdg_surface that gave this its role, if one has.
     xdg: Option<u32>,
+    /// Its last committed picture, kept when it is drawn into a window
+    /// rather than being one: a popup, a subsurface, or a toplevel that has
+    /// either over it.
+    content: Option<Content>,
 }
 
 #[derive(Default)]
@@ -187,6 +205,53 @@ struct XdgSurface {
     /// The serial last sent, and whether any configure has been acknowledged.
     sent: u32,
     acked: bool,
+    /// `set_window_geometry`: the part of the surface that is the window,
+    /// which excludes the shadow a client draws round a popup. Placement is
+    /// of this rectangle, not of the surface.
+    geom: Option<(i32, i32, i32, i32)>,
+}
+
+/// What an `xdg_positioner` has been told. Every field the protocol has; the
+/// defaults are the protocol's.
+#[derive(Clone, Copy, Default)]
+struct Positioner {
+    size: (i32, i32),
+    anchor_rect: (i32, i32, i32, i32),
+    anchor: u32,
+    gravity: u32,
+    adjust: u32,
+    offset: (i32, i32),
+}
+
+/// A menu, a dropdown, a tooltip: a surface placed against its parent and
+/// drawn into the same window, above everything else in it.
+struct Popup {
+    xdg: u32,
+    /// The xdg_surface it hangs off: a toplevel's, or another popup's.
+    parent: u32,
+    /// Its geometry rectangle, relative to the parent's geometry origin.
+    rect: (i32, i32, i32, i32),
+    grab: bool,
+    mapped: bool,
+    /// Creation order, which is stacking order: a submenu is above its menu.
+    seq: u64,
+}
+
+/// A surface positioned inside its parent, as a video player puts its
+/// picture inside its window and a toolkit its widgets.
+///
+/// **Desynchronised always**, which the protocol allows a compositor to
+/// approximate: a child's commit is drawn at once rather than held for its
+/// parent's next one. The only difference a client can see is a frame in
+/// which the child is ahead of the parent, which every client already
+/// tolerates when it asks for desync.
+struct Sub {
+    object: u32,
+    parent: u32,
+    pos: (i32, i32),
+    pending_pos: Option<(i32, i32)>,
+    mapped: bool,
+    seq: u64,
 }
 
 /// Frames committed by every client, ever: what a frame rate is read from.
@@ -210,6 +275,11 @@ pub struct Scene {
     surfaces: BTreeMap<u32, Surface>,
     xdg: BTreeMap<u32, XdgSurface>,
     toplevels: BTreeMap<u32, Toplevel>,
+    positioners: BTreeMap<u32, Positioner>,
+    popups: BTreeMap<u32, Popup>,
+    /// By the child's wl_surface.
+    subs: BTreeMap<u32, Sub>,
+    next_seq: u64,
     /// Frame callbacks committed and not yet fired: the callback, the window
     /// whose painting it waits for (none for a surface with no window), the
     /// commit it followed, and when it was committed.
@@ -257,6 +327,8 @@ impl Client {
             XDG_SURFACE => self.xdg_surface(msg),
             XDG_TOPLEVEL => self.toplevel(msg),
             XDG_POPUP => self.popup(msg),
+            WL_SUBCOMPOSITOR => self.subcompositor(msg),
+            WL_SUBSURFACE => self.subsurface(msg),
             _ => Err(Error::NoMethod),
         }
     }
@@ -392,6 +464,88 @@ impl Client {
         let next = window.as_ref().map_or(0, |f| f.lock_irq().commits)
             + matches!(pending, Some(Some(_))) as u64;
         self.scene.due.extend(frames.into_iter().map(|cb| (cb, window.clone(), next, now)));
+
+        // A parent's commit is when its subsurfaces' new positions apply.
+        let mut moved = false;
+        for sub in self.scene.subs.values_mut() {
+            if sub.parent == id {
+                if let Some(p) = sub.pending_pos.take() {
+                    moved |= sub.pos != p;
+                    sub.pos = p;
+                }
+            }
+        }
+
+        // **A popup or a subsurface is drawn into its toplevel's window**,
+        // not opened as one: its picture is kept, with its alpha, and the
+        // window is composed again.
+        let popup = xdg.and_then(|x| self.scene.xdg.get(&x)).and_then(|x| x.popup.map(|p| (p, x.acked)));
+        let is_sub = self.scene.subs.contains_key(&id);
+        if popup.is_some() || is_sub {
+            let root = self.root_toplevel(id);
+            match pending {
+                Some(Some(buffer)) => {
+                    if let Some((_, false)) = popup {
+                        return Err(Error::NotConfigured);
+                    }
+                    let b = self.scene.buffers.get(&buffer).cloned().ok_or(Error::NoObject)?;
+                    let c = copy_alpha(&b)?;
+                    if let Some(s) = self.scene.surfaces.get_mut(&id) {
+                        s.content = Some(c);
+                    }
+                    if let Some((p, _)) = popup {
+                        if let Some(pp) = self.scene.popups.get_mut(&p) {
+                            pp.mapped = true;
+                        }
+                    }
+                    if let Some(sub) = self.scene.subs.get_mut(&id) {
+                        sub.mapped = true;
+                    }
+                    self.post(Writer::new(buffer, 0));
+                }
+                Some(None) => {
+                    if let Some(s) = self.scene.surfaces.get_mut(&id) {
+                        s.content = None;
+                    }
+                    if let Some((p, _)) = popup {
+                        if let Some(pp) = self.scene.popups.get_mut(&p) {
+                            pp.mapped = false;
+                        }
+                    }
+                    if let Some(sub) = self.scene.subs.get_mut(&id) {
+                        sub.mapped = false;
+                    }
+                }
+                None if !moved => return Ok(()),
+                None => {}
+            }
+            if let Some(t) = root {
+                self.compose(t);
+            }
+            return Ok(());
+        }
+        // A toplevel with something drawn over it keeps its own picture
+        // apart and is composed; one with nothing takes the direct path below.
+        if let Some(t) = xdg.and_then(|x| self.scene.xdg.get(&x)).and_then(|x| x.toplevel) {
+            let has_kids = !self.children(t).is_empty();
+            if has_kids {
+                if let Some(Some(buffer)) = pending {
+                    let b = self.scene.buffers.get(&buffer).cloned().ok_or(Error::NoObject)?;
+                    let c = copy_alpha(&b)?;
+                    if let Some(s) = self.scene.surfaces.get_mut(&id) {
+                        s.content = Some(c);
+                    }
+                    self.post(Writer::new(buffer, 0));
+                    self.compose(t);
+                    return Ok(());
+                }
+                if moved {
+                    self.compose(t);
+                }
+            } else if moved {
+                self.compose(t);
+            }
+        }
 
         let Some(attached) = pending else { return Ok(()) };
         let toplevel = xdg.and_then(|x| self.scene.xdg.get(&x)).and_then(|x| {
@@ -634,17 +788,39 @@ impl Client {
         }
     }
 
-    /// Positioners place popups. Every setter is accepted and the popup it
-    /// places is dismissed at once (see `popup`), so nothing reads them.
+    /// Positioners place popups: a size, a rectangle on the parent to place
+    /// against, which edge of each meets, an offset, and what the compositor
+    /// may do when the result does not fit.
     fn positioner(&mut self, msg: &Message) -> Result<(), Error> {
+        let id = msg.object;
+        let mut r = msg.reader();
+        let p = self.scene.positioners.entry(id).or_default();
         match msg.opcode {
             0 => {
-                done(&msg.reader())?;
-                self.forget(msg.object)
+                done(&r)?;
+                self.scene.positioners.remove(&id);
+                return self.forget(id);
             }
-            1..=9 => Ok(()),
-            _ => Err(Error::NoMethod),
+            1 => p.size = (r.int()?, r.int()?),
+            2 => p.anchor_rect = (r.int()?, r.int()?, r.int()?, r.int()?),
+            3 => p.anchor = r.uint()?,
+            4 => p.gravity = r.uint()?,
+            5 => p.adjust = r.uint()?,
+            6 => p.offset = (r.int()?, r.int()?),
+            // set_reactive, set_parent_size, set_parent_configure: hints for
+            // a compositor that repositions on its own, which this one does
+            // not do after the first placement.
+            7 => {}
+            8 => {
+                r.int()?;
+                r.int()?;
+            }
+            9 => {
+                r.uint()?;
+            }
+            _ => return Err(Error::NoMethod),
         }
+        done(&r)
     }
 
     /// Tell a toplevel whether it has the keyboard, through its configure
@@ -724,12 +900,14 @@ impl Client {
                 self.configure(id);
                 Ok(())
             }
-            // get_popup: given the role and dismissed at once. A menu that
-            // cannot appear is better than one appearing somewhere unasked.
+            // get_popup: placed against its parent by its positioner and
+            // kept inside the window, which is the area the desktop draws.
+            // One with no parent (a layer-shell client's) has nothing to be
+            // drawn into here and is dismissed at once.
             2 => {
                 let pid = r.new_id()?;
-                let _parent = r.object()?;
-                let _positioner = r.object()?;
+                let parent = r.object()?;
+                let positioner = r.object()?;
                 done(&r)?;
                 let x = self.scene.xdg.get_mut(&id).ok_or(Error::NoObject)?;
                 if x.toplevel.is_some() || x.popup.is_some() {
@@ -737,16 +915,37 @@ impl Client {
                 }
                 x.popup = Some(pid);
                 self.objects.create(pid, XDG_POPUP, 1)?;
-                let w = Writer::new(pid, 1);
-                self.post(w);
+                let pos = self.scene.positioners.get(&positioner).copied().ok_or(Error::NoObject)?;
+                let parent_surface = self.scene.xdg.get(&parent).map(|p| p.surface);
+                let placed = parent_surface.and_then(|ps| {
+                    let origin = self.origin_of(ps)?;
+                    let (gx, gy) = self.geom_off(parent);
+                    let (bw, bh) = self.root_size(ps)?;
+                    // The window, in the parent's geometry coordinates.
+                    let bounds = (-(origin.0 + gx), -(origin.1 + gy), bw as i32, bh as i32);
+                    Some(place(&pos, bounds))
+                });
+                let Some(rect) = placed else {
+                    self.post(Writer::new(pid, 1)); // popup_done
+                    return Ok(());
+                };
+                self.scene.next_seq += 1;
+                let seq = self.scene.next_seq;
+                self.scene.popups.insert(pid, Popup { xdg: id, parent, rect, grab: false, mapped: false, seq });
+                let mut c = Writer::new(pid, 0);
+                c.int(rect.0).int(rect.1).int(rect.2).int(rect.3);
+                self.post(c);
+                self.configure(id);
                 Ok(())
             }
             // set_window_geometry
             3 => {
-                for _ in 0..4 {
-                    r.int()?;
+                let g = (r.int()?, r.int()?, r.int()?, r.int()?);
+                done(&r)?;
+                if let Some(x) = self.scene.xdg.get_mut(&id) {
+                    x.geom = Some(g);
                 }
-                done(&r)
+                Ok(())
             }
             // ack_configure
             4 => {
@@ -831,12 +1030,106 @@ impl Client {
     }
 
     fn popup(&mut self, msg: &Message) -> Result<(), Error> {
+        let id = msg.object;
+        let mut r = msg.reader();
         match msg.opcode {
             0 => {
-                done(&msg.reader())?;
+                done(&r)?;
+                if let Some(p) = self.scene.popups.remove(&id) {
+                    if let Some(x) = self.scene.xdg.get_mut(&p.xdg) {
+                        x.popup = None;
+                        let surface = x.surface;
+                        if let Some(s) = self.scene.surfaces.get_mut(&surface) {
+                            s.content = None;
+                        }
+                        if let Some(t) = self.root_toplevel(surface) {
+                            self.compose(t);
+                        }
+                    }
+                }
+                self.forget(id)
+            }
+            // grab(seat, serial): a click outside the popups ends them.
+            1 => {
+                r.object()?;
+                r.uint()?;
+                done(&r)?;
+                if let Some(p) = self.scene.popups.get_mut(&id) {
+                    p.grab = true;
+                }
+                Ok(())
+            }
+            // reposition (v3) is not offered: the global is version 1.
+            _ => Err(Error::NoMethod),
+        }
+    }
+
+    fn subcompositor(&mut self, msg: &Message) -> Result<(), Error> {
+        let mut r = msg.reader();
+        match msg.opcode {
+            0 => {
+                done(&r)?;
                 self.forget(msg.object)
             }
-            1 | 2 => Ok(()),
+            // get_subsurface(id, surface, parent)
+            1 => {
+                let id = r.new_id()?;
+                let surface = r.object()?;
+                let parent = r.object()?;
+                done(&r)?;
+                if surface == parent || !self.scene.surfaces.contains_key(&surface) || !self.scene.surfaces.contains_key(&parent) {
+                    return Err(Error::NoObject);
+                }
+                if self.scene.subs.contains_key(&surface) || self.scene.surfaces.get(&surface).is_some_and(|s| s.xdg.is_some()) {
+                    return Err(Error::Role);
+                }
+                self.objects.create(id, WL_SUBSURFACE, 1)?;
+                self.scene.next_seq += 1;
+                let seq = self.scene.next_seq;
+                self.scene.subs.insert(surface, Sub { object: id, parent, pos: (0, 0), pending_pos: None, mapped: false, seq });
+                Ok(())
+            }
+            _ => Err(Error::NoMethod),
+        }
+    }
+
+    fn subsurface(&mut self, msg: &Message) -> Result<(), Error> {
+        let obj = msg.object;
+        let mut r = msg.reader();
+        let child = self.scene.subs.iter().find(|(_, s)| s.object == obj).map(|(k, _)| *k);
+        match msg.opcode {
+            0 => {
+                done(&r)?;
+                if let Some(c) = child {
+                    let root = self.root_toplevel(c);
+                    self.scene.subs.remove(&c);
+                    if let Some(s) = self.scene.surfaces.get_mut(&c) {
+                        s.content = None;
+                    }
+                    if let Some(t) = root {
+                        self.compose(t);
+                    }
+                }
+                self.forget(obj)
+            }
+            // set_position: takes effect at the parent's next commit.
+            1 => {
+                let p = (r.int()?, r.int()?);
+                done(&r)?;
+                if let Some(s) = child.and_then(|c| self.scene.subs.get_mut(&c)) {
+                    s.pending_pos = Some(p);
+                }
+                Ok(())
+            }
+            // place_above, place_below: stacking among siblings is kept in
+            // creation order here, which is what nearly every client creates
+            // them in anyway.
+            2 | 3 => {
+                r.object()?;
+                done(&r)
+            }
+            // set_sync, set_desync: see `Sub`.
+            4 | 5 => done(&r),
             _ => Err(Error::NoMethod),
         }
     }
@@ -879,6 +1172,340 @@ impl Client {
     pub fn take_effects(&mut self) -> Vec<Effect> {
         core::mem::take(&mut self.scene.effects)
     }
+
+    /// The toplevel a surface is drawn into: itself, or through popup parents
+    /// and subsurface parents. Bounded, since a client chooses the links.
+    fn root_toplevel(&self, mut surface: u32) -> Option<u32> {
+        for _ in 0..64 {
+            if let Some(sub) = self.scene.subs.get(&surface) {
+                surface = sub.parent;
+                continue;
+            }
+            let x = self.scene.surfaces.get(&surface)?.xdg?;
+            let xs = self.scene.xdg.get(&x)?;
+            if let Some(t) = xs.toplevel {
+                return Some(t);
+            }
+            let p = self.scene.popups.get(&xs.popup?)?;
+            surface = self.scene.xdg.get(&p.parent)?.surface;
+        }
+        None
+    }
+
+    /// Where a surface's top-left sits in its toplevel's surface, in pixels.
+    fn origin_of(&self, surface: u32) -> Option<(i32, i32)> {
+        let mut at = (0, 0);
+        let mut cur = surface;
+        for _ in 0..64 {
+            if let Some(sub) = self.scene.subs.get(&cur) {
+                at = (at.0 + sub.pos.0, at.1 + sub.pos.1);
+                cur = sub.parent;
+                continue;
+            }
+            let x = self.scene.surfaces.get(&cur)?.xdg?;
+            let xs = self.scene.xdg.get(&x)?;
+            if xs.toplevel.is_some() {
+                return Some(at);
+            }
+            let p = self.scene.popups.get(&xs.popup?)?;
+            // The popup's geometry sits at `rect` from its parent's geometry
+            // origin; its surface is up and left of that by its own offset.
+            let (gx, gy) = self.geom_off(x);
+            let (pgx, pgy) = self.geom_off(p.parent);
+            at = (at.0 + p.rect.0 + pgx - gx, at.1 + p.rect.1 + pgy - gy);
+            cur = self.scene.xdg.get(&p.parent)?.surface;
+        }
+        None
+    }
+
+    fn geom_off(&self, xdg: u32) -> (i32, i32) {
+        self.scene.xdg.get(&xdg).and_then(|x| x.geom).map_or((0, 0), |g| (g.0, g.1))
+    }
+
+    /// The size of the window a surface is drawn into.
+    fn root_size(&self, surface: u32) -> Option<(u32, u32)> {
+        let t = self.root_toplevel(surface)?;
+        let tl = self.scene.toplevels.get(&t)?;
+        if let Some((_, f)) = &tl.window {
+            let g = f.lock_irq();
+            return Some((g.w, g.h));
+        }
+        None
+    }
+
+    /// The toplevel's own surface.
+    fn toplevel_surface(&self, t: u32) -> Option<u32> {
+        let tl = self.scene.toplevels.get(&t)?;
+        self.scene.xdg.get(&tl.xdg).map(|x| x.surface)
+    }
+
+    /// Everything drawn over a toplevel, bottom first: its subsurfaces, then
+    /// each popup with its own subsurfaces above it. Mapped and with a
+    /// picture, with where each goes.
+    fn children(&self, t: u32) -> Vec<(u32, (i32, i32))> {
+        let mut out: Vec<((u64, u64), u32)> = Vec::new();
+        for (surface, sub) in &self.scene.subs {
+            if !sub.mapped || self.root_toplevel(*surface) != Some(t) {
+                continue;
+            }
+            // A subsurface stacks with the nearest popup it belongs to.
+            let mut layer = 0;
+            let mut cur = sub.parent;
+            for _ in 0..64 {
+                if let Some(s2) = self.scene.subs.get(&cur) {
+                    cur = s2.parent;
+                    continue;
+                }
+                if let Some(pp) = self.scene.surfaces.get(&cur).and_then(|s| s.xdg).and_then(|x| self.scene.xdg.get(&x)).and_then(|x| x.popup) {
+                    layer = self.scene.popups.get(&pp).map_or(0, |p| p.seq);
+                }
+                break;
+            }
+            out.push(((layer, sub.seq), *surface));
+        }
+        for p in self.scene.popups.values() {
+            let Some(surface) = self.scene.xdg.get(&p.xdg).map(|x| x.surface) else { continue };
+            if p.mapped && self.root_toplevel(surface) == Some(t) {
+                out.push(((p.seq, 0), surface));
+            }
+        }
+        out.sort_by_key(|(k, _)| *k);
+        out.into_iter()
+            .filter(|(_, sf)| self.scene.surfaces.get(sf).is_some_and(|s| s.content.is_some()))
+            .filter_map(|(_, sf)| Some((sf, self.origin_of(sf)?)))
+            .collect()
+    }
+
+    /// Draw a toplevel's window again: its own picture, and every child over
+    /// it. A window with no children leaves its own picture in place and
+    /// goes back to the direct path in `commit`.
+    fn compose(&mut self, t: u32) {
+        let Some(root) = self.toplevel_surface(t) else { return };
+        let Some(frame) = self.scene.toplevels.get(&t).and_then(|tl| tl.window.as_ref().map(|(_, f)| Arc::clone(f))) else { return };
+        let kids = self.children(t);
+        let mut f = frame.lock_irq();
+        // The toplevel's own picture is kept apart once anything is drawn
+        // over it, since the window then holds a mixture of the two.
+        let base = match self.scene.surfaces.get_mut(&root) {
+            Some(s) => {
+                if s.content.is_none() {
+                    s.content = Some(Content { w: f.w, h: f.h, px: f.px.iter().map(|p| p | 0xFF00_0000).collect() });
+                }
+                s.content.clone().unwrap()
+            }
+            None => return,
+        };
+        let mut px: Vec<u32> = base.px.iter().map(|p| p & 0x00FF_FFFF).collect();
+        for (sf, (ox, oy)) in &kids {
+            if let Some(c) = self.scene.surfaces.get(sf).and_then(|s| s.content.as_ref()) {
+                blend(&mut px, base.w, base.h, c, *ox, *oy);
+            }
+        }
+        f.w = base.w;
+        f.h = base.h;
+        f.px = px;
+        f.commits += 1;
+        drop(f);
+        if kids.is_empty() {
+            if let Some(s) = self.scene.surfaces.get_mut(&root) {
+                s.content = None;
+            }
+        }
+        FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Which surface the pointer is over, and where in it, for a point in a
+    /// window: the topmost child containing it, or the window's own surface.
+    pub fn pick(&self, surface: u32, x: i32, y: i32) -> (u32, i32, i32) {
+        let Some(t) = self.root_toplevel(surface) else { return (surface, x, y) };
+        for (sf, (ox, oy)) in self.children(t).iter().rev() {
+            if let Some(c) = self.scene.surfaces.get(sf).and_then(|s| s.content.as_ref()) {
+                if x >= *ox && y >= *oy && x < ox + c.w as i32 && y < oy + c.h as i32 {
+                    return (*sf, x - ox, y - oy);
+                }
+            }
+        }
+        (surface, x, y)
+    }
+
+    /// A press in a window holding grabbing popups, outside all of them, ends
+    /// them -- topmost first, as the protocol orders `popup_done` -- and is
+    /// not delivered: the click that closes a menu is not also a click on
+    /// what is under it. Answers whether it was taken.
+    pub fn dismiss_outside(&mut self, surface: u32, x: i32, y: i32) -> bool {
+        let Some(t) = self.root_toplevel(surface) else { return false };
+        let mut ours: Vec<(u64, u32, u32)> = self
+            .scene
+            .popups
+            .iter()
+            .filter_map(|(id, p)| {
+                let sf = self.scene.xdg.get(&p.xdg)?.surface;
+                (p.mapped && self.root_toplevel(sf) == Some(t)).then_some((p.seq, *id, sf))
+            })
+            .collect();
+        if !self.scene.popups.values().any(|p| p.grab && p.mapped) || ours.is_empty() {
+            return false;
+        }
+        let (hit, _, _) = self.pick(surface, x, y);
+        if ours.iter().any(|(_, _, sf)| *sf == hit) {
+            return false;
+        }
+        ours.sort_by_key(|(seq, _, _)| core::cmp::Reverse(*seq));
+        for (_, id, sf) in ours {
+            if let Some(p) = self.scene.popups.get_mut(&id) {
+                p.mapped = false;
+            }
+            if let Some(s) = self.scene.surfaces.get_mut(&sf) {
+                s.content = None;
+            }
+            self.post(Writer::new(id, 1)); // popup_done
+        }
+        self.compose(t);
+        true
+    }
+}
+
+/// Which way an `xdg_positioner` edge enum leans: -1 left or top, 0 the
+/// centre, 1 right or bottom.
+fn horiz(e: u32) -> i32 {
+    match e {
+        3 | 5 | 6 => -1,
+        4 | 7 | 8 => 1,
+        _ => 0,
+    }
+}
+fn vert(e: u32) -> i32 {
+    match e {
+        1 | 5 | 7 => -1,
+        2 | 6 | 8 => 1,
+        _ => 0,
+    }
+}
+fn flip_h(e: u32) -> u32 {
+    match e {
+        3 => 4,
+        4 => 3,
+        5 => 7,
+        7 => 5,
+        6 => 8,
+        8 => 6,
+        o => o,
+    }
+}
+fn flip_v(e: u32) -> u32 {
+    match e {
+        1 => 2,
+        2 => 1,
+        5 => 6,
+        6 => 5,
+        7 => 8,
+        8 => 7,
+        o => o,
+    }
+}
+
+/// Where a positioner puts its popup's geometry, before any adjustment.
+fn raw_place(p: &Positioner, anchor: u32, gravity: u32) -> (i32, i32) {
+    let (ax, ay, aw, ah) = p.anchor_rect;
+    let (w, h) = p.size;
+    let px = ax + match horiz(anchor) { -1 => 0, 1 => aw, _ => aw / 2 };
+    let py = ay + match vert(anchor) { -1 => 0, 1 => ah, _ => ah / 2 };
+    let x = px + match horiz(gravity) { -1 => -w, 1 => 0, _ => -w / 2 };
+    let y = py + match vert(gravity) { -1 => -h, 1 => 0, _ => -h / 2 };
+    (x + p.offset.0, y + p.offset.1)
+}
+
+/// Place a popup inside `bounds` (x, y, w, h, in the parent's geometry
+/// coordinates), using the adjustments it allows -- flip first, then slide,
+/// in that order, which is the protocol's -- and then held inside whatever
+/// it allowed, since this compositor can draw a popup only inside its window.
+fn place(p: &Positioner, bounds: (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {
+    const SLIDE_X: u32 = 1;
+    const SLIDE_Y: u32 = 2;
+    const FLIP_X: u32 = 4;
+    const FLIP_Y: u32 = 8;
+    let (bx, by, bw, bh) = bounds;
+    // Larger than the window is given the window, which the protocol lets a
+    // compositor do: GTK answers a menu configured shorter than it asked for
+    // with scroll arrows, where one slid to the top lost its last items.
+    let (w, h) = (p.size.0.max(1).min(bw.max(1)), p.size.1.max(1).min(bh.max(1)));
+    let fits_x = |x: i32| x >= bx && x + w <= bx + bw;
+    let fits_y = |y: i32| y >= by && y + h <= by + bh;
+    let (mut x, mut y) = raw_place(p, p.anchor, p.gravity);
+    if !fits_x(x) && p.adjust & FLIP_X != 0 {
+        let (fx, _) = raw_place(p, flip_h(p.anchor), flip_h(p.gravity));
+        if fits_x(fx) {
+            x = fx;
+        }
+    }
+    if !fits_y(y) && p.adjust & FLIP_Y != 0 {
+        let (_, fy) = raw_place(p, flip_v(p.anchor), flip_v(p.gravity));
+        if fits_y(fy) {
+            y = fy;
+        }
+    }
+    let _ = (SLIDE_X, SLIDE_Y);
+    // Slid, whether or not it asked: a popup partly outside the window is a
+    // popup partly not drawn, which is worse than one moved.
+    x = x.min(bx + bw - w).max(bx);
+    y = y.min(by + bh - h).max(by);
+    (x, y, w, h)
+}
+
+/// One premultiplied ARGB picture over an opaque `0x00RRGGBB` one, at
+/// (ox, oy), clipped to it.
+fn blend(dst: &mut [u32], dw: u32, dh: u32, src: &Content, ox: i32, oy: i32) {
+    let x0 = ox.max(0);
+    let y0 = oy.max(0);
+    let x1 = (ox + src.w as i32).min(dw as i32);
+    let y1 = (oy + src.h as i32).min(dh as i32);
+    for y in y0..y1 {
+        let srow = ((y - oy) as u32 * src.w) as usize;
+        let drow = (y as u32 * dw) as usize;
+        for x in x0..x1 {
+            let s = src.px[srow + (x - ox) as usize];
+            let a = s >> 24;
+            let d = &mut dst[drow + x as usize];
+            if a == 255 {
+                *d = s & 0x00FF_FFFF;
+            } else if a != 0 || s & 0x00FF_FFFF != 0 {
+                let inv = 255 - a;
+                let ch = |sh: u32| {
+                    let sc = (s >> sh) & 0xFF;
+                    let dc = (*d >> sh) & 0xFF;
+                    (sc + (dc * inv + 127) / 255).min(255) << sh
+                };
+                *d = ch(16) | ch(8) | ch(0);
+            }
+        }
+    }
+}
+
+/// A buffer's pixels with their alpha, for a child surface. XRGB is opaque.
+fn copy_alpha(b: &Buffer) -> Result<Content, Error> {
+    let mut px = copy_pixels(b)?;
+    if b.format == ARGB8888 {
+        // `copy_pixels` dropped the alpha; read it back for these.
+        let need = b.offset + b.stride * (b.h as usize - 1) + b.w as usize * 4;
+        b.mem.with(|bytes| {
+            if need > bytes.len() {
+                return Err(Error::BadBuffer);
+            }
+            let w = b.w as usize;
+            for y in 0..b.h as usize {
+                for x in 0..w {
+                    let a = bytes[b.offset + y * b.stride + x * 4 + 3] as u32;
+                    px[y * w + x] |= a << 24;
+                }
+            }
+            Ok(())
+        })?;
+    } else {
+        for p in px.iter_mut() {
+            *p |= 0xFF00_0000;
+        }
+    }
+    Ok(Content { w: b.w, h: b.h, px })
 }
 
 /// Check a buffer's geometry against its pool, as numbers the client chose.

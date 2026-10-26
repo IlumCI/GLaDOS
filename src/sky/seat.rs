@@ -24,7 +24,7 @@
 //! there, so a client sees the pointer where it last pressed -- enough to
 //! click a menu, and not yet enough to aim.
 
-use super::client::Client;
+use super::client::{done, Client};
 use super::wire::{Error, Fixed, Message, Writer};
 use alloc::vec::Vec;
 
@@ -43,6 +43,8 @@ pub const DATA_SOURCE: &str = "wl_data_source";
 pub const DATA_DEVICE: &str = "wl_data_device";
 pub const KDE_DECORATION_MANAGER: &str = "org_kde_kwin_server_decoration_manager";
 pub const KDE_DECORATION: &str = "org_kde_kwin_server_decoration";
+pub const XDG_DECORATION_MANAGER: &str = "zxdg_decoration_manager_v1";
+pub const XDG_DECORATION: &str = "zxdg_toplevel_decoration_v1";
 /// `org_kde_kwin_server_decoration_manager`'s mode for "the server draws it".
 const DECORATION_SERVER: u32 = 2;
 
@@ -53,6 +55,7 @@ pub fn handles(iface: &str) -> bool {
         iface,
         WL_OUTPUT | WL_SEAT | WL_POINTER | WL_KEYBOARD | WL_TOUCH | RELATIVE_MANAGER | RELATIVE | CONSTRAINTS | LOCKED | CONFINED
             | DATA_MANAGER | DATA_SOURCE | DATA_DEVICE | KDE_DECORATION_MANAGER | KDE_DECORATION
+            | XDG_DECORATION_MANAGER | XDG_DECORATION
     )
 }
 
@@ -65,6 +68,8 @@ pub enum Input {
     Focus(bool),
     /// An evdev key code going down or up.
     Key { code: u32, down: bool },
+    /// The wheel, in notches; positive scrolls down, as Wayland counts.
+    Wheel(i32),
 }
 
 /// What the seat side of a connection remembers.
@@ -243,6 +248,41 @@ impl Client {
                 self.post(m);
                 Ok(())
             }
+            // The standard decoration protocol, which Qt, GTK 4 and SDL use:
+            // every toplevel is decorated by the server, and a request for
+            // either mode is answered with that one.
+            (XDG_DECORATION_MANAGER, 0) => {
+                done(&r)?;
+                self.objects.destroy(msg.object)?;
+                let mut w = Writer::new(super::object::DISPLAY, 1);
+                w.uint(msg.object);
+                self.post(w);
+                Ok(())
+            }
+            (XDG_DECORATION_MANAGER, 1) => {
+                let id = r.new_id()?;
+                let _toplevel = r.object()?;
+                done(&r)?;
+                self.objects.create(id, XDG_DECORATION, version)?;
+                let mut m = Writer::new(id, 0);
+                m.uint(2); // server_side
+                self.post(m);
+                Ok(())
+            }
+            (XDG_DECORATION, 1) | (XDG_DECORATION, 2) => {
+                let mut m = Writer::new(msg.object, 0);
+                m.uint(2);
+                self.post(m);
+                Ok(())
+            }
+            (XDG_DECORATION, 0) => {
+                done(&r)?;
+                self.objects.destroy(msg.object)?;
+                let mut w = Writer::new(super::object::DISPLAY, 1);
+                w.uint(msg.object);
+                self.post(w);
+                Ok(())
+            }
             (KDE_DECORATION, 0) => {
                 self.objects.destroy(msg.object)?;
                 let mut w = Writer::new(super::object::DISPLAY, 1);
@@ -353,8 +393,28 @@ impl Client {
         let time = crate::net::now_ms() as u32;
         match ev {
             Input::Pointer { x, y, button } => {
+                // A press outside an open menu closes it and goes no further.
+                if let Some((_, true)) = button {
+                    if self.dismiss_outside(surface, x, y) {
+                        return;
+                    }
+                }
+                // The topmost surface under the pointer -- a popup, a
+                // subsurface, or the window itself -- in its own coordinates.
+                let (surface, x, y) = self.pick(surface, x, y);
                 let ptrs = self.seat.pointers.clone();
                 if self.seat.over != Some(surface) {
+                    // `leave` before `enter`: a toolkit tracks hover per
+                    // surface, and one never told the pointer left keeps its
+                    // last item highlighted.
+                    if let Some(old) = self.seat.over {
+                        let s = self.next_serial();
+                        for p in &ptrs {
+                            let mut w = Writer::new(*p, 1);
+                            w.uint(s).object(old);
+                            self.post(w);
+                        }
+                    }
                     let s = self.next_serial();
                     for p in &ptrs {
                         let mut w = Writer::new(*p, 0);
@@ -379,6 +439,30 @@ impl Client {
                 for p in &ptrs {
                     if self.objects.get(*p).is_some_and(|e| e.version >= 5) {
                         self.post(Writer::new(*p, 5)); // frame
+                    }
+                }
+            }
+            // axis_source wheel, axis_discrete, and the value: fifteen units a
+            // notch, which is what libinput reports and what toolkits divide
+            // by. Version-5 pointers get the discrete count; older ones only
+            // the value.
+            Input::Wheel(notches) => {
+                let ptrs = self.seat.pointers.clone();
+                for p in &ptrs {
+                    let v5 = self.objects.get(*p).is_some_and(|e| e.version >= 5);
+                    if v5 {
+                        let mut src = Writer::new(*p, 6);
+                        src.uint(0);
+                        self.post(src);
+                        let mut d = Writer::new(*p, 8);
+                        d.uint(0).int(notches);
+                        self.post(d);
+                    }
+                    let mut a = Writer::new(*p, 4);
+                    a.uint(time).uint(0).fixed(Fixed::from_int(notches * 15));
+                    self.post(a);
+                    if v5 {
+                        self.post(Writer::new(*p, 5));
                     }
                 }
             }

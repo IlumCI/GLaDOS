@@ -54,6 +54,29 @@ struct Mount {
 
 static MOUNTS: Racy<Vec<Mount>> = Racy::new(Vec::new());
 
+/// The guest lock, held for the length of a public call.
+///
+/// **`MOUNTS` is read by guests inside their syscalls, under that lock, and
+/// changed or read from the shell outside it.** `linux mount` pushing a
+/// second volume reallocated the list while a session service on another
+/// core walked it: the service failed its lookups and exited 127, and the
+/// shell took a page fault in the middle of the mount. A guest already holds
+/// the lock and this is a no-op for it; for the shell, and for `start_job`
+/// reading a program, it is the exclusion every guest's syscall already has.
+struct Big(bool);
+
+impl Drop for Big {
+    fn drop(&mut self) {
+        if self.0 {
+            super::syscall::big_unlock();
+        }
+    }
+}
+
+fn big() -> Big {
+    Big(super::syscall::big_take())
+}
+
 /// The trees that are this kernel's own and never the root image's.
 const OWN: [&str; 4] = ["/proc", "/dev", "/run", "/tmp"];
 
@@ -81,6 +104,7 @@ pub fn mount(prefix: &str, index: u32) -> Result<(), &'static str> {
             dirs: BTreeMap::new(),
         },
     };
+    let _g = big();
     let m = unsafe { MOUNTS.get() };
     m.retain(|x| x.prefix != prefix);
     m.push(Mount { prefix: String::from(prefix), vol });
@@ -89,6 +113,7 @@ pub fn mount(prefix: &str, index: u32) -> Result<(), &'static str> {
 
 /// Mount point, kind, and block or cluster size, for the shell.
 pub fn mounts() -> Vec<(String, &'static str, u32)> {
+    let _g = big();
     unsafe { MOUNTS.get() }
         .iter()
         .map(|m| {
@@ -138,6 +163,7 @@ fn under(path: &str) -> Option<(usize, &str)> {
 
 /// Whether the guests' root filesystem is an image.
 pub fn root_mounted() -> bool {
+    let _g = big();
     unsafe { MOUNTS.get() }.iter().any(|m| m.prefix.is_empty())
 }
 
@@ -145,6 +171,7 @@ pub fn root_mounted() -> bool {
 /// Those are the paths a write may copy up into the guest's layer; a named
 /// mount is read-only all the way down.
 pub fn root_claims(path: &str) -> bool {
+    let _g = big();
     under(path).is_some_and(|(i, _)| unsafe { MOUNTS.get()[i].prefix.is_empty() })
 }
 
@@ -152,6 +179,7 @@ pub fn root_claims(path: &str) -> bool {
 /// honouring its whiteouts: what `mkdir`, `unlink` and `rename` need to know
 /// about the file underneath. `None` with no root image or nothing there.
 pub fn image_lookup(path: &str, follow: bool) -> Option<Node> {
+    let _g = big();
     if own(path) || super::ns::whited_out(path) {
         return None;
     }
@@ -163,6 +191,7 @@ pub fn image_lookup(path: &str, follow: bool) -> Option<Node> {
 
 /// Whether a path is on a mounted volume at all.
 pub fn claims(path: &str) -> bool {
+    let _g = big();
     under(path).is_some()
 }
 
@@ -217,17 +246,20 @@ fn lookup_with(path: &str, follow: bool) -> Option<Option<Node>> {
 /// Look a path up, following symlinks. `None` when it is not on a mount;
 /// `Some(None)` when it is and nothing is there.
 pub fn lookup(path: &str) -> Option<Option<Node>> {
+    let _g = big();
     lookup_with(path, true)
 }
 
 /// The same without following a symlink in the last component: `lstat`.
 pub fn lookup_nofollow(path: &str) -> Option<Option<Node>> {
+    let _g = big();
     lookup_with(path, false)
 }
 
 /// A symlink's target. `None` when the path is not on a mount; `Some(None)`
 /// when it is and is not a link.
 pub fn link_target(path: &str) -> Option<Option<String>> {
+    let _g = big();
     let (i, rest) = under(path)?;
     let m = unsafe { &MOUNTS.get()[i] };
     let Vol::Erofs(img) = &m.vol else { return Some(None) };
@@ -240,6 +272,7 @@ pub fn link_target(path: &str) -> Option<Option<String>> {
 /// A symlink to a directory counts as one, which is what `d_type` cannot say
 /// and what a program walking the tree wants to know.
 pub fn entries(path: &str) -> Vec<(String, bool, usize)> {
+    let _g = big();
     let Some(Some(n)) = lookup(path) else { return Vec::new() };
     if !n.is_dir {
         return Vec::new();
@@ -310,6 +343,7 @@ const RUN_MAX: usize = 32;
 
 impl DiskFile {
     pub fn open(path: &str) -> Result<DiskFile, &'static str> {
+        let _g = big();
         let (i, _) = under(path).ok_or("not on a mounted volume")?;
         let Some(Some(n)) = lookup(path) else { return Err("no such file") };
         if n.is_dir {
@@ -329,6 +363,7 @@ impl DiskFile {
 
     /// Copy up to `out.len()` bytes from offset `off`. Answers how many.
     pub fn read_at(&mut self, off: usize, out: &mut [u8]) -> usize {
+        let _g = big();
         if off >= self.size || out.is_empty() {
             return 0;
         }
@@ -378,6 +413,7 @@ impl DiskFile {
 
 /// A whole file, for the loader: a program or an interpreter on a mount.
 pub fn read_all(path: &str) -> Option<Vec<u8>> {
+    let _g = big();
     let mut f = DiskFile::open(path).ok()?;
     let mut v = alloc::vec![0u8; f.size];
     let n = f.read_at(0, &mut v);
