@@ -450,3 +450,103 @@ own code through the same allowlist gate `proposal` uses:
 its two fixtures are the exact blobs a real boot filed and refused. The
 kernel side (`godel verdicts`) re-verifies with the compiled-in anchor --
 this service is a mailbox, never an authority.
+
+## The holders function, and the Telegram bot behind it
+
+Holder chats: a Telegram account let into a chat on a share of the $GLADOS
+supply -- 2% for the holder chat and 4% for the inner one by default. Run
+migration `0006_holders.sql` first; `tools/supadeploy.sh` deploys the function
+with the others.
+
+```
+POST /functions/v1/holders/telegram   the bot's webhook (secret header)
+POST /functions/v1/holders/session    {session}                      -> who the link is for
+POST /functions/v1/holders/check      {address}                      -> a share, read-only
+POST /functions/v1/holders/nonce      {session, address}             -> the message to sign
+POST /functions/v1/holders/verify     {session, address, signature}  -> linked, and the tier
+POST /functions/v1/holders/recheck    header x-recheck-secret        -> removes who fell below
+```
+
+The page is `docs/holders/index.html`. The flow: a user sends `/verify` to the
+bot, the bot answers with `https://glados.aperture.institute/holders/?s=<token>`,
+the page gets an EIP-4361 message that names that Telegram user, any wallet
+signs it, the function reads every wallet the user has linked and
+`totalSupply()` at one block, and the bot DMs a join-request link for each chat
+the sum qualifies for. A join request is approved on a fresh reading, and the
+recheck removes anybody whose holding fell.
+
+### Secrets it needs
+
+| Name | What |
+|---|---|
+| `TG_BOT_TOKEN` | from @BotFather |
+| `TG_WEBHOOK_SECRET` | any 1-256 chars of `A-Za-z0-9_-`; Telegram echoes it on every update |
+| `HOLDER_TIERS` | `200=<chat id>,400=<chat id>` -- bps of supply and the chat it opens |
+| `HOLDER_RECHECK_SECRET` | what the schedule sends in `x-recheck-secret` |
+
+`TOKEN_CONTRACT`, `TOKEN_RPC`, `TOKEN_CHAIN_ID` and `LINK_DOMAIN` are the ones
+`link` reads, from the same place. A malformed `HOLDER_TIERS` stops the
+function from starting, deliberately: a gate that started with a tier missing
+would leave that chat open.
+
+### The bot, once
+
+1. @BotFather: `/newbot`, then `/setcommands`:
+   `verify - link a wallet`, `status - what is linked and your tier`,
+   `unlink - remove a wallet`.
+2. Make each chat a supergroup, add the bot as an **administrator** with
+   *Invite users via link* and *Ban users*, and take *Add members* away from
+   ordinary members so arrivals go through join requests. The chat-member
+   handler removes anybody who arrives another way below the bar, unless an
+   administrator added them.
+3. Chat ids: forward a message from the chat to @RawDataBot or read
+   `getUpdates` before the webhook is set; supergroup ids start `-100`.
+4. Point Telegram at the function. `allowed_updates` must name all three, or
+   `chat_member` is never delivered:
+
+```bash
+curl -sS "https://api.telegram.org/bot$TG_BOT_TOKEN/setWebhook" \
+  -H 'content-type: application/json' \
+  -d '{"url":"https://<ref>.supabase.co/functions/v1/holders/telegram",
+       "secret_token":"'"$TG_WEBHOOK_SECRET"'",
+       "allowed_updates":["message","chat_join_request","chat_member"],
+       "drop_pending_updates":true}'
+```
+
+5. On the page, set `BOT` to the bot's username, and `WC_PROJECT` to a
+   WalletConnect project id from cloud.reown.com if phone wallets on another
+   device should work. Both are optional; empty `WC_PROJECT` hides that route.
+
+### The recheck, hourly
+
+From the Supabase SQL editor, with `pg_cron` and `pg_net` enabled:
+
+```sql
+select cron.schedule('holders-recheck', '17 * * * *', $$
+  select net.http_post(
+    url := 'https://<ref>.supabase.co/functions/v1/holders/recheck',
+    headers := jsonb_build_object('x-recheck-secret', '<HOLDER_RECHECK_SECRET>'),
+    body := '{}'::jsonb)
+$$);
+```
+
+A member whose reading fails is skipped for that run and never recorded as
+holding zero. Members who were in a chat before the bot was admin there are
+not swept by the recheck -- it only knows linked accounts -- so ask them to
+`/verify`, or remove them by hand.
+
+### Checking it
+
+```bash
+node supabase/functions/_shared/holders.test.mjs        # 33 claims, the bar and the tiers
+deno run supabase/functions/_shared/holders.crosscheck.mjs   # 16, against viem
+```
+
+The second is the independent one: viem's EIP-4361 parser reads back every
+field of the message, viem's ABI encoder produces the same `isValidSignature`
+calldata, an ERC-6492 wrapper viem serialises unwraps to the signature inside,
+and a signature viem's account makes recovers through `evm.js` to that account.
+
+**Not yet driven:** the EIP-1271 path against a real contract wallet on chain
+4663, and the bot against Telegram. The project this README describes has to
+exist first (see the top of this file).

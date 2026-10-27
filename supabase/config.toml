@@ -38,3 +38,8 @@ verify_jwt = false
 
 [functions.verdict]
 verify_jwt = false
+
+# Telegram's webhook carries a secret header and no JWT, and the page carries a
+# session token and a signature. `holders` checks both itself.
+[functions.holders]
+verify_jwt = false

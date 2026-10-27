@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Holder chats</title>
+<meta name="description" content="Connect any wallet and prove a holding of at least 2% of the $GLADOS supply for the Telegram holder chats. One signature over a readable message; no transaction, no approval.">
+<meta name="keywords" content="GLaDOS token, GLADOS holders, token-gated Telegram, Sign-In with Ethereum, Robinhood Chain">
+<link rel="canonical" href="https://glados.aperture.institute/holders/">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLaDOS">
+<meta property="og:title" content="Holder chats">
+<meta property="og:description" content="Connect any wallet and prove a 2% or 4% $GLADOS holding for the Telegram holder chats.">
+<meta property="og:url" content="https://glados.aperture.institute/holders/">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Holder chats">
+<meta name="twitter:description" content="Connect any wallet and prove a 2% or 4% $GLADOS holding for the Telegram holder chats.">
+<meta property="og:image" content="https://glados.aperture.institute/img/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The GLaDOS aperture mark">
+<meta name="twitter:image" content="https://glados.aperture.institute/img/og.png">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" type="image/svg+xml" href="../img/logo.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="../img/icon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="../img/icon-180.png">
+<link rel="manifest" href="../site.webmanifest">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"GLaDOS","item":"https://glados.aperture.institute/"},{"@type":"ListItem","position":2,"name":"Token","item":"https://glados.aperture.institute/token/"},{"@type":"ListItem","position":3,"name":"Holder chats","item":"https://glados.aperture.institute/holders/"}]}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div id="page">
+
+<!--masthead-->
+<div id="masthead">
+  <a class="mark" href="../"><img src="../img/wordmark.png" alt="Aperture Institute" width="666" height="169"></a>
+  <span class="sub">GLaDOS: an operating system in Rust, with a language model in the kernel</span>
+</div>
+<!--/masthead-->
+
+<!--bar-->
+<div id="tabs"><ul><li><a href="../">Summary</a></li><li><a href="../download/">Download</a></li><li><a href="../news/">News</a></li><li><a href="../wiki/">Wiki</a></li><li><a href="../screenshots/">Screenshots</a></li><li><a href="../archive/">Archive</a></li><li class="on"><a href="../token/">Token</a></li><li><a href="../pool/">Pool</a></li><li><a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source code</a></li></ul></div>
+<!--/bar-->
+
+<div id="body">
+<!--sidebar-->
+<div id="sidebar">
+<div class="box"><div class="t">Latest release</div><div class="bd"><table class="facts"><tr><td>Version</td><td>1.4.3</td></tr><tr><td>Released</td><td>2026-10-24</td></tr><tr><td>Images</td><td>3</td></tr></table><ul><li><a href="../download/">Download</a></li><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/v1.4.3">Release notes</a></li></ul></div></div>
+<div class="box"><div class="t">Project information</div><div class="bd"><table class="facts"><tr><td>Development status</td><td>3 - Alpha</td></tr><tr><td>Environment</td><td>Console, framebuffer</td></tr><tr><td>Intended audience</td><td>Developers, science/research</td></tr><tr><td>Licence</td><td>Other/proprietary, all rights reserved</td></tr><tr><td>Natural language</td><td>English</td></tr><tr><td>Operating system</td><td>x86-64 UEFI, bare metal</td></tr><tr><td>Programming language</td><td>Rust, Python</td></tr><tr><td>Topic</td><td>Operating systems, kernels, artificial intelligence</td></tr></table></div></div>
+<div class="box"><div class="t">Statistics</div><div class="bd"><table class="facts"><tr><td>Registered</td><td>2026-08-14</td></tr><tr><td>Releases</td><td>23</td></tr><tr><td>Downloads</td><td>713</td></tr><tr><td>Source</td><td>198 files, ~132,000 lines</td></tr></table></div></div>
+<div class="box"><div class="t">Developers</div><div class="bd"><table class="facts"><tr><td>IlumCI</td><td>project admin, developer</td></tr></table></div></div>
+<div class="box"><div class="t">Documentation</div><div class="bd"><ul><li><a href="../wiki/glados-os.html">GLaDOS OS</a></li><li><a href="../wiki/kernel.html">The kernel</a></li><li><a href="../wiki/model.html">The model</a></li><li><a href="../wiki/agent.html">The agent</a></li><li><a href="../wiki/rsi.html">Self-improvement</a></li><li><a href="../wiki/aiksi.html">Aiksi, the language</a></li><li><a href="../wiki/">All 18 articles</a></li></ul></div></div>
+</div>
+<!--/sidebar-->
+<div id="content">
+<div class="crumbs"><a href="../">GLaDOS</a> / <a href="../token/">Token</a> / Holder chats</div>
+<div id="main">
+<h1>Holder chats</h1>
+
+<div class="panel">
+<p>Holders of at least <strong>2%</strong> of the $GLADOS supply are let into
+the holder chat on Telegram, and holders of <strong>4%</strong> into the inner
+one as well. You prove the holding by signing a message with any wallet that
+holds it; the share is read from the token contract on Robinhood Chain, by the
+server, against <code>totalSupply()</code> at the same block.</p>
+<p>Start in Telegram: send <code>/verify</code> to <span id="botname">the
+holders bot</span>. It answers with a link to this page that names your
+Telegram account and works once.</p>
+</div>
+
+<div class="panel" id="danger">
+<p><strong>Nothing on this page will ever ask for a seed phrase, a private key,
+a transaction or a token approval.</strong> It asks for one signature over a
+message you can read in full first. If any page claiming to be this one asks
+for more, it is not this one. Close it. The bot never messages you first.</p>
+</div>
+
+<h2 class="sect">1. Your Telegram link</h2>
+<div id="step0"><p>Reading the link&hellip;</p></div>
+
+<h2 class="sect">2. Choose a wallet</h2>
+<div id="wallets"><p>Looking for wallets&hellip;</p></div>
+
+<h2 class="sect">3. Sign</h2>
+<div id="step2"><p class="muted">Choose a wallet first.</p></div>
+
+<h2 class="sect">4. Result</h2>
+<div id="step3"><p class="muted">Nothing yet.</p></div>
+
+<h2 class="sect">Check any address</h2>
+<div class="hold">
+<p>Read-only, no wallet and no signature. A share is public information; what
+the signature adds is that the address is yours.</p>
+<p><input id="chkaddr" type="text" spellcheck="false" autocomplete="off" placeholder="0x&hellip; (40 hex digits)" aria-label="Address to check">
+<button type="button" class="wbtn" id="chk">Check</button></p>
+<div id="chkout"></div>
+</div>
+
+<h2 class="sect">Which wallets work</h2>
+
+<p><strong>Any wallet that can sign a message.</strong> Four routes, and the
+page offers whichever apply:</p>
+
+<ul>
+<li><strong>A browser extension</strong> -- MetaMask, Rabby, Phantom, Coinbase
+Wallet, OKX, Brave and the rest. Each installed one announces itself through
+<a href="https://eips.ethereum.org/EIPS/eip-6963">EIP-6963</a> and is listed by
+name, so with two installed you choose which signs rather than whichever loaded
+last.</li>
+<li><strong>A wallet app on your phone</strong> -- open this page inside the
+app's own browser, where it is an extension like any other; or use
+<strong>WalletConnect</strong>, which shows a QR code for a wallet on another
+device and deep-links to one on this device. It is the one route that loads
+somebody else's code: choosing it fetches the WalletConnect library and
+contacts Reown's servers, including their analytics endpoint. Nothing is
+loaded from anywhere but this site and its server until you choose it.</li>
+<li><strong>A contract wallet</strong> -- Safe, Coinbase Smart Wallet, passkey
+and other ERC-4337 accounts. There is no key to recover from their signatures,
+so the server asks the account itself through
+<a href="https://eips.ethereum.org/EIPS/eip-1271">EIP-1271</a>, on Robinhood
+Chain. The account must be deployed there; an
+<a href="https://eips.ethereum.org/EIPS/eip-6492">ERC-6492</a> signature from
+one that is not yet deployed is refused, because checking it means running a
+factory this server has never read.</li>
+<li><strong>Anything else</strong> -- a hardware wallet, a command line, a
+wallet with no browser at all. Choose <em>Sign by hand</em>: copy the message,
+sign it with your wallet's own <em>sign message</em> feature (for example
+<code>cast wallet sign --ledger "$(cat message.txt)"</code>), and paste the
+signature back.</li>
+</ul>
+
+<p><strong>Your wallet does not need Robinhood Chain added.</strong> A signed
+message proves which key or account produced it and says nothing about a chain.
+The balance is a separate read the server makes.</p>
+
+<h2 class="sect">What this does, exactly</h2>
+
+<ol>
+<li>The bot creates a single-use session for your Telegram account and sends
+you a link carrying it. Only its hash is stored.</li>
+<li>This page asks the server for a nonce and an
+<a href="https://eips.ethereum.org/EIPS/eip-4361">EIP-4361</a> message naming
+this domain, the chain, an expiry <em>and your Telegram user id</em>, and shows
+it to you in full.</li>
+<li>Your wallet signs it with <code>personal_sign</code>, which is prefixed so
+that a signed message can never also be a valid transaction.</li>
+<li>The server checks the signature, spends the nonce, reads every wallet you
+have linked and the total supply at one block, and decides the tier on their
+sum. The bot then sends you a <em>join request</em> link for each chat you
+qualify for.</li>
+<li>When you use that link the bot reads the chain again before approving, and
+a scheduled recheck removes anybody whose holding has fallen below the bar.</li>
+</ol>
+
+<p>Because the message names your Telegram account, a signature made for one
+account cannot admit another. A wallet can belong to one Telegram account at a
+time, so one holding cannot be lent to a whole chat. Up to five wallets can be
+linked to one account and are measured on their sum.</p>
+
+<p><strong>Compare every character of the addresses shown below</strong>, not
+the first and last few. Address poisoning works by planting a lookalike address
+that matches at both ends
+(<a href="https://arxiv.org/abs/2609.23405">arXiv:2609.23405</a> measures it on
+Ethereum), and nothing on this page is ever an address to send funds to.</p>
+
+<script>
+// No analytics, no cookies, no third-party script unless you choose
+// WalletConnect, which is fetched at the moment you choose it and not before.
+// Once chosen it talks to esm.sh, api.web3modal.org, fonts.reown.com and
+// pulse.walletconnect.org -- measured in a browser, not taken from its docs,
+// and `telemetryEnabled: false` with `enableAnalytics: false` did not remove
+// the last one, so the page says so rather than setting flags that do nothing.
+// sessionStorage keeps this tab's Telegram link across a reload and nothing
+// else; it never leaves the browser.
+(function () {
+  // Three settings, and the page works with either of the last two empty.
+  var FN = "https://vermcdgpqncfsralpesz.supabase.co/functions/v1/holders";
+  var BOT = "";          // the bot's username, without the @
+  var WC_PROJECT = "";   // a WalletConnect (Reown) project id; empty hides that route
+  var WC_URL = "https://esm.sh/@walletconnect/ethereum-provider@2.25.0?bundle";
+  var CHAIN_ID = 4663, RPC = "https://rpc.mainnet.chain.robinhood.com";
+
+  var providers = [], chosen = null, account = null, sess = null;
+
+  function el(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+  function say(id, html) { el(id).innerHTML = html; }
+  function isAddr(s) { return /^0x[0-9a-fA-F]{40}$/.test(s); }
+  function tier(bps) { return bps ? (bps / 100).toFixed(2) + "%" : "none"; }
+  function toks(raw) {
+    return (BigInt(raw) / (10n ** 18n)).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+  // personal_sign's first parameter is hex by the spec. Most wallets also
+  // accept a plain string, and a few accept only that, so a refusal of the
+  // hex form is retried once as text.
+  function hexOf(s) {
+    var b = new TextEncoder().encode(s), h = "0x";
+    for (var i = 0; i < b.length; i++) h += b[i].toString(16).padStart(2, "0");
+    return h;
+  }
+
+  async function post(path, body) {
+    var r = await fetch(FN + path, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    var j = null;
+    try { j = await r.json(); } catch (e) { j = null; }
+    if (!r.ok) {
+      var e = new Error((j && j.error) || ("HTTP " + r.status));
+      e.body = j;
+      throw e;
+    }
+    return j;
+  }
+
+  if (BOT) {
+    say("botname", '<a href="https://t.me/' + encodeURIComponent(BOT) + '" rel="noopener">@' + esc(BOT) + "</a>");
+  }
+
+  // ---- the session ---------------------------------------------------------
+
+  // The token is taken out of the address bar as soon as it is read, so a
+  // screenshot or a shared screen does not carry a working link. It is kept in
+  // this tab's sessionStorage so a reload still works; storage that throws (a
+  // private window, a blocked site) only costs that convenience.
+  var token = new URLSearchParams(location.search).get("s") || "";
+  try {
+    if (token) sessionStorage.setItem("holders.s", token);
+    else token = sessionStorage.getItem("holders.s") || "";
+  } catch (e) {}
+  if (location.search && history.replaceState) history.replaceState(null, "", location.pathname);
+
+  async function loadSession() {
+    if (!token) {
+      say("step0", "<p>This page was not opened from the bot's link, so there is no Telegram " +
+          "account to link a wallet to. Send <code>/verify</code> to the bot and open the link it " +
+          "sends. You can still check any address below.</p>");
+      return;
+    }
+    try {
+      sess = await post("/session", { session: token });
+    } catch (e) {
+      sess = null;
+      try { sessionStorage.removeItem("holders.s"); } catch (x) {}
+      say("step0", "<p><strong>" + esc(e.message) + "</strong></p>");
+      render();
+      return;
+    }
+    var until = new Date(sess.expires_at);
+    say("step0",
+      "<p>Linking a wallet to Telegram user <strong>" + esc(sess.tg_name || "") + "</strong> " +
+      "(id <code>" + esc(sess.tg_user) + "</code>). The link works once, until " +
+      esc(until.toLocaleTimeString()) + ".</p>" +
+      "<p>Bars: " + sess.tiers.map(tier).map(esc).join(", ") + " of supply. Token " +
+      "<code>" + esc(sess.token) + "</code> on chain " + esc(sess.chain_id) + ".</p>" +
+      '<p class="muted">On a phone and no wallet appears below? Copy this page into your wallet ' +
+      'app\'s own browser: <button type="button" class="wbtn" id="copylink">Copy link</button></p>');
+    el("copylink").onclick = function () {
+      var u = location.origin + location.pathname + "?s=" + encodeURIComponent(token);
+      navigator.clipboard.writeText(u).then(function () { el("copylink").textContent = "Copied"; });
+    };
+    render();
+  }
+
+  // ---- wallets ---------------------------------------------------------------
+
+  // EIP-6963. Without it, every extension writes window.ethereum and
+  // whichever loaded last wins, so a holder with two installed can silently be
+  // offered the wrong one. This asks every installed wallet to announce itself.
+  window.addEventListener("eip6963:announceProvider", function (ev) {
+    var d = ev.detail;
+    if (providers.some(function (p) { return p.info.uuid === d.info.uuid; })) return;
+    providers.push(d);
+    render();
+  });
+  window.dispatchEvent(new Event("eip6963:requestProvider"));
+  setTimeout(function () {
+    // A wallet too old for EIP-6963 still injects window.ethereum, offered as
+    // a fallback and labelled as one rather than dressed as a named wallet.
+    if (!providers.length && window.ethereum)
+      providers.push({ info: { uuid: "legacy", name: "Injected wallet" }, provider: window.ethereum });
+    render();
+  }, 700);
+
+  function render() {
+    if (!sess) {
+      say("wallets", '<p class="muted">A wallet is chosen once there is a valid Telegram link above.</p>');
+      return;
+    }
+    var h = "<p>";
+    providers.forEach(function (p, i) {
+      h += '<button type="button" class="wbtn" data-i="' + i + '">' + esc(p.info.name) + "</button> ";
+    });
+    if (WC_PROJECT) h += '<button type="button" class="wbtn" id="wc">WalletConnect</button> ';
+    h += '<button type="button" class="wbtn" id="byhand">Sign by hand</button></p>';
+    if (!providers.length)
+      h += '<p class="muted">No browser wallet announced itself' +
+           (WC_PROJECT ? "; WalletConnect reaches a wallet app on your phone." : ".") + "</p>";
+    say("wallets", h);
+    Array.prototype.forEach.call(document.querySelectorAll("#wallets button[data-i]"), function (b) {
+      b.onclick = function () { pick(providers[+b.getAttribute("data-i")]); };
+    });
+    if (WC_PROJECT) el("wc").onclick = walletConnect;
+    el("byhand").onclick = byHand;
+  }
+
+  async function walletConnect() {
+    say("step2", "<p>Loading WalletConnect&hellip;</p>");
+    try {
+      var mod = await import(WC_URL);
+      var EP = mod.EthereumProvider || (mod.default && mod.default.EthereumProvider) || mod.default;
+      // Chain 4663 is optional, not required: a wallet that has never heard of
+      // it would refuse a session that demanded it, and the signature does not
+      // touch a chain anyway.
+      var p = await EP.init({
+        projectId: WC_PROJECT, showQrModal: true, optionalChains: [1, CHAIN_ID],
+        rpcMap: { 4663: RPC },
+        metadata: {
+          name: "GLaDOS holder chats", description: "Prove a $GLADOS holding for the Telegram holder chats.",
+          url: location.origin, icons: [location.origin + "/img/icon-180.png"],
+        },
+      });
+      await p.connect();
+      pick({ info: { name: "WalletConnect" }, provider: p });
+    } catch (e) {
+      say("step2", "<p><strong>WalletConnect did not connect:</strong> " + esc(e.message || e) + "</p>");
+    }
+  }
+
+  async function pick(p) {
+    chosen = p;
+    say("step2", "<p>Asking " + esc(p.info.name) + " for an address&hellip;</p>");
+    var accs;
+    try {
+      accs = await p.provider.request({ method: "eth_requestAccounts" });
+      if (!accs || !accs.length) throw new Error("no account");
+    } catch (e) {
+      say("step2", "<p><strong>Refused:</strong> " + esc(e.message || e) + "</p>");
+      return;
+    }
+    if (accs.length === 1) return use(accs[0]);
+    var h = "<p>" + esc(p.info.name) + " offers several accounts. Which holds the $GLADOS?</p><p>";
+    accs.forEach(function (a, i) {
+      h += '<button type="button" data-a="' + i + '"><code>' + esc(a) + "</code></button><br>";
+    });
+    say("step2", h + "</p>");
+    Array.prototype.forEach.call(document.querySelectorAll("#step2 button[data-a]"), function (b) {
+      b.onclick = function () { use(accs[+b.getAttribute("data-a")]); };
+    });
+  }
+
+  function use(a) {
+    account = String(a).toLowerCase();
+    say("step2", "<p>Wallet reports <code>" + esc(a) + "</code></p>" +
+      '<p><button type="button" id="go">Request a message to sign</button></p>');
+    el("go").onclick = function () { start(false); };
+  }
+
+  function byHand() {
+    chosen = null;
+    say("step2",
+      '<div class="hold"><p>The address that holds the $GLADOS:</p>' +
+      '<p><input id="haddr" type="text" spellcheck="false" autocomplete="off" placeholder="0x&hellip;" aria-label="Your address"> ' +
+      '<button type="button" id="hgo">Get the message</button></p></div>');
+    el("hgo").onclick = function () {
+      var a = el("haddr").value.trim();
+      if (!isAddr(a)) { el("haddr").focus(); return; }
+      account = a.toLowerCase();
+      start(true);
+    };
+  }
+
+  async function start(manual) {
+    say("step2", "<p>Asking the server for a nonce&hellip;</p>");
+    var n;
+    try {
+      n = await post("/nonce", { session: token, address: account });
+    } catch (e) {
+      say("step2", "<p><strong>Could not get a nonce:</strong> " + esc(e.message) + "</p>");
+      return;
+    }
+    // Shown in full before anything is signed. A signing prompt whose contents
+    // the signer could not read first is the shape of every phishing page.
+    if (!manual) {
+      say("step2", "<p>This is the exact message you are about to sign. Read it.</p>" +
+        "<pre><code>" + esc(n.message) + "</code></pre>" +
+        '<p><button type="button" id="sign">Sign it</button></p>');
+      el("sign").onclick = function () { doSign(n.message); };
+      return;
+    }
+    say("step2",
+      '<div class="hold"><p>Sign exactly this text, every line, with your wallet\'s <em>sign message</em> ' +
+      "feature (EIP-191 <code>personal_sign</code>). It expires in ten minutes.</p>" +
+      '<textarea id="hmsg" rows="14" readonly spellcheck="false">' + esc(n.message) + "</textarea>" +
+      '<p><button type="button" id="hcopy">Copy</button> <button type="button" id="hsave">Save as message.txt</button></p>' +
+      "<p>Then paste the signature, <code>0x</code> and hex:</p>" +
+      '<textarea id="hsig" rows="3" spellcheck="false" aria-label="Signature"></textarea>' +
+      '<p><button type="button" id="hsend">Check it</button></p></div>');
+    el("hcopy").onclick = function () {
+      navigator.clipboard.writeText(n.message).then(function () { el("hcopy").textContent = "Copied"; });
+    };
+    el("hsave").onclick = function () {
+      var u = URL.createObjectURL(new Blob([n.message], { type: "text/plain" }));
+      var a = document.createElement("a");
+      a.href = u; a.download = "message.txt"; a.click();
+      setTimeout(function () { URL.revokeObjectURL(u); }, 1000);
+    };
+    el("hsend").onclick = function () { send(el("hsig").value.trim()); };
+  }
+
+  async function doSign(message) {
+    say("step2", "<p>Waiting for your wallet&hellip;</p>");
+    var sig;
+    try {
+      sig = await chosen.provider.request({ method: "personal_sign", params: [hexOf(message), account] });
+    } catch (e) {
+      if (e && e.code === 4001) {
+        say("step2", "<p><strong>Not signed:</strong> you declined it.</p>");
+        return;
+      }
+      try {
+        sig = await chosen.provider.request({ method: "personal_sign", params: [message, account] });
+      } catch (e2) {
+        say("step2", "<p><strong>Not signed:</strong> " + esc(e2.message || e2) + "</p>");
+        return;
+      }
+    }
+    say("step2", '<p class="muted">Signed.</p>');
+    send(sig);
+  }
+
+  async function send(sig) {
+    if (!/^0x[0-9a-fA-F]+$/.test(sig || "")) {
+      say("step3", "<p><strong>That is not a signature</strong> -- it should be 0x followed by hex.</p>");
+      return;
+    }
+    say("step3", "<p>Checking the signature and reading the chain&hellip;</p>");
+    var r;
+    try {
+      r = await post("/verify", { session: token, address: account, signature: sig });
+    } catch (e) {
+      say("step3", "<p><strong>Refused:</strong> " + esc(e.message) + "</p>");
+      return;
+    }
+    try { sessionStorage.removeItem("holders.s"); } catch (x) {}
+    var same = (r.address || "").toLowerCase() === account;
+    var bar = sess.tiers[0];
+    say("step3",
+      "<table class=\"facts\">" +
+      "<tr><td>You entered / the wallet said</td><td><code>" + esc(account) + "</code></td></tr>" +
+      "<tr><td>The server verified</td><td><code>" + esc(r.address) + "</code></td></tr>" +
+      "<tr><td>Proof</td><td>" + (r.kind === "1271" ? "contract wallet (EIP-1271)" : "key signature") + "</td></tr>" +
+      "<tr><td>This wallet</td><td>" + esc(toks(r.balance)) + " GLADOS</td></tr>" +
+      "<tr><td>All your linked wallets (" + esc(r.wallets) + ")</td><td>" + esc(toks(r.total)) + " GLADOS</td></tr>" +
+      "<tr><td>Share of supply</td><td>" + esc(r.percent) + "% at block " + esc(r.block) + "</td></tr>" +
+      "<tr><td>Tier</td><td><strong>" + esc(tier(r.tier)) + "</strong></td></tr></table>" +
+      (same ? "" : "<p><strong>The two addresses differ. Do not trust this result; report it.</strong></p>") +
+      (r.tier
+        ? (r.invites
+            ? "<p>The bot has sent you " + esc(r.invites) + " join link(s) in Telegram, valid for an hour.</p>"
+            : "<p>You are already in every chat you qualify for.</p>")
+        : "<p>That is below the " + esc(tier(bar)) + " bar. Wallets add up: send <code>/verify</code> " +
+          "again to link another one.</p>") +
+      (r.told ? "" : "<p><strong>The bot could not message you.</strong> Open it and send <code>/status</code>.</p>") +
+      "<p>To link another wallet, send <code>/verify</code> again; each link works once.</p>");
+    sess = null;
+    render();
+  }
+
+  // ---- read-only check ---------------------------------------------------------
+
+  el("chk").onclick = async function () {
+    var a = el("chkaddr").value.trim();
+    if (!isAddr(a)) { say("chkout", "<p><strong>An address is 0x and 40 hex digits.</strong></p>"); return; }
+    say("chkout", "<p>Reading the chain&hellip;</p>");
+    try {
+      var r = await post("/check", { address: a });
+      say("chkout", "<p><code>" + esc(r.address) + "</code> holds " + esc(toks(r.balance)) +
+        " GLADOS, " + esc(r.percent) + "% of " + esc(toks(r.supply)) + " at block " + esc(r.block) +
+        ". Tier: <strong>" + esc(tier(r.tier)) + "</strong> (bars " + r.tiers.map(tier).map(esc).join(", ") + ").</p>");
+    } catch (e) {
+      say("chkout", "<p><strong>" + esc(e.message) + "</strong></p>");
+    }
+  };
+
+  loadSession();
+})();
+</script>
+
+</div>
+</div>
+</div>
+<!--footer-->
+<div id="footer">
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This project is independent and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright 2026. All rights reserved. The source is published so it can be read; redistribution and derivatives need asking. What is not ours -- two vendored font crates, two typefaces, Intel's register layouts and Wi-Fi firmware, and the diagrams -- is listed on <a href="../credits.html">the credits page</a>.</p>
+  <p>No cookies, no analytics, no telemetry of any kind. Last updated 2026-10-24.</p>
+</div>
+<!--/footer-->
+
+</div>
+</body>
+</html>

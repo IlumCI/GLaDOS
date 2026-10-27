@@ -303,7 +303,7 @@ def masthead_html(p):
 # with it, so it takes the Token tab rather than a ninth of its own -- a tab
 # per page is how a strip of eight becomes a strip of twenty. Without this the
 # page renders with nothing active, which reads as "you are nowhere".
-UNDER = {"wallet/": "token/"}
+UNDER = {"wallet/": "token/", "holders/": "token/"}
 
 # Pages that are deliberately not given the site's chrome, and the reason has to
 # be stronger than "it looked hard" because the default is that every page gets

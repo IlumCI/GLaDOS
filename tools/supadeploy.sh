@@ -74,7 +74,7 @@ echo "==> migrations, before the functions that read the tables they make"
 # Settings come from supabase/config.toml, so no --no-verify-jwt here: a flag
 # typed per deploy is one somebody forgets, and forgetting it deploys a function
 # every caller gets a 401 from.
-for f in channel link worker proposal verdict; do
+for f in channel link worker proposal verdict holders; do
     echo "==> function $f"
     "${SUPABASE[@]}" functions deploy "$f"
 done

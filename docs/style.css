@@ -528,7 +528,7 @@ p.small { font-size: 12px; color: var(--ink-dim); margin: 4px 0 0; max-width: 48
 /* The wallet page's controls. A push button, built the way theme::BTN builds
    one: a ramp that exists to catch the top edge rather than to be looked at,
    nearly flat by the foot. */
-button.wbtn, #step2 button, #step3 button {
+button.wbtn, #step2 button, #step3 button, .hold button {
   font: inherit;
   font-size: 13px;
   padding: 5px 14px;
@@ -540,13 +540,31 @@ button.wbtn, #step2 button, #step3 button {
   cursor: pointer;
   margin-right: 6px;
 }
-button.wbtn:hover, #step2 button:hover, #step3 button:hover {
+button.wbtn:hover, #step2 button:hover, #step3 button:hover, .hold button:hover {
   background: var(--cap);
   box-shadow: inset 0 1px 0 var(--cap-edge);
   border-color: var(--accent);
   color: #fff;
 }
 #danger { border-color: var(--accent); }
+
+/* The holder page's fields: an address to check, a message to copy, a
+   signature to paste. Monospace because every one of them is compared
+   character by character, and an address read in a proportional face is
+   one whose lookalike nobody notices. */
+.hold input[type="text"], .hold textarea {
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 12px;
+  padding: 5px 7px;
+  border: 1px solid var(--well-edge);
+  border-radius: var(--round-sm);
+  background: var(--page);
+  color: var(--ink);
+  box-sizing: border-box;
+}
+.hold input[type="text"] { width: 30em; max-width: 100%; }
+.hold textarea { width: 100%; max-width: 48em; resize: vertical; }
+.hold button, #step0 button { margin-top: 4px; }
 
 /* Parked off-screen until focused, and it has to come back on focus or it is
    decoration: a skip link nobody can see is one nobody can use, which is

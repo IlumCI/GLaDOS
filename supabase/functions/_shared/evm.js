@@ -25,6 +25,7 @@
 
 import { secp256k1 } from "npm:@noble/curves@1.4.0/secp256k1";
 import { keccak_256 } from "npm:@noble/hashes@1.4.0/sha3";
+import { encodeIsValidSignature, isMagic, unwrap6492 } from "./holders.js";
 
 const hex = (b) => "0x" + Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 
@@ -88,24 +89,75 @@ export function recoverAddress(message, signature) {
   }
 }
 
-/// `balanceOf(address)` against an ERC-20, as a BigInt.
+/// One `eth_call`, answering the raw hex result.
 ///
 /// Throws on a bad RPC answer rather than returning zero. Zero is a real
 /// balance and a legitimate refusal; an RPC that is down is a different thing
 /// and must not be silently converted into "this person holds nothing".
-export async function balanceOf(rpc, token, address) {
-  const data = "0x70a08231" + address.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+async function rpcCall(rpc, method, params) {
   const res = await fetch(rpc, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0", id: 1, method: "eth_call",
-      params: [{ to: token, data }, "latest"],
-    }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
   });
   if (!res.ok) throw new Error("rpc http " + res.status);
   const j = await res.json();
   if (j.error) throw new Error("rpc: " + (j.error.message || "error"));
   if (typeof j.result !== "string" || !j.result.startsWith("0x")) throw new Error("rpc: no result");
-  return BigInt(j.result);
+  return j.result;
+}
+
+const ethCall = (rpc, to, data, block = "latest") =>
+  rpcCall(rpc, "eth_call", [{ to, data }, block]);
+
+/// The latest block number, so a balance and a supply can be read at one height.
+export async function blockNumber(rpc) {
+  return await rpcCall(rpc, "eth_blockNumber", []);
+}
+
+/// `balanceOf(address)` against an ERC-20, as a BigInt.
+export async function balanceOf(rpc, token, address, block = "latest") {
+  const data = "0x70a08231" + address.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+  return BigInt(await ethCall(rpc, token, data, block));
+}
+
+/// `totalSupply()` against an ERC-20, as a BigInt. Read at the same block as
+/// the balances it divides, or a mint or burn between the two reads moves the
+/// share by an amount nobody can account for afterwards.
+export async function totalSupply(rpc, token, block = "latest") {
+  return BigInt(await ethCall(rpc, token, "0x18160ddd", block));
+}
+
+/// Whether `address` has code on the chain `rpc` serves.
+export async function hasCode(rpc, address) {
+  const c = await rpcCall(rpc, "eth_getCode", [address, "latest"]);
+  return c !== "0x" && !/^0x0*$/.test(c);
+}
+
+/// Who signed: the address when it signed `message`, or null.
+///
+/// An externally owned key first, by recovery. When recovery does not name the
+/// address -- which is what a contract wallet's signature looks like -- the
+/// account is asked through EIP-1271 on the token's own chain, with an ERC-6492
+/// wrapper unwrapped first. Answers `"eoa"`, `"1271"` or null, so the caller
+/// can say which kind of proof it accepted. An RPC failure throws; it is not a
+/// refusal of the signature.
+export async function verifySigner(rpc, message, address, signature) {
+  const addr = address.toLowerCase();
+  if (/^0x[0-9a-fA-F]{130}$/.test(signature) && recoverAddress(message, signature) === addr)
+    return "eoa";
+  let sig = signature;
+  try {
+    sig = unwrap6492(signature) ?? signature;
+  } catch {
+    return null;
+  }
+  if (!(await hasCode(rpc, addr))) return null;
+  const data = encodeIsValidSignature(hex(personalHash(message)), sig);
+  try {
+    return isMagic(await ethCall(rpc, addr, data)) ? "1271" : null;
+  } catch {
+    // A reverting `isValidSignature` is the account saying no.
+    return null;
+  }
 }

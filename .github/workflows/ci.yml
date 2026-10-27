@@ -136,6 +136,13 @@ jobs:
       - name: The verdict verifier, against what the kernel already decided
         run: node supabase/functions/_shared/verdict.test.mjs
 
+      # The holder-chat gate: a holder exactly at the bar is in and one wei
+      # short is out, and a tier list with a typo refuses to load rather than
+      # loading with a chat missing. The viem cross-check needs Deno and the
+      # npm registry, so it is run by hand (the file says how).
+      - name: The holder gate's arithmetic, checked by node
+        run: node supabase/functions/_shared/holders.test.mjs
+
       # The origin is a pin like the two keys, and it had no check at all -- which
       # is why the pinned Supabase project was gone for some time with three
       # workflows and every shipped image still naming it. `--expect` needs no
