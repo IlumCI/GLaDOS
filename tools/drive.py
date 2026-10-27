@@ -1159,6 +1159,15 @@ def main():
                 break
             if chunk:
                 quiet_since = time.time()
+                # A kernel fault reports, prints this and spins with the VM
+                # still running, so the monitor never says it stopped -- the
+                # report is the only sign, and it is in the serial stream.
+                if b"\n  halted." in (buf[-4096:] + chunk) and stopped is None:
+                    stopped = "the kernel faulted and halted (the report is above)"
+                    print(f"\n[drive] STOPPED: {stopped}", file=sys.stderr)
+                    dump_regs()
+                    emit(chunk)
+                    break
             elif time.time() - quiet_since > 3.0:
                 quiet_since = time.time()
                 stopped = vm_stopped(proc)
