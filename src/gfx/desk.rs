@@ -619,7 +619,7 @@ const ICONS: [(&str, &str); 10] = [
 /// The Start menu, bottom of the bar upward -- the 98 half of the ancestry.
 /// Same entries as the icons plus the one thing that belongs behind a second
 /// look, exactly where 98 kept it.
-const START_ITEMS: [(&str, &str); 13] = [
+const START_ITEMS: [(&str, &str); 14] = [
     // "Search..." used to lead this list, opening a panel with one text field
     // in it. The query row at the foot of this menu does the same job in the
     // place a person already is, and dispatches through the same `open`, so
@@ -634,6 +634,8 @@ const START_ITEMS: [(&str, &str); 13] = [
     // inside the machine. Not on the wall: `ICONS` is index-locked to the
     // `ICO_*` constants and adding a row there renumbers every pictogram.
     ("Mind", "mind open"),
+    // LibreOffice with the model writing into it -- see `office`.
+    ("Office", "office ui"),
     ("Files", "win open files"),
     ("ToDo", "todo"),
     ("Enternet", "enternet"),
@@ -941,6 +943,7 @@ impl Desktop {
         if i >= self.windows.len() {
             return;
         }
+        crate::linux::input::mark_focus();
         let w = self.windows.remove(i);
         self.windows.push(w);
     }
@@ -1472,6 +1475,31 @@ pub fn open_authoring() {
 /// Is a window with this title already open?
 pub fn has_window(title: &str) -> bool {
     with(|d| d.windows.iter().any(|w| w.title == title)).unwrap_or(false)
+}
+
+/// Raise and focus the topmost window whose title contains `needle`,
+/// restoring it if it was minimised. Answers whether there was one.
+///
+/// For `office`, which types into a document: keystrokes go to whatever has
+/// focus, so the window they are meant for has to be the one in front before
+/// the first of them is sent. Matched by part of the title because a
+/// program chooses its own -- LibreOffice's is the document's name followed
+/// by "LibreOffice Writer".
+pub fn focus_titled(needle: &str) -> bool {
+    with(|d| {
+        let Some(i) = d.windows.iter().rposition(|w| w.title.contains(needle)) else { return false };
+        if d.windows[i].state == WinState::Minimised {
+            d.windows[i].state = WinState::Normal;
+        }
+        d.raise(i);
+        true
+    })
+    .unwrap_or(false)
+}
+
+/// The title of the topmost window whose title contains `needle`.
+pub fn window_titled(needle: &str) -> Option<String> {
+    with(|d| d.windows.iter().rev().find(|w| w.title.contains(needle)).map(|w| w.title.clone())).flatten()
 }
 
 /// Put every window away, so what opens next is what is on screen.

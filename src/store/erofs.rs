@@ -31,6 +31,60 @@ const SB_OFFSET: u64 = 1024;
 const SECTOR: u64 = 512;
 const MAX_HOPS: u32 = 40;
 
+/// The cache's block size: EROFS's own, so a metadata read is one block.
+const CBLOCK: u64 = 4096;
+/// At most this many blocks, 128 MiB. Enough for a desktop's worth of
+/// libraries and every directory they live in; oldest out first.
+const CBLOCKS: usize = 32 * 1024;
+
+struct Cache {
+    map: alloc::collections::BTreeMap<(u64, u64), alloc::boxed::Box<[u8]>>,
+    order: VecDeque<(u64, u64)>,
+}
+
+static CACHE: crate::sync::Spin<Cache> =
+    crate::sync::Spin::new(Cache { map: alloc::collections::BTreeMap::new(), order: VecDeque::new() });
+
+/// Copy `out` from cached blocks `b0..=b1` if every one is there.
+fn cache_copy(base: u64, b0: u64, b1: u64, off: u64, out: &mut [u8]) -> bool {
+    let c = CACHE.lock_irq();
+    if (b0..=b1).any(|b| !c.map.contains_key(&(base, b))) {
+        return false;
+    }
+    let mut at = 0usize;
+    for b in b0..=b1 {
+        let blk = &c.map[&(base, b)];
+        let start = if b == b0 { (off - b0 * CBLOCK) as usize } else { 0 };
+        let take = (CBLOCK as usize - start).min(out.len() - at);
+        out[at..at + take].copy_from_slice(&blk[start..start + take]);
+        at += take;
+    }
+    true
+}
+
+/// Remember the blocks of `buf`, which starts at block `b0`.
+fn cache_fill(base: u64, b0: u64, buf: &[u8]) {
+    let mut c = CACHE.lock_irq();
+    for (i, chunk) in buf.chunks(CBLOCK as usize).enumerate() {
+        let key = (base, b0 + i as u64);
+        if c.map.contains_key(&key) || chunk.len() != CBLOCK as usize {
+            continue;
+        }
+        if c.order.len() >= CBLOCKS {
+            if let Some(old) = c.order.pop_front() {
+                c.map.remove(&old);
+            }
+        }
+        c.map.insert(key, chunk.to_vec().into_boxed_slice());
+        c.order.push_back(key);
+    }
+}
+
+/// Blocks cached, for `linux mount`'s report.
+pub fn cached_blocks() -> usize {
+    CACHE.lock_irq().map.len()
+}
+
 /// Data layouts, `i_format >> 1 & 7`.
 const FLAT_PLAIN: u8 = 0;
 const FLAT_INLINE: u8 = 2;
@@ -126,8 +180,37 @@ impl Image {
         self.inode(self.root)
     }
 
-    /// Bytes at a byte offset in the partition, read through whole sectors.
+    /// Bytes at a byte offset in the partition, through the block cache.
+    ///
+    /// **Nothing here was cached, and every program paid for it.** A path
+    /// lookup reads an inode and a directory per component, each its own
+    /// NVMe command, and a library mapped by a program is copied off the
+    /// disk -- so a LibreOffice launch read its whole closure again every
+    /// time, and a guest's `openat` averaged 2.4 ms under the guest lock.
+    /// The image is read-only, so a cache can never be stale: it is keyed by
+    /// partition and block and only ever filled.
     fn read_raw(base: u64, off: u64, out: &mut [u8]) -> Result<(), Error> {
+        if out.is_empty() {
+            return Ok(());
+        }
+        let b0 = off / CBLOCK;
+        let b1 = (off + out.len() as u64 - 1) / CBLOCK;
+        if cache_copy(base, b0, b1, off, out) {
+            return Ok(());
+        }
+        // One request for the whole span, block-aligned, then remembered.
+        let span = ((b1 - b0 + 1) * CBLOCK) as usize;
+        let mut buf = vec![0u8; span];
+        Self::read_sectors(base, b0 * CBLOCK, &mut buf)?;
+        cache_fill(base, b0, &buf);
+        let skip = (off - b0 * CBLOCK) as usize;
+        out.copy_from_slice(&buf[skip..skip + out.len()]);
+        Ok(())
+    }
+
+    /// Bytes at a byte offset in the partition, read through whole sectors,
+    /// with no cache.
+    fn read_sectors(base: u64, off: u64, out: &mut [u8]) -> Result<(), Error> {
         if out.is_empty() {
             return Ok(());
         }

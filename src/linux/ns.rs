@@ -129,6 +129,21 @@ pub fn writable(guest: &str) -> bool {
     !(under(guest, "/proc") || under(guest, "/dev") || under(guest, "/sys") || under(guest, "/mnt"))
 }
 
+/// Whether any write a guest can make lands on this *namespace* path.
+///
+/// The question a jail is really asked. Under a root image a guest may write
+/// almost any of its own paths, and that is right -- every such write lands
+/// in the layer (`UPPER`, `GONE`), never on the namespace path of the same
+/// name. So "may a guest write `/linux/bin`" stopped being the property; "can
+/// a guest's write reach the kernel's `/linux/bin`" is, and it is no either
+/// way. Without a layer, only `/tmp` is reachable, as before.
+pub fn reaches(ns_path: &str) -> bool {
+    if under(ns_path, "/tmp") {
+        return true;
+    }
+    layered() && (under(ns_path, UPPER) || under(ns_path, GONE) || SHARED.iter().any(|s| under(ns_path, s)))
+}
+
 /// Copy a file up from the root image into the layer, so it can be written
 /// in place. Answers whether the layer now holds it.
 pub fn copy_up(guest: &str) -> bool {

@@ -43,6 +43,7 @@ mod mem;
 mod mind;
 mod mine;
 mod net;
+mod office;
 mod pkg;
 /// What a program written somewhere else may ask of this machine.
 mod port;
@@ -770,6 +771,15 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         let line = mine::boot::apply(p);
         kprintln!("
 [miner] {}", line);
+    }
+
+    // The guests' root filesystem, if a disk carries one, and the session it
+    // brings (a runtime directory and the session bus). Found rather than
+    // asked for: a Linux program on the desktop should not need somebody to
+    // know a partition number first.
+    if let Some(p) = linux::disk::auto_root() {
+        linux::services::begin_session();
+        kprintln!("[linux] the root filesystem is partition {}, with a session bus", p);
     }
 
     // What is installed, so the desktop can offer it. Read off every FAT

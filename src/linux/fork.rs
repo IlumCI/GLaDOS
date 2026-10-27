@@ -257,7 +257,9 @@ pub fn task_of_pid(pid: i64) -> Option<usize> {
 /// this possible without reaching into the loader for the backing `Exec`s: the
 /// kernel is already looking at the guest's memory the way the guest sees it.
 ///
-/// A page the parent does not have present is skipped rather than copied. A
+/// Demand-paged memory is the exception, and is copied page by page as what it
+/// is -- see inside. Otherwise, a page the parent does not have present is
+/// skipped rather than copied. A
 /// linker reserves a span with `PROT_NONE` and lays libraries over part of it,
 /// so reading the rest would take a `#PF` at ring 0 inside `fork` -- and this
 /// kernel has no handler that could survive it. The child gets a hole where
@@ -270,35 +272,66 @@ fn dup_range(
     len: usize,
     owned: &mut Vec<(u64, usize)>,
 ) -> bool {
+    use crate::mem::paging::{is_promise, ADDR_MASK, DEMAND};
     let n = syscall::page_up(len);
     if n == 0 {
         return true;
     }
-    let Some(phys) = syscall::alloc_pages(n) else { return false };
+    // The block for ordinary pages, taken the first time one is met: a range
+    // that is all demand-paged (a thread arena, a stack) needs none of it.
+    let mut block: Option<u64> = None;
     let mut off = 0u64;
     while off < n as u64 {
-        let there = crate::mem::paging::query(at + off).is_some_and(|p| p.present);
+        let a = at + off;
+        let raw = crate::mem::paging::leaf(a).unwrap_or(0);
+        // **Demand-paged memory is copied as what it is.** A promise stays a
+        // promise in the child -- skipping it, as a not-present page is
+        // skipped below, would leave a hole where the parent has memory it
+        // simply has not touched yet, and the child would die on its first
+        // write to a malloc arena. A supplied page gets a frame of its own,
+        // marked the same way so the child's teardown frees it: copied from
+        // the *frame*, which the identity map reaches whatever the guest's
+        // rights on it, so a page `mprotect`ed to `PROT_NONE` survives too.
+        if is_promise(raw) {
+            if !tables.put_leaf(a, raw) {
+                return false;
+            }
+            off += 4096;
+            continue;
+        }
+        if raw & DEMAND != 0 && raw & ADDR_MASK != 0 {
+            let Some(p) = syscall::alloc_pages(4096) else { return false };
+            unsafe { core::ptr::copy_nonoverlapping((raw & ADDR_MASK) as *const u8, p as *mut u8, 4096) };
+            if !tables.put_leaf(a, p | (raw & !ADDR_MASK)) {
+                syscall::free_pages(p, 4096);
+                return false;
+            }
+            off += 4096;
+            continue;
+        }
+        let there = crate::mem::paging::query(a).is_some_and(|p| p.present);
         if there {
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    (at + off) as *const u8,
-                    (phys + off) as *mut u8,
-                    4096,
-                )
+            let phys = match block {
+                Some(b) => b,
+                None => {
+                    let Some(b) = syscall::alloc_pages(n) else { return false };
+                    owned.push((b, n));
+                    block = Some(b);
+                    b
+                }
             };
-            let ok = if at + off >= crate::mem::space::WINDOW {
-                tables.map_page(at + off, phys + off, true, true)
+            unsafe { core::ptr::copy_nonoverlapping(a as *const u8, (phys + off) as *mut u8, 4096) };
+            let ok = if a >= crate::mem::space::WINDOW {
+                tables.map_page(a, phys + off, true, true)
             } else {
-                tables.map_low(at + off, phys + off, true, true).is_ok()
+                tables.map_low(a, phys + off, true, true).is_ok()
             };
             if !ok {
-                syscall::free_pages(phys, n);
                 return false;
             }
         }
         off += 4096;
     }
-    owned.push((phys, n));
     true
 }
 

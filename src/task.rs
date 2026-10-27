@@ -874,6 +874,28 @@ pub fn state_of(index: usize) -> Option<State> {
 /// interval and hashed at one slice's rate while the report said two. Use
 /// `pin_to` where the point is one task per core; use this where the point is
 /// that the scheduler may choose.
+/// A pin meaning "any core but the bootstrap processor's".
+///
+/// For guest threads. Every kernel task -- the shell that runs the model, the
+/// compositor, the typist -- is pinned to core 0, and a guest thread allowed
+/// everywhere competed with all of them there: an idle LibreOffice's threads,
+/// each woken to look at its condition, took core 0 in 10 ms slices, and a
+/// model that yields between tokens waited behind them every token. Decode
+/// went from 100 ms a token to over a second with a word processor open. With
+/// more than one core, ring 3 has the others and core 0 is the kernel's; with
+/// one, this means any core, because the alternative is a guest that never
+/// runs.
+pub const PIN_NOT_BSP: i16 = -2;
+
+/// Whether a task pinned `pin` may run on core `me`.
+fn pin_allows(pin: i16, me: usize) -> bool {
+    match pin {
+        p if p >= 0 => p as usize == me,
+        PIN_NOT_BSP => me != 0 || crate::smp::online() < 2,
+        _ => true,
+    }
+}
+
 /// Which core a task is confined to, or -1 for any.
 pub fn pin_of(index: usize) -> i16 {
     let t = TASKS.lock_irq();
@@ -1571,7 +1593,7 @@ fn schedule() {
         let mut next = NONE;
         let hint = RUN_NEXT.load(Ordering::Acquire);
         if hint < n && hint != cur {
-            if t[hint].pin >= 0 && t[hint].pin != me as i16 {
+            if !pin_allows(t[hint].pin, me as usize) {
                 // Another core's to run; left for it.
             } else {
                 RUN_NEXT.store(NONE, Ordering::Release);
@@ -1591,7 +1613,7 @@ fn schedule() {
                     continue;
                 }
                 // Not this core's to run.
-                if t[i].pin >= 0 && t[i].pin != me as i16 {
+                if !pin_allows(t[i].pin, me as usize) {
                     continue;
                 }
                 // Real work first. An idle task is somewhere to stand rather

@@ -410,7 +410,23 @@ glados_fault_common:
     cld
     mov rdi, rsp
     call glados_fault_entry
-    ud2
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    add rsp, 16
+    iretq
 "#
 );
 
@@ -435,10 +451,32 @@ pub fn stub_base() -> u64 {
 /// Called only from `glados_fault_common`, with `rdi` holding the stack
 /// pointer at which that stub finished pushing.
 #[no_mangle]
-pub unsafe extern "sysv64" fn glados_fault_entry(f: *const Frame) -> ! {
+pub unsafe extern "sysv64" fn glados_fault_entry(f: *const Frame) {
+    // **One fault is not a fault: a page promised and not yet supplied.**
+    // Demand-paged guest memory (`paging::DEMAND`) is a leaf that is not
+    // present and says what it will be, and touching it lands here -- from
+    // ring 3 when the guest touches it, from ring 0 when the kernel writes a
+    // syscall's answer into it. The page is supplied and this returns, which
+    // is the only path that does: the stub restores every register, drops the
+    // vector and error code and `iretq`s to the instruction that faulted.
+    //
+    // Error code bit 0 clear is "not present", which a promise always is; bit
+    // 1 is a write. Anything else -- a protection violation, a promise of a
+    // `PROT_NONE` page, a write to a read-only one, or no memory left to keep
+    // the promise with -- falls through to the report, or to the guest's own
+    // death, exactly as before.
+    let fr = unsafe { &*f };
+    if fr.vector == 14 && fr.err & 1 == 0 {
+        let cr2 = read_cr2();
+        if crate::mem::paging::promised(cr2, fr.err & 2 != 0)
+            && crate::mem::paging::populate(cr2 & !0xFFF, fr.err & 2 != 0)
+        {
+            return;
+        }
+    }
     // The pointer is the stub's own stack pointer, so what it names outlives
-    // every use below: nothing here returns.
-    fault(unsafe { &*f })
+    // every use below: nothing past this point returns.
+    fault(fr)
 }
 
 /// The console #GP itself is a real bug and is not fixed here. It is older

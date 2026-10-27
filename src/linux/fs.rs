@@ -660,9 +660,9 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         writable("/tmp")
             && writable("/tmp/x")
             && writable("/tmp/a/b")
-            && !writable("/")
-            && !writable("/ai/about")
-            && !writable("/tmpish"),
+            && !super::ns::reaches("/")
+            && !super::ns::reaches("/ai/about")
+            && !super::ns::reaches("/tmpish"),
     ));
     out.push((
         "two names for one body share a cursor, which is the whole of dup",

@@ -297,8 +297,11 @@ fn turn(s: &mut Session, now: u64, changed: &mut bool) -> bool {
         }
         s.focused = focused;
         // Keys pressed while somebody else had the focus are not this
-        // window's.
-        s.kbd = crate::linux::input::now_at(crate::linux::input::Dev::Keyboard);
+        // window's -- counted from when the focus moved, not from now, or the
+        // keys typed between the two are thrown away (see `mark_focus`).
+        let now = crate::linux::input::now_at(crate::linux::input::Dev::Keyboard);
+        let mark = crate::linux::input::focus_mark();
+        s.kbd = if focused.is_some() && mark > s.kbd && mark <= now { mark } else { now };
     }
     // The pointer lock: while it holds, the desktop routes buttons to this
     // window wherever the cursor is, and motion arrives as relative counts
@@ -414,6 +417,8 @@ impl Window {
         let at = (x - client.x as i32, y - client.y as i32);
         self.last = at;
         INPUT.lock_irq().push((self.key, super::seat::Input::Pointer { x: at.0, y: at.1, button }));
+        // Handed over when the client next looks -- so it looks now. See `key`.
+        crate::linux::syscall::wake_nappers();
         true
     }
 }
@@ -471,6 +476,11 @@ impl crate::gfx::DeskApp for Window {
     /// Taken and dropped: a client's keys are the evdev events, delivered as
     /// such, and handing it the decoded character too would type twice.
     fn key(&mut self, _k: u8) -> bool {
+        // The key itself travels by the evdev ring, which the client drains
+        // when it next enters the kernel; this makes that now. A client
+        // asleep in `poll` naps up to `NAP_MAX` when nothing it watches can
+        // change by a syscall, and a keystroke is not a syscall.
+        crate::linux::syscall::wake_nappers();
         true
     }
 

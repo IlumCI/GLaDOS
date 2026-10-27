@@ -114,7 +114,29 @@ pub fn start_service_job(path: &str, args: &[&str]) -> Result<u32, &'static str>
     start_job_as(path, args, true)
 }
 
+/// `start_job`, with some variables of the environment replaced for this job
+/// alone.
+///
+/// Applied on the job's own task, immediately before its loader reads them,
+/// through the same per-task override `execve` uses. Changing the global
+/// environment around a `start_job` instead was a race: the loader runs when
+/// the job's task does, so the value put back afterwards was sometimes the
+/// one it read -- which is how a headless LibreOffice came up on GTK anyway.
+pub fn start_job_env(path: &str, args: &[&str], overrides: &[&str]) -> Result<u32, &'static str> {
+    let ov: alloc::vec::Vec<alloc::string::String> = overrides.iter().map(|s| alloc::string::String::from(*s)).collect();
+    start_job_inner(path, args, false, ov)
+}
+
 fn start_job_as(path: &str, args: &[&str], quiet: bool) -> Result<u32, &'static str> {
+    start_job_inner(path, args, quiet, alloc::vec::Vec::new())
+}
+
+fn start_job_inner(
+    path: &str,
+    args: &[&str],
+    quiet: bool,
+    overrides: alloc::vec::Vec<alloc::string::String>,
+) -> Result<u32, &'static str> {
     if let Some(why) = busy() {
         return Err(why);
     }
@@ -127,6 +149,13 @@ fn start_job_as(path: &str, args: &[&str], quiet: bool) -> Result<u32, &'static 
         title,
         alloc::boxed::Box::new(move || {
             let argv: alloc::vec::Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+            if !overrides.is_empty() {
+                let name = |e: &str| alloc::string::String::from(e.split_once('=').map_or(e, |(n, _)| n));
+                let mut env = syscall::environ();
+                env.retain(|e| !overrides.iter().any(|o| name(o) == name(e)));
+                env.extend(overrides.iter().cloned());
+                syscall::set_exec_env(env);
+            }
             let mut g = match load::load(&bytes, &argv) {
                 Ok(g) => g,
                 Err(why) => return alloc::format!("will not run it: {}", why),

@@ -119,6 +119,21 @@ static SHIFTED: [u8; MAP_LEN] = [
     b'M', b'<', b'>', b'?', 0,    b'*', 0,    b' ',
 ];
 
+/// The set-1 make code that produces `b`, and whether Shift must be held:
+/// the decoder's two tables read backwards, so anything typed this way is
+/// exactly what the decoder would make of the same keys. Unshifted first,
+/// because the keypad star and the shifted 8 both make `*` and the plain one
+/// is the honest answer.
+pub fn scancode_for(b: u8) -> Option<(u8, bool)> {
+    if b == 0 {
+        return None;
+    }
+    if let Some(i) = UNSHIFTED.iter().position(|&c| c == b) {
+        return Some((i as u8, false));
+    }
+    SHIFTED.iter().position(|&c| c == b).map(|i| (i as u8, true))
+}
+
 pub const SC_LSHIFT: u8 = 0x2A;
 const SC_RSHIFT: u8 = 0x36;
 const SC_CAPS: u8 = 0x3A;

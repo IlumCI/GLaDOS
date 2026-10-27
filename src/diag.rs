@@ -460,6 +460,16 @@ pub const SUITES: &[Suite] = &[
         run: space_selftest,
     },
     Suite {
+        name: "office",
+        about: "a model's table turned into spreadsheet cells, and column names",
+        run: office_selftest,
+    },
+    Suite {
+        name: "typist",
+        about: "text to keystrokes: which key and whether Shift, for every character",
+        run: typist_selftest,
+    },
+    Suite {
         name: "sky",
         about: "the Wayland wire format, and which object ids belong to whom",
         run: sky_selftest,
@@ -705,6 +715,36 @@ fn sockets_selftest() -> bool {
     ok
 }
 
+fn office_selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    let mut n = 0usize;
+    for (what, good) in crate::office::checks() {
+        n += 1;
+        if !good {
+            kprintln!("    FAIL: {}", what);
+            ok = false;
+        }
+    }
+    kprintln!("    {} claim(s)", n);
+    ok
+}
+
+fn typist_selftest() -> bool {
+    use crate::kprintln;
+    let mut ok = true;
+    let mut n = 0usize;
+    for (what, good) in crate::dev::typist::checks() {
+        n += 1;
+        if !good {
+            kprintln!("    FAIL: {}", what);
+            ok = false;
+        }
+    }
+    kprintln!("    {} claim(s)", n);
+    ok
+}
+
 fn space_selftest() -> bool {
     use crate::kprintln;
     let mut ok = true;
@@ -830,7 +870,7 @@ fn web_selftest() -> bool {
 /// says it exists to prevent. A `static` cannot be read in a const context, so
 /// the array cannot be measured directly; naming its length is the next best
 /// thing and it is now the only place the number appears.
-const SLOTS: usize = 102;
+const SLOTS: usize = 104;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.

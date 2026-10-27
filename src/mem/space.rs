@@ -179,19 +179,39 @@ impl Space {
     /// other 2 MiB less a page. `paging::split_large` does this one level
     /// down for the kernel's own map; this is the same bargain against a
     /// table this space owns, which is what makes it safe to do at all.
-    fn split(&mut self, table: u64, idx: usize) -> Option<u64> {
+    ///
+    /// **Two sizes of large page, and they split differently.** A 2 MiB entry
+    /// (in a PD) becomes 512 4 KiB entries; a 1 GiB entry (in a PDPT) becomes
+    /// 512 2 MiB entries, still large. This assumed 2 MiB always, which was
+    /// true while the identity map was built from 2 MiB pages and stopped
+    /// being true when the machine started mapping 1 GiB at a time: a 1 GiB
+    /// entry split as though it were 2 MiB became 512 directory entries
+    /// pointing at page tables made of whatever the next 2 MiB of RAM held.
+    /// The PAT bit moves too -- bit 12 of a large entry, bit 7 of a 4 KiB one.
+    fn split(&mut self, table: u64, idx: usize, level: u8) -> Option<u64> {
         if !self.owns_table(table) {
             return None;
         }
+        const PAT_LARGE: u64 = 1 << 12;
+        const PAT_4K: u64 = 1 << 7;
         let t = unsafe { &mut *(table as *mut [u64; ENTRIES]) };
         let old = t[idx];
-        let base = old & ADDR_MASK;
-        let flags = old & !ADDR_MASK & !HUGE;
+        // Everything but the address and the PAT bit, which is placed per level.
+        let flags = old & 0xFFF0_0000_0000_0FFF & !HUGE;
+        let pat = old & PAT_LARGE != 0;
         let (ptr, phys) = page()?;
         self.owned.push(ptr);
         let pt = unsafe { &mut *(phys as *mut [u64; ENTRIES]) };
-        for (i, slot) in pt.iter_mut().enumerate() {
-            *slot = (base + (i as u64) * 4096) | flags;
+        if level == 3 {
+            let base = old & 0x000F_FFFF_C000_0000;
+            for (i, slot) in pt.iter_mut().enumerate() {
+                *slot = (base + (i as u64) * (2 << 20)) | flags | HUGE | if pat { PAT_LARGE } else { 0 };
+            }
+        } else {
+            let base = old & 0x000F_FFFF_FFE0_0000;
+            for (i, slot) in pt.iter_mut().enumerate() {
+                *slot = (base + (i as u64) * 4096) | flags | if pat { PAT_4K } else { 0 };
+            }
         }
         t[idx] = phys | PRESENT | WRITABLE | USER;
         Some(phys)
@@ -223,7 +243,7 @@ impl Space {
     }
 
     /// Find or create the next table down, and answer where it is.
-    fn step(&mut self, table: u64, idx: usize) -> Option<u64> {
+    fn step(&mut self, table: u64, idx: usize, level: u8) -> Option<u64> {
         let e = unsafe { (&*(table as *const [u64; ENTRIES]))[idx] };
         if e & PRESENT != 0 {
             if e & HUGE != 0 {
@@ -232,7 +252,11 @@ impl Space {
                 // the kernel's, so `split` refuses unless this space owns the
                 // table. Refusing is the only answer that cannot damage
                 // somebody else's mappings.
-                return self.split(table, idx);
+                // A 1 GiB page splits into 2 MiB ones, and the next step
+                // down meets those and splits again: what is left is a
+                // table, which is what the caller wants.
+                let t = self.split(table, idx, level)?;
+                return Some(t);
             }
             let next = e & ADDR_MASK;
             if self.owns_table(next) {
@@ -350,6 +374,76 @@ impl Space {
         }
     }
 
+    /// Promise a page at `at` rather than map one: a leaf that is not present
+    /// and carries the rights it will have, so the first touch supplies a
+    /// zeroed frame (`paging::populate`). Same address rules as `map_page`.
+    pub fn promise_page(&mut self, at: u64, perm: super::paging::Perm) -> bool {
+        if at < WINDOW && !super::fixed::in_hole(at, 4096) {
+            return false;
+        }
+        self.leaf_slot(at).is_some_and(|slot| {
+            *slot = super::paging::promise(perm);
+            true
+        })
+    }
+
+    /// Write a raw leaf, for `fork` copying a promise or a demand-supplied
+    /// page exactly as the parent has it. Same address rules as `map_page`.
+    pub fn put_leaf(&mut self, at: u64, raw: u64) -> bool {
+        if at < WINDOW && !super::fixed::in_hole(at, 4096) {
+            return false;
+        }
+        self.leaf_slot(at).is_some_and(|slot| {
+            *slot = raw;
+            true
+        })
+    }
+
+    /// The raw leaf for `at` in this space, present or not, or `None` when no
+    /// page table reaches it. For a reader that has to tell a promise from a
+    /// supplied page from nothing at all, which `phys_of` cannot.
+    pub fn leaf(&self, at: u64) -> Option<u64> {
+        let walk = |t: u64, i: usize| -> Option<u64> {
+            let e = unsafe { (&*(t as *const [u64; ENTRIES]))[i] };
+            (e & PRESENT != 0 && e & HUGE == 0).then_some(e & ADDR_MASK)
+        };
+        let pdpt = walk(self.root, ((at >> 39) & 511) as usize)?;
+        let pd = walk(pdpt, ((at >> 30) & 511) as usize)?;
+        let pt = walk(pd, ((at >> 21) & 511) as usize)?;
+        Some(unsafe { (&*(pt as *const [u64; ENTRIES]))[((at >> 12) & 511) as usize] })
+    }
+
+    /// Clear the leaf for `at` and answer what it held, flushing the
+    /// translation. Only in a table this space owns, as `unmap_page`.
+    pub fn take_leaf(&mut self, at: u64) -> u64 {
+        let walk = |t: u64, i: usize| -> Option<u64> {
+            let e = unsafe { (&*(t as *const [u64; ENTRIES]))[i] };
+            (e & PRESENT != 0 && e & HUGE == 0).then_some(e & ADDR_MASK)
+        };
+        let Some(pdpt) = walk(self.root, ((at >> 39) & 511) as usize) else { return 0 };
+        let Some(pd) = walk(pdpt, ((at >> 30) & 511) as usize) else { return 0 };
+        let Some(pt) = walk(pd, ((at >> 21) & 511) as usize) else { return 0 };
+        if !self.owns_table(pt) {
+            return 0;
+        }
+        let slot = unsafe { &mut (&mut *(pt as *mut [u64; ENTRIES]))[((at >> 12) & 511) as usize] };
+        let old = core::mem::take(slot);
+        unsafe { core::arch::asm!("invlpg [{}]", in(reg) at, options(nostack, preserves_flags)) };
+        old
+    }
+
+    /// The leaf slot for `at`, building every table on the way down.
+    fn leaf_slot(&mut self, at: u64) -> Option<&'static mut u64> {
+        if at % 4096 != 0 {
+            return None;
+        }
+        let root = self.root;
+        let pdpt = self.step(root, ((at >> 39) & 511) as usize, 4)?;
+        let pd = self.step(pdpt, ((at >> 30) & 511) as usize, 3)?;
+        let pt = self.step(pd, ((at >> 21) & 511) as usize, 2)?;
+        Some(unsafe { &mut (&mut *(pt as *mut [u64; ENTRIES]))[((at >> 12) & 511) as usize] })
+    }
+
     fn map_at(&mut self, at: u64, phys: u64, writable: bool, user: bool, cache: Cache) -> bool {
         if at % 4096 != 0 || phys % 4096 != 0 {
             return false;
@@ -361,15 +455,15 @@ impl Space {
             ((at >> 12) & 511) as usize,
         );
         let root = self.root;
-        let pdpt = match self.step(root, i4) {
+        let pdpt = match self.step(root, i4, 4) {
             Some(p) => p,
             None => return false,
         };
-        let pd = match self.step(pdpt, i3) {
+        let pd = match self.step(pdpt, i3, 3) {
             Some(p) => p,
             None => return false,
         };
-        let pt = match self.step(pd, i2) {
+        let pt = match self.step(pd, i2, 2) {
             Some(p) => p,
             None => return false,
         };
@@ -708,5 +802,74 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
         crate::cpu::read_cr3() & ADDR_MASK == boot,
     ));
 
+
+    // ---- demand paging ----
+    //
+    // A promised page has to be supplied by a *real* fault, so the claim that
+    // earns its place writes straight through a pointer to one: the fault,
+    // `populate` and the stub's `iretq` back to the faulting instruction are
+    // the only way that write can land. The rest pin what the leaf says
+    // before, during and after.
+    use super::paging::{self as pg, Perm};
+    let rw = Perm::USER_RW;
+    let none = Perm { present: false, write: false, exec: false, user: true };
+    let base = WINDOW + 0x7000_0000;
+    let (a, b, c) = (base, base + 4096, base + 8192);
+    let promised = space.promise_page(a, rw) && space.promise_page(b, rw) && space.promise_page(c, rw);
+    out.push(("three pages can be promised in the window", promised));
+    let raw = space.leaf(a).unwrap_or(0);
+    out.push((
+        "a promise is a leaf that is not present and has no frame",
+        pg::is_promise(raw) && raw & PRESENT == 0 && raw & ADDR_MASK == 0,
+    ));
+    let (asked, supplied, faulted, zero, peer) = space.with(|| {
+        let asked = pg::promised(a, true);
+        // Supplied by asking, as `reachable` does.
+        let supplied = pg::populate(a, true) && unsafe {
+            core::ptr::write_volatile(a as *mut u64, 0x4445_4D41_4E44);
+            core::ptr::read_volatile(a as *const u64) == 0x4445_4D41_4E44
+        };
+        // Supplied by touching it: this write faults, and lands.
+        let faulted = unsafe {
+            core::ptr::write_volatile((b + 8) as *mut u64, 0x544F_5543_48);
+            core::ptr::read_volatile((b + 8) as *const u64) == 0x544F_5543_48
+        };
+        // A supplied page comes zeroed apart from what was written.
+        let zero = unsafe { core::ptr::read_volatile(b as *const u64) } == 0;
+        // And the page beside it is still a promise.
+        let peer = pg::promised(c, false);
+        (asked, supplied, faulted, zero, peer)
+    });
+    out.push(("an untouched promise reports itself as one", asked));
+    out.push(("asking for it supplies a page that holds what is written", supplied));
+    out.push(("a write straight into a promise faults, is supplied, and lands", faulted));
+    out.push(("a supplied page comes zeroed", zero));
+    out.push(("and supplying one page leaves the next a promise", peer));
+    let rb = space.leaf(b).unwrap_or(0);
+    out.push((
+        "a supplied leaf is present and still marked as demand memory, so its owner frees it",
+        rb & PRESENT != 0 && rb & pg::DEMAND != 0 && rb & ADDR_MASK != 0,
+    ));
+    // `mprotect` on a promise changes its rights and nothing else -- written as
+    // an ordinary entry it would map physical page 0.
+    let (kept, refused) = space.with(|| {
+        let ok = pg::protect(c, 4096, none);
+        let kept = ok && pg::is_promise(pg::leaf(c).unwrap_or(0));
+        let refused = !pg::promised(c, false) && !pg::populate(c, false);
+        (kept, refused)
+    });
+    out.push(("protecting a promise keeps it a promise, with no frame", kept));
+    out.push(("and a PROT_NONE promise is refused rather than supplied", refused));
+    let mut freed = 0;
+    for p in [a, b, c] {
+        let e = space.take_leaf(p);
+        let f = e & ADDR_MASK;
+        if f != 0 {
+            pg::release_to_heap(f, 4096);
+            unsafe { alloc::alloc::dealloc(f as *mut u8, alloc::alloc::Layout::from_size_align_unchecked(4096, 4096)) };
+            freed += 1;
+        }
+    }
+    out.push(("the two supplied frames, and only those, come back off the leaves", freed == 2));
     out
 }

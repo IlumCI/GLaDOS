@@ -70,6 +70,22 @@ pub fn begin_session() {
     }
     super::syscall::set_env(&alloc::format!("DBUS_SESSION_BUS_ADDRESS={}", SESSION_BUS));
     super::syscall::set_env(&alloc::format!("XDG_RUNTIME_DIR={}", RUNTIME_DIR));
+    // What a desktop session on this machine is, said once here rather than
+    // by every caller. Each was a hurdle found by hand: no `HOME` and a
+    // program writes its profile into whatever directory it was started in;
+    // GTK 4 asks for a GL renderer there is no driver for; Qt and GDK probe
+    // for X11 first and LibreOffice picks its toolkit by guessing the desktop
+    // it is on. `linux env` still overrides any of them for one run.
+    for e in [
+        "HOME=/root",
+        "GDK_BACKEND=wayland",
+        "QT_QPA_PLATFORM=wayland",
+        "SAL_USE_VCLPLUGIN=gtk3",
+        "GSK_RENDERER=cairo",
+        "XDG_SESSION_TYPE=wayland",
+    ] {
+        super::syscall::set_env(e);
+    }
     load();
 }
 

@@ -6939,6 +6939,146 @@ The trip order is the checklist: `iwx`, `iwx probe`, `fw`, `iwx boot`,
 (`nc -l 4444 > trip.log`) -- which needs a second machine, since the GF63 is
 also the development host.
 
+### Office work: the model in LibreOffice (`src/office.rs`, `src/dev/typist.rs`)
+
+The in-kernel model doing office work through an unmodified LibreOffice
+from the root image. Shell verb `office`, and the Office window (Start >
+Office, or `office ui`):
+
+```
+office write <what>          the model drafts it, typed into Writer as it is generated
+office calc <what>           the model builds a table; a .fods with =SUM totals, opened in Calc
+office summarize <path> [--type]   LibreOffice reads the document, the model summarises it
+office read|convert <path> [fmt]   headless LibreOffice, on a profile of its own
+office keys <text>           type into the focused window (\t and \n spelt out)
+office bench [dir] [from] [count] [--oracle]   SpreadsheetBench, scored
+```
+
+**The model reaches the document as keystrokes.** `dev::typist` turns text
+into set-1 scancodes through `kbd::inject_scancode`, the path `linux feed`
+uses, so the focused Wayland client cannot tell it from a person: Writer,
+foot, GTK, Qt alike. The model's output is tapped (`ai::set_tap`) and typed
+as it streams. One character per tick.
+
+**Calc is written as a file, not typed.** Tab, which moves a person to the
+next cell, left LibreOffice's GTK frame with the cell still open and every
+key after it lost. So the model writes `| a | b |` rows, the kernel repairs
+what a small model gets wrong (a name and its amount fused into one cell,
+doubled pipes, an abbreviated row, its own total), converts its A1 formulas
+to ODF (`=B2*12` is `of:=[.B2]*12`) and writes a flat ODS with a styled
+header and a Total row of `=SUM`s -- the spreadsheet does the arithmetic,
+which a 0.6B is bad at and a formula is not.
+
+Things that had to be true, each found by a run:
+
+- **The profile is seeded before LibreOffice first starts** (`seed_profile`):
+  Calc's AutoInput and Writer's word completion off (Tab and Enter accept a
+  guess, and a typist cannot see one), and **ODF files recalculated on load**
+  -- Calc trusts cached values by default and a written sheet has none, so
+  every total read zero.
+- **A first launch exits 81** to restart itself (the `soffice` script does
+  that; `soffice.bin` does not), so every launch here is retried, and a
+  second launch while one runs hands its request over the pipe and exits 0,
+  which is not a failure (`start_app`).
+- **Keys typed before a client notices it has focus were discarded.** The
+  server reset its key cursor to "now" when it noticed; it uses the moment
+  the focus moved (`input::mark_focus`, set in `Desktop::raise`).
+- **Headless LibreOffice runs on `svp`, not on the session's GTK.** The
+  session sets `SAL_USE_VCLPLUGIN=gtk3` for every program and LibreOffice
+  honours it even under `--headless`: each conversion brought GTK up, GTK
+  started helpers through `sh` until fork failed, and a launch took two
+  minutes. `linux::start_job_env` gives one job its own overrides, applied on
+  its own task just before the loader reads them (the `execve` override).
+  Flipping the global value around the launch was tried first and raced the
+  loader, so some launches still came up on GTK.
+- **A session's teardown holds the guest lock.** It closes the session's
+  descriptors, which borrows every pipe, while the far end -- dbus-daemon,
+  talking to every LibreOffice -- may be reading one on another core inside
+  a syscall: "RefCell already borrowed" in `unix::read`, a kernel panic, the
+  first time a benchmark ran LibreOffice beside a busy bus. `teardown` and
+  `release_guest` take the lock themselves now.
+- **The EROFS reader caches blocks** (`erofs::CACHE`, 128 MiB, 4 KiB
+  blocks, oldest out first). Nothing was cached: every path component was
+  an NVMe command and every library a program maps was read off the disk
+  again on every launch. The image is read-only, so a cached block cannot go
+  stale.
+- **A macro takes no argument in its URL.** `macro:///...View("path")` ran
+  and wrote nothing, where the same call made from Basic worked (measured on
+  the host). `bench.bas` reads fixed job files under `/tmp/office/bench/`,
+  one tab-separated record per task, **one launch per phase for the whole
+  batch** -- a guest launch costs most of a minute, and per-task launches
+  made the 123 tasks a day long. Each record writes its own output and
+  carries its own error handler, so one workbook that will not open costs
+  one task.
+
+**SpreadsheetBench** (Ma et al., NeurIPS 2024, CC BY-SA 4.0): Excel-forum
+questions with input and answer workbooks, two or three test cases each,
+solved only when all pass. `out/bench/stage.py` (local, like the dataset)
+puts the cell-level tasks on the guest disk at `/bench/sb`. `bench.bas`, in
+the headless profile's Standard library, is the judge: the formula goes in
+the first answer cell, is copied to every other cell of the range (a copy
+adjusts relative references exactly as a drag does), the book is
+recalculated and compared cell by cell, an error matching only the same
+error. An array formula `{=...}` is tried both ways -- one array per cell,
+copied down as a person copies one, and one array over the whole range --
+and either passing counts, the generous reading of a formula that does not
+say which. `--oracle` answers with the reference formula the answer workbook
+keeps, which is the ceiling this harness can measure and the proof it can say
+"solved"; on the host, task 59196's reference passes all three cases and `=D3`
+fails all three, and the first ten tasks' references solve seven. The other
+three are the protocol's limits, not the checker's: an answer with a
+different formula per row, an answer workbook that leaves part of its range
+empty, and an answer kept as a plain value. Across all 123 on the host the
+reference formulas solve **105 (326 of 369 cases)**: the ceiling.
+
+**The guest scored 0 where the host scored 105, and it was the disk, not
+the kernel.** In the guest the workbooks are on the read-only FAT mount, so
+LibreOffice opened every input as a read-only document -- on which one cell's
+formula still goes in while `fillAuto`, `copyRange` and `setArrayFormula`
+silently do nothing: H3 right, H4 holding no formula at all. Reproduced on the
+host by making the same files read-only, and fixed by opening inputs with
+`AsTemplate` (`OpenEditable`), an untitled editable copy. Threaded formula
+groups were suspected first and are off in the judge's profile anyway
+(`seed_profile_at`), so a judge computes every formula the same way
+everywhere. The cost is **open**: a guest LibreOffice spent 80 s on one task
+the host does in about one, mostly waiting -- `openat` 2.4 ms and `mmap`
+1.2 ms each under the guest lock, 190 s of lock-waiting summed over threads,
+and a ring-3 hot spot in one 256-byte region of the main thread.
+
+**Why the model was slow beside LibreOffice, in three parts, each measured:**
+
+- `generate` fed the prompt a token at a time, and `office` prompts are
+  mostly prompt. It prefills now, and `Mat::matvec_batch` splits by row
+  across cores (`batch_rows`): each core streams its own rows once, so the
+  traffic is one core's and the arithmetic is shared. `logits` over 24 ids:
+  97 ms a token on one core, 22 split, top five bit-identical.
+- Every syscall woke every napping guest waiter. `may_wake` limits it to the
+  calls that can change what a waiter waits on, and a waiter whose
+  descriptors only a syscall can change naps up to `NAP_MAX` (100 ms)
+  instead of a tick (`needs_tick` names the rest: timers, sockets, devices).
+- Guest threads ran on core 0 beside every kernel task. `task::PIN_NOT_BSP`
+  keeps them off it when there is another core (`linux cores any` undoes it).
+
+Still open: with Writer idle, raw decode is about 240 ms a token against 120
+alone, and nothing above explains the difference.
+
+**A task's root is cleared before its tables drop, at every door.** `execve`,
+a forked child's exit and `run`'s own `teardown` each freed a guest's page
+tables while some task's recorded root still named them, and the next switch
+to that task loaded freed tables: a reset with nothing printed, found with
+`drive.py`'s register dump (core 0 in `run`, CR3 a guest root, CR2 in the
+kernel's own `.data`). `teardown` clears the current task's root itself now,
+and `execve` and `fork::body` end the process's other threads and wait for
+them before memory goes. And `Space::split` splits a 1 GiB page into 2 MiB
+ones: it assumed 2 MiB, which made a 1 GiB entry 512 directory entries
+pointing at garbage the day the identity map started using 1 GiB pages.
+
+**And a TLB shootdown waits only for cores on the same root.** It waited on
+every core, five milliseconds each when one had interrupts off, holding the
+guest lock -- LibreOffice reported dozens a launch, always core 0, which no
+longer runs guests. Without PCIDs a CR3 load drops the old root's
+translations, so `lapic::holding` asks only cores whose CR3 names the root.
+
 ### Skywalker: the Wayland server (`src/sky/`)
 
 A Linux program that draws asks a display server, so this is one. It is the

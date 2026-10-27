@@ -111,6 +111,23 @@ pub fn mount(prefix: &str, index: u32) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Find the guests' root filesystem on the attached disks and mount it, the
+/// way a person typed `linux mount / 2` for every session until now.
+///
+/// Every partition is offered to `mount` at `/`, which refuses anything that
+/// is not EROFS, so the first that takes is the root and nothing else is
+/// touched. Answers the partition number, or `None` when there is no root
+/// image -- the ordinary case on a machine without one, and not an error.
+/// Already mounted is answered as the partition it already is.
+pub fn auto_root() -> Option<u32> {
+    if root_mounted() {
+        return Some(0);
+    }
+    let layout = crate::store::block::scan().ok()?;
+    let indices: Vec<u32> = layout.partitions.iter().map(|p| p.index).collect();
+    indices.into_iter().find(|&i| mount("/", i).is_ok())
+}
+
 /// Mount point, kind, and block or cluster size, for the shell.
 pub fn mounts() -> Vec<(String, &'static str, u32)> {
     let _g = big();

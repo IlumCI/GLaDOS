@@ -78,7 +78,11 @@ pub struct Ev {
     pub us: u64,
 }
 
-const CAP: usize = 256;
+/// A thousand events is about two hundred typed characters: a reader that
+/// looks only when its program next enters the kernel can fall that far
+/// behind the typist (`dev::typist`) without losing a key. At 256 it lost
+/// whole rows of a spreadsheet.
+const CAP: usize = 1024;
 
 /// One device's events.
 ///
@@ -146,6 +150,25 @@ fn now_us() -> u64 {
 /// a possessed machine rather than a bug in this file.
 pub fn now_at(d: Dev) -> u64 {
     ring(d).head.load(Ordering::Acquire)
+}
+
+/// Where the keyboard ring stood when the desktop last moved the focus.
+///
+/// A Wayland client only learns it has the focus the next time it enters the
+/// kernel, and it starts reading keys from that moment, so that keys typed
+/// for some other window are not delivered to it. Measured from "the next
+/// time it looked", that discarded everything typed between the focus moving
+/// and the client noticing -- which for the typist, raising a window and
+/// typing into it at once, was everything. Measured from the move itself it
+/// discards exactly what it meant to.
+static FOCUS_MARK: AtomicU64 = AtomicU64::new(0);
+
+pub fn mark_focus() {
+    FOCUS_MARK.store(KEYS.head.load(Ordering::Acquire), Ordering::Release);
+}
+
+pub fn focus_mark() -> u64 {
+    FOCUS_MARK.load(Ordering::Acquire)
 }
 
 pub fn pending(d: Dev, cursor: u64) -> bool {

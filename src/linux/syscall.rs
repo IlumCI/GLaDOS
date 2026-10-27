@@ -1320,6 +1320,14 @@ pub fn reachable(at: u64, len: usize, need_write: bool) -> bool {
     let Some(end) = at.checked_add(len as u64) else { return false };
     let mut page = at & !(PAGE - 1);
     while page < end {
+        // A page promised and never touched is the guest's as much as any
+        // other, and the kernel is about to touch it: supplied here rather
+        // than left to a fault at ring 0, so the copy that follows meets an
+        // ordinary page and running out of memory is an `EFAULT` rather than
+        // a halted machine.
+        if crate::mem::paging::promised(page, need_write) && !crate::mem::paging::populate(page, need_write) {
+            return false;
+        }
         match crate::mem::paging::query(page) {
             Some(p) if p.present && (!need_write || p.write) => {}
             _ => {
@@ -1395,7 +1403,26 @@ pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
 /// A guest that exits without unmapping is the ordinary case, not an error --
 /// `exit_group` is how programs end -- so the teardown is where mappings are
 /// actually reclaimed and `munmap` is only the early return of one.
+/// Dismantle the current guest, under the guest lock.
+///
+/// **Under the lock, because the far end of a pipe is somebody else's.**
+/// `run` calls this after the guest has left and the lock with it, and
+/// closing the session's descriptors borrows every pipe it held -- while the
+/// process at the other end of one, on another core and inside a syscall,
+/// can be reading it. dbus-daemon talks to every LibreOffice there is, so a
+/// LibreOffice ending beside a busy bus panicked the kernel: "RefCell already
+/// borrowed" in `unix::read`. Every other touch of a pipe holds the lock;
+/// this one did not.
 pub fn teardown() -> usize {
+    let took = big_take();
+    let freed = teardown_locked();
+    if took {
+        big_unlock();
+    }
+    freed
+}
+
+fn teardown_locked() -> usize {
     // **Before anything else, and unconditionally for this session.** A guest
     // that took the display and then faulted is exactly the case this has to
     // cover, and a release conditional on a tidy exit would leave the desktop
@@ -1413,6 +1440,23 @@ pub fn teardown() -> usize {
         super::fork::reset(s);
     }
     let mut freed = 0;
+    // **Off the guest's root before its tables go**, here and not only in
+    // the callers. `run` calls this and its caller clears the task's root
+    // afterwards -- with the session's trace printed in between, a window a
+    // timer tick lands in. `Space::drop` moves this core's CR3 away, but the
+    // task's own record still named the freed tables, and the next switch
+    // back to it loaded them: core 0 in `run`, on a guest root, reading the
+    // kernel's own statics through page tables back in the heap, and a reset
+    // with nothing printed. `execve` had the same hole and closes it the
+    // same way; doing it here closes it for every door at once.
+    unsafe {
+        if let Some(root) = guest_slot().as_ref().and_then(|sp| sp.tables.as_ref()).map(|t| t.root()) {
+            let me_t = crate::task::current();
+            if crate::task::root_of(me_t) == root {
+                crate::task::set_root(me_t, 0);
+            }
+        }
+    }
     unsafe {
         if let Some(sp) = guest_slot().as_mut() {
             // A guest that writes and exits without closing is the ordinary
@@ -1435,6 +1479,9 @@ pub fn teardown() -> usize {
                 if m.from == Source::Paged {
                     free_paged(sp, m.at, page_up(m.len) as u64);
                 } else {
+                    if m.from == Source::Copied {
+                        free_leaves(sp, m.at, page_up(m.len) as u64, true);
+                    }
                     give_back(m.at, m.len, Some(m.from));
                 }
                 freed += 1;
@@ -1499,6 +1546,16 @@ pub fn teardown() -> usize {
 /// The caller must already be off this entry's root; dropping the entry drops
 /// the tables.
 pub fn release_guest(i: usize) {
+    // Under the lock for `teardown`'s reason: a child's descriptors are
+    // pipes whose far ends other processes may be using right now.
+    let took = big_take();
+    release_guest_locked(i);
+    if took {
+        big_unlock();
+    }
+}
+
+fn release_guest_locked(i: usize) {
     let Some(mut sp) = (unsafe { slot_at(i) }).take() else { return };
     for slot in sp.fds.iter_mut() {
         if let Some(f) = slot.take() {
@@ -1510,6 +1567,9 @@ pub fn release_guest(i: usize) {
         if m.from == Source::Paged {
             free_paged(&mut sp, m.at, page_up(m.len) as u64);
         } else {
+            if m.from == Source::Copied {
+                free_leaves(&mut sp, m.at, page_up(m.len) as u64, true);
+            }
             give_back(m.at, m.len, Some(m.from));
         }
     }
@@ -3129,6 +3189,52 @@ pub(super) fn wait_turn() {
 /// wait cost at least a tick: a 32-bit game on Zink spent 23 ms a poll in 993
 /// polls over twenty seconds. Such a waiter yields instead and looks again.
 pub(super) fn wait_turn_for(device: bool) {
+    wait_turn_nap(device, 1)
+}
+
+/// The longest a waiter naps before looking again, when nothing it watches
+/// can change except through a syscall.
+///
+/// **A tick was the nap for everybody, and an idle LibreOffice is what it
+/// cost.** Twenty threads each waking a hundred times a second to look at a
+/// condition nothing had changed, every look taking the guest lock: profiled,
+/// 17.5 seconds of lock-waiting in 12 seconds of wall time, all of it
+/// spinning, on the very cores the model's matrix helpers run on in their
+/// idle time -- and decode ran at a tenth of its speed with a word processor
+/// open and nobody touching it. A waiter is woken the moment a call that can
+/// change what it waits on finishes (`may_wake`), so the nap's own length
+/// only matters for what no syscall announces; `needs_tick` names those and
+/// they keep a tick.
+pub(super) const NAP_MAX: u64 = 10;
+
+/// Whether a descriptor can become ready with no syscall to say so -- a
+/// timer expiring, a key or a packet arriving, a fence signalling, audio
+/// draining -- so a waiter watching it must keep looking every tick.
+pub(super) fn needs_tick(fd: u64) -> bool {
+    use super::fs::Fd;
+    with_fds(|t, _| match t.get(fd as usize) {
+        Some(Some(Fd::Timer(_))) | Some(Some(Fd::Socket(_))) | Some(Some(Fd::Epoll(_))) => true,
+        Some(Some(Fd::Dev(b))) => !matches!(b.borrow().node, super::dev::Node::Null | super::dev::Node::Zero | super::dev::Node::Random),
+        _ => false,
+    })
+    .unwrap_or(true)
+}
+
+/// The nap a waiter should take: a tick if it watches something only time or
+/// a device can change, otherwise up to `NAP_MAX`, and never past its own
+/// deadline.
+pub(super) fn nap_ticks(short: bool, start: u64, limit: Option<u64>) -> u64 {
+    if short {
+        return 1;
+    }
+    let left = match limit {
+        Some(l) => (start + l).saturating_sub(crate::dev::lapic::ticks()),
+        None => NAP_MAX,
+    };
+    left.clamp(1, NAP_MAX)
+}
+
+pub(super) fn wait_turn_nap(device: bool, ticks: u64) {
     let held = holds_big();
     let me = crate::task::current();
     let nap = !device && NAP.load(Ordering::Relaxed) && me < crate::task::MAX_TASKS;
@@ -3144,7 +3250,7 @@ pub(super) fn wait_turn_for(device: bool) {
         // kept rather than lost (`task::wake` on a task not yet asleep).
         NAPPING[me].store(true, Ordering::Release);
         NAPPERS.fetch_add(1, Ordering::AcqRel);
-        crate::task::set_wake(crate::dev::lapic::ticks() + 1);
+        crate::task::set_wake(crate::dev::lapic::ticks() + ticks.max(1));
     }
     if held {
         big_unlock();
@@ -3303,7 +3409,7 @@ pub fn tlb_shootdown() {
     if crate::smp::online() <= 1 || !FEAT_SHOOT.load(Ordering::Relaxed) {
         return;
     }
-    crate::dev::lapic::shootdown();
+    crate::dev::lapic::shootdown(crate::cpu::read_cr3() & crate::mem::paging::ADDR_MASK);
 }
 
 pub(super) fn sleep_for(sec: u64, nsec: u64) -> u64 {
@@ -3836,6 +3942,7 @@ pub(super) fn sys_epoll_wait(epfd: u64, evs: u64, maxevents: u64, timeout: u64) 
         let out = unsafe { core::slice::from_raw_parts_mut(evs as *mut u8, bytes) };
         let mut n = 0usize;
         let mut fired: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        let short = entries.iter().any(|w| needs_tick(w.fd));
         for w in &entries {
             if n >= maxevents as usize {
                 break;
@@ -3872,7 +3979,7 @@ pub(super) fn sys_epoll_wait(epfd: u64, evs: u64, maxevents: u64, timeout: u64) 
         }
         // The display server answers while its client waits.
         crate::sky::server::pump();
-        wait_turn();
+        wait_turn_nap(false, nap_ticks(short, start, limit));
     }
 }
 
@@ -4110,7 +4217,7 @@ pub(super) fn sys_accept4(fd: u64, addr: u64, alen: u64, flags: u64) -> u64 {
                 if unsafe { kill_if_overdue() } {
                     return EAGAIN;
                 }
-                wait_turn();
+                wait_turn_nap(false, if needs_tick(fd) { 1 } else { NAP_MAX });
             }
         }
     }
@@ -5799,6 +5906,7 @@ pub(super) fn do_poll(fds: u64, nfds: u64, limit: Option<u64>) -> u64 {
     }
     let bytes = nfds as usize * PFD_LEN;
     let start = crate::dev::lapic::ticks();
+    let mut short = false;
     loop {
         // Writable, because `revents` is written back into the guest's own
         // array: the guest keeps one array across many calls and the kernel
@@ -5818,6 +5926,9 @@ pub(super) fn do_poll(fds: u64, nfds: u64, limit: Option<u64>) -> u64 {
             // A negative descriptor is skipped with its answer cleared. That
             // is how a program switches one entry off without rebuilding its
             // array, and refusing it would break every caller that does.
+            if raw >= 0 && !short {
+                short = needs_tick(raw as u64);
+            }
             let rev = if raw < 0 {
                 0
             } else {
@@ -5849,7 +5960,11 @@ pub(super) fn do_poll(fds: u64, nfds: u64, limit: Option<u64>) -> u64 {
         }
         // The display server answers while its client waits.
         crate::sky::server::pump();
-        wait_turn_for(polls_fence(fds, nfds));
+        if polls_fence(fds, nfds) {
+            wait_turn_for(true);
+        } else {
+            wait_turn_nap(false, nap_ticks(short, start, limit));
+        }
     }
 }
 
@@ -7402,16 +7517,22 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
                     arena_report(sp);
                     return None;
                 };
+                // **Promised, not allocated.** Each page is a leaf that says
+                // what it will be, and the first touch supplies a zeroed frame
+                // (`paging::populate`, from the fault handler or from
+                // `reachable`). Backing it all here is what made one GTK 4
+                // program's thread arenas -- 128 MiB reserved apiece, a few
+                // pages used -- run the heap dry. Zeroing is free this way
+                // too: a supplied page is zeroed when it is supplied.
+                let perm = crate::mem::paging::Perm {
+                    present: prot != 0,
+                    write: prot & PROT_WRITE != 0,
+                    exec: prot & PROT_EXEC != 0,
+                    user: true,
+                };
                 let mut off = 0u64;
                 while off < want {
-                    let ok = alloc_pages(4096).is_some_and(|p| {
-                        sp.tables.as_mut().is_some_and(|t| t.map_page(at + off, p, true, true))
-                            || {
-                                free_pages(p, 4096);
-                                false
-                            }
-                    });
-                    if !ok {
+                    if !sp.tables.as_mut().is_some_and(|t| t.promise_page(at + off, perm)) {
                         free_paged(sp, at, off);
                         arena_give(sp, at, want);
                         return None;
@@ -7422,15 +7543,6 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
             });
             match paged {
                 Some(at) => {
-                    // Fresh pages from the heap carry what the last owner left.
-                    unsafe { core::ptr::write_bytes(at as *mut u8, 0, want as usize) };
-                    let perm = crate::mem::paging::Perm {
-                        present: prot != 0,
-                        write: prot & PROT_WRITE != 0,
-                        exec: prot & PROT_EXEC != 0,
-                        user: true,
-                    };
-                    let _ = crate::mem::paging::protect(at, want as usize, perm);
                     if let Some(sp) = unsafe { guest_slot() }.as_mut() {
                         sp.maps.push(Mapping { at, len: want as usize, from: Source::Paged });
                     }
@@ -7700,6 +7812,9 @@ pub(super) fn sys_munmap(at: u64, len: u64) -> u64 {
             if m.from == Source::Paged {
                 free_paged(sp, m.at, page_up(m.len) as u64);
             } else {
+                if m.from == Source::Copied {
+                    free_leaves(sp, m.at, page_up(m.len) as u64, true);
+                }
                 give_back(m.at, m.len, Some(m.from));
             }
             // An arena address goes back on the free list once its pages have.
@@ -7826,6 +7941,29 @@ pub(super) fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
 /// assembly above, and the `sysv64` pinning is why `rdi` is the frame.
 /// Whether an x86-64 call reads or writes a descriptor, or waits on some:
 /// after these the display server always takes its turn (`pump_after`).
+/// Whether a call can change something another task is waiting on, so the
+/// napping waiters should look again now rather than at the next tick.
+///
+/// **Every call used to wake every waiter**, and an idle LibreOffice showed
+/// what that costs: its threads each call `gettimeofday` and friends in their
+/// loops, each of those woke all the others, and each woken thread looked,
+/// found nothing and napped again -- 26,000 switches a second from a word
+/// processor with nobody typing, while the model decoding beside it ran at a
+/// quarter of its speed. A clock read, an `mmap`, a `poll` that found nothing
+/// change nothing anybody waits on.
+///
+/// A call left off this list is not a lost wake, only a slower one: every
+/// nap ends at the next tick regardless, so the cost of a miss is at most ten
+/// milliseconds. The list errs towards waking.
+fn may_wake(nr: u64) -> bool {
+    matches!(
+        nr,
+        0 | 1 | 3 | 16 | 17 | 18 | 19 | 20 | 33 | 40 | 42 | 43 | 44 | 45 | 46 | 47 | 48 | 50
+            | 56 | 57 | 58 | 59 | 60 | 62 | 82 | 87 | 129 | 200 | 202 | 231 | 234 | 263 | 264
+            | 275 | 276 | 286 | 288 | 292 | 295 | 296 | 299 | 307 | 316 | 434 | 435
+    )
+}
+
 fn touches_fd(nr: u64) -> bool {
     // read write close poll readv writev select sendto recvfrom sendmsg
     // recvmsg epoll_wait ppoll epoll_pwait
@@ -8177,7 +8315,9 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
     if matches!(nr, SYS_MMAP | SYS_MUNMAP | SYS_MPROTECT | SYS_BRK | 25 /* mremap */) {
         tlb_shootdown();
     }
-    wake_nappers();
+    if may_wake(nr) {
+        wake_nappers();
+    }
     big_unlock();
     super::prof::leave();
     unsafe { die_if_doomed() };
@@ -8393,15 +8533,38 @@ pub static MAP_NAMES: Racy<Vec<(u64, u64, u64, String)>> = Racy::new(Vec::new())
 
 /// Give back a `Paged` mapping's pages: each one looked up in the guest's
 /// tables, its rights restored and freed, then the translation removed.
+///
+/// Every frame under a `Paged` mapping is its own, supplied or not yet, so the
+/// leaf is read raw: a page the guest `mprotect`ed to `PROT_NONE` has no
+/// present bit and still has a frame, and `phys_of` -- which asks for present
+/// -- leaked it. A promise has no frame and only its leaf goes.
 fn free_paged(sp: &mut Space, at: u64, len: u64) {
+    free_leaves(sp, at, len, false);
+}
+
+/// Give back the frames under `[at, at+len)` and clear their leaves: every
+/// frame when `demand_only` is false, only the ones supplied on demand when it
+/// is true. The second is for a forked child's `Copied` mappings, whose other
+/// pages came from one block in `owned` and go back with it -- while a page
+/// the child touched for the first time after the fork was supplied on its
+/// own and nothing else would free it.
+fn free_leaves(sp: &mut Space, at: u64, len: u64, demand_only: bool) {
     let Some(t) = sp.tables.as_mut() else { return };
     let mut off = 0;
     while off < len {
-        if let Some(phys) = t.phys_of(at + off) {
+        let e = if demand_only {
+            match t.leaf(at + off) {
+                Some(e) if e & crate::mem::paging::DEMAND != 0 => t.take_leaf(at + off),
+                _ => 0,
+            }
+        } else {
+            t.take_leaf(at + off)
+        };
+        let phys = e & crate::mem::paging::ADDR_MASK;
+        if phys != 0 {
             crate::mem::paging::release_to_heap(phys, 4096);
             free_pages(phys, 4096);
         }
-        t.unmap_page(at + off);
         off += 4096;
     }
 }
@@ -8644,6 +8807,10 @@ pub fn take_task_fault(task: usize) -> Option<Fault> {
 /// The one place the flag is set, so the three doors cannot disagree about
 /// it. Cleared on the way back whichever way the guest left -- an exit, a
 /// kill, a fault -- because all of them return here through the longjmp.
+/// Whether guests leave core 0 to the kernel (`task::PIN_NOT_BSP`), or may
+/// run on it too (`linux cores any`).
+pub static SPARE_BSP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
 pub fn as_guest(enter: impl FnOnce() -> u64) -> u64 {
     let t = me();
     DOOM[t].store(0, Ordering::Release);
@@ -8653,7 +8820,8 @@ pub fn as_guest(enter: impl FnOnce() -> u64) -> u64 {
     // shell that ran a guest in the foreground is the shell on core 0 again.
     let pin = crate::task::pin_of(t);
     if SPREAD.load(Ordering::Relaxed) {
-        crate::task::set_pin(t, -1);
+        let pin = if SPARE_BSP.load(Ordering::Relaxed) { crate::task::PIN_NOT_BSP } else { -1 };
+        crate::task::set_pin(t, pin);
     }
     let code = enter();
     // Every way out of a guest lands here, the longjmps included, and one of
@@ -9448,8 +9616,12 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // its reason, and what it cost is every `fts`-based program: `find`,
     // `rm -r`, `du` and `cp -r` all stop at the first subdirectory.
     //
-    // `/lib` is the directory used because it is seeded at every boot, so this
-    // needs no store mounted and no guest staged.
+    // A file of its own under `/tmp`, made here: `/tmp` is the one tree a
+    // guest sees the same way with or without a root image under it. This
+    // used `/lib`, seeded at every boot -- and under a root image a guest's
+    // `/lib` is the image's, so the claims failed the first time one was
+    // mounted at boot, about a fixture rather than about `openat`.
+    let _ = crate::sysbox::write_blob("/tmp/dfd/geom.txt", alloc::vec![b'x']);
     {
         let mut buf = [0u8; 512];
         let at = buf.as_mut_ptr() as u64;
@@ -9459,17 +9631,17 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         // Three disjoint slices of the one region: the paths have to live
         // inside what the guest owns, because `read_cstr` bounds-checks them
         // like any other guest pointer, and a `stat` writes 144 bytes.
-        let dir_p = at;            // "/lib"
-        let rel_p = at + 32;       // "geom.ai&xi"
-        let abs_p = at + 64;       // "/lib/geom.ai&xi"
+        let dir_p = at;            // "/tmp/dfd"
+        let rel_p = at + 32;       // "geom.txt"
+        let abs_p = at + 64;       // "/tmp/dfd/geom.txt"
         let sbuf = at + 256;
         let put = |off: usize, text: &str, b: &mut [u8; 512]| {
             b[off..off + text.len()].copy_from_slice(text.as_bytes());
             b[off + text.len()] = 0;
         };
-        put(0, "/lib", &mut buf);
-        put(32, "geom.ai&xi", &mut buf);
-        put(64, "/lib/geom.ai&xi", &mut buf);
+        put(0, "/tmp/dfd", &mut buf);
+        put(32, "geom.txt", &mut buf);
+        put(64, "/tmp/dfd/geom.txt", &mut buf);
 
         let fd = sys_openat(super::fs::AT_FDCWD as u64, dir_p, O_DIRECTORY, 0);
         out.push(("a directory opens, which is what a relative path is resolved against", (fd as i64) > 2));
@@ -9502,19 +9674,20 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         // path, which names its parent in its own text. The refusal cost a
         // real program its data directory: the Source engine resolves
         // `bin/../game` and reported its game as not installed.
-        put(32, "../lib/geom.ai&xi", &mut buf);
+        put(32, "../dfd/geom.txt", &mut buf);
         out.push((
             "a relative path may step back with .. , which drops a component",
             sys_statat(fd, rel_p, sbuf, 0) == 0,
         ));
         // And it cannot climb past the root, which is where Linux stops too.
-        put(32, "../../../../lib/geom.ai&xi", &mut buf);
+        put(32, "../../../../tmp/dfd/geom.txt", &mut buf);
         out.push((
             "and stepping back past the root stays at the root",
             sys_statat(fd, rel_p, sbuf, 0) == 0,
         ));
         teardown();
     }
+    let _ = crate::sysbox::detach("/tmp/dfd");
 
     // `nanosleep`, which was the one wait in this kernel that genuinely spun:
     // `while ticks() < until { spin_loop() }`, no yield in it at all. One

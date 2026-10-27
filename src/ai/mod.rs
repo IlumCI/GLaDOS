@@ -1476,7 +1476,20 @@ pub fn echo_end() -> Option<alloc::string::String> {
     unsafe { (*ECHO.get()).take() }
 }
 
+/// Where the clean text goes besides the screen, while somebody wants it:
+/// `office` sets the typist here, so the model's draft is typed into a
+/// document as it is generated. A plain `fn`, so nothing borrowed can outlive
+/// the call that set it; cleared by the same caller when the generation ends.
+static TAP: Racy<Option<fn(&str)>> = Racy::new(None);
+
+pub fn set_tap(f: Option<fn(&str)>) {
+    unsafe { *TAP.get() = f };
+}
+
 fn echo(s: &str) {
+    if let Some(f) = unsafe { *TAP.get() } {
+        f(s);
+    }
     if let Some(buf) = unsafe { (*ECHO.get()).as_mut() } {
         if buf.len() + s.len() <= ECHO_CAP {
             buf.push_str(s);
@@ -1830,10 +1843,33 @@ pub fn generate(prompt: &str, opts: &GenOpts) {
         let t0 = crate::time::rdtsc();
         console::set_color(LTCYAN);
 
+        // **The prompt in one pass, when nothing needs it echoed.** Fed a
+        // token at a time, every prompt token cost a full stream of the
+        // weights, and a chat prompt is mostly prompt: `office write` spent
+        // longer on its 120-token instructions than on the 63-token letter it
+        // wrote, and a document to summarise would have been minutes before
+        // the first word. `prefill` streams each matrix once per chunk and is
+        // bit-identical to the loop, so the logits it leaves are exactly the
+        // ones the last forward below would have left -- which is why the
+        // first iteration samples from them rather than running a forward.
+        //
+        // `gen` echoes its prompt as it is fed, and keeps the loop for that.
+        let mut primed = false;
+        if !opts.echo_prompt && prompt_tokens.len() > 1 {
+            pos = e.model.prefill(&mut e.state, &prompt_tokens, pos);
+            fed = prompt_tokens.len();
+            token = prompt_tokens[prompt_tokens.len() - 1];
+            primed = true;
+        }
+
         while pos < cap && generated < opts.steps {
-            e.model.forward(&mut e.state, token, pos);
-            pos += 1;
-            fed += 1;
+            if primed {
+                primed = false;
+            } else {
+                e.model.forward(&mut e.state, token, pos);
+                pos += 1;
+                fed += 1;
+            }
 
             // While the prompt lasts we already know the next token; the
             // forward pass still had to happen, because it is what fills the

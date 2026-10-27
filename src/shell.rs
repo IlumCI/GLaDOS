@@ -5559,6 +5559,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 );
             }
         }
+        // The model doing office work through LibreOffice -- see `office`.
+        "office" => crate::office::command(rest),
         "launch" => match crate::apps::launch(rest.trim()) {
             Ok(id) => kprintln!("  [job {}] {} started", id, rest.trim()),
             Err(why) => kprintln!("  {}", why),
@@ -7543,7 +7545,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 "cores" => {
                     match words.next() {
                         Some("one") => linux::syscall::SPREAD.store(false, core::sync::atomic::Ordering::Relaxed),
-                        Some("all") => linux::syscall::SPREAD.store(true, core::sync::atomic::Ordering::Relaxed),
+                        Some("all") => {
+                            linux::syscall::SPREAD.store(true, core::sync::atomic::Ordering::Relaxed);
+                            linux::syscall::SPARE_BSP.store(true, core::sync::atomic::Ordering::Relaxed);
+                        }
+                        Some("any") => {
+                            linux::syscall::SPREAD.store(true, core::sync::atomic::Ordering::Relaxed);
+                            linux::syscall::SPARE_BSP.store(false, core::sync::atomic::Ordering::Relaxed);
+                        }
                         _ => {}
                     }
                     kprintln!(

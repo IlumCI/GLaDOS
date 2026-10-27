@@ -36,7 +36,9 @@ just runs.
 decorations, focus (`0743f6a`). LibreOffice, foot and bash, and a GTK 4 app
 all start. What stops several GUI apps at once is memory:
 
-- **Demand paging for anonymous `mmap` -- next.** glibc gives each thread a
+- **Demand paging for anonymous `mmap` -- done (2026-10-27).** Three GUI
+  programs at once now sit in 443 MB of heap where two ran 4 GB dry. The plan
+  below is what was built. glibc gives each thread a
   malloc arena by mapping 128 MiB `PROT_NONE` and trimming it to 64 MiB;
   Mesa, Qt and every thread stack reserve large and touch little. Here
   `sys_mmap` backs every page up front (the `anon_paged` branch, a page at a
@@ -106,6 +108,18 @@ renders its escape codes.
     loaded all its libraries, made its profile, and then aborted with an
     uncaught `uno::RuntimeException`. That is being traced now.
   - Then the GUI on Skywalker, through LibreOffice's gtk3 or qt6 Wayland plugin.
+- **Done (2026-10-27): `office`.** The in-kernel model drafts into Writer as
+  keystrokes (`dev::typist`), builds Calc sheets as `.fods` files with `=SUM`
+  totals, and summarises and converts documents through headless LibreOffice.
+  There's an Office window under Start. CLAUDE.md has the details and what
+  each piece cost.
+- **Measured: SpreadsheetBench** (cell-level, 123 tasks, `office bench`),
+  with an oracle arm for the harness's ceiling. The score is in the commit and
+  in CLAUDE.md. Next for the score: a bigger model (the Qwen3.5-2B payload)
+  once hybrid prefill is batched; and Excel structured table references,
+  which LibreOffice evaluated to 0 in the guest.
+- **Open: an idle LibreOffice still halves decode speed** (120 -> 240 ms a
+  token), and nothing measured yet explains it.
 - **The model doing office tasks.** Headless conversion and filling a document
   from a template are things the agent can call. Two rules:
   - An action that writes is gated like every other mutating applet.

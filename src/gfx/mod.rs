@@ -73,6 +73,7 @@ pub mod uidoc;
 pub mod desk;
 pub mod agentwin;
 pub mod mindwin;
+pub mod officewin;
 
 /// A program that owns a window's client area.
 ///
