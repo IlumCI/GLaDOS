@@ -365,10 +365,27 @@ static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 /// What a worker runs: `(ctx, lo, hi)` over a half-open row range.
 pub type ChunkFn = unsafe fn(usize, usize, usize);
 
+/// Run chunks with interrupts masked, on whichever core.
+///
+/// The helpers are each core's idle task, so a timer tick with a guest
+/// thread ready preempted a helper *holding a claimed chunk*, and the caller
+/// spun on that one chunk until the scheduler came back to the idle task --
+/// a tick at least, several under load. Beside a running LibreOffice that was
+/// prefill at 69 ms a token against 22 on a quiet boot, and decode at a
+/// 1,960-token context at 2.6 s a token. A chunk is microseconds to a few
+/// milliseconds of arithmetic and a core's share of a job is a handful of
+/// them, which is the longest any interrupt now waits; the caller's wait for
+/// `DONE` stays preemptible.
 fn claim_and_run() {
+    let flags: u64;
+    // No options: `pushfq` writes to the stack.
+    unsafe { core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags) };
     ACTIVE.fetch_add(1, Ordering::AcqRel);
     claim_inner();
     ACTIVE.fetch_sub(1, Ordering::AcqRel);
+    if flags & (1 << 9) != 0 {
+        crate::cpu::enable_interrupts();
+    }
 }
 
 fn claim_inner() {

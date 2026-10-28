@@ -326,7 +326,10 @@ fn start(work: Work, flags: u64, ptid: u64) -> Result<u64, u64> {
     // The task is spawned on first use and kept afterwards. A machine that
     // never runs a threaded guest spawns none of these.
     let have = unsafe { (*SLOTS.get())[idx].task };
-    if have.is_none() {
+    if let Some(t) = have {
+        // A parked pool task sleeps until this.
+        crate::task::wake(t);
+    } else {
         let Some(t) = crate::task::spawn("guest thread", body) else {
             let s = unsafe { &mut *SLOTS.get() };
             s[idx].work = None;
@@ -398,10 +401,18 @@ fn body() {
         let work = my_slot().and_then(|i| unsafe { (*SLOTS.get())[i].work });
         crate::linux::syscall::big_unlock();
         let Some(w) = work else {
-            // Parked. `hlt` rather than a spin, so an idle pool costs one
-            // wake-up per timer tick instead of every scheduler round.
-            crate::port::idle();
-            crate::task::yield_now();
+            // Parked, and genuinely asleep: `clone` wakes this task when it
+            // fills the slot. It was a `hlt` and a yield, which kept the task
+            // *running* -- holding its core in `hlt` until the next tick, then
+            // ready again -- and an idle task only runs when nothing else is
+            // ready. The idle tasks are the matrix helpers, so six parked pool
+            // tasks left after LibreOffice shut five cores out of every
+            // matvec: one `logits` went from 21 to 51 ms a token. The second
+            // is a backstop, not the mechanism.
+            let slot = my_slot();
+            crate::task::sleep_until_or(crate::dev::lapic::ticks() + crate::TIMER_HZ as u64, || {
+                slot.is_some_and(|i| unsafe { (*SLOTS.get())[i].work.is_some() })
+            });
             continue;
         };
         let stack = my_slot().map(|i| unsafe { (*SLOTS.get())[i].stack }).unwrap_or(0);

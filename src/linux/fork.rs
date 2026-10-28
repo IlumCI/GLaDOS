@@ -521,7 +521,9 @@ fn fork_with(f: &Frame, stack: Option<u64>, settid: Option<u64>) -> u64 {
     LIVE.fetch_add(1, Ordering::Release);
 
     let have = unsafe { (*SLOTS.get())[idx].task };
-    if have.is_none() {
+    if let Some(t) = have {
+        crate::task::wake(t);
+    } else {
         let Some(t) = crate::task::spawn("guest child", body) else {
             let s = unsafe { SLOTS.get() };
             s[idx].work = None;
@@ -559,11 +561,13 @@ fn body() {
         };
         crate::linux::syscall::big_unlock();
         let Some(i) = found else {
-            // `hlt` rather than a spin, so an idle pool costs one wake per
-            // timer tick instead of one per scheduler round -- `thread`'s
-            // pool makes the same trade.
-            crate::port::idle();
-            crate::task::yield_now();
+            // Asleep until `fork` fills a slot for this task, for the reason
+            // `thread`'s pool gives: a parked task kept in `hlt` and a yield
+            // is a running task, and it keeps the core's idle task -- a matrix
+            // helper -- from ever being scheduled.
+            crate::task::sleep_until_or(crate::dev::lapic::ticks() + crate::TIMER_HZ as u64, || {
+                unsafe { SLOTS.get() }.iter().any(|x| x.task == Some(me) && x.work.is_some())
+            });
             continue;
         };
         let (work, stack, guest, sess) = {
