@@ -7,6 +7,8 @@ REM   View      out, sheet, workbook        -> the sheet's used area as text
 REM   Formula   out, sheet, workbook, cell  -> the formula kept there
 REM   Check     out, sheet, range, formula, then input/answer pairs
 REM                                           -> PASS or FAIL per pair
+REM   Probe     out, sheet, range, input, then candidate formulas
+REM                                           -> what each computes there
 REM
 REM Check is the benchmark's own rule: the model's formula goes into the
 REM first cell of the answer range and is filled across the rest, the way a
@@ -41,6 +43,10 @@ Sub Check
 	Batch(JOBS & "check.job", 2)
 End Sub
 
+Sub Probe
+	Batch(JOBS & "probe.job", 3)
+End Sub
+
 Sub Batch(job As String, kind As Integer)
 	Dim f As Integer, l As String
 	f = FreeFile
@@ -68,6 +74,8 @@ Sub Record(r As Variant, kind As Integer)
 				t = t & OneCase(r(i), r(i + 1), r(1), r(2), r(3)) & Chr(10)
 			Next i
 			WriteText(r(0), t)
+		Case 3
+			WriteText(r(0), Probed(r))
 	End Select
 	Exit Sub
 bad:
@@ -256,15 +264,9 @@ Function OneCase(inp As String, ans As String, sheet As String, rng As String, f
 	End If
 End Function
 
-REM mode 0: the formula in the first cell, filled across the range.
-REM mode 1: an array formula in the first cell, copied to every other cell.
-REM mode 2: one array formula over the whole range.
-Function Attempt(inp As String, ans As String, sheet As String, rng As String, formula As String, mode As Integer) As String
-	Dim d As Object, a As Object, s As Object, sa As Object, r As Object, addr As Object
-	Dim first As Object, row As Object, x As Long, y As Long, ga As Object, gg As Object, body As String
-	d = OpenEditable(inp)
-	s = SheetOf(d, sheet)
-	r = s.getCellRangeByName(rng)
+REM Put a formula over a range the way Attempt's mode says.
+Sub Fill(s As Object, r As Object, formula As String, mode As Integer)
+	Dim addr As Object, first As Object, x As Long, y As Long, body As String
 	addr = r.RangeAddress
 	first = s.getCellByPosition(addr.StartColumn, addr.StartRow)
 	If mode = 0 Then
@@ -297,6 +299,76 @@ Function Attempt(inp As String, ans As String, sheet As String, rng As String, f
 			Next y
 		End If
 	End If
+End Sub
+
+REM What each candidate computes over the answer range of one input workbook,
+REM a line each: "ERR <cell> <text>" at the first error, else "OK" and the
+REM cells' values. No answer workbook is opened: this is what a person could
+REM see by trying the formula, and it is all a choice between candidates may
+REM rest on. The workbook is opened once and the range put back between
+REM candidates, so the next one starts from what the first saw.
+Function Probed(r As Variant) As String
+	On Error GoTo bad
+	Dim d As Object, s As Object, rg As Object, saved As Variant, t As String, i As Integer
+	d = OpenEditable(r(3))
+	s = SheetOf(d, r(1))
+	rg = s.getCellRangeByName(r(2))
+	saved = rg.getFormulaArray()
+	t = ""
+	For i = 4 To UBound(r)
+		t = t & ProbeOne(d, s, rg, r(i)) & Chr(10)
+		rg.setFormulaArray(saved)
+	Next i
+	d.close(True)
+	Probed = t
+	Exit Function
+bad:
+	Probed = t & "ERR probe " & Err & " " & Error$ & Chr(10)
+End Function
+
+REM One candidate, its failure kept to itself: a formula Calc will not take
+REM raises here, and that is an answer about the formula rather than a reason
+REM to lose the candidates after it.
+Function ProbeOne(d As Object, s As Object, rg As Object, f As String) As String
+	On Error GoTo bad
+	Dim addr As Object, x As Long, y As Long, c As Object, ln As String
+	addr = rg.RangeAddress
+	If Left(f, 2) = "{=" And Right(f, 1) = "}" Then
+		Fill(s, rg, f, 1)
+	Else
+		Fill(s, rg, f, 0)
+	End If
+	d.calculateAll()
+	ln = "OK"
+	For y = addr.StartRow To addr.EndRow
+		For x = addr.StartColumn To addr.EndColumn
+			c = s.getCellByPosition(x, y)
+			If c.getError() <> 0 Then
+				ln = "ERR " & ColName(x) & (y + 1) & " " & c.String
+				x = addr.EndColumn
+				y = addr.EndRow
+			Else
+				ln = ln & Chr(9) & Left(c.String, 60)
+			End If
+		Next x
+	Next y
+	ProbeOne = ln
+	Exit Function
+bad:
+	ProbeOne = "ERR fill " & Err
+End Function
+
+REM mode 0: the formula in the first cell, filled across the range.
+REM mode 1: an array formula in the first cell, copied to every other cell.
+REM mode 2: one array formula over the whole range.
+Function Attempt(inp As String, ans As String, sheet As String, rng As String, formula As String, mode As Integer) As String
+	Dim d As Object, a As Object, s As Object, sa As Object, r As Object, addr As Object
+	Dim first As Object, row As Object, x As Long, y As Long, ga As Object, gg As Object, body As String
+	d = OpenEditable(inp)
+	s = SheetOf(d, sheet)
+	r = s.getCellRangeByName(rng)
+	addr = r.RangeAddress
+	Fill(s, r, formula, mode)
 	d.calculateAll()
 	a = OpenBook(ans)
 	If sheet <> "" Then

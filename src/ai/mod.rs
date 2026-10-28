@@ -2336,6 +2336,53 @@ pub fn spawn_agent() -> bool {
 /// produces fluent-looking nonsense rather than an error. Feeding fixed ids and
 /// diffing the logits against the same arithmetic done in numpy turns all of
 /// that into one comparison, with no tokenizer in the way to muddy it.
+/// Several answers to one prompt, for paying the prompt once.
+///
+/// `generate` prefills and decodes one answer; asking it `k` times would
+/// prefill `k` times, and on a 2,000-token spreadsheet prompt the prefill is
+/// most of a minute. Here the prompt is prefilled once, the logits it leaves
+/// are kept, and every draw starts from them at the same position -- each
+/// draw's tokens overwrite the cache slots after the prompt, and attention
+/// reads only the live range, so no draw sees another's.
+///
+/// The first draw is greedy, so the set always contains what `generate` at
+/// temperature zero would have answered. Answers are raw text, stopped at
+/// end of turn or after `steps` tokens; `None` with no model or a busy engine.
+pub fn samples(prompt: &str, k: usize, steps: usize, temperature: f32, topp: f32) -> Option<Vec<alloc::string::String>> {
+    with_engine(|e| {
+        let ids = e.tok.encode(prompt, false, false);
+        if ids.len() < 2 || ids.len() + steps >= e.model.cfg.seq_len {
+            return Vec::new();
+        }
+        let start = e.model.prefill(&mut e.state, &ids, 0);
+        let primed = e.state.logits.clone();
+        let mut out = Vec::with_capacity(k);
+        for draw in 0..k {
+            e.state.logits.copy_from_slice(&primed);
+            let mut pos = start;
+            let mut prev = ids[ids.len() - 1];
+            let mut bytes: Vec<u8> = Vec::new();
+            for _ in 0..steps {
+                let temp = if draw == 0 { 0.0 } else { temperature };
+                let t = sample::sample(&mut e.state.logits, temp, topp, &mut e.rng);
+                if t == e.tok.eos() || t == e.tok.bos() {
+                    break;
+                }
+                e.tok.append_piece(prev, t, &mut bytes);
+                prev = t;
+                if pos >= e.model.cfg.seq_len {
+                    break;
+                }
+                e.model.forward(&mut e.state, t, pos);
+                pos += 1;
+            }
+            out.push(alloc::string::String::from_utf8_lossy(&bytes).into_owned());
+        }
+        e.pos = 0;
+        out
+    })
+}
+
 /// `logits check <n> [seed]`: one sequence two ways, `prefill` against the
 /// token-by-token forward, and every logit compared.
 ///

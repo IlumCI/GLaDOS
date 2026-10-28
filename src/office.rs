@@ -533,7 +533,8 @@ fn draft_at(system: &str, user: &str, steps: usize, sink: Sink, temperature: f32
     out
 }
 
-fn draft_inner(system: &str, user: &str, steps: usize, sink: Sink, temperature: f32) -> Result<String, String> {
+/// One ChatML turn, ready for the assistant to answer.
+fn chat_prompt(system: &str, user: &str) -> String {
     let mut prompt = String::from("<|im_start|>system\n");
     prompt.push_str(system);
     prompt.push_str("<|im_end|>\n<|im_start|>user\n");
@@ -545,6 +546,11 @@ fn draft_inner(system: &str, user: &str, steps: usize, sink: Sink, temperature: 
         // and the reasoning would be typed.
         prompt.push_str("<think>\n\n</think>\n\n");
     }
+    prompt
+}
+
+fn draft_inner(system: &str, user: &str, steps: usize, sink: Sink, temperature: f32) -> Result<String, String> {
+    let prompt = chat_prompt(system, user);
     let opts = crate::ai::GenOpts {
         steps,
         temperature,
@@ -1059,7 +1065,8 @@ const BENCH_BAS: &str = include_str!("office/bench.bas");
 
 const BENCH_SYSTEM: &str = "You are an Excel expert. You are shown a spreadsheet as cells (address=value, with {formula} where a cell has one) and a question about it. \
 Answer with exactly one Excel formula for the cell named, starting with =, which will be filled down and across the answer range the way a formula is dragged. \
-Use relative references so it works when filled. Write only the formula, nothing else.";
+Use relative references so it works when filled. Never refer to the answer cell itself. \
+Write only the formula, with no explanation: for example =SUM(B2:B9) or =IF(C2>0,\"yes\",\"no\").";
 
 /// The headless profile's user directory, where its macros live.
 const HEADLESS_USER: &str = "/tmp/office/profile/user";
@@ -1147,6 +1154,70 @@ fn formula_in(text: &str) -> Option<String> {
     None
 }
 
+/// What a small model wraps around a formula, taken off it.
+///
+/// Measured on the first 40 tasks, where Qwen3-0.6B solved none: about one
+/// answer in three named the answer cell before the formula, as `=C1=LEFT(..)`
+/// or `=B7:B10=SUM(..)`, which Calc reads as a comparison against the cell
+/// itself, a circular reference. Others ended in prose (`=B5 on sheet
+/// Overview`) or restated themselves (`=K27 formula: =C5$C$16`). Only the
+/// target's own name is stripped: `=A1=B1` is a perfectly good formula
+/// whenever A1 is not where it is going.
+fn tidy(f: &str, position: &str) -> String {
+    let mut f = String::from(f.trim());
+    if let Some(i) = f.rfind("formula:") {
+        if let Some(j) = f[i..].find('=') {
+            f = String::from(f[i + j..].trim());
+        }
+    }
+    if let Some(i) = f.find(" on sheet") {
+        f.truncate(i);
+    }
+    let (_, range) = split_position(position);
+    let upper = f.to_ascii_uppercase();
+    let first = String::from(range.split(':').next().unwrap_or(&range)).to_ascii_uppercase();
+    for name in [range.to_ascii_uppercase(), first] {
+        let lead = format!("={}=", name);
+        if upper.starts_with(&lead) && f.len() > lead.len() {
+            f = format!("={}", &f[lead.len()..]);
+            break;
+        }
+    }
+    f
+}
+
+/// Which candidate to keep, from what each computed on the input.
+///
+/// A line is `OK` and the range's values, or `ERR` and where. A candidate is
+/// usable when it computed without error, produced something in at least one
+/// cell, and refers to a cell at all -- a constant can fill a range and say
+/// nothing about the question. Among the usable the most common result wins,
+/// the way independent attempts agreeing is evidence none of them is alone;
+/// ties go to the earlier candidate, so the greedy answer leads. `None` when
+/// nothing is usable, which leaves the greedy answer in place.
+fn choose(candidates: &[String], probed: &[&str]) -> Option<usize> {
+    let refers = |f: &str| {
+        let b = f.as_bytes();
+        (1..b.len()).any(|i| b[i].is_ascii_digit() && b[i - 1].is_ascii_alphabetic())
+    };
+    let usable: Vec<usize> = (0..candidates.len().min(probed.len()))
+        .filter(|&i| {
+            let l = probed[i];
+            l.starts_with("OK")
+                && l.split('\t').skip(1).any(|v| !v.trim().is_empty())
+                && refers(&candidates[i])
+        })
+        .collect();
+    let mut best: Option<(usize, usize)> = None;
+    for &i in &usable {
+        let n = usable.iter().filter(|&&j| probed[j] == probed[i]).count();
+        if best.map_or(true, |(_, m)| n > m) {
+            best = Some((i, n));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
 pub fn bench(arg: &str) -> Result<(), String> {
     let Some(_) = context() else { return Err(crate::ai::engine_refusal()) };
     ready()?;
@@ -1154,10 +1225,34 @@ pub fn bench(arg: &str) -> Result<(), String> {
     // keeps, through the same checker: the ceiling this harness can measure,
     // and the proof that it can say "solved" at all.
     let oracle = arg.split_whitespace().any(|w| w == "--oracle");
+    // `--k N`: N formulas a task, sampled from one prefill, tried on the
+    // input workbook, and the one most of the working candidates agree on
+    // kept. One is the old single greedy answer and probes nothing.
+    let k: usize = arg
+        .split_whitespace()
+        .skip_while(|w| *w != "--k")
+        .nth(1)
+        .and_then(|w| w.parse().ok())
+        .unwrap_or(1)
+        .clamp(1, 32);
     // The directory is optional, so it is peeked rather than taken: `next`
     // then `filter` consumed the first number when no directory was given,
     // and `office bench 0 40` ran from task 40.
-    let mut words = arg.split_whitespace().filter(|w| *w != "--oracle").peekable();
+    let mut skip_next = false;
+    let mut words = arg
+        .split_whitespace()
+        .filter(|w| {
+            if skip_next {
+                skip_next = false;
+                return false;
+            }
+            if *w == "--k" {
+                skip_next = true;
+                return false;
+            }
+            *w != "--oracle"
+        })
+        .peekable();
     let dir = match words.peek() {
         Some(w) if w.starts_with('/') => words.next().unwrap(),
         _ => BENCH_DIR,
@@ -1212,6 +1307,7 @@ pub fn bench(arg: &str) -> Result<(), String> {
     // 2. A formula per task, with nothing else running.
     let seq = context().unwrap_or(2048);
     let mut formulas: Vec<Option<String>> = Vec::new();
+    let mut candidates: Vec<Vec<String>> = Vec::new();
     for (i, t) in tasks.iter().enumerate() {
         let (sheet, range) = split_position(&t[1]);
         let got = read_any(&records[i][0]).unwrap_or_default();
@@ -1234,7 +1330,7 @@ pub fn bench(arg: &str) -> Result<(), String> {
                 view.push_str("\n(the sheet continues)\n");
             }
             let user = format!(
-                "{}\nQuestion: {}\n\nThe answer goes in {}{}. Write the formula for {}.",
+                "{}\nQuestion: {}\n\nThe answer goes in {}{}. Reply with the formula {} should contain.",
                 view.trim_end(),
                 t[3],
                 range,
@@ -1242,9 +1338,63 @@ pub fn bench(arg: &str) -> Result<(), String> {
                 first_cell(&range)
             );
             note(format!("{} ({} of {}): asking the model", t[0], i + 1, tasks.len()));
-            draft_at(BENCH_SYSTEM, &user, 120, Sink::Screen, 0.0).unwrap_or_default()
+            if k > 1 {
+                let drawn = crate::ai::samples(&chat_prompt(BENCH_SYSTEM, &user), k, 120, 0.8, 0.95).unwrap_or_default();
+                let mut seen: Vec<String> = Vec::new();
+                for d in &drawn {
+                    if let Some(f) = formula_in(d).map(|f| tidy(&f, &t[1])) {
+                        // A tab or a newline would split the job record.
+                        let f = f.replace(['\t', '\n', '\r'], " ");
+                        if !seen.contains(&f) {
+                            seen.push(f);
+                        }
+                    }
+                }
+                note(format!("  {} distinct formula(s) from {} draw(s)", seen.len(), drawn.len()));
+                let first = seen.first().cloned().unwrap_or_default();
+                candidates.push(seen);
+                first
+            } else {
+                draft_at(BENCH_SYSTEM, &user, 120, Sink::Screen, 0.0).unwrap_or_default()
+            }
         };
-        formulas.push(formula_in(&said));
+        if k > 1 && !oracle {
+            formulas.push(candidates.last().and_then(|c| c.first().cloned()));
+        } else {
+            formulas.push(formula_in(&said).map(|f| if oracle { f } else { tidy(&f, &t[1]) }));
+        }
+    }
+
+    // 2b. Each task's candidates tried on its first input -- one launch. The
+    // answer workbooks are not opened: what decides is only what trying a
+    // formula shows, and the check below is still the only judge.
+    if k > 1 && !oracle {
+        let probes: Vec<Vec<String>> = tasks
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| candidates[*i].len() > 1)
+            .map(|(i, t)| {
+                let (sheet, range) = split_position(&t[1]);
+                let mut r = alloc::vec![format!("{}/p{}.txt", BENCH_OUT, i), sheet, range, input(&t[0], 1)];
+                r.extend(candidates[i].iter().cloned());
+                r
+            })
+            .collect();
+        note(format!("LibreOffice tries the candidates of {} task(s)", probes.len()));
+        if !probes.is_empty() {
+            macro_batch("Probe", &probes);
+        }
+        for (i, t) in tasks.iter().enumerate() {
+            if candidates[i].len() < 2 {
+                continue;
+            }
+            let lines = read_any(&format!("{}/p{}.txt", BENCH_OUT, i)).unwrap_or_default();
+            let probed: Vec<&str> = lines.lines().collect();
+            if let Some(c) = choose(&candidates[i], &probed) {
+                note(format!("{} chose {} of {}: {}", t[0], c + 1, candidates[i].len(), candidates[i][c]));
+                formulas[i] = Some(candidates[i][c].clone());
+            }
+        }
     }
 
     // 3. Every answer checked against every test case -- one launch.
@@ -1353,6 +1503,18 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push(("a sheet-qualified answer position splits, quotes off", split_position("'My Sheet'!B2:B9") == (String::from("My Sheet"), String::from("B2:B9"))));
     out.push(("a bare one has no sheet", split_position("H3:H5") == (String::new(), String::from("H3:H5"))));
     out.push(("the formula is found inside a code fence", formula_in("```\n=SUM(A1:A3)\n```").as_deref() == Some("=SUM(A1:A3)")));
+    out.push(("a formula that names its own cell first loses the name", tidy("=C1=LEFT(A1,2)", "C1:C9") == "=LEFT(A1,2)"));
+    out.push(("and so does one naming its whole range", tidy("=B7:B10=SUM(B3:B5)", "B7:B10") == "=SUM(B3:B5)"));
+    out.push(("but a comparison of another cell is a formula and stays", tidy("=A1=B1", "C1:C9") == "=A1=B1"));
+    out.push(("prose after a formula is cut", tidy("=B5 on sheet Overview", "'Overview'!C5") == "=B5"));
+    out.push(("a formula restated after a label is the restatement", tidy("=K27 formula: =C5$C$16", "K27") == "=C5$C$16"));
+    let c = |v: &[&str]| v.iter().map(|x| String::from(*x)).collect::<Vec<_>>();
+    out.push(("an erroring candidate is passed over", choose(&c(&["=A1/0", "=A1+1"]), &["ERR B1 #DIV/0!", "OK\t2"]) == Some(1)));
+    out.push(("the result most candidates agree on wins", choose(&c(&["=A1", "=B1*2", "=B1+B1"]), &["OK\t1", "OK\t4", "OK\t4"]) == Some(1)));
+    out.push(("a tie goes to the earlier, so greedy leads", choose(&c(&["=A1", "=B1"]), &["OK\t1", "OK\t2"]) == Some(0)));
+    out.push(("a constant says nothing and is not chosen", choose(&c(&["=5", "=A1"]), &["OK\t5", "OK\t3"]) == Some(1)));
+    out.push(("an empty result is not an answer", choose(&c(&["=A1", "=B1"]), &["OK\t", "OK\t7"]) == Some(1)));
+    out.push(("nothing usable leaves the choice alone", choose(&c(&["=A1"]), &["ERR A1 Err:522"]).is_none()));
     out.push(("an array formula keeps its braces", formula_in("{=A1:A3*B1:B3}").as_deref() == Some("{=A1:A3*B1:B3}")));
     out.push(("and after a preamble, without its full stop", formula_in("Use this: =INDEX(A1:C1,MATCH(MAX(A2:C2),A2:C2,0)).").as_deref() == Some("=INDEX(A1:C1,MATCH(MAX(A2:C2),A2:C2,0))")));
     out
