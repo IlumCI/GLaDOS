@@ -485,6 +485,82 @@ struct KvLayer {
     blocks: usize,
 }
 
+/// Causal attention over a block of queries, one (head, query) pair a row.
+///
+/// It was a scalar loop on the calling core, in both the single-token pass
+/// and the prefill, while every projection around it was split across every
+/// core. That is cheap at a short context and quadratic in a long prompt: a
+/// 1,840-token spreadsheet prompt is about two hundred billion
+/// multiply-adds of attention, all on core 0, and `office bench` sat on that
+/// one task for half an hour with five cores spinning beside it.
+///
+/// A row's scores, its softmax and its weighted sum are computed exactly as
+/// before -- keys ascending, head dimensions ascending, one accumulator -- so
+/// splitting changes which core does a row and nothing about its arithmetic.
+/// Rows write disjoint parts of `out`, and each chunk keeps its own score
+/// scratch, so no two cores share a byte they write.
+struct AttnJob<'a> {
+    q: *const f32,
+    out: *mut f32,
+    krot: *const f32,
+    vc: &'a KvLayer,
+    win: &'a Window,
+    nq: usize,
+    base_j: usize,
+    q_dim: usize,
+    head_size: usize,
+    kv_dim: usize,
+    kv_mul: usize,
+    scale: f32,
+}
+
+impl AttnJob<'_> {
+    fn run(&self, n_heads: usize) {
+        let rows = n_heads * self.nq;
+        let keys = self.base_j + self.nq;
+        let ctx = self as *const Self as usize;
+        if !crate::smp::parallel_split(ctx, attend_rows, rows, keys * self.head_size * 2) {
+            unsafe { attend_rows(ctx, 0, rows) };
+        }
+    }
+}
+
+/// # Safety
+/// `ctx` is an `AttnJob` that outlives the call, `lo..hi` rows of it.
+unsafe fn attend_rows(ctx: usize, lo: usize, hi: usize) {
+    let j = unsafe { &*(ctx as *const AttnJob) };
+    let hs = j.head_size;
+    let mut att = vec![0.0f32; j.base_j + j.nq];
+    for r in lo..hi {
+        let hh = r / j.nq;
+        let t = r % j.nq;
+        let qi = j.base_j + t;
+        let qo = t * j.q_dim + hh * hs;
+        let hoff = (hh / j.kv_mul) * hs;
+        let q = unsafe { core::slice::from_raw_parts(j.q.add(qo), hs) };
+        for k in 0..=qi {
+            let kr = unsafe { core::slice::from_raw_parts(j.krot.add(k * j.kv_dim + hoff), hs) };
+            let mut score = 0.0f32;
+            for i in 0..hs {
+                score += q[i] * kr[i];
+            }
+            att[k] = score * j.scale;
+        }
+        tensor::softmax(&mut att[..qi + 1]);
+        let out = unsafe { core::slice::from_raw_parts_mut(j.out.add(qo), hs) };
+        for o in out.iter_mut() {
+            *o = 0.0;
+        }
+        for k in 0..=qi {
+            let vslot = j.win.slot_of(k);
+            let a = att[k];
+            for i in 0..hs {
+                out[i] += a * j.vc.at(vslot, hoff + i);
+            }
+        }
+    }
+}
+
 impl KvLayer {
     fn new(cap: usize, kv_dim: usize, exact: bool) -> Self {
         let blocks = kv_dim.div_ceil(KV_BLOCK);
@@ -3058,35 +3134,22 @@ impl Model {
                 }
 
                 // Causal attention: query t sees live keys 0..=base_j+t and
-                // nothing later. Scores ascend over j, head dims accumulate
-                // ascending -- the same order `attend` established.
-                for hh in 0..c.n_heads {
-                    let qo = hh * head_size;
-                    let hoff = (hh / kv_mul) * head_size;
-                    for t in 0..n {
-                        let qi = base_j + t;
-                        for j in 0..=qi {
-                            let ko = j * kvd + hoff;
-                            let mut score = 0.0f32;
-                            for i in 0..head_size {
-                                score += qb[t * qd + qo + i] * s.krot[ko + i];
-                            }
-                            s.att[hh * cap + j] = score * inv_scale;
-                        }
-                        tensor::softmax(&mut s.att[hh * cap..hh * cap + qi + 1]);
-                        for i in 0..head_size {
-                            ao[t * qd + qo + i] = 0.0;
-                        }
-                        let vc = &s.value_cache[l];
-                        for j in 0..=qi {
-                            let vslot = wend.slot_of(j);
-                            let a = s.att[hh * cap + j];
-                            for i in 0..head_size {
-                                ao[t * qd + qo + i] += a * vc.at(vslot, hoff + i);
-                            }
-                        }
-                    }
-                }
+                // nothing later, across every core -- see `attend_rows`.
+                let job = AttnJob {
+                    q: qb.as_ptr(),
+                    out: ao.as_mut_ptr(),
+                    krot: s.krot.as_ptr(),
+                    vc: &s.value_cache[l],
+                    win: &wend,
+                    nq: n,
+                    base_j,
+                    q_dim: qd,
+                    head_size,
+                    kv_dim: kvd,
+                    kv_mul,
+                    scale: inv_scale,
+                };
+                job.run(c.n_heads);
 
                 self.wo(l).matvec_batch(&mut xo, &ao, n);
                 for t in 0..n {
@@ -3231,34 +3294,21 @@ impl Model {
     fn attend(&self, s: &mut State, w: &Window, cache: usize, kv_dim: usize, kv_mul: usize) {
         let c = &self.cfg;
         let head_size = c.head_size();
-        let cap = s.cap;
-        let scale = 1.0 / tensor::sqrtf(head_size as f32);
-        for h in 0..c.n_heads {
-            let qo = h * head_size;
-            let ao = h * cap;
-            let hoff = (h / kv_mul) * head_size;
-            for t in 0..w.live {
-                let ko = t * kv_dim + hoff;
-                let mut score = 0.0f32;
-                for i in 0..head_size {
-                    score += s.q[qo + i] * s.krot[ko + i];
-                }
-                s.att[ao + t] = score * scale;
-            }
-            tensor::softmax(&mut s.att[ao..ao + w.live]);
-
-            for i in 0..head_size {
-                s.xb[qo + i] = 0.0;
-            }
-            let vc = &s.value_cache[cache];
-            for t in 0..w.live {
-                let vslot = w.slot_of(t);
-                let a = s.att[ao + t];
-                for i in 0..head_size {
-                    s.xb[qo + i] += a * vc.at(vslot, hoff + i);
-                }
-            }
-        }
+        let job = AttnJob {
+            q: s.q.as_ptr(),
+            out: s.xb.as_mut_ptr(),
+            krot: s.krot.as_ptr(),
+            vc: &s.value_cache[cache],
+            win: w,
+            nq: 1,
+            base_j: w.live - 1,
+            q_dim: c.q_dim(),
+            head_size,
+            kv_dim,
+            kv_mul,
+            scale: 1.0 / tensor::sqrtf(head_size as f32),
+        };
+        job.run(c.n_heads);
     }
 
     /// One decode step through a Qwen3.5 hybrid.

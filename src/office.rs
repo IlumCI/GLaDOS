@@ -1154,8 +1154,14 @@ pub fn bench(arg: &str) -> Result<(), String> {
     // keeps, through the same checker: the ceiling this harness can measure,
     // and the proof that it can say "solved" at all.
     let oracle = arg.split_whitespace().any(|w| w == "--oracle");
-    let mut words = arg.split_whitespace().filter(|w| *w != "--oracle");
-    let dir = words.next().filter(|w| w.starts_with('/')).unwrap_or(BENCH_DIR);
+    // The directory is optional, so it is peeked rather than taken: `next`
+    // then `filter` consumed the first number when no directory was given,
+    // and `office bench 0 40` ran from task 40.
+    let mut words = arg.split_whitespace().filter(|w| *w != "--oracle").peekable();
+    let dir = match words.peek() {
+        Some(w) if w.starts_with('/') => words.next().unwrap(),
+        _ => BENCH_DIR,
+    };
     let from: usize = words.next().and_then(|w| w.parse().ok()).unwrap_or(0);
     let count: usize = words.next().and_then(|w| w.parse().ok()).unwrap_or(usize::MAX);
     let manifest = read_any(&format!("{}/tasks.tsv", dir))?;
@@ -1213,9 +1219,12 @@ pub fn bench(arg: &str) -> Result<(), String> {
             got
         } else {
             let mut view = got;
-            // Cut to fit: the context less the answer and the framing, about
-            // three characters a token.
-            let room = (seq.saturating_sub(400) * 3).saturating_sub(t[3].len() + 300);
+            // Cut to fit: the context less the answer and the framing, at two
+            // characters a token. Three is right for prose and wrong here: a
+            // sheet dump is addresses and numbers, and at three some prompts
+            // ran past the context, where prefill stops and the model answers
+            // nothing.
+            let room = (seq.saturating_sub(400) * 2).saturating_sub(t[3].len() * 2 / 3 + 300);
             if view.len() > room {
                 let mut e = room;
                 while !view.is_char_boundary(e) {

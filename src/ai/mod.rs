@@ -1855,8 +1855,11 @@ pub fn generate(prompt: &str, opts: &GenOpts) {
         //
         // `gen` echoes its prompt as it is fed, and keeps the loop for that.
         let mut primed = false;
+        let mut prefill_cycles = 0u64;
         if !opts.echo_prompt && prompt_tokens.len() > 1 {
+            let p0 = crate::time::rdtsc();
             pos = e.model.prefill(&mut e.state, &prompt_tokens, pos);
+            prefill_cycles = crate::time::rdtsc() - p0;
             fed = prompt_tokens.len();
             token = prompt_tokens[prompt_tokens.len() - 1];
             primed = true;
@@ -1946,7 +1949,10 @@ pub fn generate(prompt: &str, opts: &GenOpts) {
         emit(&mut pending);
         // A marker held for the next token that never came is text.
         show(plain_text("", true));
-        let elapsed = crate::time::rdtsc() - t0;
+        // The prompt is reported apart from the answer: divided into one
+        // figure, a 1,500-token prompt read as a model taking six seconds a
+        // token to write six tokens, when the decode was its usual speed.
+        let elapsed = crate::time::rdtsc() - t0 - prefill_cycles;
         console::set_color(LTGRAY);
         kprintln!();
 
@@ -1960,6 +1966,15 @@ pub fn generate(prompt: &str, opts: &GenOpts) {
                 // under emulation -- the number was least informative where it
                 // mattered most.
                 let per = us / generated.max(1) as u64;
+                if prefill_cycles > 0 {
+                    let pus = prefill_cycles / mhz;
+                    kprintln!(
+                        "  prompt {} tokens in {}.{:03} s",
+                        prompt_tokens.len(),
+                        pus / 1_000_000,
+                        (pus % 1_000_000) / 1000
+                    );
+                }
                 kprintln!(
                     "  {} tokens in {}.{:03} s  ({} ms/token)",
                     generated,
