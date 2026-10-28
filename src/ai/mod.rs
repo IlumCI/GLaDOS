@@ -2336,6 +2336,84 @@ pub fn spawn_agent() -> bool {
 /// produces fluent-looking nonsense rather than an error. Feeding fixed ids and
 /// diffing the logits against the same arithmetic done in numpy turns all of
 /// that into one comparison, with no tokenizer in the way to muddy it.
+/// `logits check <n> [seed]`: one sequence two ways, `prefill` against the
+/// token-by-token forward, and every logit compared.
+///
+/// `prefill` promises results bit-identical to feeding the tokens one at a
+/// time, and `logits` could only check that on a prompt short enough to type
+/// over serial -- a long one arrives mangled. The bench prompts are 1,000 to
+/// 2,700 tokens, which is where a fault in the chunked path would live and
+/// where nothing had looked. The ids are made here, from a seed, so the
+/// sequence is as long as asked and the same every time.
+pub fn prefill_check(n: usize, seed: u64) {
+    kprintln!("[logits check]");
+    let done = with_engine(|e| {
+        let cap = e.model.cfg.seq_len;
+        let n = n.min(cap).max(2);
+        // Ordinary vocabulary: below the special tokens at the end.
+        let span = (e.tok.vocab_size() as u64).min(30_000).max(256) - 200;
+        let mut x = seed | 1;
+        let ids: Vec<usize> = (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (200 + x % span) as usize
+            })
+            .collect();
+        let mhz = crate::time::tsc_mhz().max(1);
+        let t0 = crate::time::rdtsc();
+        e.model.prefill(&mut e.state, &ids, 0);
+        let t_pre = (crate::time::rdtsc() - t0) / mhz;
+        let a = e.state.logits.clone();
+        let t1 = crate::time::rdtsc();
+        for (p, &t) in ids.iter().enumerate() {
+            e.model.forward(&mut e.state, t, p);
+        }
+        let t_fwd = (crate::time::rdtsc() - t1) / mhz;
+        let b = &e.state.logits;
+        let mut differ = 0usize;
+        let mut worst = 0.0f32;
+        for (u, v) in a.iter().zip(b.iter()) {
+            if u.to_bits() != v.to_bits() {
+                differ += 1;
+                let d = if u > v { u - v } else { v - u };
+                if d > worst {
+                    worst = d;
+                }
+            }
+        }
+        let arg = |l: &[f32]| {
+            let mut best = 0;
+            for i in 0..l.len() {
+                if l[i] > l[best] {
+                    best = i;
+                }
+            }
+            best
+        };
+        e.pos = n;
+        (n, a.len(), differ, worst, arg(&a), arg(b), t_pre, t_fwd)
+    });
+    let Some((n, total, differ, worst, ta, tb, t_pre, t_fwd)) = done else {
+        kprintln!("  {}", engine_refusal());
+        return;
+    };
+    kprintln!("  {} tokens: prefill {} ms, one at a time {} ms", n, t_pre / 1000, t_fwd / 1000);
+    kprintln!("  top token {} by prefill, {} one at a time", ta, tb);
+    if differ == 0 {
+        kprintln!("  ok   all {} logits bit-identical", total);
+    } else {
+        // Printed as micro-units: there is no float formatting in kprintln.
+        kprintln!(
+            "  FAIL {} of {} logits differ, the worst by {} millionths",
+            differ,
+            total,
+            (worst * 1_000_000.0) as u64
+        );
+    }
+}
+
 pub fn logits_for(ids: &[usize]) {
     console::set_color(YELLOW);
     kprintln!("[logits]");

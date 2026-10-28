@@ -3551,6 +3551,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 kprintln!("  (1.0 is off -- a loop can reinforce itself unchecked)");
             }
         }
+        "logits" if rest.starts_with("check") => {
+            let mut w = rest.split_whitespace().skip(1);
+            let n = w.next().and_then(|x| x.parse().ok()).unwrap_or(1500);
+            let seed = w.next().and_then(|x| x.parse().ok()).unwrap_or(7);
+            crate::ai::prefill_check(n, seed);
+        }
         "logits" => {
             let ids: Vec<usize> = rest.split_whitespace().filter_map(|s| s.parse().ok()).collect();
             crate::ai::logits_for(&ids);
