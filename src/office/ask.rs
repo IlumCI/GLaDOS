@@ -18,7 +18,65 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::{headless_macros, macro_batch, note, read_any, ready, BENCH_OUT};
+use super::{headless_macros, macro_batch, note, read_any, ready, start_app, App, BENCH_OUT, OUT};
+
+/// The workbook `colleague` asks about: the last one `office open` put on
+/// the desktop.
+pub static BOOK: crate::sync::Spin<Option<String>> = crate::sync::Spin::new(None);
+
+/// Put a workbook on the desktop for `colleague` to work on.
+///
+/// A copy in /tmp is what opens: a workbook read off the read-only disk opens
+/// in Calc with a read-only banner across it, which is not how anybody's own
+/// spreadsheet looks.
+pub fn open(path: &str) -> Result<(), String> {
+    let bytes = super::read_bytes(path).ok_or_else(|| format!("no such file: {}", path))?;
+    if !crate::linux::ns::is_dir(OUT) {
+        crate::linux::ns::make_dir(OUT);
+    }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let copy = format!("{}/{}", OUT, name);
+    crate::linux::ns::write_blob(&copy, bytes);
+    // Questions are answered from the original: the copy is held open by the
+    // desktop's Calc, and LibreOffice will not load a document another
+    // instance has locked -- every `colleague` answered "no header row".
+    *BOOK.lock_irq() = Some(String::from(path));
+    show(&copy)
+}
+
+/// Close whatever Calc has open and open `file` in a Calc of its own.
+///
+/// Not handed to the running one: `start_app` accepted any Calc window as the
+/// one it opened, so with the original still up the copy was "opened" at once
+/// and never appeared. A fresh instance after the old one has gone is slower
+/// and is the one whose window is the copy's.
+fn show(file: &str) -> Result<(), String> {
+    if crate::gfx::desk::close_titled("LibreOffice Calc") > 0 {
+        let deadline = crate::dev::lapic::ticks() + 30 * crate::TIMER_HZ as u64;
+        while crate::dev::lapic::ticks() < deadline
+            && (crate::gfx::desk::window_titled("LibreOffice").is_some() || crate::job::list().iter().any(|r| r.state == "running" && r.title.contains("--calc")))
+        {
+            crate::task::sleep_until(crate::dev::lapic::ticks() + crate::TIMER_HZ as u64 / 4);
+        }
+    }
+    start_app(App::Calc, Some(file))?;
+    let stem = file.rsplit('/').next().unwrap_or(file);
+    crate::gfx::desk::focus_titled(stem);
+    Ok(())
+}
+
+/// `colleague <request>`: a question about the open workbook, answered in a
+/// copy of it opened beside the original.
+pub fn colleague(request: &str) {
+    let book = BOOK.lock_irq().clone();
+    let Some(book) = book else {
+        crate::kprintln!("  no workbook is open -- 'office open <path>' first");
+        return;
+    };
+    if let Err(why) = ask(&book, &format!("{} --open", request.trim())) {
+        crate::kprintln!("  {}", why);
+    }
+}
 
 /// What a request can ask of a column. The names are what the model picks
 /// between, so they are short ordinary words: a name carries probability mass
@@ -49,6 +107,8 @@ const OPS: &[Op] = &[
 /// A sheet as `Bench.View` rendered it: the header row, how far the data
 /// goes, and the cells seen.
 struct Sheet {
+    /// The sheet's own name, which the answer's formulas refer back to.
+    name: String,
     /// (column letters, header text), left to right.
     headers: Vec<(String, String)>,
     last_row: usize,
@@ -69,6 +129,7 @@ fn split_addr(a: &str) -> Option<(&str, usize)> {
 fn parse(view: &str) -> Option<Sheet> {
     let mut lines = view.lines();
     let head = lines.next()?;
+    let name = String::from(head.strip_prefix("Sheet ")?.rsplit_once(", used area")?.0);
     let area = head.rsplit("used area ").next()?;
     let end = area.split(':').nth(1)?.trim();
     let (last_col, last_row) = split_addr(end)?;
@@ -90,7 +151,52 @@ fn parse(view: &str) -> Option<Sheet> {
         .filter(|(_, v)| !v.is_empty())
         .map(|(a, v)| (String::from(split_addr(a).unwrap().0), v.clone()))
         .collect::<Vec<_>>();
-    (!headers.is_empty()).then_some(Sheet { headers, last_row, last_col: String::from(last_col), cells })
+    (!headers.is_empty()).then_some(Sheet { name, headers, last_row, last_col: String::from(last_col), cells })
+}
+
+/// A formula's ranges qualified with the sheet they are on, for a formula
+/// written on another sheet: `B2:B41` becomes `$Sales.B2:B41`. Text in quotes
+/// is left alone, so a group called "A1:A2" is not a reference.
+fn qualify(formula: &str, sheet: &str) -> String {
+    let prefix = if sheet.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        format!("${}.", sheet)
+    } else {
+        format!("$'{}'.", sheet.replace('\'', "''"))
+    };
+    // One cell reference at `i`: capitals then digits. Answers its end.
+    let cell = |b: &[u8], i: usize| -> Option<usize> {
+        let mut j = i;
+        while j < b.len() && b[j].is_ascii_uppercase() {
+            j += 1;
+        }
+        let k = j;
+        while j < b.len() && b[j].is_ascii_digit() {
+            j += 1;
+        }
+        (k > i && j > k).then_some(j)
+    };
+    let b = formula.as_bytes();
+    let mut out = String::new();
+    let (mut i, mut quoted) = (0, false);
+    while i < b.len() {
+        if b[i] == b'"' {
+            quoted = !quoted;
+        } else if !quoted && (i == 0 || !b[i - 1].is_ascii_alphanumeric()) {
+            if let Some(e) = cell(b, i) {
+                if e < b.len() && b[e] == b':' {
+                    if let Some(e2) = cell(b, e + 1) {
+                        out.push_str(&prefix);
+                        out.push_str(&formula[i..e2]);
+                        i = e2;
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(b[i] as char);
+        i += 1;
+    }
+    out
 }
 
 /// The column after `col`, for a cell nothing in the sheet is using.
@@ -238,6 +344,12 @@ fn op_named(request: &str) -> Option<&'static str> {
 }
 
 pub fn ask(path: &str, request: &str) -> Result<(), String> {
+    // `--open`: the answer written into a copy of the workbook, beside the
+    // data, and that copy opened in Calc on the desktop.
+    let (request, open) = match request.strip_suffix("--open") {
+        Some(r) => (r.trim(), true),
+        None => (request, false),
+    };
     ready()?;
     headless_macros()?;
     let out = format!("{}/ask-view.txt", BENCH_OUT);
@@ -343,6 +455,31 @@ pub fn ask(path: &str, request: &str) -> Result<(), String> {
             note(format!("{:<16} {:>12}    {}", label, v, f));
         }
     }
+    if open {
+        let stem = path.rsplit('/').next().unwrap_or(path).split('.').next().unwrap_or("answer");
+        // A new name each time: the copy before may be open in Calc, and a
+        // headless instance cannot save over a document another one holds.
+        static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(1);
+        let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let copy = format!("{}/{}-answered-{}.ods", OUT, stem, n);
+        let mut r = alloc::vec![
+            format!("{}/ask-answer.txt", BENCH_OUT),
+            String::from(path),
+            copy.clone(),
+            String::from("Colleague"),
+            String::from(request)
+        ];
+        for (label, f) in &asked {
+            r.push(if label.is_empty() { String::from("Answer") } else { label.clone() });
+            r.push(qualify(f, &sheet.name));
+        }
+        macro_batch("Answer", &[r]);
+        if read_any(&format!("{}/ask-answer.txt", BENCH_OUT)).is_err() {
+            return Err("LibreOffice did not write the answered copy".into());
+        }
+        show(&copy)?;
+        note(format!("opened {} in Calc, the answer beside the data", copy));
+    }
     Ok(())
 }
 
@@ -365,6 +502,8 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             (String::from("West"), String::from("=SUMIF(A2:A4,\"West\",C2:C4)")),
         ]),
     ));
+    out.push(("a range written on another sheet names its own", qualify("=SUMIF(B2:B4,\"East\",C2:C4)", "Sales") == "=SUMIF($Sales.B2:B4,\"East\",$Sales.C2:C4)"));
+    out.push(("but text in quotes is not a reference", qualify("=COUNTIF(A2:A4,\"A1:B2\")", "My Data") == "=COUNTIF($'My Data'.A2:A4,\"A1:B2\")"));
     out.push(("the spare cell is the column after the data", next_col("C") == "D" && next_col("Z") == "AA" && next_col("AZ") == "BA"));
     out.push(("a column of numbers is numeric, one of names is not", s.as_ref().is_some_and(|s| numeric(s, "C") && !numeric(s, "A"))));
     out.push(("'each', 'per' and 'by' ask for groups", wants_groups("revenue by region") && wants_groups("units of each product") && !wants_groups("what is our total revenue")));

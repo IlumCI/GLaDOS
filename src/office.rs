@@ -24,6 +24,7 @@
 
 mod ask;
 mod table;
+pub use ask::colleague;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -109,6 +110,8 @@ pub fn command(rest: &str) {
         "calc" | "sheet" if !arg.is_empty() => calc(arg),
         "bench" => bench(arg),
         "wikisql" => table::wikisql(arg),
+        // The workbook `colleague` works on: opened in Calc, and remembered.
+        "open" if !arg.is_empty() => ask::open(arg),
         "ask" if !arg.is_empty() => match arg.split_once(char::is_whitespace) {
             Some((path, req)) => ask::ask(path, req.trim()),
             None => Err("usage: office ask <workbook> <request>".into()),
@@ -201,7 +204,9 @@ fn ready() -> Result<(), String> {
 /// (`start_job_env`): flipping the session's value around the launch raced
 /// the loader, and some launches still came up on GTK.
 fn run_to_end(args: &[&str], secs: u64) -> Result<String, String> {
-    let id = crate::linux::start_job_env(SOFFICE, args, &["SAL_USE_VCLPLUGIN=svp"]).map_err(String::from)?;
+    // Quiet: what a headless run prints is GTK and the soffice script talking
+    // to nobody, and it went into the terminal the operator was reading.
+    let id = crate::linux::start_job_env_quiet(SOFFICE, args, &["SAL_USE_VCLPLUGIN=svp"]).map_err(String::from)?;
     let deadline = crate::dev::lapic::ticks() + secs * crate::TIMER_HZ as u64;
     loop {
         if let Some(r) = crate::job::list().into_iter().find(|r| r.id == id) {
@@ -271,6 +276,11 @@ pub fn extract(path: &str) -> Result<String, String> {
     let want = out_name(path, "txt");
     headless(&["--convert-to", "txt:Text (encoded):UTF8", "--outdir", OUT, path], &want)?;
     read_any(&want)
+}
+
+/// A file's bytes from the namespace or from a mounted disk.
+fn read_bytes(path: &str) -> Option<Vec<u8>> {
+    crate::linux::ns::read_blob(path).or_else(|| crate::linux::disk::program_bytes(path))
 }
 
 fn read_any(path: &str) -> Result<String, String> {
@@ -355,7 +365,9 @@ pub fn start_app(app: App, file: Option<&str>) -> Result<String, String> {
     // process hands the request over and exits at once, and the window comes
     // from the old one. That exit is the request delivered, not a failure.
     let handoff = crate::gfx::desk::window_titled("LibreOffice").is_some();
-    let mut id = crate::linux::start_job(SOFFICE, &args).map_err(String::from)?;
+    // Quiet: a desktop application's stderr is GTK's cursor-theme warnings
+    // and the soffice script's retries, which buried the terminal it shares.
+    let mut id = crate::linux::start_service_job(SOFFICE, &args).map_err(String::from)?;
     let deadline = crate::dev::lapic::ticks() + WINDOW_S * crate::TIMER_HZ as u64;
     let mut dots = 0;
     // A LibreOffice that has just finished setting its profile up exits with
@@ -379,7 +391,7 @@ pub fn start_app(app: App, file: Option<&str>) -> Result<String, String> {
             } else if retries > 0 {
                 retries -= 1;
                 kprint!(" again");
-                id = crate::linux::start_job(SOFFICE, &args).map_err(String::from)?;
+                id = crate::linux::start_service_job(SOFFICE, &args).map_err(String::from)?;
                 continue;
             } else {
                 kprintln!();

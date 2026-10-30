@@ -127,6 +127,13 @@ pub fn start_job_env(path: &str, args: &[&str], overrides: &[&str]) -> Result<u3
     start_job_inner(path, args, false, ov)
 }
 
+/// `start_job_env`, its console output kept out of the terminal the way a
+/// service's is.
+pub fn start_job_env_quiet(path: &str, args: &[&str], overrides: &[&str]) -> Result<u32, &'static str> {
+    let ov: alloc::vec::Vec<alloc::string::String> = overrides.iter().map(|s| alloc::string::String::from(*s)).collect();
+    start_job_inner(path, args, true, ov)
+}
+
 fn start_job_as(path: &str, args: &[&str], quiet: bool) -> Result<u32, &'static str> {
     start_job_inner(path, args, quiet, alloc::vec::Vec::new())
 }
@@ -144,7 +151,10 @@ fn start_job_inner(
     let mut argv: alloc::vec::Vec<alloc::string::String> = alloc::vec![alloc::string::String::from(path)];
     argv.extend(args.iter().map(|a| alloc::string::String::from(*a)));
     let title = argv.join(" ");
-    crate::job::start(
+    // A quiet job's console output goes to the service log, and its end is
+    // its caller's to report: the notice was a line per LibreOffice launch in
+    // the terminal of somebody asking a spreadsheet a question.
+    (if quiet { crate::job::start_quiet } else { crate::job::start })(
         &RUNTIME,
         title,
         alloc::boxed::Box::new(move || {

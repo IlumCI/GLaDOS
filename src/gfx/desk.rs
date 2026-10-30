@@ -1497,6 +1497,23 @@ pub fn focus_titled(needle: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// Close every closable window whose title contains `needle`, the way its
+/// title bar's close box would: a client is asked to close, through
+/// `xdg_toplevel.close`. Answers how many were asked.
+pub fn close_titled(needle: &str) -> usize {
+    let n = with(|d| {
+        let mut n = 0;
+        while let Some(i) = d.windows.iter().rposition(|w| w.closable && w.title.contains(needle)) {
+            close_at(d, i);
+            n += 1;
+        }
+        n
+    })
+    .unwrap_or(0);
+    super::render::invalidate();
+    n
+}
+
 /// The title of the topmost window whose title contains `needle`.
 pub fn window_titled(needle: &str) -> Option<String> {
     with(|d| d.windows.iter().rev().find(|w| w.title.contains(needle)).map(|w| w.title.clone())).flatten()

@@ -240,26 +240,27 @@ Function CellsOf(sheet As String, book As String) As String
 	CellsOf = t
 End Function
 
-REM A copy of a workbook with an answer written beside its data, for a person
-REM to open: the question as a bold title at the top of column r(3), then a
-REM row a result -- its label, and the live formula that computes it, so the
-REM answer is a spreadsheet's own arithmetic and stays one if the data moves.
-REM Saved as ODF to r(2); the original is opened as a template and not touched.
-REM   out, input, output, column, title, then label, formula pairs
+REM A copy of a workbook with the answer on a sheet of its own, for a person
+REM to open: the question as a bold title, then a row a result -- its label,
+REM and the live formula that computes it from the data sheet, so the answer is
+REM the spreadsheet's own arithmetic and stays so if the data changes. The new
+REM sheet is first and active, which ODF keeps with the document: beside the
+REM data it was off screen in any window narrower than the table. Saved as ODF
+REM to r(2); the original is opened as a template and not touched.
+REM   out, input, output, sheet name, title, then label, formula pairs
 Function Answered(r As Variant) As String
-	Dim d As Object, s As Object, col As Long, i As Integer, row As Long, c As Object
+	Dim d As Object, s As Object, i As Integer, row As Long, c As Object
 	Dim a(0) As New com.sun.star.beans.PropertyValue
 	d = OpenEditable(r(1))
-	s = SheetOf(d, "")
-	col = s.getCellRangeByName(r(3) & "1").CellAddress.Column
-	c = s.getCellByPosition(col, 0)
-	c.String = r(4)
-	c.CharWeight = com.sun.star.awt.FontWeight.BOLD
-	c.CellBackColor = RGB(255, 236, 200)
-	row = 1
+	If d.Sheets.hasByName(r(3)) Then d.Sheets.removeByName(r(3))
+	d.Sheets.insertNewByName(r(3), 0)
+	s = d.Sheets.getByName(r(3))
+	row = 2
 	For i = 5 To UBound(r) - 1 Step 2
-		s.getCellByPosition(col, row).String = r(i)
-		c = s.getCellByPosition(col + 1, row)
+		c = s.getCellByPosition(0, row)
+		c.String = r(i)
+		c.CharWeight = com.sun.star.awt.FontWeight.SEMIBOLD
+		c = s.getCellByPosition(1, row)
 		If Left(r(i + 1), 2) = "{=" Then
 			c.setArrayFormula(ApiSyntax(Mid(r(i + 1), 2, Len(r(i + 1)) - 2)))
 		Else
@@ -268,9 +269,17 @@ Function Answered(r As Variant) As String
 		c.CellBackColor = RGB(255, 246, 228)
 		row = row + 1
 	Next i
-	s.Columns.getByIndex(col).OptimalWidth = True
-	s.Columns.getByIndex(col + 1).OptimalWidth = True
 	d.calculateAll()
+	s.Columns.getByIndex(0).OptimalWidth = True
+	s.Columns.getByIndex(1).OptimalWidth = True
+	REM The title after the widths, so it runs on over the empty cells rather
+	REM than sizing column A to the whole sentence.
+	c = s.getCellByPosition(0, 0)
+	c.String = r(4)
+	c.CharWeight = com.sun.star.awt.FontWeight.BOLD
+	c.CharHeight = 14
+	c.CellBackColor = RGB(255, 236, 200)
+	d.CurrentController.setActiveSheet(s)
 	a(0).Name = "FilterName"
 	a(0).Value = "calc8"
 	d.storeToURL(ConvertToURL(r(2)), a())

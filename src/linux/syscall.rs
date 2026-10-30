@@ -84,6 +84,19 @@ pub const SYS_FADVISE64: u64 = 221;
 pub const SYS_STATX: u64 = 332;
 pub const SYS_UNLINKAT: u64 = 263;
 pub const SYS_UTIMENSAT: u64 = 280;
+pub const SYS_FSYNC: u64 = 74;
+pub const SYS_FDATASYNC: u64 = 75;
+pub const SYS_SYNC: u64 = 162;
+pub const SYS_SYNCFS: u64 = 306;
+pub const SYS_FLOCK: u64 = 73;
+pub const SYS_CHMOD: u64 = 90;
+pub const SYS_FCHMOD: u64 = 91;
+pub const SYS_CHOWN: u64 = 92;
+pub const SYS_FCHOWN: u64 = 93;
+pub const SYS_LCHOWN: u64 = 94;
+pub const SYS_FCHOWNAT: u64 = 260;
+pub const SYS_FCHMODAT: u64 = 268;
+pub const SYS_FALLOCATE: u64 = 285;
 pub const SYS_RENAMEAT: u64 = 264;
 pub const SYS_RENAMEAT2: u64 = 316;
 pub const SYS_FSTATFS: u64 = 138;
@@ -8188,6 +8201,18 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         194..=196 => (0, true),
         SYS_UNLINKAT => (sys_unlinkat(f.rdi, f.rsi, f.rdx), true),
         SYS_UTIMENSAT => (sys_utimensat(f.rdi, f.rsi), true),
+        // What a program saving a file asks after writing it, and none of it
+        // has anything to do here. A write reaches the store at the last
+        // close whatever is synced; there are no permissions or owners to
+        // change, every file reporting one mode already; and there is one
+        // machine, so an advisory lock has nobody to exclude. Refused, they
+        // stopped LibreOffice saving anything: `impl_store ... Io General`
+        // on every document written into /tmp.
+        SYS_FSYNC | SYS_FDATASYNC | SYS_SYNC | SYS_SYNCFS | SYS_FLOCK => (0, true),
+        SYS_CHMOD | SYS_FCHMOD | SYS_FCHMODAT | SYS_CHOWN | SYS_FCHOWN | SYS_LCHOWN | SYS_FCHOWNAT => (0, true),
+        // Not served, and said so in the answer glibc's `posix_fallocate`
+        // knows how to fall back from, which `ENOSYS` is not.
+        SYS_FALLOCATE => ((-95i64) as u64, true),
         SYS_RENAME => {
             let at = super::fs::AT_FDCWD as u64;
             (sys_renameat(at, f.rdi, at, f.rsi, 0), true)
@@ -10473,6 +10498,19 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_STATX => "statx",
         SYS_UNLINKAT => "unlinkat",
         SYS_UTIMENSAT => "utimensat",
+        SYS_FSYNC => "fsync",
+        SYS_FDATASYNC => "fdatasync",
+        SYS_SYNC => "sync",
+        SYS_SYNCFS => "syncfs",
+        SYS_FLOCK => "flock",
+        SYS_CHMOD => "chmod",
+        SYS_FCHMOD => "fchmod",
+        SYS_FCHMODAT => "fchmodat",
+        SYS_CHOWN => "chown",
+        SYS_FCHOWN => "fchown",
+        SYS_LCHOWN => "lchown",
+        SYS_FCHOWNAT => "fchownat",
+        SYS_FALLOCATE => "fallocate",
         SYS_RENAME => "rename",
         SYS_RENAMEAT => "renameat",
         SYS_RENAMEAT2 => "renameat2",
