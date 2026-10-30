@@ -22,6 +22,7 @@
 //! an agent action is a separate decision, gated like every other mutating
 //! applet, and it is not taken here.
 
+mod ask;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -106,6 +107,10 @@ pub fn command(rest: &str) {
         }
         "calc" | "sheet" if !arg.is_empty() => calc(arg),
         "bench" => bench(arg),
+        "ask" if !arg.is_empty() => match arg.split_once(char::is_whitespace) {
+            Some((path, req)) => ask::ask(path, req.trim()),
+            None => Err("usage: office ask <workbook> <request>".into()),
+        },
         // Into whatever has focus, with \t and \n spelt out: how a table is
         // typed without the model, and how the typist is tested.
         "keys" if !arg.is_empty() => {
@@ -1125,6 +1130,25 @@ fn macro_batch(entry: &str, records: &[Vec<String>]) {
     }
 }
 
+/// The headless profile, with `bench.bas` in it, ready for `macro_batch`.
+fn headless_macros() -> Result<(), String> {
+    for d in [OUT, BENCH_OUT] {
+        if !crate::linux::ns::is_dir(d) {
+            crate::linux::ns::make_dir(d);
+        }
+    }
+    // The headless profile first, then the macros into it -- see
+    // `seed_bench_macros` for the order.
+    if !crate::linux::ns::is_dir(&format!("{}/basic/Standard", HEADLESS_USER)) {
+        seed_profile_at(HEADLESS_USER);
+        note(String::from("making the headless profile (once)"));
+        for _ in 0..2 {
+            run_to_end(&["--headless", "--norestore", "--nologo", HEADLESS, "--terminate_after_init"], CONVERT_S)?;
+        }
+    }
+    seed_bench_macros()
+}
+
 /// The answer position split into an optional sheet and a range.
 fn split_position(p: &str) -> (String, String) {
     match p.rsplit_once('!') {
@@ -1269,21 +1293,7 @@ pub fn bench(arg: &str) -> Result<(), String> {
     if tasks.is_empty() {
         return Err(format!("no tasks in {}/tasks.tsv", dir));
     }
-    for d in [OUT, BENCH_OUT] {
-        if !crate::linux::ns::is_dir(d) {
-            crate::linux::ns::make_dir(d);
-        }
-    }
-    // The headless profile first, then the macros into it -- see
-    // `seed_bench_macros` for the order.
-    if !crate::linux::ns::is_dir(&format!("{}/basic/Standard", HEADLESS_USER)) {
-        seed_profile_at(HEADLESS_USER);
-        note(String::from("making the headless profile (once)"));
-        for _ in 0..2 {
-            run_to_end(&["--headless", "--norestore", "--nologo", HEADLESS, "--terminate_after_init"], CONVERT_S)?;
-        }
-    }
-    seed_bench_macros()?;
+    headless_macros()?;
     let input = |id: &str, k: usize| format!("{}/{}/{}_{}_input.xlsx", dir, id, k, id);
     let answer = |id: &str, k: usize| format!("{}/{}/{}_{}_answer.xlsx", dir, id, k, id);
     let first_cell = |range: &str| String::from(range.split(':').next().unwrap_or(range));
@@ -1517,5 +1527,6 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push(("nothing usable leaves the choice alone", choose(&c(&["=A1"]), &["ERR A1 Err:522"]).is_none()));
     out.push(("an array formula keeps its braces", formula_in("{=A1:A3*B1:B3}").as_deref() == Some("{=A1:A3*B1:B3}")));
     out.push(("and after a preamble, without its full stop", formula_in("Use this: =INDEX(A1:C1,MATCH(MAX(A2:C2),A2:C2,0)).").as_deref() == Some("=INDEX(A1:C1,MATCH(MAX(A2:C2),A2:C2,0))")));
+    out.extend(ask::checks());
     out
 }
