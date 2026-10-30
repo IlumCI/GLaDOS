@@ -1,0 +1,20 @@
+[rail] v1
+video.rect 74.000 us lower
+video.draw 1672.000 us lower
+video.present 250.000 us lower
+video.fill_present 324.000 us lower
+video.console 133.000 us lower
+video.cursor_move 14.000 us lower
+video.idle_turn 73.000 us lower
+video.small_damage 151.000 us lower
+video.window_move 1159.000 us lower
+core.new 50.000 ns lower
+core.step 16080.000 ps lower
+core.vote 4285.000 ns lower
+core.vote_walk 4065.000 ns lower
+ai.matmul 17.232 gflops higher
+ai.bpb absent mbits lower  -- no checkpoint, or too little history to read
+ai.answer absent mbits lower  -- no checkpoint, or no question fits the window
+smp.one_core 6904.000 mbs higher
+smp.all_cores 48788.000 mbs higher
+[rail] end
