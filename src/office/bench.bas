@@ -47,15 +47,30 @@ Sub Probe
 	Batch(JOBS & "probe.job", 3)
 End Sub
 
+Sub Cells
+	Batch(JOBS & "cells.job", 4)
+End Sub
+
+Sub Answer
+	Batch(JOBS & "answer.job", 5)
+End Sub
+
 Sub Batch(job As String, kind As Integer)
-	Dim f As Integer, l As String
-	f = FreeFile
-	Open job For Input As #f
-	Do While Not EOF(f)
-		Line Input #f, l
+	Dim sfa As Object, inp As Object, l As String
+	REM UTF-8 both ways, through the stream services. Basic's own Open and
+	REM Print use the system's legacy encoding, which turned a minus sign, an
+	REM en dash and a middle dot into '?' in every cell read and every answer
+	REM written -- right answers compared wrong, and conditions on values that
+	REM were not in the sheet.
+	sfa = createUnoService("com.sun.star.ucb.SimpleFileAccess")
+	inp = createUnoService("com.sun.star.io.TextInputStream")
+	inp.setInputStream(sfa.openFileRead(ConvertToURL(job)))
+	inp.setEncoding("UTF-8")
+	Do While Not inp.isEOF()
+		l = inp.readLine()
 		If Len(l) > 0 Then Record(Split(l, Chr(9)), kind)
 	Loop
-	Close #f
+	inp.closeInput()
 	StarDesktop.terminate()
 End Sub
 
@@ -76,6 +91,10 @@ Sub Record(r As Variant, kind As Integer)
 			WriteText(r(0), t)
 		Case 3
 			WriteText(r(0), Probed(r))
+		Case 4
+			WriteText(r(0), CellsOf(r(1), r(2)))
+		Case 5
+			WriteText(r(0), Answered(r))
 	End Select
 	Exit Sub
 bad:
@@ -142,11 +161,15 @@ Function ReadLines(job As String) As Variant
 End Function
 
 Sub WriteText(path As String, text As String)
-	Dim f As Integer
-	f = FreeFile
-	Open path For Output As #f
-	Print #f, text
-	Close #f
+	Dim sfa As Object, o As Object, url As String
+	sfa = createUnoService("com.sun.star.ucb.SimpleFileAccess")
+	url = ConvertToURL(path)
+	If sfa.exists(url) Then sfa.kill(url)
+	o = createUnoService("com.sun.star.io.TextOutputStream")
+	o.setOutputStream(sfa.openFileWrite(url))
+	o.setEncoding("UTF-8")
+	o.writeString(text & Chr(10))
+	o.closeOutput()
 End Sub
 
 Function ColName(c As Long) As String
@@ -188,6 +211,71 @@ Function ViewOf(sheet As String, book As String) As String
 	Next r
 	doc.close(True)
 	ViewOf = t
+End Function
+
+REM The whole used area, a row a line and a tab between cells, nothing cut:
+REM View is for a reader and stops at sixty rows and thirty characters, which
+REM loses exactly the value a question names when it is long or far down.
+Function CellsOf(sheet As String, book As String) As String
+	Dim doc As Object, s As Object, cur As Object, r As Long, c As Long, lastR As Long, lastC As Long
+	Dim t As String, ln As String
+	doc = OpenBook(book)
+	s = SheetOf(doc, sheet)
+	cur = s.createCursor()
+	cur.gotoEndOfUsedArea(False)
+	lastR = cur.RangeAddress.EndRow
+	lastC = cur.RangeAddress.EndColumn
+	If lastR > 999 Then lastR = 999
+	If lastC > 39 Then lastC = 39
+	t = ""
+	For r = 0 To lastR
+		ln = ""
+		For c = 0 To lastC
+			If c > 0 Then ln = ln & Chr(9)
+			ln = ln & Replace(Replace(s.getCellByPosition(c, r).String, Chr(9), " "), Chr(10), " ")
+		Next c
+		t = t & ln & Chr(10)
+	Next r
+	doc.close(True)
+	CellsOf = t
+End Function
+
+REM A copy of a workbook with an answer written beside its data, for a person
+REM to open: the question as a bold title at the top of column r(3), then a
+REM row a result -- its label, and the live formula that computes it, so the
+REM answer is a spreadsheet's own arithmetic and stays one if the data moves.
+REM Saved as ODF to r(2); the original is opened as a template and not touched.
+REM   out, input, output, column, title, then label, formula pairs
+Function Answered(r As Variant) As String
+	Dim d As Object, s As Object, col As Long, i As Integer, row As Long, c As Object
+	Dim a(0) As New com.sun.star.beans.PropertyValue
+	d = OpenEditable(r(1))
+	s = SheetOf(d, "")
+	col = s.getCellRangeByName(r(3) & "1").CellAddress.Column
+	c = s.getCellByPosition(col, 0)
+	c.String = r(4)
+	c.CharWeight = com.sun.star.awt.FontWeight.BOLD
+	c.CellBackColor = RGB(255, 236, 200)
+	row = 1
+	For i = 5 To UBound(r) - 1 Step 2
+		s.getCellByPosition(col, row).String = r(i)
+		c = s.getCellByPosition(col + 1, row)
+		If Left(r(i + 1), 2) = "{=" Then
+			c.setArrayFormula(ApiSyntax(Mid(r(i + 1), 2, Len(r(i + 1)) - 2)))
+		Else
+			c.FormulaLocal = r(i + 1)
+		End If
+		c.CellBackColor = RGB(255, 246, 228)
+		row = row + 1
+	Next i
+	s.Columns.getByIndex(col).OptimalWidth = True
+	s.Columns.getByIndex(col + 1).OptimalWidth = True
+	d.calculateAll()
+	a(0).Name = "FilterName"
+	a(0).Value = "calc8"
+	d.storeToURL(ConvertToURL(r(2)), a())
+	d.close(True)
+	Answered = "OK"
 End Function
 
 REM The formula a workbook keeps in one cell, as a person would type it:

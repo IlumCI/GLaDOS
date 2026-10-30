@@ -23,6 +23,7 @@
 //! applet, and it is not taken here.
 
 mod ask;
+mod table;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -107,6 +108,7 @@ pub fn command(rest: &str) {
         }
         "calc" | "sheet" if !arg.is_empty() => calc(arg),
         "bench" => bench(arg),
+        "wikisql" => table::wikisql(arg),
         "ask" if !arg.is_empty() => match arg.split_once(char::is_whitespace) {
             Some((path, req)) => ask::ask(path, req.trim()),
             None => Err("usage: office ask <workbook> <request>".into()),
@@ -1528,5 +1530,6 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push(("an array formula keeps its braces", formula_in("{=A1:A3*B1:B3}").as_deref() == Some("{=A1:A3*B1:B3}")));
     out.push(("and after a preamble, without its full stop", formula_in("Use this: =INDEX(A1:C1,MATCH(MAX(A2:C2),A2:C2,0)).").as_deref() == Some("=INDEX(A1:C1,MATCH(MAX(A2:C2),A2:C2,0))")));
     out.extend(ask::checks());
+    out.extend(table::checks());
     out
 }
