@@ -229,6 +229,158 @@ def skipped_version(name):
     return "0"
 
 
+ORANGE = r"""#!/bin/bash
+# orange -- the package manager of GLaDOS.
+#
+# pacman underneath, so what it installs, checks and records is the
+# distribution's own work; apt-style verbs and pacman/yay-style flags both
+# work. Its own home is the [glados] repository, so it updates like any
+# other package.
+#
+#   orange install <pkg>...    orange -S <pkg>...
+#   orange remove <pkg>...     orange -Rs <pkg>...
+#   orange update              orange -Sy
+#   orange upgrade             orange -Syu      (orange -Syyu forces a refresh)
+#   orange search <words>      orange -Ss <words>
+#   orange info <pkg>          installed: -Qi, otherwise -Si
+#   orange list                orange -Q
+#   orange files <pkg>         orange -Ql <pkg>
+#   orange owns <path>         orange -Qo <path>
+#   orange clean               orange -Sc
+#
+# Anything starting with '-' goes to pacman as it is.
+
+usage() {
+    sed -n '9,20p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+pac() {
+    exec /usr/bin/pacman "$@"
+}
+
+verb=$1
+[ $# -gt 0 ] && shift
+case "$verb" in
+    install|add|get)      pac -S "$@" ;;
+    remove|uninstall|rm)  pac -Rs "$@" ;;
+    update|refresh)       pac -Sy "$@" ;;
+    upgrade)              pac -Syu "$@" ;;
+    search|find)          pac -Ss "$@" ;;
+    info|show)
+        if /usr/bin/pacman -Q "$@" >/dev/null 2>&1; then pac -Qi "$@"; else pac -Si "$@"; fi ;;
+    list)                 pac -Q "$@" ;;
+    files)                pac -Ql "$@" ;;
+    owns)                 pac -Qo "$@" ;;
+    clean)                pac -Sc "$@" ;;
+    help|-h|--help|"")    usage ;;
+    -*)                   pac "$verb" "$@" ;;
+    *)
+        echo "orange: '$verb' is not a command -- 'orange help' lists them" >&2
+        exit 1 ;;
+esac
+"""
+
+
+def orange():
+    """`orange`, the package manager's front end, until it ships from the
+    [glados] repository."""
+    path = TREE / "usr/bin/orange"
+    path.write_text(ORANGE)
+    path.chmod(0o755)
+
+
+def keyring():
+    """pacman's keyring, made as an installed Arch system makes it: a local
+    master key, then the distribution's keys from the image's own
+    archlinux-keyring, signed and trusted as `pacman-key --populate` does.
+
+    Made here, on the host, because `pacman-key` wants root, a gpg-agent and
+    entropy, and a guest offers none of those at install time. `fakeroot`
+    satisfies its root check -- it writes only into the image tree. The
+    agent it started is stopped and its sockets removed, so the image does
+    not carry a socket somebody else's process once listened on. The local
+    master key's secret half is in the image as it is on any Arch machine;
+    it signs nothing but the distribution's keys, here before anybody has
+    the image.
+
+    Without this, signature checking -- left on -- refuses every package."""
+    home = TREE / "etc/pacman.d/gnupg"
+    if home.exists():
+        shutil.rmtree(home)
+    keys = TREE / "usr/share/pacman/keyrings"
+    base = ["fakeroot", "pacman-key", "--gpgdir", str(home), "--config", str(TREE / "etc/pacman.conf")]
+    subprocess.run(base + ["--init"], check=True, capture_output=True)
+    subprocess.run(base + ["--populate-from", str(keys), "--populate", "archlinux"], check=True, capture_output=True)
+    subprocess.run(["gpgconf", "--homedir", str(home), "--kill", "all"], capture_output=True)
+    for sock in home.glob("S.*"):
+        sock.unlink()
+    n = subprocess.run(["gpg", "--homedir", str(home), "--list-keys", "--with-colons"],
+                       capture_output=True, text=True).stdout.count("\npub:")
+    print(f"  pacman's keyring: {n} key(s)")
+
+
+def ca_bundle():
+    """The TLS trust bundle every OpenSSL program reads, extracted from the
+    image's own Mozilla root list the way `update-ca-trust` does on install.
+
+    That is a package hook, and hooks do not run here, so the image shipped
+    the links to `/etc/ca-certificates/extracted/tls-ca-bundle.pem` and not
+    the file: curl and pacman refused every HTTPS server with "error adding
+    trust anchors". A root goes in when it is marked trusted and either says
+    nothing about its purposes or names server authentication among them --
+    the `--purpose server-auth` filter the hook applies. The list is the
+    image's, not the host's."""
+    src = TREE / "usr/share/ca-certificates/trust-source/mozilla.trust.p11-kit"
+    text = src.read_text()
+    blocks = text.split("[p11-kit-object-v1]")
+    server_auth = bytes.fromhex("06082b06010505070301")
+    # Purpose restrictions are separate objects keyed by the certificate's
+    # label: the extended key usage extension, percent-encoded DER.
+    eku = {}
+    for b in blocks:
+        if "class: x-certificate-extension" in b and "object-id: 2.5.29.37" in b:
+            label = b.split('label: "', 1)[1].split('"', 1)[0]
+            raw = b.split('value: "', 1)[1].split('"', 1)[0]
+            der = bytearray()
+            i = 0
+            while i < len(raw):
+                if raw[i] == "%":
+                    der.append(int(raw[i + 1:i + 3], 16))
+                    i += 3
+                else:
+                    der.append(ord(raw[i]))
+                    i += 1
+            eku[label] = bytes(der)
+    pems = []
+    for b in blocks:
+        if "trusted: true" not in b or "-----BEGIN CERTIFICATE-----" not in b:
+            continue
+        label = b.split('label: "', 1)[1].split('"', 1)[0]
+        if label in eku and server_auth not in eku[label]:
+            continue
+        pem = "-----BEGIN CERTIFICATE-----" + b.split("-----BEGIN CERTIFICATE-----", 1)[1].split("-----END CERTIFICATE-----", 1)[0] + "-----END CERTIFICATE-----\n"
+        pems.append(f"# {label}\n" + pem)
+    out = TREE / "etc/ca-certificates/extracted/tls-ca-bundle.pem"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("".join(pems))
+    print(f"  TLS trust bundle: {len(pems)} root(s)")
+
+
+def resolver():
+    """Names looked up in /etc/hosts and then by DNS, and nothing else: the
+    image's nsswitch asks systemd's resolver and its container and hostname
+    modules first, none of which exists here. /etc/resolv.conf itself is the
+    kernel's (`linux::proc`), written from what DHCP said."""
+    p = TREE / "etc/nsswitch.conf"
+    text = p.read_text()
+    lines = [("hosts: files dns" if l.startswith("hosts:") else l) for l in text.splitlines()]
+    p.write_text("\n".join(lines) + "\n")
+    conf = TREE / "etc/resolv.conf"
+    if conf.exists() or conf.is_symlink():
+        conf.unlink()
+    conf.symlink_to("../run/glados/resolv.conf")
+
+
 def pacman_conf(names):
     """pacman's configuration for a guest, and the packages the system stands
     in for.
@@ -430,6 +582,10 @@ def build(reuse=False):
         if i % 25 == 0:
             print(f"  {i} unpacked")
     pacman_conf(names)
+    resolver()
+    ca_bundle()
+    keyring()
+    orange()
     readable()
     settings()
     data_hooks()

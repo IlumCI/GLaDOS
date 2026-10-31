@@ -432,6 +432,14 @@ impl DiskFile {
         Ok(DiskFile { path: String::from(path), size: n.size, at: 0, mount: m.id, body })
     }
 
+    /// The permission bits the image gives this file; `None` on FAT.
+    pub fn image_mode(&self) -> Option<u32> {
+        match &self.body {
+            Body::Erofs(ino) => Some(ino.mode & 0o7777),
+            _ => None,
+        }
+    }
+
     /// Copy up to `out.len()` bytes from offset `off`. Answers how many.
     pub fn read_at(&mut self, off: usize, out: &mut [u8]) -> usize {
         let _g = big();

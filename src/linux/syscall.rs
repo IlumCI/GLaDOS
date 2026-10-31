@@ -107,6 +107,8 @@ pub const SYS_PREAD64: u64 = 17;
 pub const SYS_SET_ROBUST_LIST: u64 = 273;
 pub const SYS_RSEQ: u64 = 334;
 pub const SYS_PRLIMIT64: u64 = 302;
+pub const SYS_GETRLIMIT: u64 = 97;
+pub const SYS_SETRLIMIT: u64 = 160;
 pub const SYS_GETRANDOM: u64 = 318;
 pub const SYS_TIME: u64 = 201;
 pub const SYS_SYSINFO: u64 = 99;
@@ -116,6 +118,10 @@ pub const SYS_LINK: u64 = 86;
 pub const SYS_CREAT: u64 = 85;
 pub const SYS_PAUSE: u64 = 34;
 pub const SYS_GETPRIORITY: u64 = 140;
+pub const SYS_MLOCK: u64 = 149;
+pub const SYS_MUNLOCK: u64 = 150;
+pub const SYS_MLOCKALL: u64 = 151;
+pub const SYS_MUNLOCKALL: u64 = 152;
 pub const SYS_SETPRIORITY: u64 = 141;
 pub const SYS_SCHED_GETPARAM: u64 = 143;
 pub const SYS_SCHED_SETSCHEDULER: u64 = 144;
@@ -908,6 +914,9 @@ pub struct Space {
     /// The I/O priority `ioprio_set` set, as its packed class and level; the
     /// same bargain as `nice`, with no I/O scheduler underneath.
     pub ioprio: u32,
+    /// Resource limits this process has set, as (resource, soft, hard);
+    /// one it has not set answers the machine's own figure.
+    pub rlimits: Vec<(u64, u64, u64)>,
     pub holder: Option<alloc::boxed::Box<super::load::Guest>>,
     /// Heap ranges this guest owns outright, freed when it is torn down.
     ///
@@ -1128,6 +1137,7 @@ pub fn replace_guest(
         signals: super::signal::State::default(),
         nice: 0,
         ioprio: 0,
+        rlimits: Vec::new(),
         holder: None,
         owned: alloc::vec::Vec::new(),
         mmap_next: r.mmap_at,
@@ -1226,6 +1236,7 @@ pub fn clone_guest(
         },
         nice: p.nice,
         ioprio: p.ioprio,
+        rlimits: p.rlimits.clone(),
         holder: None,
         tables: Some(tables),
         owned,
@@ -1429,6 +1440,7 @@ pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
             signals: super::signal::State::default(),
             nice: 0,
             ioprio: 0,
+            rlimits: Vec::new(),
             holder: None,
             owned: alloc::vec::Vec::new(),
             mmap_next: r.mmap_at,
@@ -2199,7 +2211,7 @@ pub(super) fn place_fd(fds: &mut Vec<Option<super::fs::Fd>>, entry: super::fs::F
     }
 }
 
-pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
+pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, mode: u64) -> u64 {
     let raw = match read_cstr(path_at) {
         Ok(v) => v,
         Err(e) => return e,
@@ -2213,7 +2225,11 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
         return ENOENT;
     }
     let cwd_relative = !raw.starts_with('/');
-    with_fds(|fds, cwd| {
+    // A file this open creates takes the mode it was created with, less the
+    // usual umask: a compiler's output and a package's `install -m 755` are
+    // executable from their first byte.
+    let mut created: Option<String> = None;
+    let r = with_fds(|fds, cwd| {
         // Only consulted for a relative path, so a closed `dirfd` beside an
         // absolute one is not refused -- see `at_base`.
         let base = if cwd_relative {
@@ -2236,6 +2252,9 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
             Ok(p) => p,
             Err(e) => return e,
         };
+        if flags & O_CREAT != 0 && !occupied(&path) {
+            created = Some(path.clone());
+        }
         // A mounted volume, read in place by range. Before everything else,
         // so a mount point shadows whatever the namespace has at that path.
         // **A write to the root image goes to the guest's layer.** The file
@@ -2465,7 +2484,21 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
             None => EMFILE,
         }
     })
-    .unwrap_or(EBADF)
+    .unwrap_or(EBADF);
+    if let Some(p) = created {
+        if (r as i64) >= 0 {
+            super::ns::set_mode(&p, (mode as u32) & 0o7777 & !0o022);
+            // The file exists from the moment it is created, not from its
+            // last close: ldconfig `chmod`s its cache by name while the
+            // descriptor that wrote it is still open, and a name that only
+            // appears at close answered ENOENT -- which libalpm reported as
+            // ldconfig dying of signal 6 after every transaction.
+            if super::ns::blob_len(&p).is_none() && super::fs::writable(&p) {
+                super::ns::write_blob(&p, alloc::vec::Vec::new());
+            }
+        }
+    }
+    r
 }
 
 /// Duplicate a descriptor onto the lowest free number, or onto a given one.
@@ -2578,6 +2611,7 @@ pub(super) fn sys_name_op_at(dirfd: u64, path_at: u64, op: u8) -> u64 {
             if below.is_some() && !super::ns::white_out(&path) {
                 return EPERM;
             }
+            super::ns::forget_mode(&path);
             0
         }
     }
@@ -2655,6 +2689,50 @@ pub(super) fn sys_close_range(first: u64, last: u64, flags: u64) -> u64 {
         }
     }
     0
+}
+
+/// `chmod` and `fchmodat`: the bits are recorded beside the layer
+/// (`ns::MODES`) for any path a guest may write, image files included --
+/// the bits are the guest's to set even where the bytes stay the image's.
+pub(super) fn sys_chmodat(dirfd: u64, path_at: u64, mode: u64) -> u64 {
+    let raw = match read_cstr(path_at) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if raw.is_empty() {
+        return ENOENT;
+    }
+    let path = match at_path(dirfd, &raw) {
+        Ok(p) => super::link::follow(p),
+        Err(e) => return e,
+    };
+    chmod_path(&path, mode)
+}
+
+pub(super) fn sys_fchmod(fd: u64, mode: u64) -> u64 {
+    let path = with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::File(b))) => Some(b.borrow().path.clone()),
+        Some(Some(super::fs::Fd::Disk(b))) => Some(b.borrow().path.clone()),
+        Some(Some(super::fs::Fd::Dir(d))) => Some(d.borrow().path.clone()),
+        Some(Some(_)) => None,
+        _ => None,
+    })
+    .flatten();
+    match path {
+        Some(p) => chmod_path(&p, mode),
+        // A pipe or a socket has no bits worth keeping, and Linux accepts it.
+        None => 0,
+    }
+}
+
+fn chmod_path(path: &str, mode: u64) -> u64 {
+    if !occupied(path) && super::proc::claims(path) == false && super::dev::node(path).is_none() {
+        return ENOENT;
+    }
+    if !super::fs::writable(path) {
+        return EROFS;
+    }
+    if super::ns::set_mode(path, mode as u32) { 0 } else { EIO }
 }
 
 /// Whether anything is at a guest path: the guest's layer, a link it made,
@@ -5167,18 +5245,18 @@ pub(super) fn sys_recv(fd: u64, buf: u64, len: u64) -> u64 {
         Err(e) => return e,
     };
     let Some(h) = sock.borrow().conn else { return ENOTCONN };
-    let got = crate::net::tcp::recv_at(h, SOCK_TIMEOUT_MS);
+    let got = crate::net::tcp::recv_upto(h, len as usize, SOCK_TIMEOUT_MS);
     if got.is_empty() {
         // Zero means end of file, and only end of file. A timeout with the
         // peer still there is `EAGAIN`, because a program reading zero from a
         // live connection concludes the other end hung up.
         return if crate::net::tcp::peer_done(h) { 0 } else { EAGAIN };
     }
-    let n = got.len().min(len as usize);
+    // Never more than the buffer holds: `recv_upto` left the rest on the
+    // connection for the next read (it once took everything and this copied
+    // what fitted, under a comment saying the rest was kept).
+    let n = got.len();
     unsafe { core::ptr::copy_nonoverlapping(got.as_ptr(), buf as *mut u8, n) };
-    // Anything past the guest's buffer would need pushing back, which this
-    // stack has nowhere to put. Refused as short rather than lost: the caller
-    // asked for `len` and got `len`, and the rest is still on the connection.
     n as u64
 }
 
@@ -5264,8 +5342,13 @@ pub(super) fn sys_access(path_at: u64, mode: u64) -> u64 {
         if mode & 2 != 0 && !(super::disk::root_claims(&path) && super::ns::writable(&path)) {
             return EROFS;
         }
+        // X_OK for root: a directory, or any execute bit. A FAT file has no
+        // modes and is run as a program from there, so it counts.
         if mode & 1 != 0 && !n.is_dir {
-            return EACCES;
+            let perm = perm_of(&path, n.inode.map(|i| i.mode));
+            if perm.is_some_and(|p| p & 0o111 == 0) {
+                return EACCES;
+            }
         }
         return 0;
     }
@@ -5275,12 +5358,13 @@ pub(super) fn sys_access(path_at: u64, mode: u64) -> u64 {
     if !super::ns::is_dir(&path) && super::ns::blob_len(&path).is_none() {
         return ENOENT;
     }
-    // W_OK is bit 1. X_OK is granted on directories and refused on files,
-    // since nothing here can be executed by name.
+    // W_OK is bit 1. X_OK is a directory or an execute bit: this said
+    // "nothing here can be executed by name" long after `execve` ran files
+    // from the layer, and a package installed there was not executable.
     if mode & 2 != 0 && !super::fs::writable(&path) {
         return EACCES;
     }
-    if mode & 1 != 0 && !super::ns::is_dir(&path) {
+    if mode & 1 != 0 && !super::ns::is_dir(&path) && perm_of(&path, None).unwrap_or(0o644) & 0o111 == 0 {
         return EACCES;
     }
     0
@@ -6863,27 +6947,55 @@ pub(super) fn sys_prlimit64(_pid: u64, resource: u64, new: u64, old: u64) -> u64
     const RLIMIT_STACK: u64 = 3;
     const RLIMIT_NOFILE: u64 = 7;
     const RLIM_INFINITY: u64 = u64::MAX;
-    if new != 0 {
-        return EPERM;
-    }
-    if old == 0 {
+    const RLIM_NLIMITS: u64 = 16;
+    if resource >= RLIM_NLIMITS {
         return EINVAL;
     }
-    if !reachable(old, 16, true) {
-        return EFAULT;
-    }
-    let Some(sp) = (unsafe { guest_slot() }).as_ref() else { return EINVAL };
-    let n = match resource {
+    let Some(sp) = (unsafe { guest_slot() }).as_mut() else { return EINVAL };
+    // What the machine can actually give, which is the hard limit nothing
+    // may be raised past: more descriptors than the table holds would be a
+    // promise the next `open` breaks.
+    let ceiling = match resource {
         RLIMIT_STACK => sp.stack.len as u64,
         RLIMIT_DATA => sp.brk_end.saturating_sub(sp.brk_start),
         RLIMIT_NOFILE => MAX_FDS as u64,
         _ => RLIM_INFINITY,
     };
-    // Soft and hard are the same number, because there is nothing here that
-    // could raise one to reach the other.
-    unsafe {
-        core::ptr::write_unaligned(old as *mut u64, n);
-        core::ptr::write_unaligned((old + 8) as *mut u64, n);
+    let (soft, hard) = sp
+        .rlimits
+        .iter()
+        .find(|r| r.0 == resource)
+        .map(|r| (r.1, r.2))
+        .unwrap_or((ceiling, ceiling));
+    if old != 0 {
+        if !reachable(old, 16, true) {
+            return EFAULT;
+        }
+        unsafe {
+            core::ptr::write_unaligned(old as *mut u64, soft);
+            core::ptr::write_unaligned((old + 8) as *mut u64, hard);
+        }
+    }
+    // **Setting one is allowed, down and back up to what is real.** Every
+    // set was EPERM, and gpg treats failing to turn core dumps off as fatal
+    // -- it will not risk a crash writing a secret key to disk -- so pacman
+    // could check no signature at all; dbus warned on its descriptor limit
+    // too. Lowering is always fine; raising stops at the ceiling above,
+    // which is the one thing this kernel cannot pretend about.
+    if new != 0 {
+        if !reachable(new, 16, false) {
+            return EFAULT;
+        }
+        let ns = unsafe { core::ptr::read_unaligned(new as *const u64) };
+        let nh = unsafe { core::ptr::read_unaligned((new + 8) as *const u64) };
+        if ns > nh {
+            return EINVAL;
+        }
+        if nh > ceiling {
+            return EPERM;
+        }
+        sp.rlimits.retain(|r| r.0 != resource);
+        sp.rlimits.push((resource, ns, nh));
     }
     0
 }
@@ -6984,6 +7096,31 @@ pub(super) fn write_stat(buf: u64, kind: super::fs::Kind, size: usize, ino: u64)
     write_stat_rdev(buf, kind, size, ino, 0)
 }
 
+/// `write_stat` with the file's own permission bits where it has some (see
+/// `perm_of`), in place of the kind's default.
+pub(super) fn write_stat_perm(buf: u64, kind: super::fs::Kind, size: usize, ino: u64, perm: Option<u32>) -> u64 {
+    match perm {
+        None => write_stat_rdev(buf, kind, size, ino, 0),
+        Some(p) => {
+            PERM_OVERRIDE.store(p | 0x8000_0000, Ordering::Relaxed);
+            let r = write_stat_rdev(buf, kind, size, ino, 0);
+            PERM_OVERRIDE.store(0, Ordering::Relaxed);
+            r
+        }
+    }
+}
+
+/// The permission bits the next `stat` written should carry, flagged by the
+/// top bit. A guest's syscalls are serialised by the guest lock, so one
+/// static does; threading it through four writers of the structure would
+/// put the mode in every caller that has no file to ask about.
+static PERM_OVERRIDE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// A path's permission bits: what a guest set, else the image inode's.
+pub(super) fn perm_of(path: &str, image: Option<u32>) -> Option<u32> {
+    super::ns::mode_of(path).or(image.map(|m| m & 0o7777))
+}
+
 /// `write_stat` for a device node, whose `st_rdev` is how a program tells
 /// which device it is. libdrm reads `major(st_rdev)` and `minor(st_rdev)` to
 /// find the render node's `/sys/dev/char/<major>:<minor>` directory, and a
@@ -6991,6 +7128,11 @@ pub(super) fn write_stat(buf: u64, kind: super::fs::Kind, size: usize, ino: u64)
 pub(super) fn write_stat_rdev(buf: u64, kind: super::fs::Kind, size: usize, ino: u64, rdev: u64) -> u64 {
     let mut b = super::fs::stat_bytes(kind, size, ino);
     b[40..48].copy_from_slice(&rdev.to_le_bytes());
+    let over = PERM_OVERRIDE.load(Ordering::Relaxed);
+    if over & 0x8000_0000 != 0 {
+        let m = (kind.mode() & !0o7777) | (over & 0o7777);
+        b[24..28].copy_from_slice(&m.to_le_bytes());
+    }
     if abi32() && STAT_OLD.load(Ordering::Relaxed) {
         return write_stat_old(buf, size, &b);
     }
@@ -7151,10 +7293,12 @@ pub(super) fn sys_fstat(fd: u64, buf: u64) -> u64 {
     let found = with_fds(|fds, _| match fds.get(fd as usize) {
         Some(Some(super::fs::Fd::Disk(b))) => {
             let f = b.borrow();
+            PERM_OVERRIDE.store(perm_of(&f.path, f.image_mode()).map_or(0, |p| p | 0x8000_0000), Ordering::Relaxed);
             Some((super::fs::Kind::File, f.size, super::fs::ino_of(&f.path), 0))
         }
         Some(Some(super::fs::Fd::File(b))) => {
             let f = b.borrow();
+            PERM_OVERRIDE.store(perm_of(&f.path, None).map_or(0, |p| p | 0x8000_0000), Ordering::Relaxed);
             Some((super::fs::Kind::File, f.data.len(), super::fs::ino_of(&f.path), 0))
         }
         Some(Some(super::fs::Fd::Dir(b))) => {
@@ -7177,10 +7321,12 @@ pub(super) fn sys_fstat(fd: u64, buf: u64) -> u64 {
         _ => None,
     })
     .flatten();
-    match found {
+    let r = match found {
         Some((k, n, ino, rdev)) => write_stat_rdev(buf, k, n, ino, rdev),
         None => EBADF,
-    }
+    };
+    PERM_OVERRIDE.store(0, Ordering::Relaxed);
+    r
 }
 
 pub(super) fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 {
@@ -7229,8 +7375,8 @@ pub(super) fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 
     if let Some(on) = on {
         return match on {
             Some(n) if n.is_link => write_stat(buf, super::fs::Kind::Link, n.size, super::fs::ino_of(&path)),
-            Some(n) if n.is_dir => write_stat(buf, super::fs::Kind::Dir, 0, super::fs::ino_of(&path)),
-            Some(n) => write_stat(buf, super::fs::Kind::File, n.size, super::fs::ino_of(&path)),
+            Some(n) if n.is_dir => write_stat_perm(buf, super::fs::Kind::Dir, 0, super::fs::ino_of(&path), perm_of(&path, n.inode.map(|i| i.mode))),
+            Some(n) => write_stat_perm(buf, super::fs::Kind::File, n.size, super::fs::ino_of(&path), perm_of(&path, n.inode.map(|i| i.mode))),
             None => ENOENT,
         };
     }
@@ -7258,14 +7404,14 @@ pub(super) fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 
         return write_stat(buf, super::fs::Kind::File, n, super::fs::ino_of(&path));
     }
     if super::ns::is_dir(&path) {
-        return write_stat(buf, super::fs::Kind::Dir, 0, super::fs::ino_of(&path));
+        return write_stat_perm(buf, super::fs::Kind::Dir, 0, super::fs::ino_of(&path), perm_of(&path, None));
     }
     // `blob_len` rather than `read_blob`: the only field wanted here is the
     // size, and reading the blob to find it copies the whole file into the
     // heap and drops it. `stat` on a large checkpoint is an ordinary thing for
     // a program to do and was an allocation of the whole checkpoint.
     match super::ns::blob_len(&path) {
-        Some(n) => write_stat(buf, super::fs::Kind::File, n, super::fs::ino_of(&path)),
+        Some(n) => write_stat_perm(buf, super::fs::Kind::File, n, super::fs::ino_of(&path), perm_of(&path, None)),
         None => ENOENT,
     }
 }
@@ -7293,9 +7439,17 @@ pub(super) fn sys_getdents64(fd: u64, buf: u64, len: u64) -> u64 {
                 }
                 full.push_str(name);
                 let next = (*at + 1) as u64;
-                if !super::fs::dirent(
-                    &mut out, room, super::fs::ino_of(&full), next, *is_dir, name,
-                ) {
+                // `d_type` is trusted over `lstat` by every walker that reads
+                // it: ldconfig took a link for the library it names and never
+                // asked again, so a link reported as DT_REG is a file to it.
+                let kind = if *is_dir {
+                    4 // DT_DIR
+                } else if super::link::is_link(&full) {
+                    10 // DT_LNK
+                } else {
+                    8 // DT_REG
+                };
+                if !super::fs::dirent(&mut out, room, super::fs::ino_of(&full), next, kind, name) {
                     break;
                 }
                 *at += 1;
@@ -8433,6 +8587,8 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_PWRITE64 => (sys_pwrite64(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_SET_ROBUST_LIST => (sys_set_robust_list(f.rdi, f.rsi), true),
         SYS_PRLIMIT64 => (sys_prlimit64(f.rdi, f.rsi, f.rdx, f.r10), true),
+        SYS_GETRLIMIT => (sys_prlimit64(0, f.rdi, 0, f.rsi), true),
+        SYS_SETRLIMIT => (sys_prlimit64(0, f.rdi, f.rsi, 0), true),
         SYS_GETRANDOM => (sys_getrandom(f.rdi, f.rsi, f.rdx), true),
         SYS_TIME => (sys_time(f.rdi), true),
         SYS_READLINK => {
@@ -8472,6 +8628,10 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         229 => (sys_clock_getres(f.rdi, f.rsi), true),
         SYS_ACCESS => (sys_access(f.rdi, f.rsi), true),
         SYS_FACCESSAT => (sys_access(f.rsi, f.rdx), true),
+        // `faccessat2` is `faccessat` with flags; the ones it has (effective
+        // ids, don't follow) change nothing where every guest is root and the
+        // last component is already followed.
+        439 => (sys_access(f.rsi, f.rdx), true),
         SYS_FTRUNCATE => (sys_ftruncate(f.rdi, f.rsi), true),
         285 => (sys_fallocate(f.rdi, f.rsi, f.rdx, f.r10), true),
         27 => (sys_mincore(f.rdi, f.rsi, f.rdx), true),
@@ -8557,7 +8717,12 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         // stopped LibreOffice saving anything: `impl_store ... Io General`
         // on every document written into /tmp.
         SYS_FSYNC | SYS_FDATASYNC | SYS_SYNC | SYS_SYNCFS | SYS_FLOCK => (0, true),
-        SYS_CHMOD | SYS_FCHMOD | SYS_FCHMODAT | SYS_CHOWN | SYS_FCHOWN | SYS_LCHOWN | SYS_FCHOWNAT => (0, true),
+        SYS_CHMOD => (sys_chmodat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi), true),
+        SYS_FCHMODAT => (sys_chmodat(f.rdi, f.rsi, f.rdx), true),
+        SYS_FCHMOD => (sys_fchmod(f.rdi, f.rsi), true),
+        // Every guest is root and owns everything, so a change of owner has
+        // nothing to record and is answered as done.
+        SYS_CHOWN | SYS_FCHOWN | SYS_LCHOWN | SYS_FCHOWNAT => (0, true),
         // Not served, and said so in the answer glibc's `posix_fallocate`
         // knows how to fall back from, which `ENOSYS` is not.
         SYS_FALLOCATE => ((-95i64) as u64, true),
@@ -8582,6 +8747,11 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_RT_SIGACTION => (super::signal::sigaction(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_RT_SIGSUSPEND => (super::signal::sigsuspend(f.rdi, f.rsi), true),
         SYS_PAUSE => (super::signal::pause(), true),
+        // Locking memory is a promise not to swap it out, and nothing here is
+        // ever swapped: every page a guest has is resident until it is
+        // freed. So the promise is already kept and success is the truth.
+        // gpg locks its key material and warned "using insecure memory".
+        SYS_MLOCK | SYS_MUNLOCK | SYS_MLOCKALL | SYS_MUNLOCKALL => (0, true),
         SYS_GETPRIORITY => (sys_priority(f.rdi, f.rsi, None), true),
         SYS_SETPRIORITY => (sys_priority(f.rdi, f.rsi, Some(f.rdx)), true),
         SYS_IOPRIO_GET => (sys_ioprio(f.rdi, f.rsi, None), true),
@@ -10845,6 +11015,8 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_PWRITE64 => "pwrite64",
         SYS_SET_ROBUST_LIST => "set_robust_list",
         SYS_PRLIMIT64 => "prlimit64",
+        SYS_GETRLIMIT => "getrlimit",
+        SYS_SETRLIMIT => "setrlimit",
         SYS_GETRANDOM => "getrandom",
         SYS_TIME => "time",
         SYS_READLINK => "readlink",
@@ -10928,6 +11100,10 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_RT_SIGSUSPEND => "rt_sigsuspend",
         SYS_PAUSE => "pause",
         SYS_GETPRIORITY => "getpriority",
+        SYS_MLOCK => "mlock",
+        SYS_MUNLOCK => "munlock",
+        SYS_MLOCKALL => "mlockall",
+        SYS_MUNLOCKALL => "munlockall",
         SYS_SETPRIORITY => "setpriority",
         SYS_SCHED_GETPARAM => "sched_getparam",
         SYS_SCHED_SETSCHEDULER => "sched_setscheduler",

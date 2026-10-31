@@ -32,6 +32,36 @@ use alloc::vec::Vec;
 pub const UPPER: &str = "/linux/root";
 /// Whiteouts: a path here hides the image's file at the same guest path.
 pub const GONE: &str = "/linux/gone";
+/// Permission bits a guest has set on a path, as four little-endian bytes.
+///
+/// **Beside the files, as whiteouts are, because the store has no modes.**
+/// Every file reported 0644, so nothing looked executable: gpgme searched
+/// PATH for gpgconf with `access(X_OK)`, found none, and pacman could check
+/// no signature. `chmod` was a no-op, so a package's binaries, which its
+/// extraction marks 0755, stayed 0644. A path with no entry here answers its
+/// image inode's mode, or the default for its kind.
+pub const MODES: &str = "/linux/mode";
+
+fn mode_path(guest: &str) -> String {
+    format!("{}{}", MODES, guest)
+}
+
+/// The permission bits set on a guest path, if any were.
+pub fn mode_of(guest: &str) -> Option<u32> {
+    let b = sysbox::read_blob(&mode_path(guest))?;
+    (b.len() == 4).then(|| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) & 0o7777)
+}
+
+pub fn set_mode(guest: &str, perm: u32) -> bool {
+    sysbox::write_blob(&mode_path(guest), Vec::from((perm & 0o7777).to_le_bytes()))
+}
+
+pub fn forget_mode(guest: &str) {
+    let p = mode_path(guest);
+    if sysbox::blob_len(&p).is_some() {
+        sysbox::detach(&p);
+    }
+}
 
 /// The trees a guest shares with the kernel rather than layering.
 const SHARED: [&str; 2] = ["/tmp", "/run"];
@@ -113,6 +143,12 @@ pub fn detach(guest: &str) -> bool {
 
 pub fn rename(from: &str, to: &str) -> bool {
     unwhite(to);
+    // The bits travel with the file; whatever `to` had set goes with it.
+    forget_mode(to);
+    if let Some(m) = mode_of(from) {
+        set_mode(to, m);
+        forget_mode(from);
+    }
     sysbox::rename(&backing(from), &backing(to))
 }
 
@@ -151,6 +187,13 @@ pub fn copy_up(guest: &str) -> bool {
         return true;
     }
     let Some(bytes) = super::disk::read_all(guest) else { return false };
+    // The image file's mode comes with it: a program copied up to be edited
+    // is still a program.
+    if mode_of(guest).is_none() {
+        if let Some(m) = super::disk::image_lookup(guest, true).and_then(|n| n.inode).map(|i| i.mode) {
+            set_mode(guest, m);
+        }
+    }
     write_blob(guest, bytes)
 }
 

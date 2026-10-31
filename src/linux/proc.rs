@@ -87,7 +87,7 @@ pub fn is_file(path: &str) -> bool {
     matches!(
         path,
         "/proc/self/exe" | "/proc/self/cmdline" | "/proc/self/environ" | "/proc/self/maps"
-            | "/proc/self/mounts" | "/proc/mounts" | "/proc/meminfo" | CPU_MAX_FREQ
+            | "/proc/self/mounts" | "/proc/mounts" | "/proc/meminfo" | CPU_MAX_FREQ | RESOLV
     ) || super::drm::sys_is_file(path)
 }
 
@@ -103,6 +103,32 @@ pub fn link(path: &str) -> Option<String> {
         "/proc/self/exe" => syscall::guest_image(),
         _ => super::drm::sys_link(path),
     }
+}
+
+/// Where a guest's resolver is told what to ask.
+const RESOLV: &str = "/run/glados/resolv.conf";
+
+/// The resolver configuration, written by the machine from what DHCP told
+/// it. The image's `/etc/resolv.conf` is a link here, which is how
+/// systemd-resolved owns the file on a desktop: a file in the image would
+/// win over anything this module serves at the same path.
+///
+/// **Over TCP (`use-vc`), because a guest has no UDP.** Its sockets are TCP
+/// only; the kernel's own UDP is one port held by one task for its own
+/// resolver, not a socket layer. glibc speaks DNS over TCP when told to, and
+/// every resolver worth asking answers there -- a router's, QEMU's virtual
+/// one (which forwards it to the host's), a public one. Without this the
+/// image's own file was empty and pacman could not find a mirror.
+///
+/// The DHCP server first, then a public one in case it will not take TCP.
+fn resolv() -> String {
+    let d = crate::net::dns_server();
+    let mut out = String::from("# Written by GLaDOS from the network's own settings.\n");
+    if d != [0, 0, 0, 0] {
+        out.push_str(&format!("nameserver {}.{}.{}.{}\n", d[0], d[1], d[2], d[3]));
+    }
+    out.push_str("nameserver 1.1.1.1\noptions use-vc timeout:3 attempts:2\n");
+    out
 }
 
 /// The mount table, in `/proc/self/mounts`'s format: device, mount point,
@@ -150,6 +176,7 @@ pub fn read(path: &str) -> Option<Vec<u8>> {
         "/proc/self/environ" => Some(joined(&syscall::environ())),
         "/proc/self/maps" => Some(maps().into_bytes()),
         "/proc/self/mounts" | "/proc/mounts" => Some(mounts().into_bytes()),
+        RESOLV => Some(resolv().into_bytes()),
         // **Every field here is one this machine knows**, which is what
         // admits the file under the rule above: total and free are the
         // kernel heap's, the same figures `sysinfo` already answers, and

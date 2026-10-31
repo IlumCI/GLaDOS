@@ -526,7 +526,7 @@ pub fn stat_bytes(kind: Kind, size: usize, ino: u64) -> [u8; 144] {
 /// walking the buffer adds `d_reclen` to its cursor. An unpadded record leaves
 /// the next one misaligned and the guest reads a name out of the middle of an
 /// inode.
-pub fn dirent(out: &mut Vec<u8>, room: usize, ino: u64, next: u64, is_dir: bool, name: &str) -> bool {
+pub fn dirent(out: &mut Vec<u8>, room: usize, ino: u64, next: u64, kind: u8, name: &str) -> bool {
     let len = (19 + name.len() + 1).next_multiple_of(8);
     if out.len() + len > room {
         return false;
@@ -541,7 +541,7 @@ pub fn dirent(out: &mut Vec<u8>, room: usize, ino: u64, next: u64, is_dir: bool,
     // two would disagree silently.
     out.extend_from_slice(&next.to_le_bytes());
     out.extend_from_slice(&(len as u16).to_le_bytes());
-    out.push(if is_dir { 4 } else { 8 }); // DT_DIR / DT_REG
+    out.push(kind);
     out.extend_from_slice(name.as_bytes());
     out.push(0);
     while out.len() < start + len {
@@ -623,9 +623,9 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 
     // Directory entries, and the padding a guest's cursor depends on.
     let mut buf = Vec::new();
-    let ok1 = dirent(&mut buf, 4096, 1, 1, true, "ai");
+    let ok1 = dirent(&mut buf, 4096, 1, 1, 4, "ai");
     let first = buf.len();
-    let ok2 = dirent(&mut buf, 4096, 2, 2, false, "a-rather-longer-name.txt");
+    let ok2 = dirent(&mut buf, 4096, 2, 2, 8, "a-rather-longer-name.txt");
     out.push(("two entries fit and both are eight-byte multiples", ok1 && ok2 && first % 8 == 0 && buf.len() % 8 == 0));
     out.push((
         "the record length in the first entry steps exactly to the second",
@@ -642,13 +642,13 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     ));
     out.push((
         "an entry that will not fit is refused rather than truncated",
-        !dirent(&mut Vec::new(), 8, 1, 1, false, "toolong"),
+        !dirent(&mut Vec::new(), 8, 1, 1, 8, "toolong"),
     ));
     out.push((
         "and a room of zero refuses without touching the buffer",
         {
             let mut v = Vec::new();
-            !dirent(&mut v, 0, 1, 1, false, "x") && v.is_empty()
+            !dirent(&mut v, 0, 1, 1, 8, "x") && v.is_empty()
         },
     ));
 

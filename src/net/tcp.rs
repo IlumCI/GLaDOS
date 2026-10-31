@@ -1022,6 +1022,24 @@ pub fn recv_at(h: Handle, timeout_ms: u64) -> Vec<u8> {
     at(h, |t| core::mem::take(&mut t.recv_buf)).unwrap_or_default()
 }
 
+/// `recv_at` taking at most `max` bytes, leaving the rest for the next call.
+///
+/// What a socket `read` needs: the caller's buffer is its limit, and what
+/// arrived past it is still the connection's. Taking the whole buffer and
+/// copying what fitted threw the rest away -- a DNS reply over TCP is a
+/// two-byte length then the message, read in that order, and both arrive in
+/// one segment, so every lookup a guest made lost its answer.
+pub fn recv_upto(h: Handle, max: usize, timeout_ms: u64) -> Vec<u8> {
+    wait_until(timeout_ms, || {
+        at(h, |t| !t.recv_buf.is_empty() || t.peer_fin).unwrap_or(true)
+    });
+    at(h, |t| {
+        let n = t.recv_buf.len().min(max);
+        t.recv_buf.drain(..n).collect()
+    })
+    .unwrap_or_default()
+}
+
 /// Whether the peer has finished sending on one connection.
 pub fn peer_done(h: Handle) -> bool {
     at(h, |t| t.peer_fin).unwrap_or(true)

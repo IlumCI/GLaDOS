@@ -5568,6 +5568,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         // The model doing office work through LibreOffice -- see `office`.
         "office" => crate::office::command(rest),
         "colleague" if !rest.trim().is_empty() => crate::office::colleague(rest),
+        // The package manager, from the machine's own shell: `orange install
+        // figlet` runs the guest's `orange` (pacman underneath) the way a
+        // Linux shell would.
+        "orange" => {
+            let line = alloc::format!("linux run /usr/bin/bash /usr/bin/orange {}", rest.trim());
+            execute(&line, boot, acpi, interp);
+        }
         "launch" => match crate::apps::launch(rest.trim()) {
             Ok(id) => kprintln!("  [job {}] {} started", id, rest.trim()),
             Err(why) => kprintln!("  {}", why),
