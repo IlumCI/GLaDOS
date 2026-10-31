@@ -1272,9 +1272,10 @@ def main():
             # The shell echoes a prompt when it is ready for the next line.
             # A compositor notice printed after the prompt -- "[gfx] the
             # compositor is painting again" lands whenever the host stalls the
-            # guest, often on the prompt's own line -- hid the prompt, and the run sat there with
+            # guest, often on the prompt's own line -- or a service's restart
+            # notice ("[services] session-bus ended ...") hid the prompt, and the run sat there with
             # every command unsent. Such lines are stripped before asking.
-            quiet = re.sub(rb"(\r?\n)?\[gfx\][^\n]*(\r?\n\[gfx\][^\n]*)*\s*$", b"", buf[-4096:]) if not chunk else buf
+            quiet = re.sub(rb"((\r?\n)?[ \t]*\[(gfx|services)\][^\n]*)+\s*$", b"", buf[-4096:]) if not chunk else buf
             if (force_send or buf.endswith(PROMPT)
                     or (not chunk and buf.rstrip().endswith(PROMPT.strip()))
                     or (not chunk and quiet.rstrip().endswith(PROMPT.strip()))):

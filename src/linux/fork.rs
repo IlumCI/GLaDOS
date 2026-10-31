@@ -38,7 +38,7 @@ pub const MAX_CHILDREN: usize = 4;
 /// while its parent sits inside one would otherwise overwrite where the
 /// parent's `rsp` went -- which `syscall::run` already records as the reason
 /// the main thread carries entry state at all.
-const CHILD_STACK: usize = 16 * 1024;
+const CHILD_STACK: usize = super::syscall::GUEST_SYSCALL_STACK;
 
 #[derive(Clone, Copy)]
 struct Slot {

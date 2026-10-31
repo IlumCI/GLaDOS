@@ -87,7 +87,7 @@ pub fn is_file(path: &str) -> bool {
     matches!(
         path,
         "/proc/self/exe" | "/proc/self/cmdline" | "/proc/self/environ" | "/proc/self/maps"
-            | "/proc/meminfo" | CPU_MAX_FREQ
+            | "/proc/self/mounts" | "/proc/mounts" | "/proc/meminfo" | CPU_MAX_FREQ
     ) || super::drm::sys_is_file(path)
 }
 
@@ -103,6 +103,31 @@ pub fn link(path: &str) -> Option<String> {
         "/proc/self/exe" => syscall::guest_image(),
         _ => super::drm::sys_link(path),
     }
+}
+
+/// The mount table, in `/proc/self/mounts`'s format: device, mount point,
+/// type, options, and two zeros.
+///
+/// **pacman would not install anything without it.** It checks free space per
+/// mount point before a transaction, finds the mount points through
+/// `/etc/mtab` -- a symlink to this file in every Arch root -- and with the
+/// file missing it reported "not enough free disk space" about a disk it had
+/// not looked at. Every field is one this machine knows: the root is the
+/// writable layer over the image, which is memory and which `statfs` already
+/// answers as such; a partition is read-only FAT; `/proc` and `/dev` are this
+/// module's and `dev.rs`'s.
+fn mounts() -> String {
+    let mut out = String::new();
+    for (at, kind, _) in super::disk::mounts() {
+        let line = match kind {
+            "erofs" => format!("layer {} overlay rw 0 0\n", at),
+            "fat" => format!("disk {} vfat ro 0 0\n", at),
+            other => format!("{} {} {} ro 0 0\n", other, at, other),
+        };
+        out.push_str(&line);
+    }
+    out.push_str("proc /proc proc rw 0 0\ndev /dev devtmpfs rw 0 0\n");
+    out
 }
 
 /// The bytes of a synthetic file, or nothing when this machine cannot say.
@@ -124,6 +149,7 @@ pub fn read(path: &str) -> Option<Vec<u8>> {
         "/proc/self/cmdline" => Some(joined(&syscall::guest_argv())),
         "/proc/self/environ" => Some(joined(&syscall::environ())),
         "/proc/self/maps" => Some(maps().into_bytes()),
+        "/proc/self/mounts" | "/proc/mounts" => Some(mounts().into_bytes()),
         // **Every field here is one this machine knows**, which is what
         // admits the file under the rule above: total and free are the
         // kernel heap's, the same figures `sysinfo` already answers, and

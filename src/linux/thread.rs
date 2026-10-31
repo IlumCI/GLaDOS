@@ -64,10 +64,10 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 /// always handle, so the limit has to be one a real program does not reach.
 pub const MAX_THREADS: usize = 48;
 
-/// Sixteen KiB, the same as the main guest's, and for the same reason: the
+/// The same as the main guest's, and for the same reason: the
 /// dispatcher is ordinary Rust that formats and prints, so a stack sized for
 /// the assembly is a handler that works until somebody adds a `kprintln!`.
-const SYSCALL_STACK: usize = 16 * 1024;
+const SYSCALL_STACK: usize = super::syscall::GUEST_SYSCALL_STACK;
 
 /// The flags a thread is made of.
 ///

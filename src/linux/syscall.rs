@@ -628,15 +628,28 @@ pub fn arm_core() {
     }
 }
 
-/// Sixteen KiB, aligned, and static rather than heap-allocated.
+/// `GUEST_SYSCALL_STACK`, aligned, and static rather than heap-allocated.
 ///
-/// Static because the address has to be known to the stub, and 16 KiB because
+/// Static because the address has to be known to the stub, and that size because
 /// the dispatcher below is ordinary Rust that formats and prints -- a stack
 /// sized for the assembly rather than for what it calls is the classic way to
 /// make a trap handler that works until somebody adds a `kprintln!`.
 #[repr(align(16))]
-struct Stack([u8; 16 * 1024]);
-static mut SYSCALL_STACK: Stack = Stack([0; 16 * 1024]);
+struct Stack([u8; GUEST_SYSCALL_STACK]);
+static mut SYSCALL_STACK: Stack = Stack([0; GUEST_SYSCALL_STACK]);
+
+/// Every guest syscall stack's size: the main thread's, a session's, a
+/// thread's and a forked child's.
+///
+/// **Sixty-four KiB, and sixteen was measured too small.** Nothing guards the
+/// end of one, so running off it does not fault: it writes over whatever is
+/// below, and the first thing to notice is the guest, whose saved registers
+/// were in the way. Two read-only lookups added to `openat` were enough --
+/// inlined, they grew its frame, the image lookups after them ran deeper,
+/// and dbus-daemon took a null pointer inside `ld.so` on every boot while
+/// the same build with the lookups made a no-op booted clean. The kernel
+/// had been within a few frames of this since the image reader landed.
+pub const GUEST_SYSCALL_STACK: usize = 64 * 1024;
 
 /// The three globals the stub reaches through, as one value.
 ///
@@ -1692,7 +1705,7 @@ const TRACE_CAP: usize = 1024;
 pub fn arm() {
     arm_core();
     unsafe {
-        let top = core::ptr::addr_of!(SYSCALL_STACK.0) as u64 + (16 * 1024);
+        let top = core::ptr::addr_of!(SYSCALL_STACK.0) as u64 + GUEST_SYSCALL_STACK as u64;
         (*core_entry()).syscall_stack = top;
         // And the 32-bit door beside it.
         super::i386::arm();
@@ -2108,6 +2121,32 @@ pub(super) fn place_fd(fds: &mut Vec<Option<super::fs::Fd>>, entry: super::fs::F
     }
 }
 
+/// A path whose last component is a symlink in the root image that leads
+/// out of it, replaced by where it leads.
+///
+/// The image's reader follows a link inside the image and nowhere else, so a
+/// link to something this kernel provides itself ended there: `/etc/mtab` is
+/// `../proc/self/mounts` in every Arch root, `/proc` is synthetic, and
+/// pacman, finding no mount table, refused every install for want of disk
+/// space it had not measured. Only a link that dangles in the image is taken
+/// further, and only when it leads somewhere no mount covers, so anything
+/// the image can or should answer itself is left to it.
+fn out_of_image(path: String) -> String {
+    if !matches!(super::disk::lookup(&path), Some(None)) {
+        return path;
+    }
+    let Some(Some(target)) = super::disk::link_target(&path) else { return path };
+    let parent = path.rsplit_once('/').map(|(p, _)| if p.is_empty() { "/" } else { p }).unwrap_or("/");
+    match super::fs::resolve(parent, &target) {
+        // Only out of the image. A link that dangles *inside* it is the
+        // image's to answer, and answering it here instead changed what the
+        // dynamic loader found: dbus-daemon took a null pointer in `ld.so`
+        // on every boot once every dangling link was followed.
+        Some(next) if !super::disk::claims(&next) => next,
+        _ => path,
+    }
+}
+
 pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
     let raw = match read_cstr(path_at) {
         Ok(v) => v,
@@ -2134,6 +2173,7 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
             String::new()
         };
         let Some(path) = super::fs::resolve(&base, &raw) else { return ENOENT };
+        let path = out_of_image(path);
         // A mounted volume, read in place by range. Before everything else,
         // so a mount point shadows whatever the namespace has at that path.
         // **A write to the root image goes to the guest's layer.** The file
@@ -6790,7 +6830,15 @@ pub(super) fn sys_statfs(path_at: u64, buf: u64) -> u64 {
     };
     let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
     let Some(path) = found else { return ENOENT };
+    // The root image is not read-only to a guest: what it writes there goes
+    // to its layer, which is memory, and that is what to report. Answered as
+    // a read-only volume, pacman refused every install with "partition / is
+    // mounted read only". A named mount -- a FAT partition -- is read-only.
+    let layer = super::disk::root_claims(&path) && super::ns::writable(&path);
     if let Some(on) = super::disk::lookup(&path) {
+        if layer && (on.is_some() || super::ns::is_dir(&path) || super::ns::blob_len(&path).is_some()) {
+            return write_statfs(buf, false);
+        }
         return if on.is_some() { write_statfs(buf, true) } else { ENOENT };
     }
     let known = path == "/"
@@ -6807,7 +6855,12 @@ pub(super) fn sys_statfs(path_at: u64, buf: u64) -> u64 {
 
 pub(super) fn sys_fstatfs(fd: u64, buf: u64) -> u64 {
     let on_disk = with_fds(|fds, _| match fds.get(fd as usize) {
-        Some(Some(super::fs::Fd::Disk(_))) => Some(true),
+        // A file of the root image is on the layer's volume as far as a
+        // guest can tell -- see `sys_statfs`.
+        Some(Some(super::fs::Fd::Disk(b))) => {
+            let p = b.borrow().path.clone();
+            Some(!(super::disk::root_claims(&p) && super::ns::writable(&p)))
+        }
         Some(Some(_)) => Some(false),
         _ => None,
     })
@@ -9043,10 +9096,10 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64, bits32: bool) -> u64 {
         return 0;
     };
     // **And a syscall stack of its own.** The main thread's syscalls ran on
-    // one static 16 KiB stack, which is correct for exactly one session: a
+    // one static stack, which is correct for exactly one session: a
     // second main thread blocked in a syscall beside the first would be
     // pushing onto the frame the first is suspended in.
-    let sys_layout = core::alloc::Layout::from_size_align(16 * 1024, 16).unwrap();
+    let sys_layout = core::alloc::Layout::from_size_align(GUEST_SYSCALL_STACK, 16).unwrap();
     let sys_stack = unsafe { alloc::alloc::alloc(sys_layout) };
     if sys_stack.is_null() {
         super::session::release(sess);
@@ -9054,7 +9107,7 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64, bits32: bool) -> u64 {
     }
     arm();
     unsafe {
-        (*core_entry()).syscall_stack = sys_stack as u64 + 16 * 1024;
+        (*core_entry()).syscall_stack = sys_stack as u64 + GUEST_SYSCALL_STACK as u64;
     };
     // The guest is about to be allowed to write `FS`, and `FS` is a register
     // of this machine that the kernel goes on using afterwards. Parked here
@@ -10102,7 +10155,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 
     // The handler's stack has to be aligned, because the stub's `sub rsp, 8`
     // assumes a 16-aligned top and corrects for exactly nine pushes.
-    let top = unsafe { core::ptr::addr_of!(SYSCALL_STACK.0) as u64 + (16 * 1024) };
+    let top = unsafe { core::ptr::addr_of!(SYSCALL_STACK.0) as u64 + GUEST_SYSCALL_STACK as u64 };
     out.push(("the handler's stack top is 16-byte aligned", top % 16 == 0));
     out.push((
         "nine pushes and the alignment slot leave rsp 16-aligned at the call",
