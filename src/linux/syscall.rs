@@ -115,6 +115,13 @@ pub const SYS_READLINK: u64 = 89;
 pub const SYS_LINK: u64 = 86;
 pub const SYS_CREAT: u64 = 85;
 pub const SYS_PAUSE: u64 = 34;
+pub const SYS_GETPRIORITY: u64 = 140;
+pub const SYS_SETPRIORITY: u64 = 141;
+pub const SYS_SCHED_GETPARAM: u64 = 143;
+pub const SYS_SCHED_SETSCHEDULER: u64 = 144;
+pub const SYS_SCHED_GETSCHEDULER: u64 = 145;
+pub const SYS_IOPRIO_SET: u64 = 251;
+pub const SYS_IOPRIO_GET: u64 = 252;
 pub const SYS_ALARM: u64 = 37;
 pub const SYS_RT_SIGSUSPEND: u64 = 130;
 pub const SYS_CLOSE_RANGE: u64 = 436;
@@ -207,6 +214,7 @@ pub const SYS_EXIT_GROUP: u64 = 231;
 pub(super) const ENOSYS: u64 = (-38i64) as u64;
 pub(super) const EBADF: u64 = (-9i64) as u64;
 pub(super) const EPERM: u64 = (-1i64) as u64;
+pub(super) const ESRCH: u64 = (-3i64) as u64;
 pub(super) const ENOMEM: u64 = (-12i64) as u64;
 pub(super) const EINVAL: u64 = (-22i64) as u64;
 pub(super) const EFAULT: u64 = (-14i64) as u64;
@@ -893,6 +901,13 @@ pub struct Space {
     /// replacing this field drops what it held.
     /// Handlers, masks and the frame a handler interrupted.
     pub signals: super::signal::State,
+    /// The niceness `setpriority` set and `getpriority` reports, -20..=19.
+    /// Kept and answered, and not acted on: this scheduler has no priorities
+    /// for it to change.
+    pub nice: i32,
+    /// The I/O priority `ioprio_set` set, as its packed class and level; the
+    /// same bargain as `nice`, with no I/O scheduler underneath.
+    pub ioprio: u32,
     pub holder: Option<alloc::boxed::Box<super::load::Guest>>,
     /// Heap ranges this guest owns outright, freed when it is torn down.
     ///
@@ -1111,6 +1126,8 @@ pub fn replace_guest(
         brk_mapped: r.brk_mapped,
         tables,
         signals: super::signal::State::default(),
+        nice: 0,
+        ioprio: 0,
         holder: None,
         owned: alloc::vec::Vec::new(),
         mmap_next: r.mmap_at,
@@ -1201,8 +1218,14 @@ pub fn clone_guest(
             // Not inside a handler, whatever the parent was doing: the child
             // resumes at the fork, not at the parent's interrupted frame.
             depth: 0,
+            // Nor in the parent's suspend, and with no alarm: Linux clears a
+            // child's pending alarm.
+            after_suspend: None,
+            alarm_at: 0,
             ..p.signals
         },
+        nice: p.nice,
+        ioprio: p.ioprio,
         holder: None,
         tables: Some(tables),
         owned,
@@ -1404,6 +1427,8 @@ pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
             brk_mapped: r.brk_mapped,
             tables,
             signals: super::signal::State::default(),
+            nice: 0,
+            ioprio: 0,
             holder: None,
             owned: alloc::vec::Vec::new(),
             mmap_next: r.mmap_at,
@@ -2205,7 +2230,12 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
         if flags & O_NOFOLLOW != 0 && super::link::is_link(&path) {
             return ELOOP;
         }
-        let path = super::link::follow(path);
+        // A loop of links is ELOOP, not a missing file: "too many levels of
+        // symbolic links" is the message that says what is wrong.
+        let path = match super::link::walk(&path, true) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
         // A mounted volume, read in place by range. Before everything else,
         // so a mount point shadows whatever the namespace has at that path.
         // **A write to the root image goes to the guest's layer.** The file
@@ -2562,6 +2592,44 @@ fn with_links(dir: &str, mut entries: Vec<(String, bool, usize)>) -> Vec<(String
         }
     }
     entries
+}
+
+/// `getpriority` and `setpriority` for this process (`PRIO_PROCESS`, pid 0
+/// or its own). The raw call answers `20 - nice`, which glibc turns back;
+/// `nice -n 5 true` stopped at "cannot get niceness" with this ENOSYS.
+pub(super) fn sys_priority(which: u64, who: u64, set: Option<u64>) -> u64 {
+    if which as u32 != 0 {
+        return EINVAL;
+    }
+    let Some(sp) = (unsafe { guest_slot() }).as_mut() else { return EINVAL };
+    if who as u32 != 0 && who as u32 as u64 != super::fork::pid_of_guest(current_guest()) {
+        return ESRCH;
+    }
+    match set {
+        None => (20 - sp.nice) as u64,
+        Some(v) => {
+            sp.nice = (v as u32 as i32).clamp(-20, 19);
+            0
+        }
+    }
+}
+
+/// `ioprio_get` and `ioprio_set` for this process, kept and answered.
+pub(super) fn sys_ioprio(which: u64, who: u64, set: Option<u64>) -> u64 {
+    if which as u32 != 1 {
+        return EINVAL;
+    }
+    let Some(sp) = (unsafe { guest_slot() }).as_mut() else { return EINVAL };
+    if who as u32 != 0 && who as u32 as u64 != super::fork::pid_of_guest(current_guest()) {
+        return ESRCH;
+    }
+    match set {
+        None => sp.ioprio as u64,
+        Some(v) => {
+            sp.ioprio = v as u32;
+            0
+        }
+    }
 }
 
 /// `close_range`: close every descriptor from `first` to `last`, or with
@@ -8507,6 +8575,27 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_RT_SIGACTION => (super::signal::sigaction(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_RT_SIGSUSPEND => (super::signal::sigsuspend(f.rdi, f.rsi), true),
         SYS_PAUSE => (super::signal::pause(), true),
+        SYS_GETPRIORITY => (sys_priority(f.rdi, f.rsi, None), true),
+        SYS_SETPRIORITY => (sys_priority(f.rdi, f.rsi, Some(f.rdx)), true),
+        SYS_IOPRIO_GET => (sys_ioprio(f.rdi, f.rsi, None), true),
+        SYS_IOPRIO_SET => (sys_ioprio(f.rdi, f.rsi, Some(f.rdx)), true),
+        // One scheduling policy, the ordinary one, and it is what anybody
+        // asking is told. Setting it to that is a no-op; setting it to a
+        // real-time policy is refused, since nothing here would honour it.
+        SYS_SCHED_GETSCHEDULER => (0, true),
+        SYS_SCHED_GETPARAM => {
+            if reachable(f.rsi, 4, true) {
+                unsafe { core::ptr::write(f.rsi as *mut i32, 0) };
+                (0, true)
+            } else {
+                (EFAULT, true)
+            }
+        }
+        SYS_SCHED_SETSCHEDULER => (if matches!(f.rsi as u32, 0 | 3 | 5) { 0 } else { EPERM }, true),
+        // Extended attributes: none of the filesystems a guest sees carries
+        // them, and EOPNOTSUPP is Linux's answer for exactly that -- the
+        // copy or archive asking carries on without them.
+        188..=199 => ((-95i64) as u64, true),
         SYS_ALARM => (super::signal::alarm(f.rdi), true),
         // `creat` is `open` with these flags and always was.
         SYS_CREAT => (sys_openat(super::fs::AT_FDCWD as u64, f.rdi, O_CREAT | O_WRONLY | O_TRUNC, f.rsi), true),
@@ -10831,6 +10920,13 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_RT_SIGPROCMASK => "rt_sigprocmask",
         SYS_RT_SIGSUSPEND => "rt_sigsuspend",
         SYS_PAUSE => "pause",
+        SYS_GETPRIORITY => "getpriority",
+        SYS_SETPRIORITY => "setpriority",
+        SYS_SCHED_GETPARAM => "sched_getparam",
+        SYS_SCHED_SETSCHEDULER => "sched_setscheduler",
+        SYS_SCHED_GETSCHEDULER => "sched_getscheduler",
+        SYS_IOPRIO_SET => "ioprio_set",
+        SYS_IOPRIO_GET => "ioprio_get",
         SYS_ALARM => "alarm",
         SYS_CREAT => "creat",
         SYS_CLOSE_RANGE => "close_range",
