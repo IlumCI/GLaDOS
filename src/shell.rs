@@ -7576,6 +7576,22 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     Some("off") => linux::prof::ON.store(false, core::sync::atomic::Ordering::Relaxed),
                     _ => linux::prof::report(),
                 },
+                "unserved" => {
+                    if words.next() == Some("clear") {
+                        for n in linux::syscall::UNSERVED.iter().chain(linux::syscall::UNSERVED_32.iter()) {
+                            n.store(0, core::sync::atomic::Ordering::Relaxed);
+                        }
+                        kprintln!("  forgotten");
+                    } else {
+                        let rows = linux::syscall::unserved();
+                        if rows.is_empty() {
+                            kprintln!("  no guest has been refused a call");
+                        }
+                        for (name, i386, n, nr) in rows {
+                            kprintln!("  {:>8}  {:>3} {}{}", n, nr, name, if i386 { "  (i386)" } else { "" });
+                        }
+                    }
+                }
                 "misses" => {
                     let on = words.next() != Some("off");
                     linux::syscall::MISSES.store(on, core::sync::atomic::Ordering::Relaxed);

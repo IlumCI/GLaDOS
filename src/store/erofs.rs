@@ -351,6 +351,31 @@ impl Image {
 
     /// Resolve a path inside the image. `follow` says whether a symlink in
     /// the last component is followed, which is `stat` against `lstat`.
+    /// The first symlink on the way to `path`, without following any: how
+    /// many components lead to it and its target as written. `None` when the
+    /// walk reaches the end, or a component that is not there, with no link
+    /// on the way. The last component counts only when `last` is set.
+    ///
+    /// One walk from the root, where asking `lookup` about every prefix would
+    /// be one walk per component -- and a path walk runs on every path a
+    /// guest names.
+    pub fn first_link(&self, path: &str, last: bool) -> Result<Option<(usize, String)>, Error> {
+        let mut cur = self.root()?;
+        let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty() && *p != ".").collect();
+        for (i, part) in parts.iter().enumerate() {
+            if !cur.is_dir() {
+                return Ok(None);
+            }
+            let Ok(next) = self.child(&cur, part) else { return Ok(None) };
+            if next.is_link() && (last || i + 1 < parts.len()) {
+                let target = self.read_all(&next)?;
+                return Ok(Some((i + 1, String::from_utf8_lossy(&target).into_owned())));
+            }
+            cur = next;
+        }
+        Ok(None)
+    }
+
     pub fn lookup(&self, path: &str, follow: bool) -> Result<Inode, Error> {
         let root = self.root()?;
         let mut cur = root;

@@ -112,6 +112,15 @@ pub const SYS_TIME: u64 = 201;
 pub const SYS_SYSINFO: u64 = 99;
 pub const SYS_SCHED_GETAFFINITY: u64 = 204;
 pub const SYS_READLINK: u64 = 89;
+pub const SYS_LINK: u64 = 86;
+pub const SYS_CREAT: u64 = 85;
+pub const SYS_PAUSE: u64 = 34;
+pub const SYS_ALARM: u64 = 37;
+pub const SYS_RT_SIGSUSPEND: u64 = 130;
+pub const SYS_CLOSE_RANGE: u64 = 436;
+pub const SYS_SYMLINK: u64 = 88;
+pub const SYS_LINKAT: u64 = 265;
+pub const SYS_SYMLINKAT: u64 = 266;
 pub const SYS_READLINKAT: u64 = 267;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_GETDENTS64: u64 = 217;
@@ -214,6 +223,8 @@ pub(super) const EINTR: u64 = (-4i64) as u64;
 pub(super) const ENAMETOOLONG: u64 = (-36i64) as u64;
 pub(super) const EROFS: u64 = (-30i64) as u64;
 pub(super) const EEXIST: u64 = (-17i64) as u64;
+/// Too many links followed in one lookup.
+pub(super) const ELOOP: u64 = (-40i64) as u64;
 pub(super) const ERANGE: u64 = (-34i64) as u64;
 pub(super) const ENOTEMPTY: u64 = (-39i64) as u64;
 pub(super) const EXDEV: u64 = (-18i64) as u64;
@@ -242,6 +253,7 @@ pub(super) const ENOBUFS: u64 = (-105i64) as u64;
 const O_WRONLY: u64 = 1;
 const O_RDWR: u64 = 2;
 const O_DIRECTORY: u64 = 0x10000;
+const O_NOFOLLOW: u64 = 0x20000;
 const O_CREAT: u64 = 0x40;
 const O_TRUNC: u64 = 0x200;
 const O_APPEND: u64 = 0x400;
@@ -1755,11 +1767,45 @@ pub(super) fn record(mut c: Call) {
             );
         }
     }
+    if c.ret == ENOSYS {
+        let base = (c.nr & !(1 << 31)) as usize;
+        let row = if c.nr & (1 << 31) != 0 { &UNSERVED_32 } else { &UNSERVED };
+        if let Some(n) = row.get(base) {
+            n.fetch_add(1, Ordering::Relaxed);
+        }
+    }
     if MISSES.load(Ordering::Relaxed) && c.path_len > 0 && (c.ret as i64) < 0 {
         let p = core::str::from_utf8(&c.path[..c.path_len as usize]).unwrap_or("?");
         crate::kprintln!("  [miss] {} {} -> {}", name_of(c.nr), p, c.ret as i64);
     }
     super::session::record(c, TRACE_CAP);
+}
+
+/// Every call any guest has been answered `ENOSYS` for since boot (or since
+/// `linux unserved clear`), by number: unimplemented, or implemented and
+/// refusing a flag.
+///
+/// **The sweep's instrument.** The trace is one guest's last thousand calls;
+/// what to implement next is a question about many programs, and the answer
+/// is a count over all of them. `UNSERVED_32` is the i386 table's, which
+/// numbers its calls differently.
+pub static UNSERVED: [core::sync::atomic::AtomicU32; 512] = [const { core::sync::atomic::AtomicU32::new(0) }; 512];
+pub static UNSERVED_32: [core::sync::atomic::AtomicU32; 512] = [const { core::sync::atomic::AtomicU32::new(0) }; 512];
+
+/// (name, i386, count) for every call refused at least once, most first.
+pub fn unserved() -> Vec<(&'static str, bool, u32, usize)> {
+    let mut out = Vec::new();
+    for (i386, row) in [(false, &UNSERVED), (true, &UNSERVED_32)] {
+        for (nr, n) in row.iter().enumerate() {
+            let n = n.load(Ordering::Relaxed);
+            if n > 0 {
+                let tag = if i386 { nr as u64 | (1 << 31) } else { nr as u64 };
+                out.push((name_of(tag), i386, n, nr));
+            }
+        }
+    }
+    out.sort_by(|a, b| b.2.cmp(&a.2));
+    out
 }
 
 /// Print every path a guest named and was refused, as it happens.
@@ -1988,10 +2034,17 @@ pub(super) fn with_fds<T>(f: impl FnOnce(&mut Vec<Option<super::fs::Fd>>, &str) 
 /// shortcut: a caller passing a closed descriptor with an absolute path is
 /// correct code, so checking the descriptor first would refuse it.
 fn at_base(fds: &[Option<super::fs::Fd>], dirfd: u64, cwd: &str) -> Result<String, u64> {
-    if (dirfd as i64) == super::fs::AT_FDCWD {
+    // **An `int`, so only the low 32 bits are the argument.** glibc passes
+    // `AT_FDCWD` as -100 in `edi`, and a 32-bit move leaves the register
+    // `0xffffff9c`: compared as a 64-bit -100 it was a descriptor nobody had
+    // opened, and `stat`, `chmod`, `ln`, `mv` and `rm -r` on a relative path
+    // all answered "Bad file descriptor" about a file `touch` had just made.
+    // Linux truncates, so this does.
+    let dirfd = dirfd as u32 as i32 as i64;
+    if dirfd == super::fs::AT_FDCWD {
         return Ok(String::from(cwd));
     }
-    let i = dirfd as i64;
+    let i = dirfd;
     if i < 0 || i as usize >= fds.len() {
         return Err(EBADF);
     }
@@ -2121,32 +2174,6 @@ pub(super) fn place_fd(fds: &mut Vec<Option<super::fs::Fd>>, entry: super::fs::F
     }
 }
 
-/// A path whose last component is a symlink in the root image that leads
-/// out of it, replaced by where it leads.
-///
-/// The image's reader follows a link inside the image and nowhere else, so a
-/// link to something this kernel provides itself ended there: `/etc/mtab` is
-/// `../proc/self/mounts` in every Arch root, `/proc` is synthetic, and
-/// pacman, finding no mount table, refused every install for want of disk
-/// space it had not measured. Only a link that dangles in the image is taken
-/// further, and only when it leads somewhere no mount covers, so anything
-/// the image can or should answer itself is left to it.
-fn out_of_image(path: String) -> String {
-    if !matches!(super::disk::lookup(&path), Some(None)) {
-        return path;
-    }
-    let Some(Some(target)) = super::disk::link_target(&path) else { return path };
-    let parent = path.rsplit_once('/').map(|(p, _)| if p.is_empty() { "/" } else { p }).unwrap_or("/");
-    match super::fs::resolve(parent, &target) {
-        // Only out of the image. A link that dangles *inside* it is the
-        // image's to answer, and answering it here instead changed what the
-        // dynamic loader found: dbus-daemon took a null pointer in `ld.so`
-        // on every boot once every dangling link was followed.
-        Some(next) if !super::disk::claims(&next) => next,
-        _ => path,
-    }
-}
-
 pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
     let raw = match read_cstr(path_at) {
         Ok(v) => v,
@@ -2173,7 +2200,12 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
             String::new()
         };
         let Some(path) = super::fs::resolve(&base, &raw) else { return ENOENT };
-        let path = out_of_image(path);
+        // The last component is followed unless the caller said not to, and
+        // then a link there is ELOOP, which is what `O_NOFOLLOW` promises.
+        if flags & O_NOFOLLOW != 0 && super::link::is_link(&path) {
+            return ELOOP;
+        }
+        let path = super::link::follow(path);
         // A mounted volume, read in place by range. Before everything else,
         // so a mount point shadows whatever the namespace has at that path.
         // **A write to the root image goes to the guest's layer.** The file
@@ -2201,7 +2233,7 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
                 Some(Some(n)) if n.is_dir => super::fs::Fd::Dir(alloc::rc::Rc::new(
                     core::cell::RefCell::new(super::fs::Dir {
                         path: path.clone(),
-                        entries: super::disk::entries(&path),
+                        entries: with_links(&path, super::disk::entries(&path)),
                         at: 0,
                     }),
                 )),
@@ -2341,7 +2373,7 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
             }
             super::fs::Fd::Dir(alloc::rc::Rc::new(core::cell::RefCell::new(super::fs::Dir {
                 path: path.clone(),
-                entries: super::ns::listing(&path),
+                entries: with_links(&path, super::ns::listing(&path)),
                 at: 0,
             })))
         } else {
@@ -2450,6 +2482,21 @@ pub(super) fn sys_name_op_at(dirfd: u64, path_at: u64, op: u8) -> u64 {
     if !super::fs::writable(&path) {
         return EROFS;
     }
+    // A link the guest made: removed by `unlink`, in the way of `mkdir`, not
+    // a directory to `rmdir`.
+    if super::link::own(&path).is_some() {
+        return match op {
+            b'm' => EEXIST,
+            b'r' => ENOTDIR,
+            _ => {
+                super::link::remove(&path);
+                if super::disk::image_lookup(&path, false).is_some() {
+                    super::ns::white_out(&path);
+                }
+                0
+            }
+        };
+    }
     // The root image underneath, when there is one: a directory it has
     // exists, a file it has can be deleted -- which leaves a whiteout, since
     // the image itself cannot forget anything.
@@ -2504,6 +2551,132 @@ pub(super) fn sys_name_op_at(dirfd: u64, path_at: u64, op: u8) -> u64 {
             0
         }
     }
+}
+
+/// A directory's entries with the guest's own links in it: `ls` and every
+/// tree walk find a link by listing its directory.
+fn with_links(dir: &str, mut entries: Vec<(String, bool, usize)>) -> Vec<(String, bool, usize)> {
+    for (name, len) in super::link::names_in(dir) {
+        if !entries.iter().any(|e| e.0 == name) {
+            entries.push((name, false, len));
+        }
+    }
+    entries
+}
+
+/// `close_range`: close every descriptor from `first` to `last`, or with
+/// `CLOSE_RANGE_CLOEXEC` mark them close-on-exec instead. glibc's
+/// `posix_spawn` and every daemon that tidies its descriptors before an
+/// `exec` asks for it, and falls back to closing them one at a time -- up to
+/// the descriptor limit -- when it is refused.
+pub(super) fn sys_close_range(first: u64, last: u64, flags: u64) -> u64 {
+    const CLOSE_RANGE_CLOEXEC: u64 = 4;
+    if flags & !CLOSE_RANGE_CLOEXEC != 0 || first as u32 > last as u32 {
+        return EINVAL;
+    }
+    let (first, last) = (first as u32 as usize, last as u32 as usize);
+    let open: Vec<usize> = with_fds(|fds, _| {
+        (first..=last.min(fds.len().saturating_sub(1))).filter(|&i| matches!(fds.get(i), Some(Some(_)))).collect()
+    })
+    .unwrap_or_default();
+    for fd in open {
+        if flags & CLOSE_RANGE_CLOEXEC != 0 {
+            cloexec_set(fd as u64, true);
+        } else {
+            sys_close(fd as u64);
+        }
+    }
+    0
+}
+
+/// Whether anything is at a guest path: the guest's layer, a link it made,
+/// or the image underneath where the layer has not deleted it.
+fn occupied(path: &str) -> bool {
+    super::ns::blob_len(path).is_some()
+        || super::ns::is_dir(path)
+        || super::link::own(path).is_some()
+        || super::disk::image_lookup(path, false).is_some()
+}
+
+/// `symlinkat` and `symlink`: a link made in the guest's layer (see `link`).
+///
+/// The target is stored as written and not checked, which is Linux: a link
+/// may point at nothing yet, and a package unpacks its links before the
+/// files they name.
+pub(super) fn sys_symlinkat(target_at: u64, dirfd: u64, path_at: u64) -> u64 {
+    let (target, raw) = match (read_cstr(target_at), read_cstr(path_at)) {
+        (Ok(t), Ok(p)) => (t, p),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    if target.is_empty() || raw.is_empty() {
+        return ENOENT;
+    }
+    let path = match at_path(dirfd, &raw) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if !super::fs::writable(&path) {
+        return EROFS;
+    }
+    if occupied(&path) {
+        return EEXIST;
+    }
+    let parent = path.rsplit_once('/').map(|(p, _)| if p.is_empty() { "/" } else { p }).unwrap_or("/");
+    let parent_there = parent == "/"
+        || super::ns::is_dir(parent)
+        || super::disk::image_lookup(parent, true).is_some_and(|n| n.is_dir);
+    if !parent_there {
+        return ENOENT;
+    }
+    if super::link::make(&path, &target) { 0 } else { EIO }
+}
+
+/// `linkat` and `link`: a hard link, made as a copy.
+///
+/// **A copy, and that is a deviation with a reason.** The store is keyed by
+/// content, so a copy costs nothing and the two names share their bytes on
+/// disk as Linux's two names share an inode -- until one is written, when
+/// Linux would change both and this changes one. What a program uses a hard
+/// link for in practice is an atomic second name (a lock file, a backup
+/// before an edit, git's object store), and a copy serves each. A link to a
+/// link is a second link with the same target unless `AT_SYMLINK_FOLLOW`.
+pub(super) fn sys_linkat(olddir: u64, old_at: u64, newdir: u64, new_at: u64, flags: u64) -> u64 {
+    const AT_SYMLINK_FOLLOW: u64 = 0x400;
+    if flags & !(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH) != 0 {
+        return EINVAL;
+    }
+    let (a, b) = match (read_cstr(old_at), read_cstr(new_at)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    if a.is_empty() || b.is_empty() {
+        return ENOENT;
+    }
+    let (from, to) = match (at_path(olddir, &a), at_path(newdir, &b)) {
+        (Ok(f), Ok(t)) => (f, t),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    if !super::fs::writable(&to) {
+        return EROFS;
+    }
+    if occupied(&to) {
+        return EEXIST;
+    }
+    let from = if flags & AT_SYMLINK_FOLLOW != 0 { super::link::follow(from) } else { from };
+    if let Some(t) = super::link::own(&from) {
+        return if super::link::make(&to, &t) { 0 } else { EIO };
+    }
+    if super::ns::is_dir(&from) || super::disk::image_lookup(&from, false).is_some_and(|n| n.is_dir) {
+        return EPERM;
+    }
+    let bytes = match super::ns::read_blob(&from) {
+        Some(b) => b,
+        None => match super::disk::read_all(&from) {
+            Some(b) => b,
+            None => return ENOENT,
+        },
+    };
+    if super::ns::write_blob(&to, bytes) { 0 } else { EIO }
 }
 
 /// `utimensat`: set a file's times. Nothing here keeps times -- every file
@@ -2565,6 +2738,21 @@ pub(super) fn sys_renameat(olddir: u64, old_at: u64, newdir: u64, new_at: u64, f
     }
     if !super::fs::writable(&from) || !super::fs::writable(&to) {
         return EROFS;
+    }
+    // A link the guest made moves as a link: what it points at stays put.
+    if super::link::own(&from).is_some() {
+        if super::ns::is_dir(&to) {
+            return EISDIR;
+        }
+        let there = super::ns::blob_len(&to).is_some() || super::link::own(&to).is_some();
+        if there && flags & RENAME_NOREPLACE != 0 {
+            return EEXIST;
+        }
+        if super::ns::blob_len(&to).is_some() {
+            super::ns::detach(&to);
+        }
+        super::link::remove(&to);
+        return if super::link::rename(&from, &to) { 0 } else { EIO };
     }
     // A file on the root image moves by being copied up first; the image's
     // copy is then whited out, so the old name is gone as a move promises. A
@@ -2645,6 +2833,7 @@ pub(super) fn sys_chdir(path_at: u64) -> u64 {
     };
     let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
     let Some(path) = found else { return ENOENT };
+    let path = super::link::follow(path);
     let is_dir = match super::disk::lookup(&path) {
         Some(on) => on.is_some_and(|n| n.is_dir),
         None => super::ns::is_dir(&path) || super::dev::is_dir(&path) || super::proc::is_dir(&path) || path == "/",
@@ -4993,6 +5182,7 @@ pub(super) fn sys_access(path_at: u64, mode: u64) -> u64 {
     }
     let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
     let Some(path) = found else { return ENOENT };
+    let path = super::link::follow(path);
     // **A mounted volume is not in the namespace**, so asking only `sysbox`
     // answered `ENOENT` for every file on one. `open` and `stat` already ask
     // the disk first; `access` was the call that did not, and the Source
@@ -5298,11 +5488,25 @@ pub(super) fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
         }
         // F_GETFL and F_SETFL: a device keeps its blocking mode, which is
         // how libasound turns a stream it opened non-blocking back into a
-        // blocking one. Elsewhere no flag it could set applies.
+        // blocking one.
+        //
+        // **And the access mode is the descriptor's own.** Every file
+        // answered 0 -- `O_RDONLY` -- so `fdopen(fd, "w")`, which checks the
+        // mode against what it is asked for, refused a file opened for
+        // writing: git could not write `HEAD.lock` and `git init` failed.
+        // A pipe's write end said the same, which is what `popen` fdopens.
         3 => with_fds(|fds, _| match fds.get(fd as usize) {
             Some(Some(super::fs::Fd::Dev(b))) => 2 | if b.borrow().nonblock { O_NONBLOCK } else { 0 },
             Some(Some(super::fs::Fd::Unix(_, nb))) => 2 | if nb.get() { O_NONBLOCK } else { 0 },
             Some(Some(super::fs::Fd::Pty(e))) => 2 | if e.borrow().nonblock { O_NONBLOCK } else { 0 },
+            Some(Some(super::fs::Fd::File(f))) => if f.borrow().writable { 2 } else { 0 },
+            Some(Some(super::fs::Fd::Pipe(p))) => {
+                let p = p.borrow();
+                (if p.writing { 1 } else { 0 }) | if p.nonblock { O_NONBLOCK } else { 0 }
+            }
+            Some(Some(super::fs::Fd::Socket(_))) | Some(Some(super::fs::Fd::Memfd(_))) => 2,
+            Some(Some(super::fs::Fd::Stdout)) | Some(Some(super::fs::Fd::Stderr)) => 1,
+            Some(Some(super::fs::Fd::Dir(_))) => O_DIRECTORY,
             _ => 0,
         })
         .unwrap_or(0),
@@ -5311,6 +5515,7 @@ pub(super) fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
                 Some(Some(super::fs::Fd::Dev(b))) => b.borrow_mut().nonblock = arg & O_NONBLOCK != 0,
                 Some(Some(super::fs::Fd::Unix(_, nb))) => nb.set(arg & O_NONBLOCK != 0),
                 Some(Some(super::fs::Fd::Pty(e))) => e.borrow_mut().nonblock = arg & O_NONBLOCK != 0,
+                Some(Some(super::fs::Fd::Pipe(p))) => p.borrow_mut().nonblock = arg & O_NONBLOCK != 0,
                 _ => {}
             });
             0
@@ -6432,9 +6637,12 @@ pub(super) fn sys_readlinkat(dirfd: u64, path_at: u64, buf: u64, size: u64) -> u
     let Some(path) = found else { return ENOENT };
     // A link in the root image. Its target is copied as written: relative
     // targets stay relative, which is what `realpath` builds on.
-    let target = match super::disk::link_target(&path) {
-        Some(Some(t)) => Some(t),
-        _ => super::proc::link(&path),
+    let target = match super::link::own(&path) {
+        Some(t) => Some(t),
+        None => match super::disk::link_target(&path) {
+            Some(Some(t)) if !super::ns::whited_out(&path) => Some(t),
+            _ => super::proc::link(&path),
+        },
     };
     let Some(target) = target else {
         // **A directory is not a symlink, and saying it does not exist is a
@@ -6941,6 +7149,14 @@ pub(super) fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 
         None => None,
     };
     let Some(path) = found else { return ENOENT };
+    // A link the guest made is the guest's layer's: `lstat` sees the link,
+    // `stat` what it leads to.
+    if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        if let Some(t) = super::link::own(&path) {
+            return write_stat(buf, super::fs::Kind::Link, t.len(), super::fs::ino_of(&path));
+        }
+    }
+    let path = if flags & AT_SYMLINK_NOFOLLOW != 0 { path } else { super::link::follow(path) };
     let on = if flags & AT_SYMLINK_NOFOLLOW != 0 { super::disk::lookup_nofollow(&path) } else { super::disk::lookup(&path) };
     if let Some(on) = on {
         return match on {
@@ -8253,6 +8469,10 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         }
         194..=196 => (0, true),
         SYS_UNLINKAT => (sys_unlinkat(f.rdi, f.rsi, f.rdx), true),
+        SYS_SYMLINK => (sys_symlinkat(f.rdi, super::fs::AT_FDCWD as u64, f.rsi), true),
+        SYS_SYMLINKAT => (sys_symlinkat(f.rdi, f.rsi, f.rdx), true),
+        SYS_LINK => (sys_linkat(super::fs::AT_FDCWD as u64, f.rdi, super::fs::AT_FDCWD as u64, f.rsi, 0), true),
+        SYS_LINKAT => (sys_linkat(f.rdi, f.rsi, f.rdx, f.r10, f.r8), true),
         SYS_UTIMENSAT => (sys_utimensat(f.rdi, f.rsi), true),
         // What a program saving a file asks after writing it, and none of it
         // has anything to do here. A write reaches the store at the last
@@ -8285,17 +8505,23 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         // terminal, and a fault ends the guest. `fork` is what made the first
         // clause false, and a child exiting is an event its parent is owed.
         SYS_RT_SIGACTION => (super::signal::sigaction(f.rdi, f.rsi, f.rdx, f.r10), true),
+        SYS_RT_SIGSUSPEND => (super::signal::sigsuspend(f.rdi, f.rsi), true),
+        SYS_PAUSE => (super::signal::pause(), true),
+        SYS_ALARM => (super::signal::alarm(f.rdi), true),
+        // `creat` is `open` with these flags and always was.
+        SYS_CREAT => (sys_openat(super::fs::AT_FDCWD as u64, f.rdi, O_CREAT | O_WRONLY | O_TRUNC, f.rsi), true),
+        SYS_CLOSE_RANGE => (sys_close_range(f.rdi, f.rsi, f.rdx), true),
         SYS_RT_SIGPROCMASK => {
             (super::signal::sigprocmask(f.rdi, f.rsi, f.rdx, f.r10), true)
         }
         SYS_RT_SIGRETURN => (super::signal::sigreturn(f), true),
-        SYS_KILL => (super::signal::kill(f.rdi as i64, f.rsi), true),
+        SYS_KILL => (super::signal::kill(f.rdi as u32 as i32 as i64, f.rsi), true),
         // To the thread group rather than the one thread: signals here are
         // pending per process. What `raise` and `abort` need is that the
         // signal arrives at all -- answering `ENOSYS` left glibc's `abort`
         // with nothing but its final `hlt`, a fault where a program should
         // have died of SIGABRT.
-        SYS_TGKILL => (super::signal::kill(f.rdi as i64, f.rdx), true),
+        SYS_TGKILL => (super::signal::kill(f.rdi as u32 as i32 as i64, f.rdx), true),
         // No parent, and no group but the one. `getppid` answering zero is
         // what a process reparented to nothing reports.
         SYS_GETPPID => (super::fork::parent_pid(), true),
@@ -9243,10 +9469,26 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64, bits32: bool) -> u64 {
             }
             (!out.is_empty()).then_some(out)
         });
+        // **A quiet job's report goes to the services log, not the terminal.**
+        // The session bus faulting at mount printed thirty lines over the
+        // operator's prompt every two seconds while it restarted; one line
+        // says it happened, and `services log` has the rest.
+        let quiet = crate::job::quiet_here();
+        let mut sink = String::new();
+        macro_rules! say {
+            ($($t:tt)*) => {
+                if quiet.is_some() {
+                    sink.push_str(&alloc::format!($($t)*));
+                    sink.push('\n');
+                } else {
+                    crate::kprintln!($($t)*);
+                }
+            };
+        }
         // Where, as well as the stack: a background job has no `linux run`
         // to print the fault afterwards, so it is said here, once.
         if let Some(f) = last_fault() {
-            crate::kprintln!(
+            say!(
                 "  fault {:#04x} at rip {:#x} ({}), reaching for {:#x} ({}), error {:#x}",
                 f.regs.vector, f.regs.rip,
                 name_code(f.regs.rip).unwrap_or_else(|| locate(f.regs.rip)),
@@ -9255,27 +9497,27 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64, bits32: bool) -> u64 {
         }
         if let (Some(sid), Some(_)) = (super::session::current(), last_fault()) {
             let tail = super::session::peek_tail(sid);
-            crate::kprintln!("  the session's last calls:");
+            say!("  the session's last calls:");
             for c in tail.iter().rev().take(25).rev() {
-                crate::kprintln!(
+                say!(
                     "    {:<16} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} -> {:#x}",
                     name_of(c.nr), c.args[0], c.args[1], c.args[2], c.args[3], c.args[4], c.args[5], c.ret
                 );
             }
         }
         if let Some(ws) = (*FAULT_STACK.get())[me()].as_ref() {
-            crate::kprintln!("  return addresses on the stack:");
+            say!("  return addresses on the stack:");
             for (at, v, n) in ws {
-                crate::kprintln!("    {:#010x}: {:#010x} {}", at, v, n);
+                say!("    {:#010x}: {:#010x} {}", at, v, n);
             }
         }
         let c = &mut *CRASH.get();
         if c.0 {
-            crate::kprintln!("  the first crash's stack, from {:#x}:", c.1);
+            say!("  the first crash's stack, from {:#x}:", c.1);
             let mut shown = 0;
             for i in 0..c.2 {
                 if let Some(n) = name_code(c.3[i] as u64) {
-                    crate::kprintln!("    +{:#06x}: {:#010x} {}", i * 4, c.3[i], n);
+                    say!("    +{:#06x}: {:#010x} {}", i * 4, c.3[i], n);
                     shown += 1;
                     if shown >= 64 {
                         break;
@@ -9283,6 +9525,18 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64, bits32: bool) -> u64 {
                 }
             }
             c.0 = false;
+        }
+        if let Some(title) = &quiet {
+            if !sink.is_empty() {
+                super::services::log(alloc::format!("{} faulted:\n{}", title, sink).as_bytes());
+                if let Some(f) = last_fault() {
+                    crate::kprintln!(
+                        "  [job] {} faulted at {} -- 'services log' has the report",
+                        title.split_whitespace().next().unwrap_or(title).rsplit('/').next().unwrap_or(title),
+                        name_code(f.regs.rip).unwrap_or_else(|| locate(f.regs.rip))
+                    );
+                }
+            }
         }
     }
     teardown();
@@ -10550,6 +10804,10 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_FADVISE64 => "fadvise64",
         SYS_STATX => "statx",
         SYS_UNLINKAT => "unlinkat",
+        SYS_SYMLINK => "symlink",
+        SYS_SYMLINKAT => "symlinkat",
+        SYS_LINK => "link",
+        SYS_LINKAT => "linkat",
         SYS_UTIMENSAT => "utimensat",
         SYS_FSYNC => "fsync",
         SYS_FDATASYNC => "fdatasync",
@@ -10571,6 +10829,11 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_CLOCK_NANOSLEEP => "clock_nanosleep",
         SYS_RT_SIGACTION => "rt_sigaction",
         SYS_RT_SIGPROCMASK => "rt_sigprocmask",
+        SYS_RT_SIGSUSPEND => "rt_sigsuspend",
+        SYS_PAUSE => "pause",
+        SYS_ALARM => "alarm",
+        SYS_CREAT => "creat",
+        SYS_CLOSE_RANGE => "close_range",
         SYS_RT_SIGRETURN => "rt_sigreturn",
         SYS_KILL => "kill",
         SYS_GETPPID => "getppid",

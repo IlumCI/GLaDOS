@@ -162,7 +162,7 @@ fn under(path: &str) -> Option<(usize, &str)> {
         return Some(hit);
     }
     let (i, root) = m.iter().enumerate().find(|(_, x)| x.prefix.is_empty())?;
-    if own(path) || super::ns::blob_len(path).is_some() || super::ns::whited_out(path) {
+    if own(path) || super::ns::blob_len(path).is_some() || super::ns::whited_out(path) || super::link::own(path).is_some() {
         return None;
     }
     // A directory in the guest's layer that the image also has is the
@@ -271,6 +271,24 @@ pub fn lookup(path: &str) -> Option<Option<Node>> {
 pub fn lookup_nofollow(path: &str) -> Option<Option<Node>> {
     let _g = big();
     lookup_with(path, false)
+}
+
+/// The first link in the root image on the way to `path`: how many of its
+/// components lead to it, and its target. `None` with no root image, for a
+/// path in the kernel's own trees, or when the image has no link on the way.
+pub fn image_first_link(path: &str, last: bool) -> Option<(usize, String)> {
+    let _g = big();
+    if own(path) {
+        return None;
+    }
+    let m = unsafe { MOUNTS.get() };
+    let root = m.iter().find(|x| x.prefix.is_empty())?;
+    // A named mount over part of the path is not the image's to answer.
+    if m.iter().any(|x| !x.prefix.is_empty() && (path == x.prefix || path.strip_prefix(x.prefix.as_str()).is_some_and(|r| r.starts_with('/')))) {
+        return None;
+    }
+    let Vol::Erofs(img) = &root.vol else { return None };
+    img.first_link(path, last).ok().flatten()
 }
 
 /// A symlink's target. `None` when the path is not on a mount; `Some(None)`

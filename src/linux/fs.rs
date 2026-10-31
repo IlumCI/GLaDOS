@@ -438,7 +438,9 @@ pub fn resolve(cwd: &str, path: &str) -> Option<String> {
     }
     let mut out = String::from("/");
     out.push_str(&parts.join("/"));
-    Some(out)
+    // Every link on the way but the last component, which is the caller's to
+    // follow or not (see `link`).
+    super::link::walk(&out, false).ok()
 }
 
 /// `S_IFREG | 0644`.

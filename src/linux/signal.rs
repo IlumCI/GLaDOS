@@ -273,6 +273,12 @@ pub struct State {
     /// so nesting costs stack rather than kernel state -- which is the whole
     /// reason the frame moved there.
     pub depth: u32,
+    /// The mask to restore once the handler that ends an `rt_sigsuspend`
+    /// returns: the one in force before the suspend, not the one it waited
+    /// under.
+    pub after_suspend: Option<u64>,
+    /// When `alarm` raises `SIGALRM`, in timer ticks; zero for none.
+    pub alarm_at: u64,
 }
 
 impl Default for State {
@@ -282,6 +288,8 @@ impl Default for State {
             pending: 0,
             blocked: 0,
             depth: 0,
+            after_suspend: None,
+            alarm_at: 0,
         }
     }
 }
@@ -395,6 +403,91 @@ pub fn sigprocmask(how: u64, set: u64, old: u64, setsize: u64) -> u64 {
     0
 }
 
+/// `rt_sigsuspend`: wait under a temporary mask until a signal arrives that
+/// does something, and answer `EINTR` so it is delivered on the way out.
+///
+/// **This is how a shell waits for its children**, and it was `ENOSYS`:
+/// bash's `wait` called it in a loop a million times a second and never
+/// returned, so `sleep 1 & wait` hung for good. A signal whose action is to
+/// be ignored is consumed and the wait goes on, which is what Linux does --
+/// otherwise every `SIGCHLD` a program does not handle would end its suspend.
+pub fn sigsuspend(mask: u64, setsize: u64) -> u64 {
+    const EINVAL: u64 = (-22i64) as u64;
+    const EFAULT: u64 = (-14i64) as u64;
+    if setsize != 8 {
+        return EINVAL;
+    }
+    if !syscall::reachable(mask, 8, false) {
+        return EFAULT;
+    }
+    suspend(unsafe { core::ptr::read(mask as *const u64) })
+}
+
+/// `pause`: `rt_sigsuspend` under the mask already in force.
+pub fn pause() -> u64 {
+    let Some(sp) = (unsafe { syscall::guest_slot() }).as_mut() else { return (-14i64) as u64 };
+    suspend(sp.signals.blocked)
+}
+
+/// A due `alarm` becomes a pending `SIGALRM`. Checked wherever a signal is
+/// looked for, since nothing else is watching the clock for a guest.
+fn ring_alarm(sp: &mut super::syscall::Space) {
+    let at = sp.signals.alarm_at;
+    if at != 0 && crate::dev::lapic::ticks() >= at {
+        sp.signals.alarm_at = 0;
+        sp.signals.pending |= bit(SIGALRM);
+    }
+}
+
+/// `alarm`: `SIGALRM` in `secs` seconds, replacing any alarm already set.
+/// Answers the seconds the old one had left, rounded up, as Linux does.
+///
+/// `timeout` measures with this when `timer_create` is refused, and with
+/// neither it could not time anything: `timeout 1 sleep 5` failed outright.
+pub fn alarm(secs: u64) -> u64 {
+    let Some(sp) = (unsafe { syscall::guest_slot() }).as_mut() else { return 0 };
+    let hz = crate::TIMER_HZ as u64;
+    let now = crate::dev::lapic::ticks();
+    let left = if sp.signals.alarm_at > now { (sp.signals.alarm_at - now + hz - 1) / hz } else { 0 };
+    sp.signals.alarm_at = if secs == 0 { 0 } else { now + (secs as u32 as u64) * hz };
+    left
+}
+
+fn suspend(want: u64) -> u64 {
+    const EFAULT: u64 = (-14i64) as u64;
+    const EINTR: u64 = (-4i64) as u64;
+    let want = want & !(bit(SIGKILL) | bit(SIGSTOP));
+    let old = {
+        let Some(sp) = (unsafe { syscall::guest_slot() }).as_mut() else { return EFAULT };
+        let old = sp.signals.blocked;
+        sp.signals.blocked = want;
+        old
+    };
+    loop {
+        if unsafe { syscall::kill_if_overdue() } {
+            if let Some(sp) = (unsafe { syscall::guest_slot() }).as_mut() {
+                sp.signals.blocked = old;
+            }
+            return EINTR;
+        }
+        if let Some(sp) = (unsafe { syscall::guest_slot() }).as_mut() {
+            ring_alarm(sp);
+            if let Some(sig) = next(sp) {
+                let h = sp.signals.actions[sig as usize - 1].handler;
+                let ignored = h == SIG_IGN
+                    || (h == SIG_DFL && matches!(default_disposition(sig), Disposition::Ignore));
+                if ignored {
+                    sp.signals.pending &= !bit(sig);
+                    continue;
+                }
+                sp.signals.after_suspend = Some(old);
+                return EINTR;
+            }
+        }
+        syscall::wait_turn();
+    }
+}
+
 /// Mark a signal pending on one guest. Answers false when there is no such
 /// guest to mark.
 pub fn raise_at(guest: usize, sig: u32) -> bool {
@@ -483,6 +576,7 @@ fn next(sp: &super::syscall::Space) -> Option<u32> {
 /// frame was rewritten, which the caller uses only for its trace.
 pub fn deliver(f: &mut Frame) -> bool {
     let Some(sp) = (unsafe { syscall::guest_slot() }).as_mut() else { return false };
+    ring_alarm(sp);
     let Some(sig) = next(sp) else { return false };
     let a = sp.signals.actions[sig as usize - 1];
 
@@ -567,13 +661,17 @@ pub fn deliver(f: &mut Frame) -> bool {
         r(frame::CSGSFSSS, 0x33 | (0x2b << 48));
         r(frame::ERR, 0);
         r(frame::TRAPNO, 0);
-        r(frame::OLDMASK, sp.signals.blocked);
+        // The mask a handler's return puts back: after an `rt_sigsuspend`,
+        // the one from before it, as Linux does -- the suspend's own mask
+        // lasts only until a signal arrives.
+        let saved = sp.signals.after_suspend.take().unwrap_or(sp.signals.blocked);
+        r(frame::OLDMASK, saved);
         r(frame::CR2, 0);
         // No extended state saved, and said so rather than pointed at
         // rubbish: a handler that followed a stale pointer would `xrstor`
         // whatever was there.
         r(frame::FPSTATE, 0);
-        w(frame::SIGMASK, sp.signals.blocked);
+        w(frame::SIGMASK, saved);
         // `siginfo`: signo, errno, code. `SI_USER` is 0, which is what a
         // signal raised by `kill` carries.
         core::ptr::write((at + frame::INFO) as *mut u32, sig);

@@ -66,6 +66,13 @@ static NEXT_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::n
 /// thousands of short jobs does not grow the table forever.
 const KEEP_DONE: usize = 16;
 
+/// The title of the quiet job the current task is running, if it is one:
+/// something started in the background whose output is not the terminal's.
+pub fn quiet_here() -> Option<String> {
+    let me = crate::task::current();
+    JOBS.lock_irq().iter().find(|j| j.task == Some(me) && j.quiet).map(|j| j.title.clone())
+}
+
 /// Start `work` on a task of its own. Answers the job's number.
 pub fn start(runtime: &'static Runtime, title: String, work: Work) -> Result<u32, &'static str> {
     start_as(runtime, title, work, false)

@@ -719,21 +719,36 @@ pub fn wait(pid: i64, status: u64, options: u64) -> u64 {
     const ECHILD: u64 = (-10i64) as u64;
     const EINVAL: u64 = (-22i64) as u64;
 
-    // Refused rather than ignored. A caller that asked to be told about a
-    // stopped child and is simply never told has been given a wait that looks
-    // like it works and silently never fires -- the shape this tree keeps
-    // recording as the worst kind of wrong.
-    if options & !WNOHANG != 0 {
+    // `WUNTRACED` and `WCONTINUED` ask to hear about a child stopping or
+    // resuming, and none ever does here -- there is no job-control stop -- so
+    // accepting them reports exactly what Linux would: nothing extra. They
+    // were refused with EINVAL, and bash passes both on every wait. `__WALL`
+    // and `__WNOTHREAD` choose among kinds of child this kernel does not
+    // have. Anything else is still refused rather than ignored.
+    const WUNTRACED: u64 = 2;
+    const WCONTINUED: u64 = 8;
+    const WNOTHREAD: u64 = 0x2000_0000;
+    const WALL: u64 = 0x4000_0000;
+    if options & !(WNOHANG | WUNTRACED | WCONTINUED | WNOTHREAD | WALL) != 0 {
         return EINVAL;
     }
+    // A `pid_t`, so only the low 32 bits: `waitpid(-1)` can arrive as
+    // `0xffffffff`, which read as a large positive pid matched no child and
+    // answered ECHILD.
+    let pid = pid as u32 as i32 as i64;
 
+    // **Only this process's own children.** Matched by session and pid
+    // alone, a shell's `waitpid(-1)` reaped its grandchildren too -- the
+    // `sleep` under `timeout`, the `gzip` under `tar` -- and they then waited
+    // on a child already collected and answered "No child processes".
+    let me = syscall::current_guest();
     loop {
         let sess = here();
         let found = {
             let s = unsafe { SLOTS.get() };
             s.iter()
                 .position(|x| x.pid != 0 && !x.live && x.status.is_some() && x.session == sess
-                    && !x.quarantined && (pid <= 0 || x.pid == pid as u64))
+                    && x.parent == me && !x.quarantined && (pid <= 0 || x.pid == pid as u64))
         };
         if let Some(i) = found {
             let s = unsafe { SLOTS.get() };
@@ -751,7 +766,7 @@ pub fn wait(pid: i64, status: u64, options: u64) -> u64 {
         }
         let any = {
             let s = unsafe { SLOTS.get() };
-            s.iter().any(|x| x.pid != 0 && !x.quarantined && x.session == sess
+            s.iter().any(|x| x.pid != 0 && !x.quarantined && x.session == sess && x.parent == me
                 && (pid <= 0 || x.pid == pid as u64))
         };
         if !any {

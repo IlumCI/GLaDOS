@@ -866,7 +866,12 @@ pub fn exec(f: &mut syscall::Frame) -> u64 {
         None
     };
 
-    let Some(bytes) = super::disk::program_bytes(&path) else { return ENOENT };
+    // The program a link names is the one that runs -- `/usr/bin/vi` is often
+    // a link to another editor, and `/bin` is `usr/bin` in an Arch root --
+    // while argv[0] stays the name the caller used, which is what a program
+    // that dispatches on its own name reads.
+    let real = super::fs::resolve("/", &path).map(super::link::follow).unwrap_or_else(|| path.clone());
+    let Some(bytes) = super::disk::program_bytes(&real) else { return ENOENT };
     let args: Vec<&str> = if argv.is_empty() {
         alloc::vec![path.as_str()]
     } else {
