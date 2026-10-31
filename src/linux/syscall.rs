@@ -661,14 +661,14 @@ static mut SYSCALL_STACK: Stack = Stack([0; GUEST_SYSCALL_STACK]);
 /// Every guest syscall stack's size: the main thread's, a session's, a
 /// thread's and a forked child's.
 ///
-/// **Sixty-four KiB, and sixteen was measured too small.** Nothing guards the
-/// end of one, so running off it does not fault: it writes over whatever is
-/// below, and the first thing to notice is the guest, whose saved registers
-/// were in the way. Two read-only lookups added to `openat` were enough --
-/// inlined, they grew its frame, the image lookups after them ran deeper,
-/// and dbus-daemon took a null pointer inside `ld.so` on every boot while
-/// the same build with the lookups made a no-op booted clean. The kernel
-/// had been within a few frames of this since the image reader landed.
+/// **Sixty-four KiB, raised from sixteen on a wrong diagnosis, and kept.**
+/// dbus-daemon faulting in `ld.so` was blamed on running off a 16 KiB stack,
+/// because four boots crashed and then three with bigger stacks did not. The
+/// crash happened on about half of boots for an unrelated reason -- an open
+/// file naming its volume by a position a remount moved (`disk::RETIRED`) --
+/// and seven boots of a coin flip had looked like a cause. The size stays
+/// because nothing guards the end of one of these stacks, so running off it
+/// would corrupt a guest silently, and the margin costs 48 KiB per thread.
 pub const GUEST_SYSCALL_STACK: usize = 64 * 1024;
 
 /// The three globals the stub reaches through, as one value.
@@ -7772,8 +7772,15 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
                 let from = (off as usize).min(f.size);
                 let to = from.saturating_add(len as usize).min(f.size);
                 let mut v = alloc::vec![0u8; to - from];
-                let got = f.read_at(from, &mut v);
-                v.truncate(got);
+                // **A short read is an error here, not a short mapping.** It
+                // was truncated and the rest of the mapping left zero, so a
+                // failed read became a library whose dynamic section was all
+                // zeros, which `ld.so` found by dereferencing null -- far
+                // from anything that said a read had failed. Linux would
+                // raise SIGBUS on touching it; EIO says so at the call.
+                if f.read_at(from, &mut v) != v.len() {
+                    return EIO;
+                }
                 Some(v)
             }
             Some(super::fs::Fd::File(b)) => {

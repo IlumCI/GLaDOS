@@ -50,9 +50,38 @@ struct Mount {
     /// the root image.
     prefix: String,
     vol: Vol,
+    /// This mount's own number, never reused: what an open file names it by.
+    id: u64,
 }
 
 static MOUNTS: Racy<Vec<Mount>> = Racy::new(Vec::new());
+
+/// Mounts replaced at their path while files may still be open on them.
+///
+/// **An open file names its volume by `Mount::id`, and that is the fix for
+/// a crash that looked like the dynamic loader's.** It named it by position
+/// in `MOUNTS`, and `mount` takes the old entry at a path out before adding
+/// the new one -- so remounting `/` slid every later mount down a place.
+/// Boot mounts the root first and starts the session bus on it; a `linux
+/// mount / 2` typed while dbus was still loading its libraries left every
+/// library it had open naming `/disk/1`, a FAT volume, where the reads found
+/// no file of theirs and answered zero bytes. `mmap` laid those zeros down
+/// as the library's dynamic section and `ld.so` took a null pointer out of
+/// it -- on about half of boots, the half where dbus was still loading.
+/// A replaced mount is kept here, as Linux keeps a lazily unmounted
+/// filesystem alive for the files open on it; mounts are rare and a volume's
+/// state is small, so they are never freed.
+static RETIRED: Racy<Vec<Mount>> = Racy::new(Vec::new());
+static NEXT_MOUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+/// The mount an open file names, wherever it now is.
+fn by_id(id: u64) -> Option<&'static mut Mount> {
+    let m = unsafe { MOUNTS.get() };
+    if let Some(i) = m.iter().position(|x| x.id == id) {
+        return Some(&mut m[i]);
+    }
+    unsafe { RETIRED.get() }.iter_mut().find(|x| x.id == id)
+}
 
 /// The guest lock, held for the length of a public call.
 ///
@@ -106,8 +135,14 @@ pub fn mount(prefix: &str, index: u32) -> Result<(), &'static str> {
     };
     let _g = big();
     let m = unsafe { MOUNTS.get() };
-    m.retain(|x| x.prefix != prefix);
-    m.push(Mount { prefix: String::from(prefix), vol });
+    // Out of the table and into `RETIRED`, never dropped: files may be open
+    // on it (see `RETIRED`).
+    while let Some(i) = m.iter().position(|x| x.prefix == prefix) {
+        let old = m.remove(i);
+        unsafe { RETIRED.get() }.push(old);
+    }
+    let id = NEXT_MOUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    m.push(Mount { prefix: String::from(prefix), vol, id });
     Ok(())
 }
 
@@ -368,7 +403,8 @@ pub struct DiskFile {
     pub path: String,
     pub size: usize,
     pub at: usize,
-    mount: usize,
+    /// The mount's id, not its place in the table: see `RETIRED`.
+    mount: u64,
     body: Body,
 }
 
@@ -393,7 +429,7 @@ impl DiskFile {
             },
             Vol::Erofs(_) => Body::Erofs(n.inode.ok_or("no inode")?),
         };
-        Ok(DiskFile { path: String::from(path), size: n.size, at: 0, mount: i, body })
+        Ok(DiskFile { path: String::from(path), size: n.size, at: 0, mount: m.id, body })
     }
 
     /// Copy up to `out.len()` bytes from offset `off`. Answers how many.
@@ -402,7 +438,7 @@ impl DiskFile {
         if off >= self.size || out.is_empty() {
             return 0;
         }
-        let m = unsafe { &MOUNTS.get()[self.mount] };
+        let Some(m) = by_id(self.mount) else { return 0 };
         match (&m.vol, &mut self.body) {
             (Vol::Erofs(img), Body::Erofs(ino)) => img.read(ino, off as u64, out).unwrap_or(0),
             (Vol::Fat { vol, .. }, Body::Fat { chain, cache_first, cache }) => {
