@@ -276,6 +276,20 @@ pub struct Console {
     /// top the heap has been up for a long time, and if the allocation fails
     /// the console behaves precisely as it did before there was one.
     history: alloc::vec::Vec<alloc::vec::Vec<Cell>>,
+    /// Whether each history row ran on into the next one, beside `history`
+    /// and indexed the same way. See `wrap`.
+    hist_wrap: alloc::vec::Vec<bool>,
+    /// Which grid rows ran out of width and carried on into the row below,
+    /// one bit per row -- a soft wrap rather than a newline.
+    ///
+    /// This is what lets a resize rewrap. Without it a line that wrapped and
+    /// two lines that happen to fill the width look alike, so a terminal made
+    /// narrower could only cut every row at its new right edge -- what a tiled
+    /// window showed of a log written at full width -- and one made wider
+    /// could never join a wrapped line back up. A bitset and not a `Vec`,
+    /// because a direct console must not allocate, and 512 rows is the most
+    /// any grid holds (`MAX_WIDE`).
+    wrap: [u64; MAX_WIDE / 64],
     /// Where the next scrolled-off row goes.
     ///
     /// A ring rather than a queue, because a queue's `remove(0)` is a 128 KB
@@ -378,6 +392,8 @@ impl Console {
             scale,
             caret: None,
             history: alloc::vec::Vec::new(),
+            hist_wrap: alloc::vec::Vec::new(),
+            wrap: [0; MAX_WIDE / 64],
             hist_next: 0,
             view: 0,
             ox: x,
@@ -416,6 +432,30 @@ impl Console {
     fn set(&mut self, r: usize, c: usize, v: Cell) {
         let s = self.stride;
         self.cells.cells_mut()[r * s + c] = v;
+    }
+
+    fn wrapped(&self, r: usize) -> bool {
+        r < MAX_WIDE && self.wrap[r / 64] & (1 << (r % 64)) != 0
+    }
+
+    fn set_wrapped(&mut self, r: usize, on: bool) {
+        if r >= MAX_WIDE {
+            return;
+        }
+        if on {
+            self.wrap[r / 64] |= 1 << (r % 64);
+        } else {
+            self.wrap[r / 64] &= !(1 << (r % 64));
+        }
+    }
+
+    /// The grid moved up `n` rows: so do the flags, and the rows that come in
+    /// at the bottom are new and wrap nothing.
+    fn shift_wrap(&mut self, n: usize) {
+        for r in 0..MAX_WIDE {
+            let v = r + n < MAX_WIDE && self.wrapped(r + n);
+            self.set_wrapped(r, v);
+        }
     }
 
     /// Give the grid room for `cols` x `rows`, keeping what is in it. A boot
@@ -586,6 +626,11 @@ impl Console {
         let (cap_c, cap_r) = if self.composed() { (MAX_WIDE, MAX_WIDE) } else { (self.stride, self.cap_rows) };
         let cols = ((w / (self.cell_w())) as usize).min(cap_c);
         let rows = ((h / (self.cell_h())) as usize).min(cap_r);
+        if self.composed() && cols != self.cols && cols > 0 && rows > 0 && self.rewrap(cols, rows) {
+            self.ox = x;
+            self.oy = y;
+            return;
+        }
         // Keep the tail rather than the head: the interesting part of a boot
         // log is the end of it, and a shrinking grid would otherwise scroll the
         // most recent lines off the bottom.
@@ -600,8 +645,10 @@ impl Console {
             // found nothing to scroll to.
             for r in 0..drop {
                 let kept = self.grid_row(r)[..self.cols].to_vec();
-                self.push_history(kept);
+                let w = self.wrapped(r);
+                self.push_history(kept, w);
             }
+            self.shift_wrap(drop);
             let s = self.stride;
             self.cells.cells_mut().copy_within(drop * s..(drop + rows) * s, 0);
             for r in rows..self.cap_rows {
@@ -620,6 +667,120 @@ impl Console {
         self.oy = y;
         self.view = self.view.min(rows.saturating_sub(1));
         self.drop_caret();
+    }
+
+    /// Lay everything printed so far out again at a new width: the history
+    /// and the grid read back as the lines they were, and each line wrapped
+    /// afresh. Answers false, having changed nothing, when there is no memory
+    /// for it -- the caller then keeps the old behaviour of cutting rows.
+    ///
+    /// What a terminal is expected to do, and what this one did not: tiled to
+    /// half the screen it showed the left half of everything already on it,
+    /// each line cut where the window now ended, and wrapped only what came
+    /// after. A line is the cells up to its last non-blank one, so the space
+    /// a row was padded with does not become a run of blank rows when it
+    /// narrows; the cursor's line keeps the cursor's column, so a prompt
+    /// keeps the space it ends in.
+    fn rewrap(&mut self, cols: usize, rows: usize) -> bool {
+        let used = |row: &[Cell]| row.iter().rposition(|c| c.glyph() != font::SPACE).map_or(0, |i| i + 1);
+        // The lines, oldest first, and where the cursor is in the last one.
+        let mut lines: alloc::vec::Vec<alloc::vec::Vec<Cell>> = alloc::vec::Vec::new();
+        let mut open = false;
+        let take = |lines: &mut alloc::vec::Vec<alloc::vec::Vec<Cell>>, open: &mut bool, row: &[Cell], wrapped: bool, min: usize| {
+            let n = if wrapped { row.len() } else { used(row).max(min).min(row.len()) };
+            if !*open {
+                lines.push(alloc::vec::Vec::new());
+            }
+            if let Some(l) = lines.last_mut() {
+                l.extend_from_slice(&row[..n]);
+            }
+            *open = wrapped;
+        };
+        let cap = self.history.len();
+        let first = if cap < HISTORY { 0 } else { self.hist_next };
+        for i in 0..cap {
+            let k = (first + i) % cap;
+            take(&mut lines, &mut open, &self.history[k], self.hist_wrap.get(k).copied().unwrap_or(false), 0);
+        }
+        // Where the cursor's line began, counted in cells, so the cursor can
+        // be found again in it.
+        let mut start = 0;
+        for r in 0..=self.row.min(self.rows.saturating_sub(1)) {
+            if r == self.row {
+                let before = if open { lines.last().map_or(0, |l| l.len()) } else { 0 };
+                start = before;
+            }
+            let w = r < self.row && self.wrapped(r);
+            let min = if r == self.row { self.col } else { 0 };
+            take(&mut lines, &mut open, &self.grid_row(r)[..self.cols], w, min);
+        }
+        let at = start + self.col;
+
+        // The same lines in rows of the new width.
+        let mut out: alloc::vec::Vec<(&[Cell], bool)> = alloc::vec::Vec::new();
+        for l in &lines {
+            if l.is_empty() {
+                out.push((&l[..], false));
+                continue;
+            }
+            let mut i = 0;
+            while i < l.len() {
+                let e = (i + cols).min(l.len());
+                out.push((&l[i..e], e < l.len()));
+                i = e;
+            }
+        }
+        // The cursor's row. At the exact end of a full row it stays on that
+        // row past its last column, which is where `put_glyph` expects a
+        // cursor that has run out of width.
+        let last_line_rows = lines.last().map_or(1, |l| ((l.len() + cols - 1) / cols).max(1));
+        let line_top = out.len() - last_line_rows;
+        let (mut crow, mut ccol) = (line_top + at / cols, at % cols);
+        if crow >= out.len() {
+            crow = out.len() - 1;
+            ccol = cols;
+        }
+        // Only the cursor's row and what is above it exist; the grid shows
+        // the newest of them, the rest are history.
+        let keep = crow + 1;
+        let top = keep.saturating_sub(rows);
+
+        let mut grid = alloc::vec::Vec::new();
+        if grid.try_reserve_exact(cols * rows).is_err() {
+            return false;
+        }
+        grid.resize(cols * rows, BLANK);
+        let mut history = alloc::vec::Vec::new();
+        let mut hist_wrap = alloc::vec::Vec::new();
+        let from = top.saturating_sub(HISTORY);
+        if history.try_reserve_exact(top - from).is_err() || hist_wrap.try_reserve_exact(top - from).is_err() {
+            return false;
+        }
+        for &(row, w) in &out[from..top] {
+            history.push(row.to_vec());
+            hist_wrap.push(w);
+        }
+        let mut wrap = [0u64; MAX_WIDE / 64];
+        for (r, &(row, w)) in out[top..keep].iter().enumerate() {
+            grid[r * cols..r * cols + row.len()].copy_from_slice(row);
+            if w && r < MAX_WIDE {
+                wrap[r / 64] |= 1 << (r % 64);
+            }
+        }
+        self.hist_next = history.len() % HISTORY;
+        self.history = history;
+        self.hist_wrap = hist_wrap;
+        self.cells = Grid::Heap(grid);
+        self.stride = cols;
+        self.cap_rows = rows;
+        self.cols = cols;
+        self.rows = rows;
+        self.wrap = wrap;
+        self.row = crow - top;
+        self.col = ccol;
+        self.view = 0;
+        self.drop_caret();
+        true
     }
 
     /// Pixel size of the grid as currently laid out.
@@ -642,6 +803,7 @@ impl Console {
         self.col = 0;
         self.row = 0;
         self.view = 0;
+        self.wrap = [0; MAX_WIDE / 64];
         self.drop_caret();
         if self.paints() {
             // The grid's own rectangle, not the panel: clearing the screen must
@@ -728,6 +890,9 @@ impl Console {
             // actually showing there.
             return;
         }
+        if r >= self.rows || c >= self.cols {
+            return;
+        }
         self.paint_cell(r, c);
         let (cw, ch) = (self.cell_w(), self.cell_h());
         self.push(self.ox + c as u32 * cw, self.oy + r as u32 * ch, cw, ch);
@@ -742,7 +907,14 @@ impl Console {
         // shadow grid and simply is not painted. Nothing is lost: `redraw_all`
         // brings the whole log back the moment the splash hands over, so the
         // boot output is there to read exactly as it always was.
-        if !self.paints() {
+        // A cell outside the grid has nothing to paint. The caret can be
+        // remembered one past the last column -- a row filled to the edge
+        // leaves the cursor there until the next glyph wraps -- and taking
+        // it off read the cell at `cols`: the next row's first on most rows,
+        // and past the end of the grid on the last one, which panicked the
+        // kernel the first time a model's streamed summary filled the bottom
+        // row exactly.
+        if !self.paints() || r >= self.rows || c >= self.cols {
             return;
         }
         self.paint_at(r, c, self.get(r, c));
@@ -869,7 +1041,9 @@ impl Console {
         // in place after that, so the steady state allocates nothing and moves
         // nothing -- the whole point of the index.
         let top = self.grid_row(0)[..self.cols].to_vec();
-        self.push_history(top);
+        let w = self.wrapped(0);
+        self.push_history(top, w);
+        self.shift_wrap(1);
 
         // A view that is not at the tail follows the content instead of the
         // window, and it costs nothing to do it: with one more row in the
@@ -915,6 +1089,8 @@ impl Console {
         self.row += 1;
         if self.row >= self.rows {
             self.scroll();
+        } else {
+            self.set_wrapped(self.row, false);
         }
     }
 
@@ -972,6 +1148,9 @@ impl Console {
 
     fn put_glyph(&mut self, glyph: u16) {
         if self.col >= self.cols {
+            // Out of width: the row carries on below, which is what a resize
+            // needs to know to put it back together.
+            self.set_wrapped(self.row, true);
             self.newline();
         }
         let (r, c, fg) = (self.row, self.col, self.fg);
@@ -985,14 +1164,16 @@ impl Console {
     /// It grows to `HISTORY` and is written in place after that, so the steady
     /// state allocates nothing and moves nothing -- the whole point of the
     /// index.
-    fn push_history(&mut self, row: alloc::vec::Vec<Cell>) {
+    fn push_history(&mut self, row: alloc::vec::Vec<Cell>, wrapped: bool) {
         // Each row as wide as it was when it left, so a grid that changed
         // width since keeps its history legible; readers treat a short row as
         // ending in blanks (`cell_of`).
         if self.history.len() < HISTORY {
             self.history.push(row);
+            self.hist_wrap.push(wrapped);
         } else {
             self.history[self.hist_next] = row;
+            self.hist_wrap[self.hist_next] = wrapped;
         }
         self.hist_next = (self.hist_next + 1) % HISTORY;
     }

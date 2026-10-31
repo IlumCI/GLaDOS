@@ -23,6 +23,7 @@
 //! applet, and it is not taken here.
 
 mod ask;
+mod report;
 mod table;
 pub use ask::colleague;
 use alloc::format;
@@ -391,6 +392,11 @@ pub fn start_app(app: App, file: Option<&str>) -> Result<String, String> {
             } else if retries > 0 {
                 retries -= 1;
                 kprint!(" again");
+                // The first start built the profile and exited to be started
+                // again: `Bench` goes in now, between the two, so it is there
+                // when the binding to `Bench.Watch` first fires. Written
+                // before the first start it is replaced by the presets.
+                let _ = seed_bench_macros_at(PROFILE);
                 id = crate::linux::start_service_job(SOFFICE, &args).map_err(String::from)?;
                 continue;
             } else {
@@ -411,7 +417,7 @@ pub fn start_app(app: App, file: Option<&str>) -> Result<String, String> {
 }
 
 /// Where LibreOffice keeps its settings, under the session's `HOME`.
-const PROFILE: &str = "/root/.config/libreoffice/4/user";
+pub(crate) const PROFILE: &str = "/root/.config/libreoffice/4/user";
 
 /// LibreOffice's settings, written before its first start, for the two that
 /// stand between the typist and a correct document.
@@ -433,8 +439,19 @@ const PROFILE: &str = "/root/.config/libreoffice/4/user";
 /// theirs. LibreOffice reads this file on its first start and keeps what it
 /// finds.
 fn seed_profile() {
-    seed_profile_at(PROFILE)
+    seed_profile_at(PROFILE, WATCH)
 }
+
+/// The desktop's LibreOffice runs `Bench.Watch` when a document has loaded,
+/// and from then on writes any answer `colleague` leaves for it.
+///
+/// **A job file it polls, because handing it a macro does not work here.**
+/// A second soffice is meant to pass `macro:///...` to the running one
+/// through its pipe; in this guest it exits 1 and nothing runs, and that is a
+/// kernel question about LibreOffice's pipe still open. The desktop profile
+/// alone carries the binding: a headless instance that ran it would never
+/// exit.
+const WATCH: &str = "<item oor:path=\"/org.openoffice.Office.Events/ApplicationEvents/Bindings\"><node oor:name=\"OnLoad\" oor:op=\"replace\"><prop oor:name=\"BindingURL\" oor:op=\"fuse\"><value>vnd.sun.star.script:Standard.Bench.Watch?language=Basic&amp;location=application</value></prop></node></item>\n";
 
 /// The same settings for a profile at `dir` -- the GUI's, or the headless
 /// one `office bench` judges with.
@@ -446,7 +463,12 @@ fn seed_profile() {
 /// all three. A judge has to compute every formula the same way on every
 /// machine, so its profile computes them on one thread. Why the pool fails
 /// in the guest is a kernel question and is open.
-fn seed_profile_at(dir: &str) {
+///
+/// **And a comma between arguments, said rather than inherited.** `colleague`
+/// types formulas into Calc as keystrokes, and a separator that is a locale's
+/// default is one that changes with the locale -- a `;` sheet reads a typed
+/// `=SUMIF(B2:B41,"East",G2:G41)` as an error.
+fn seed_profile_at(dir: &str, extra: &str) {
     let file = format!("{}/registrymodifications.xcu", dir);
     if crate::linux::ns::blob_len(&file).is_some() {
         return;
@@ -459,7 +481,9 @@ fn seed_profile_at(dir: &str) {
 <item oor:path="/org.openoffice.Office.Common/Misc"><prop oor:name="FirstRun" oor:op="fuse"><value>false</value></prop></item>
 <item oor:path="/org.openoffice.Office.Calc/Formula/Load"><prop oor:name="ODFRecalcMode" oor:op="fuse"><value>0</value></prop></item>
 <item oor:path="/org.openoffice.Office.Calc/Formula/Calculation"><prop oor:name="UseThreadedCalculationForFormulaGroups" oor:op="fuse"><value>false</value></prop></item>
-</oor:items>
+<item oor:path="/org.openoffice.Office.Calc/Formula/Syntax"><prop oor:name="SeparatorArg" oor:op="fuse"><value>,</value></prop></item>
+<item oor:path="/org.openoffice.Office.Calc/Formula/Syntax"><prop oor:name="SeparatorArrayCol" oor:op="fuse"><value>,</value></prop></item>
+<item oor:path="/org.openoffice.Office.Calc/Formula/Syntax"><prop oor:name="SeparatorArrayRow" oor:op="fuse"><value>;</value></prop></item>
 "#;
     let mut path = String::new();
     for part in dir.split('/').filter(|p| !p.is_empty()) {
@@ -469,7 +493,8 @@ fn seed_profile_at(dir: &str) {
             crate::linux::ns::make_dir(&path);
         }
     }
-    crate::linux::ns::write_blob(&file, xcu.as_bytes().to_vec());
+    let xcu = format!("{}{}</oor:items>\n", xcu, extra);
+    crate::linux::ns::write_blob(&file, xcu.into_bytes());
 }
 
 /// Whether the draft has typed anything yet. Whitespace before the first
@@ -1096,9 +1121,23 @@ const HEADLESS_USER: &str = "/tmp/office/profile/user";
 /// profile's Basic libraries from its presets, and a library written first
 /// would be replaced by the default one.
 fn seed_bench_macros() -> Result<(), String> {
-    let base = format!("{}/basic", HEADLESS_USER);
+    seed_bench_macros_at(HEADLESS_USER)
+}
+
+/// `bench.bas` into the profile at `user` -- the headless one, or the
+/// desktop's, where `Bench.Live` writes an answer into the workbook on screen.
+pub(crate) fn seed_bench_macros_at(user: &str) -> Result<(), String> {
+    let base = format!("{}/basic", user);
     let std = format!("{}/Standard", base);
-    for d in [HEADLESS_USER, base.as_str(), std.as_str()] {
+    let mut path = String::new();
+    for part in user.split('/').filter(|p| !p.is_empty()) {
+        path.push('/');
+        path.push_str(part);
+        if !crate::linux::ns::is_dir(&path) {
+            crate::linux::ns::make_dir(&path);
+        }
+    }
+    for d in [user, base.as_str(), std.as_str()] {
         if !crate::linux::ns::is_dir(d) {
             crate::linux::ns::make_dir(d);
         }
@@ -1154,7 +1193,7 @@ fn headless_macros() -> Result<(), String> {
     // The headless profile first, then the macros into it -- see
     // `seed_bench_macros` for the order.
     if !crate::linux::ns::is_dir(&format!("{}/basic/Standard", HEADLESS_USER)) {
-        seed_profile_at(HEADLESS_USER);
+        seed_profile_at(HEADLESS_USER, "");
         note(String::from("making the headless profile (once)"));
         for _ in 0..2 {
             run_to_end(&["--headless", "--norestore", "--nologo", HEADLESS, "--terminate_after_init"], CONVERT_S)?;
@@ -1542,6 +1581,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push(("an array formula keeps its braces", formula_in("{=A1:A3*B1:B3}").as_deref() == Some("{=A1:A3*B1:B3}")));
     out.push(("and after a preamble, without its full stop", formula_in("Use this: =INDEX(A1:C1,MATCH(MAX(A2:C2),A2:C2,0)).").as_deref() == Some("=INDEX(A1:C1,MATCH(MAX(A2:C2),A2:C2,0))")));
     out.extend(ask::checks());
+    out.extend(report::checks());
     out.extend(table::checks());
     out
 }

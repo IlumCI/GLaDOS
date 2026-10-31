@@ -1486,7 +1486,7 @@ pub fn has_window(title: &str) -> bool {
 /// program chooses its own -- LibreOffice's is the document's name followed
 /// by "LibreOffice Writer".
 pub fn focus_titled(needle: &str) -> bool {
-    with(|d| {
+    let done = with(|d| {
         let Some(i) = d.windows.iter().rposition(|w| w.title.contains(needle)) else { return false };
         if d.windows[i].state == WinState::Minimised {
             d.windows[i].state = WinState::Normal;
@@ -1494,7 +1494,14 @@ pub fn focus_titled(needle: &str) -> bool {
         d.raise(i);
         true
     })
-    .unwrap_or(false)
+    .unwrap_or(false);
+    // A frame, now. A Wayland client is told it has the focus by the frame
+    // that draws it focused (`sky::server` reads that, not the window list),
+    // and with nothing else changing on screen no frame came: Calc raised by
+    // `colleague` was never told, and every key of the first answer waited
+    // for something unrelated to repaint -- or was dropped.
+    super::render::invalidate();
+    done
 }
 
 /// Close every closable window whose title contains `needle`, the way its
@@ -1515,6 +1522,11 @@ pub fn close_titled(needle: &str) -> usize {
 }
 
 /// The title of the topmost window whose title contains `needle`.
+/// The title of the window that has the focus, if any does.
+pub fn focused_title() -> Option<String> {
+    with(|d| d.focus().map(|i| d.windows[i].title.clone())).flatten()
+}
+
 pub fn window_titled(needle: &str) -> Option<String> {
     with(|d| d.windows.iter().rev().find(|w| w.title.contains(needle)).map(|w| w.title.clone())).flatten()
 }

@@ -324,6 +324,7 @@ fn turn(s: &mut Session, now: u64, changed: &mut bool) -> bool {
                 s.client.input(surf, super::seat::Input::Key { code: e.code as u32, down: e.value == 1 });
             }
         }
+        crate::linux::input::note_read(s.kbd);
     }
 
     // Answers, as far as the socket has room -- and any descriptors the events

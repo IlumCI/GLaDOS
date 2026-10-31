@@ -41,8 +41,24 @@ pub fn open(path: &str) -> Result<(), String> {
     // desktop's Calc, and LibreOffice will not load a document another
     // instance has locked -- every `colleague` answered "no header row".
     *BOOK.lock_irq() = Some(String::from(path));
-    show(&copy)
+    NEXT_ROW.store(0, core::sync::atomic::Ordering::Relaxed);
+    super::report::reset(path, 0);
+    show(&copy)?;
+    // `Bench` into the desktop's own profile, for `Bench.Live`: now that the
+    // profile exists, since one written before the first start is replaced
+    // by the presets. The Standard library is read when first used, so the
+    // running Calc finds it.
+    super::seed_bench_macros_at(super::PROFILE)?;
+    // The headless profile made now rather than by the first question: it is
+    // the slow part of the first launch, and run during a question it took
+    // the machine from the Calc being typed into.
+    headless_macros()
 }
+
+/// The row of the open workbook's sheet the next answer is typed at: under
+/// the data, then under the answer before it. Zero until the first question
+/// has read how far the data goes.
+static NEXT_ROW: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Close whatever Calc has open and open `file` in a Calc of its own.
 ///
@@ -65,15 +81,21 @@ fn show(file: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// `colleague <request>`: a question about the open workbook, answered in a
-/// copy of it opened beside the original.
+/// `colleague <request>`: a question about the open workbook, answered in
+/// the workbook on screen -- the formulas typed into Calc under the data, so
+/// the sheet computes them where it can be watched -- and in the terminal.
 pub fn colleague(request: &str) {
     let book = BOOK.lock_irq().clone();
     let Some(book) = book else {
         crate::kprintln!("  no workbook is open -- 'office open <path>' first");
         return;
     };
-    if let Err(why) = ask(&book, &format!("{} --open", request.trim())) {
+    let done = if super::report::asks_for(request) {
+        super::report::write()
+    } else {
+        ask(&book, &format!("{} --live", request.trim()))
+    };
+    if let Err(why) = done {
         crate::kprintln!("  {}", why);
     }
 }
@@ -102,6 +124,8 @@ const OPS: &[Op] = &[
     Op { name: "total per group", whole: "SUM", grouped: Some("SUMIF"), needs_value: true, by: true },
     Op { name: "average per group", whole: "AVERAGE", grouped: Some("AVERAGEIF"), needs_value: true, by: true },
     Op { name: "count per group", whole: "COUNTA", grouped: Some("COUNTIF"), needs_value: false, by: true },
+    Op { name: "largest per group", whole: "MAX", grouped: Some("MAXIFS"), needs_value: true, by: true },
+    Op { name: "smallest per group", whole: "MIN", grouped: Some("MINIFS"), needs_value: true, by: true },
 ];
 
 /// A sheet as `Bench.View` rendered it: the header row, how far the data
@@ -115,6 +139,9 @@ struct Sheet {
     last_col: String,
     /// (address, value) for every cell the view carried.
     cells: Vec<(String, String)>,
+    /// (column letters, every distinct value) for each column of names, over
+    /// the whole sheet and not only the rows the view carried.
+    distinct: Vec<(String, Vec<String>)>,
 }
 
 fn split_addr(a: &str) -> Option<(&str, usize)> {
@@ -134,7 +161,12 @@ fn parse(view: &str) -> Option<Sheet> {
     let end = area.split(':').nth(1)?.trim();
     let (last_col, last_row) = split_addr(end)?;
     let mut cells = Vec::new();
+    let mut distinct = Vec::new();
     for l in lines {
+        if let Some((col, vals)) = l.strip_prefix("Distinct ").and_then(|r| r.split_once(": ")) {
+            distinct.push((String::from(col), vals.split('|').map(String::from).collect()));
+            continue;
+        }
         for part in l.split(" | ") {
             if let Some((addr, val)) = part.split_once('=') {
                 if split_addr(addr).is_some() {
@@ -151,7 +183,7 @@ fn parse(view: &str) -> Option<Sheet> {
         .filter(|(_, v)| !v.is_empty())
         .map(|(a, v)| (String::from(split_addr(a).unwrap().0), v.clone()))
         .collect::<Vec<_>>();
-    (!headers.is_empty()).then_some(Sheet { name, headers, last_row, last_col: String::from(last_col), cells })
+    (!headers.is_empty()).then_some(Sheet { name, headers, last_row, last_col: String::from(last_col), cells, distinct })
 }
 
 /// A formula's ranges qualified with the sheet they are on, for a formula
@@ -221,6 +253,13 @@ fn next_col(col: &str) -> String {
 
 /// The distinct values of a column below its header, in order of appearance.
 fn groups(sheet: &Sheet, col: &str) -> Vec<String> {
+    // The whole column's, sorted, when the view carried them: a ledger's
+    // groups are not all in its first sixty rows.
+    if let Some((_, vals)) = sheet.distinct.iter().find(|(c, _)| c == col) {
+        let mut v = vals.clone();
+        v.sort();
+        return v;
+    }
     let mut out: Vec<String> = Vec::new();
     for (a, v) in &sheet.cells {
         if let Some((c, r)) = split_addr(a) {
@@ -243,6 +282,9 @@ fn formulas(sheet: &Sheet, op: &Op, value: &str, by: Option<&str>) -> Vec<(Strin
                 let quoted = label.replace('"', "\"\"");
                 let formula = if f == "COUNTIF" {
                     format!("=COUNTIF({},\"{}\")", range(g), quoted)
+                } else if f.ends_with("IFS") {
+                    // MAXIFS and MINIFS put the range they reduce first.
+                    format!("={}({},{},\"{}\")", f, range(value), range(g), quoted)
                 } else {
                     format!("={}({},\"{}\",{})", f, range(g), quoted, range(value))
                 };
@@ -279,9 +321,11 @@ fn numeric(sheet: &Sheet, col: &str) -> bool {
 /// than chosen: on the first run "what is our total revenue" was answered per
 /// group, the grouped operations' names beginning with the plain ones'.
 fn wants_groups(request: &str) -> bool {
-    request
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|w| matches!(w.to_ascii_lowercase().as_str(), "each" | "per" | "by" | "every" | "breakdown"))
+    let w: Vec<String> = request.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).map(|w| w.to_ascii_lowercase()).collect();
+    // "Per sale" is per row, which is what an average already is: grouped by
+    // it, "the average revenue per sale" became forty averages, one a date.
+    let row = |i: usize| w.get(i + 1).is_some_and(|n| matches!(n.trim_end_matches('s'), "sale" | "row" | "order" | "transaction" | "entry" | "entrie" | "record" | "line" | "item"));
+    w.iter().enumerate().any(|(i, x)| matches!(x.as_str(), "each" | "per" | "by" | "every" | "breakdown") && !row(i))
 }
 
 /// A computed value for reading: a long fraction to two places, as a person
@@ -343,10 +387,282 @@ fn op_named(request: &str) -> Option<&'static str> {
     }
 }
 
+/// What an answer's column is headed: "Total Revenue", "Average Units",
+/// "Count".
+fn title(word: &str, of: Option<&str>) -> String {
+    let mut w = String::from(word);
+    if let Some(f) = w.get_mut(0..1) {
+        f.make_ascii_uppercase();
+    }
+    match of {
+        Some(c) => format!("{} {}", w, c),
+        None => w,
+    }
+}
+
+/// A number as a person reads one: thousands grouped, an average to two
+/// places. Anything that is not a number is left as it came.
+fn readable(v: &str) -> String {
+    let v = shown(v);
+    let Ok(_) = v.parse::<f64>() else { return v };
+    let (sign, rest) = match v.strip_prefix('-') {
+        Some(r) => ("-", r),
+        None => ("", v.as_str()),
+    };
+    let (int, frac) = match rest.split_once('.') {
+        Some((i, f)) => (i, Some(f)),
+        None => (rest, None),
+    };
+    let mut out = String::from(sign);
+    for (i, ch) in int.chars().enumerate() {
+        if i > 0 && (int.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    if let Some(f) = frac {
+        out.push('.');
+        out.push_str(f);
+    }
+    out
+}
+
+/// Text cut into lines no wider than `width` columns, at spaces where there
+/// are any. A word wider than the line is cut, since it has to go somewhere.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(8);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ').filter(|w| !w.is_empty()) {
+        let mut word = word;
+        loop {
+            let have = line.chars().count();
+            let need = word.chars().count() + usize::from(have > 0);
+            if have + need <= width {
+                if have > 0 {
+                    line.push(' ');
+                }
+                line.push_str(word);
+                break;
+            }
+            if have > 0 {
+                lines.push(core::mem::take(&mut line));
+                continue;
+            }
+            let cut = word.char_indices().nth(width).map_or(word.len(), |(i, _)| i);
+            lines.push(String::from(&word[..cut]));
+            word = &word[cut..];
+            if word.is_empty() {
+                break;
+            }
+        }
+    }
+    if !line.is_empty() || lines.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// The terminal's width as `note` writes into it: two columns of indent.
+fn room() -> usize {
+    crate::gfx::console::cols().saturating_sub(3).max(24)
+}
+
+/// One labelled line of the report, wrapped to the terminal as it is now
+/// with the label's column kept clear: a line written for a full-width
+/// terminal and read in a tiled one was cut mid-word and carried on at the
+/// left edge, where it read as a line of its own.
+fn say(label: &str, text: &str) {
+    const LABEL: usize = 9;
+    for (i, l) in wrap(text, room().saturating_sub(LABEL)).into_iter().enumerate() {
+        let tag = if i == 0 { label } else { "" };
+        note(format!("{:<w$}{}", tag, l, w = LABEL));
+    }
+}
+
+/// A two-column table in box-drawing characters, as wide as it needs to be
+/// and never wider than the terminal: labels are cut with an ellipsis before
+/// a number is, since a number cut short is a different number.
+fn table(heads: (&str, &str), rows: &[(String, String)]) -> Vec<String> {
+    let len = |s: &str| s.chars().count();
+    let mut b = len(heads.1).max(rows.iter().map(|(_, v)| len(v)).max().unwrap_or(0));
+    let mut a = len(heads.0).max(rows.iter().map(|(l, _)| len(l)).max().unwrap_or(0));
+    // Seven columns of rule and padding around the two cells.
+    let room = room().saturating_sub(7);
+    if a + b > room {
+        b = b.min(room.saturating_sub(4).max(4));
+        a = room.saturating_sub(b).max(3);
+    }
+    let fit = |s: &str, w: usize| -> String {
+        if len(s) <= w {
+            return String::from(s);
+        }
+        let mut t: String = s.chars().take(w.saturating_sub(1)).collect();
+        t.push('…');
+        t
+    };
+    let rule = |l: char, m: char, r: char| {
+        let mut s = String::new();
+        s.push(l);
+        s.extend(core::iter::repeat('─').take(a + 2));
+        s.push(m);
+        s.extend(core::iter::repeat('─').take(b + 2));
+        s.push(r);
+        s
+    };
+    let row = |x: &str, y: &str| format!("│ {:<a$} │ {:>b$} │", fit(x, a), fit(y, b), a = a, b = b);
+    let mut out = alloc::vec![rule('┌', '┬', '┐'), row(heads.0, heads.1), rule('├', '┼', '┤')];
+    for (l, v) in rows {
+        out.push(row(l, v));
+    }
+    out.push(rule('└', '┴', '┘'));
+    out
+}
+
+/// The answer written into the workbook on screen, and read back as a table.
+///
+/// **Into the open sheet, not a copy.** The first version put the answer on a
+/// sheet of its own in a copy and opened that copy, which reads -- correctly
+/// -- as a picture of a result: Calc relaunched, and there it was. Here the
+/// question, the headings and every formula arrive cell by cell under the
+/// data, selected as they are written, and each number appears the moment its
+/// formula is entered, computed by the Calc being watched.
+///
+/// **And the terminal's figures are read back from that sheet** -- the cells
+/// Calc just computed, not the same formulas run again somewhere else.
+fn answer_live(path: &str, sheet: &Sheet, request: &str, heads: (String, String), asked: &[(String, String)], source: Option<String>) -> Result<(), String> {
+    use core::sync::atomic::Ordering;
+    if crate::gfx::desk::window_titled("LibreOffice Calc").is_none() {
+        return Err("no Calc window to answer in -- 'office open <path>' first".into());
+    }
+    // Under the data with a row to spare, or under the last answer.
+    let top = match NEXT_ROW.load(Ordering::Relaxed) {
+        0 => sheet.last_row + 2,
+        r => r,
+    };
+    let grouped = asked.len() > 1 || !asked[0].0.is_empty();
+    let first = top + if grouped { 2 } else { 1 };
+    let last = first + asked.len() - 1;
+    say("writing", &format!("into the sheet at A{}: the question, then {}", top, if grouped { format!("{} formulas in B{}:B{}", asked.len(), first, last) } else { format!("the formula in B{}", first) }));
+
+    let mut q = String::from(request.trim());
+    if let Some(f) = q.get_mut(0..1) {
+        f.make_ascii_uppercase();
+    }
+    if !q.ends_with('?') {
+        q.push('?');
+    }
+    let left = if grouped { heads.0.as_str() } else { heads.1.as_str() };
+    // The cells, in the order they are written: the question, the headings,
+    // then each label and its formula. A single answer has no heading row;
+    // its label is its heading.
+    let mut job: Vec<(String, String, &str)> = Vec::new();
+    job.push((format!("A{}", top), q.clone(), "q"));
+    if grouped {
+        job.push((format!("A{}", top + 1), String::from(left), "h"));
+        job.push((format!("B{}", top + 1), heads.1.clone(), "h"));
+    }
+    for (i, (label, f)) in asked.iter().enumerate() {
+        let row = first + i;
+        job.push((format!("A{}", row), if label.is_empty() { String::from(left) } else { label.clone() }, "h"));
+        job.push((format!("B{}", row), f.clone(), "v"));
+    }
+    NEXT_ROW.store(last + 3, Ordering::Relaxed);
+
+    // Written by the Calc on screen, which polls for the job (`Bench.Watch`).
+    // The window is raised first so the answer is seen arriving.
+    let stem = path.rsplit('/').next().unwrap_or(path);
+    if !crate::gfx::desk::focus_titled(&format!("{} ", stem)) {
+        crate::gfx::desk::focus_titled("LibreOffice Calc");
+    }
+    let out = format!("{}/live-out.txt", BENCH_OUT);
+    let _ = crate::linux::ns::detach(&out);
+    let mut text = format!("{}\n{}\n", out, stem);
+    for (cell, what, style) in &job {
+        // A value carries the column it summarises, for its number format.
+        let src = if *style == "v" { source.as_deref().unwrap_or("") } else { "" };
+        text.push_str(&format!("{}\t{}\t{}\t{}\n", cell, what, style, src));
+    }
+    // Picked up by `Bench.Watch` in the Calc on screen.
+    crate::linux::ns::write_blob(&format!("{}/live.job", BENCH_OUT), text.into_bytes());
+    let deadline = crate::dev::lapic::ticks() + 180 * crate::TIMER_HZ as u64;
+    let lines = loop {
+        if let Ok(t) = read_any(&out) {
+            break t;
+        }
+        if crate::dev::lapic::ticks() > deadline {
+            return Err("the Calc on screen did not answer within three minutes".into());
+        }
+        crate::task::sleep_until(crate::dev::lapic::ticks() + crate::TIMER_HZ as u64 / 4);
+    };
+    if let Some(e) = lines.strip_prefix("ERROR") {
+        return Err(format!("Calc could not write the answer:{}", e.trim_end()));
+    }
+    // "OK", the value, and the cell's own text, per value cell in order. The
+    // terminal shows the text, exactly as the sheet does: 976,802.90 there
+    // and 976,802.9 here read as two different answers.
+    let parts: Vec<Vec<&str>> = lines.lines().map(|l| l.split('\t').collect()).collect();
+    let got: Vec<&str> = parts.iter().map(|p| p.get(1).copied().unwrap_or("")).collect();
+    let text_of: Vec<Option<&str>> = parts.iter().map(|p| p.get(2).copied().filter(|t| !t.trim().is_empty())).collect();
+
+    let rows: Vec<(String, String)> = asked
+        .iter()
+        .enumerate()
+        .map(|(i, (label, _))| {
+            let v = match text_of.get(i).copied().flatten() {
+                Some(t) => String::from(t.trim()),
+                None => got.get(i).map(|l| readable(l.trim())).unwrap_or_else(|| String::from("?")),
+            };
+            (if label.is_empty() { String::from(left) } else { label.clone() }, v)
+        })
+        .collect();
+    note(String::new());
+    for l in wrap(&q, room()) {
+        note(l);
+    }
+    let shown_heads = if grouped { (heads.0.as_str(), heads.1.as_str()) } else { ("", "") };
+    let t = table(shown_heads, &rows);
+    // A single answer needs no heading row.
+    let t: Vec<String> = if grouped { t } else { t.into_iter().enumerate().filter(|(i, _)| *i != 1 && *i != 2).map(|(_, l)| l).collect() };
+    for l in t {
+        note(l);
+    }
+    if let Some(b) = super::report::BOOK.lock_irq().as_mut() {
+        b.1 = sheet.last_row.saturating_sub(1);
+    }
+    super::report::keep(super::report::Answer {
+        question: q.clone(),
+        heads: heads.clone(),
+        rows: asked
+            .iter()
+            .zip(&rows)
+            .enumerate()
+            .map(|(i, (_, (l, shown)))| (l.clone(), got.get(i).and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(0.0), shown.clone()))
+            .collect(),
+        word: String::from(heads.1.split(' ').next().unwrap_or("").to_ascii_lowercase().as_str()),
+        formula: asked[0].1.clone(),
+        cells: if grouped { format!("B{}:B{}, one formula per {}", first, last, heads.0.to_lowercase()) } else { format!("B{}", first) },
+    });
+    let f = &asked[0].1;
+    if grouped {
+        say("formula", &format!("{} and {} like it, in B{}:B{}", f, asked.len() - 1, first, last));
+    } else {
+        say("formula", &format!("{} in B{}", f, first));
+    }
+    say("", "computed by the Calc on screen, and read back from it");
+    Ok(())
+}
+
 pub fn ask(path: &str, request: &str) -> Result<(), String> {
     // `--open`: the answer written into a copy of the workbook, beside the
     // data, and that copy opened in Calc on the desktop.
     let (request, open) = match request.strip_suffix("--open") {
+        Some(r) => (r.trim(), true),
+        None => (request, false),
+    };
+    // `--live`: typed into the Calc on the desktop, the one `office open` put
+    // there, and reported as a table.
+    let (request, live) = match request.strip_suffix("--live") {
         Some(r) => (r.trim(), true),
         None => (request, false),
     };
@@ -357,7 +673,11 @@ pub fn ask(path: &str, request: &str) -> Result<(), String> {
     let view = read_any(&out).map_err(|_| format!("LibreOffice could not read {}", path))?;
     let sheet = parse(&view).ok_or_else(|| format!("no header row found in {}", path))?;
     let names: Vec<&str> = sheet.headers.iter().map(|(_, h)| h.as_str()).collect();
-    note(format!("{} column(s): {}", names.len(), names.join(", ")));
+    if live {
+        say("sheet", &format!("{}, {} rows: {}", sheet.name, sheet.last_row.saturating_sub(1), names.join(", ")));
+    } else {
+        note(format!("{} column(s): {}", names.len(), names.join(", ")));
+    }
     let numbers: Vec<usize> = (0..sheet.headers.len()).filter(|&i| numeric(&sheet, &sheet.headers[i].0)).collect();
     let labels: Vec<usize> = (0..sheet.headers.len()).filter(|i| !numbers.contains(i)).collect();
 
@@ -422,6 +742,29 @@ pub fn ask(path: &str, request: &str) -> Result<(), String> {
         by.clone().unwrap_or_else(|| sheet.headers[0].0.clone())
     };
     let header_of = |c: &str| sheet.headers.iter().find(|(l, _)| l == c).map(|(_, h)| h.clone()).unwrap_or_else(|| String::from(c));
+    if live {
+        let word = op.name.split(' ').next().unwrap_or(op.name);
+        say(
+            "chose",
+            &format!(
+                "{}{}{}",
+                word,
+                if op.needs_value { format!(" of {}", header_of(&value)) } else { String::from(" of rows") },
+                by.as_deref().map(|g| format!(", per {}", header_of(g))).unwrap_or_default(),
+            ),
+        );
+        say("", &said.join(", "));
+        let asked = formulas(&sheet, op, &value, by.as_deref());
+        if asked.is_empty() {
+            return Err("no groups found in that column".into());
+        }
+        let heads = (
+            by.as_deref().map(|g| header_of(g)).unwrap_or_default(),
+            title(word, op.needs_value.then(|| header_of(&value)).as_deref()),
+        );
+        let source = op.needs_value.then(|| format!("{}2", value));
+        return answer_live(path, &sheet, request, heads, &asked, source);
+    }
     note(format!(
         "chose {}{}{}  ({})",
         op.name,
@@ -507,11 +850,16 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push(("the spare cell is the column after the data", next_col("C") == "D" && next_col("Z") == "AA" && next_col("AZ") == "BA"));
     out.push(("a column of numbers is numeric, one of names is not", s.as_ref().is_some_and(|s| numeric(s, "C") && !numeric(s, "A"))));
     out.push(("'each', 'per' and 'by' ask for groups", wants_groups("revenue by region") && wants_groups("units of each product") && !wants_groups("what is our total revenue")));
+    out.push(("but 'per sale' is per row, not a grouping", !wants_groups("the average revenue per sale") && !wants_groups("units for each order") && wants_groups("revenue per region")));
     let hs = ["Region", "Rep", "Unit Price", "Revenue"];
     out.push(("a header the request names is picked, in the request's order", named("revenue by region", &hs, &[0, 1, 2, 3]) == [3, 0]));
     out.push(("a plural names its header", named("how much did the regions make", &hs, &[0, 1]) == [0]));
     out.push(("'how many' is a count and 'biggest' the largest", op_named("how many sales were there") == Some("count") && op_named("the biggest single sale") == Some("largest")));
     out.push(("an average is shown to two places, a whole number as it is", shown("731.142857142857") == "731.14" && shown("32136") == "32136" && shown("East") == "East"));
     out.push(("a sheet with no header row is refused", parse("Sheet S, used area A1:A1\n").is_none()));
+    out.push(("a number reads with its thousands grouped", readable("32136") == "32,136" && readable("-1234567.5") == "-1,234,567.5" && readable("731.142857142857") == "731.14" && readable("East") == "East"));
+    out.push(("text wraps at spaces, inside the width", wrap("the quick brown fox jumps", 10) == ["the quick", "brown fox", "jumps"]));
+    out.push(("a word wider than the line is cut, not lost", wrap("abcdefghijkl", 8) == ["abcdefgh", "ijkl"]));
+    out.push(("an answer's column says what it is", title("total", Some("Revenue")) == "Total Revenue" && title("count", None) == "Count"));
     out
 }

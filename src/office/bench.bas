@@ -9,6 +9,8 @@ REM   Check     out, sheet, range, formula, then input/answer pairs
 REM                                           -> PASS or FAIL per pair
 REM   Probe     out, sheet, range, input, then candidate formulas
 REM                                           -> what each computes there
+REM   Live      out, then cells to write into the workbook on screen
+REM                                           -> what the value cells compute
 REM
 REM Check is the benchmark's own rule: the model's formula goes into the
 REM first cell of the answer range and is filled across the rest, the way a
@@ -53,6 +55,175 @@ End Sub
 
 Sub Answer
 	Batch(JOBS & "answer.job", 5)
+End Sub
+
+REM The answer to a question, written into the workbook on screen by the
+REM LibreOffice showing it, which `Watch` runs when the kernel leaves a job.
+REM It must not terminate anything.
+REM
+REM The job is the output file, the workbook's name, then one cell per line: its address, what goes
+REM in it (a formula if it starts with "="), and a style -- q for the question,
+REM h for a heading, v for a value whose computed text is read back, anything
+REM else plain. Each cell is selected before it is written and the next waits
+REM a moment, so the answer arrives where it can be watched.
+REM
+REM **Not typed.** The keyboard was tried first: the typist's keys reached
+REM Calc, but Calc on a loaded guest took them in bursts, its input method lost
+REM the letters of a burst while the arrows went through, and an answer came
+REM out as a cursor moving down an empty column.
+Global Watching As Boolean
+
+REM Bound to the desktop profile's document-loaded event: from the first
+REM document on, look for a job twice a second and do it. Wait hands the
+REM event loop its turn, so Calc goes on drawing and taking input meanwhile.
+REM One loop however many documents load after it.
+Sub Watch
+	Dim sfa As Object, job As String
+	If Watching Then Exit Sub
+	Watching = True
+	sfa = createUnoService("com.sun.star.ucb.SimpleFileAccess")
+	job = ConvertToURL(JOBS & "live.job")
+	Do
+		If sfa.exists(job) Then Live
+		If sfa.exists(ConvertToURL(JOBS & "open.job")) Then OpenAsked
+		Wait 500
+	Loop
+End Sub
+
+REM Open a document the kernel names, in this instance -- which is how a
+REM report reaches Writer, there being no second soffice to ask (see Watch).
+Sub OpenAsked
+	Dim sfa As Object, inp As Object, path As String
+	Dim a(0) As New com.sun.star.beans.PropertyValue
+	sfa = createUnoService("com.sun.star.ucb.SimpleFileAccess")
+	inp = createUnoService("com.sun.star.io.TextInputStream")
+	inp.setInputStream(sfa.openFileRead(ConvertToURL(JOBS & "open.job")))
+	inp.setEncoding("UTF-8")
+	path = inp.readLine()
+	inp.closeInput()
+	sfa.kill(ConvertToURL(JOBS & "open.job"))
+	On Error Resume Next
+	StarDesktop.loadComponentFromURL(ConvertToURL(path), "_blank", 0, a())
+End Sub
+
+Sub Live
+	Dim sfa As Object, inp As Object, l As String, r As Variant, out As String, book As String
+	Dim doc As Object, s As Object, c As Object, t As String, cells(200) As Object, kinds(200) As String
+	Dim n As Integer, i As Integer, e As Object, d As Object
+	sfa = createUnoService("com.sun.star.ucb.SimpleFileAccess")
+	inp = createUnoService("com.sun.star.io.TextInputStream")
+	inp.setInputStream(sfa.openFileRead(ConvertToURL(JOBS & "live.job")))
+	inp.setEncoding("UTF-8")
+	out = inp.readLine()
+	book = inp.readLine()
+	On Error GoTo bad
+	REM The workbook by its name, not ThisComponent: a report open in
+	REM Writer may be the active document by now.
+	e = StarDesktop.Components.createEnumeration()
+	Do While e.hasMoreElements()
+		d = e.nextElement()
+		If d.supportsService("com.sun.star.sheet.SpreadsheetDocument") Then
+			If InStr(d.URL, book) > 0 Or IsNull(doc) Then doc = d
+		End If
+	Loop
+	If IsNull(doc) Then
+		WriteText(out, "ERROR no spreadsheet named " & book & " is open")
+		inp.closeInput()
+		sfa.kill(ConvertToURL(JOBS & "live.job"))
+		Exit Sub
+	End If
+	s = doc.CurrentController.ActiveSheet
+	n = 0
+	Do While Not inp.isEOF() And n < 200
+		l = inp.readLine()
+		If Len(l) > 0 Then
+			r = Split(l, Chr(9))
+			c = s.getCellRangeByName(r(0))
+			doc.CurrentController.select(c)
+			If Left(r(1), 1) = "=" Then
+				c.Formula = ApiSyntax(r(1))
+			Else
+				c.String = r(1)
+			End If
+			REM A value takes the number format of the column it summarises
+			REM when that is a percentage: an average discount of 0.06 is 6%,
+			REM and was restated by the model as 0.06%.
+			If UBound(r) >= 3 Then
+				If r(3) <> "" Then
+					Dim k As Long
+					k = s.getCellRangeByName(r(3)).NumberFormat
+					If (doc.NumberFormats.getByKey(k).Type And com.sun.star.util.NumberFormat.PERCENT) <> 0 Then
+						c.NumberFormat = k
+						r(2) = "p"
+					End If
+				End If
+			End If
+			Select Case r(2)
+				Case "q"
+					c.CharWeight = com.sun.star.awt.FontWeight.BOLD
+				Case "h"
+					c.CharWeight = com.sun.star.awt.FontWeight.SEMIBOLD
+					c.CellBackColor = RGB(255, 236, 200)
+				Case "v", "p"
+					c.CellBackColor = RGB(255, 246, 228)
+			End Select
+			cells(n) = c
+			kinds(n) = r(2)
+			n = n + 1
+			Wait 400
+		End If
+	Loop
+	inp.closeInput()
+	sfa.kill(ConvertToURL(JOBS & "live.job"))
+	doc.calculateAll()
+	REM Read as a person reads them: thousands grouped, and two places only
+	REM where there is a fraction. And the label column wide enough for its
+	REM labels -- the question beside them runs on over empty cells and is
+	REM left out of the measure, or column A would be a sentence wide.
+	Dim loc As New com.sun.star.lang.Locale, whole As Long, frac As Long, w As Long, cw As Long
+	loc.Language = "en"
+	loc.Country = "US"
+	whole = doc.NumberFormats.queryKey("#,##0", loc, False)
+	If whole < 0 Then whole = doc.NumberFormats.addNew("#,##0", loc)
+	frac = doc.NumberFormats.queryKey("#,##0.00", loc, False)
+	If frac < 0 Then frac = doc.NumberFormats.addNew("#,##0.00", loc)
+	w = 0
+	For i = 0 To n - 1
+		If kinds(i) = "v" Then
+			If cells(i).getError() = 0 Then
+				If cells(i).Value = Int(cells(i).Value) Then cells(i).NumberFormat = whole Else cells(i).NumberFormat = frac
+			End If
+		ElseIf kinds(i) = "h" And cells(i).CellAddress.Column = 0 Then
+			If Len(cells(i).String) > w Then w = Len(cells(i).String)
+		End If
+	Next i
+	cw = w * 240 + 500
+	If s.Columns.getByIndex(0).Width < cw Then s.Columns.getByIndex(0).Width = cw
+	REM And the answers' column wide enough for its numbers, or Calc shows
+	REM ### where the answer is.
+	w = 0
+	For i = 0 To n - 1
+		If cells(i).CellAddress.Column = 1 And kinds(i) <> "q" Then
+			If Len(cells(i).String) > w Then w = Len(cells(i).String)
+		End If
+	Next i
+	cw = w * 210 + 400
+	If s.Columns.getByIndex(1).Width < cw Then s.Columns.getByIndex(1).Width = cw
+	t = ""
+	For i = 0 To n - 1
+		If kinds(i) = "v" Or kinds(i) = "p" Then
+			If cells(i).getError() <> 0 Then
+				t = t & "ERR " & cells(i).getError() & Chr(10)
+			Else
+				t = t & "OK" & Chr(9) & cells(i).Value & Chr(9) & cells(i).String & Chr(10)
+			End If
+		End If
+	Next i
+	WriteText(out, t)
+	Exit Sub
+bad:
+	WriteText(out, "ERROR " & Err & " " & Error$)
+	If sfa.exists(ConvertToURL(JOBS & "live.job")) Then sfa.kill(ConvertToURL(JOBS & "live.job"))
 End Sub
 
 Sub Batch(job As String, kind As Integer)
@@ -209,8 +380,50 @@ Function ViewOf(sheet As String, book As String) As String
 		Next c
 		If ln <> "" Then t = t & ln & Chr(10)
 	Next r
+	t = t & Distinct(s, cur.RangeAddress.EndRow, lastC)
 	doc.close(True)
 	ViewOf = t
+End Function
+
+REM Every text column's distinct values over the whole used area, one line
+REM each: "Distinct C: North|South|...". The view above stops at sixty rows,
+REM which on a ten-thousand-row ledger is a sample: the groups of a "per
+REM product" answer have to be all of them, not the ones near the top. A
+REM column with more than fifty values is not a grouping and is left out.
+Function Distinct(s As Object, lastR As Long, lastC As Long) As String
+	Dim c As Long, r As Long, d As Variant, v As Variant, seen As String, n As Integer, t As String, ok As Boolean
+	t = ""
+	If lastR < 1 Then
+		Distinct = t
+		Exit Function
+	End If
+	For c = 0 To lastC
+		d = s.getCellRangeByPosition(c, 1, c, lastR).getDataArray()
+		seen = "|"
+		n = 0
+		ok = True
+		For r = 0 To UBound(d)
+			v = d(r)(0)
+			If VarType(v) = 8 Then
+				If v <> "" And InStr(seen, "|" & v & "|") = 0 Then
+					seen = seen & v & "|"
+					n = n + 1
+					If n > 50 Then
+						ok = False
+						Exit For
+					End If
+				End If
+			ElseIf VarType(v) <> 0 Then
+				REM A number in it: not a column of names.
+				If Not (VarType(v) = 5 And v = 0) Then
+					ok = False
+					Exit For
+				End If
+			End If
+		Next r
+		If ok And n > 0 Then t = t & "Distinct " & ColName(c) & ": " & Mid(seen, 2, Len(seen) - 2) & Chr(10)
+	Next c
+	Distinct = t
 End Function
 
 REM The whole used area, a row a line and a tab between cells, nothing cut:

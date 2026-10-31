@@ -145,6 +145,7 @@ fn run() {
             crate::task::sleep_until(until);
             continue;
         };
+        keep_pace();
         if type_byte(b) {
             TYPED.fetch_add(1, Ordering::Relaxed);
             // A program reads its keys when it next enters the kernel, and
@@ -157,6 +158,31 @@ fn run() {
         // One character a tick. See the module doc for why not a burst.
         let until = crate::dev::lapic::ticks() + 1;
         crate::task::sleep_until(until);
+    }
+}
+
+/// Wait while the program being typed into is behind.
+///
+/// One character a tick is fast enough to outrun a program that is busy: it
+/// takes its keys only when it next enters the kernel, and Calc on a loaded
+/// machine went whole seconds without doing so. The keyboard ring holds about
+/// two hundred keys and drops the oldest past that, and they were lost from
+/// the front of what was typed.
+/// The typist waits instead, while the backlog is more than a few keys and
+/// somebody is reading at all: nobody having read for ten seconds means
+/// nothing is going to, and the wait would only stop the typing.
+fn keep_pace() {
+    const BEHIND: u64 = 64;
+    let hz = crate::TIMER_HZ as u64;
+    let start = crate::dev::lapic::ticks();
+    loop {
+        let (unread, at) = crate::linux::input::unread();
+        let now = crate::dev::lapic::ticks();
+        if unread <= BEHIND || now.saturating_sub(at) > 10 * hz || now - start > 30 * hz || STOP.load(Ordering::Acquire) {
+            return;
+        }
+        crate::linux::syscall::wake_nappers();
+        crate::task::sleep_until(now + hz / 20);
     }
 }
 
