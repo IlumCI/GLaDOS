@@ -1644,6 +1644,7 @@ fn schedule() {
             && t[cur].wake_at == 0
             && !t[cur].exiting
             && t[cur].state == State::Running(me as u8)
+            && pin_allows(t[cur].pin, me as usize)
         {
             return;
         }

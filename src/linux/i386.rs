@@ -454,6 +454,10 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
     sc::big_lock();
     unsafe { sc::die_if_doomed() };
     let nr = f.rax as u32 as u64;
+    // read, write, close, readv, writev, pread64, pwrite64: wake only when
+    // the descriptor is one somebody could be waiting on (`fd_wakes`).
+    let by_fd = matches!(nr, 3 | 4 | 6 | 145 | 146 | 180 | 181);
+    let fd_matters = by_fd && sc::fd_wakes(f.rbx as u32 as u64);
     let t0 = super::prof::start();
     let a = [
         f.rbx as u32 as u64,
@@ -735,7 +739,9 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
     if matches!(nr, 90 | 192 | 91 | 125 | 45 | 163) {
         sc::tlb_shootdown();
     }
-    sc::wake_nappers();
+    if !by_fd || fd_matters {
+        sc::wake_nappers();
+    }
     sc::big_unlock();
     super::prof::leave();
     unsafe { sc::die_if_doomed() };

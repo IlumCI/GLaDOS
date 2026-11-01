@@ -459,6 +459,18 @@ pub fn pop() -> Option<u8> {
         FROM_SERIAL.store(v, Ordering::Relaxed);
     }
 
+    /// A trace of the last bytes through `pop_any`: 'U' read off the UART,
+    /// 'P' handed out, with the core and task (`kbd trace`).
+    pub static TRACE: crate::sync::Spin<alloc::collections::VecDeque<(u8, u8, u8, u16)>> =
+        crate::sync::Spin::new(alloc::collections::VecDeque::new());
+    fn note(kind: u8, b: u8) {
+        let mut t = TRACE.lock_irq();
+        if t.len() >= 256 {
+            t.pop_front();
+        }
+        t.push_back((kind, b, crate::smp::this_cpu() as u8, crate::task::current() as u16));
+    }
+
     pub fn pop_any() -> Option<u8> {
         // Drain the UART FIFO into the ring while it has data, not one byte
         // per poll. The shell polls at its own cadence -- hlt woken by the
@@ -480,13 +492,20 @@ pub fn pop() -> Option<u8> {
         while guard < 64 {
             guard += 1;
             match crate::serial::read_byte() {
-                Some(next) => push_from(translate(next), true),
+                Some(next) => {
+                    note(b'U', next);
+                    push_from(translate(next), true)
+                }
                 None => break,
             }
         }
         // `pop` reports the origin of what it hands back, because the ring
         // holds both kinds and only it knows which slot this came from.
-        pop()
+        let r = pop();
+        if let Some(b) = r {
+            note(b'P', b);
+        }
+        r
     }
 
 /// How many bytes are waiting to be read.

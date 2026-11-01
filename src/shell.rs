@@ -6540,6 +6540,27 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("{}", crate::gfx::text::OFL_CASCADIA);
             kprintln!("  crates and their licences: NOTICE.md in the source tree");
         }
+        "kbd" if rest.trim() == "trace" => {
+            // The bytes through `pop_any`, oldest first, as a line per run of
+            // one kind on one core and task.
+            let t = crate::dev::kbd::TRACE.lock_irq().clone();
+            let mut line = alloc::string::String::new();
+            let mut last: Option<(u8, u8, u16)> = None;
+            for (k, b, c, task) in t.iter() {
+                if last != Some((*k, *c, *task)) {
+                    if !line.is_empty() {
+                        kprintln!("  {}", line);
+                    }
+                    line = alloc::format!("{} core {} task {}: ", *k as char, c, task);
+                    last = Some((*k, *c, *task));
+                }
+                let ch = *b as char;
+                if ch.is_ascii_graphic() || ch == ' ' { line.push(ch) } else { line.push_str(&alloc::format!("<{:02x}>", b)) }
+            }
+            if !line.is_empty() {
+                kprintln!("  {}", line);
+            }
+        }
         "kbd" => {
             let (irqs, ring, shell, routed) = crate::dev::kbd::stats();
             kprintln!("  {} keyboard interrupt(s), {} routed by the compositor", irqs, routed);

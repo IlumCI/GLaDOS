@@ -7052,9 +7052,11 @@ pub(super) fn sys_readlinkat(dirfd: u64, path_at: u64, buf: u64, size: u64) -> u
 }
 
 pub(super) fn sys_time(tloc: u64) -> u64 {
-    let secs = crate::dev::rtc::now()
-        .map(|dt| crate::dev::rtc::unix_seconds(&dt) as u64)
-        .unwrap_or(0);
+    // **The same clock `clock_gettime(CLOCK_REALTIME)` reads**, which is the
+    // RTC once and the TSC after. This read the CMOS clock on every call, 82
+    // us of port reads each, and pacman asks for the time over three thousand
+    // times in one install. Two clocks a program compares must also agree.
+    let secs = clock_pair(0).map(|(s, _)| s).unwrap_or(0);
     // The pointer is optional, which is unusual enough to be worth saying: the
     // value comes back in the return register either way, and a program that
     // wants it in memory as well passes somewhere to put it.
@@ -8781,6 +8783,27 @@ pub(super) fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
 /// A call left off this list is not a lost wake, only a slower one: every
 /// nap ends at the next tick regardless, so the cost of a miss is at most ten
 /// milliseconds. The list errs towards waking.
+/// Whether a read, write or close of `fd` can change what a waiter waits on.
+///
+/// **A file is nobody's to wait on**: a poll on a regular file is always
+/// ready, and a write to one, or closing it, moves no waiter. Those calls
+/// woke every napping thread all the same, and pacman extracting a package
+/// is a `write` and a `close` per file -- thousands a second, each waking
+/// every waiting thread of every guest to take the guest lock, look, and nap
+/// again. During one vim install the lock was found taken 179,463 times.
+/// Pipes, sockets, terminals, event and timer descriptors, devices: those
+/// still wake.
+pub(super) fn fd_wakes(fd: u64) -> bool {
+    use super::fs::Fd;
+    with_fds(|fds, _| {
+        !matches!(
+            fds.get(fd as usize),
+            Some(Some(Fd::File(_) | Fd::Disk(_) | Fd::Dir(_) | Fd::Stdin | Fd::Stdout | Fd::Stderr | Fd::Memfd(_)))
+        )
+    })
+    .unwrap_or(true)
+}
+
 fn may_wake(nr: u64) -> bool {
     matches!(
         nr,
@@ -8878,6 +8901,11 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
     unsafe { die_if_doomed() };
     let nr = f.rax;
     let args = [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9];
+    // read, write, close, pread, pwrite, readv, writev: whether they wake
+    // anybody depends on what the descriptor is (`fd_wakes`), and close has
+    // to be asked before the descriptor is gone.
+    let by_fd = matches!(nr, 0 | 1 | 3 | 17 | 18 | 19 | 20);
+    let fd_matters = by_fd && fd_wakes(f.rdi);
     super::prof::enter(nr, &args);
     let t0 = super::prof::start();
 
@@ -9200,7 +9228,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
     if matches!(nr, SYS_MMAP | SYS_MUNMAP | SYS_MPROTECT | SYS_BRK | 25 /* mremap */) {
         tlb_shootdown();
     }
-    if may_wake(nr) {
+    if may_wake(nr) && (!by_fd || fd_matters) {
         wake_nappers();
     }
     big_unlock();
@@ -9735,6 +9763,16 @@ pub fn as_guest(enter: impl FnOnce() -> u64) -> u64 {
     super::prof::leave();
     big_unlock();
     crate::task::set_pin(t, pin);
+    // **And home now, not at the next switch.** The shell runs its guests on
+    // its own task, and with the pin back but no switch, it went on reading
+    // the next command on whichever core the guest had ended on -- beside the
+    // compositor on core 0 for the first time, sharing the terminal's state
+    // with it. Typed commands came out of that window mangled: `linux run`
+    // as `linuxx r ruunn`, a path doubled and swapped.
+    if pin >= 0 && pin as usize != crate::smp::this_cpu() as usize {
+        crate::dev::lapic::kick_others();
+        crate::task::yield_now();
+    }
     IN_GUEST[t].store(false, Ordering::Release);
     DOOM[t].store(0, Ordering::Release);
     code
