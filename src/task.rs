@@ -1632,6 +1632,21 @@ fn schedule() {
         if next == NONE {
             return;
         }
+        // **An idle task is not a reason to stop a task that can run.** Pass
+        // 1 takes the idle task when nothing else is ready, and the current
+        // task is never a candidate -- so a task merely yielding, or preempted
+        // by the timer with the core to itself, was switched out for `mwait`
+        // and came back at the next tick. A `wait4` loop spent 9 ms in one
+        // yield that way. Staying is right unless the task is going to sleep
+        // or to end, which is what the idle task is for.
+        if t[next].idle
+            && !t[cur].idle
+            && t[cur].wake_at == 0
+            && !t[cur].exiting
+            && t[cur].state == State::Running(me as u8)
+        {
+            return;
+        }
 
         SWITCHES.fetch_add(1, Ordering::Relaxed);
         t[next].switches += 1;

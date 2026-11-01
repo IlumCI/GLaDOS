@@ -282,6 +282,15 @@ extern "C" fn glados_ap_main() -> ! {
         } else {
             core::hint::spin_loop();
         }
+        // **Whatever woke this core, the scheduler is asked.** A kick is an
+        // interrupt sent precisely so a core picks up a task made runnable
+        // for it, and its handler only acknowledges it -- so the core went
+        // back to `mwait` with the task still waiting, and it ran at the next
+        // timer tick instead: a child's parent waited 7.8 ms to reap it, on
+        // every fork. Nothing ready is one look at the table.
+        if adopted {
+            crate::task::yield_now();
+        }
     }
 }
 

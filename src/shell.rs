@@ -7600,6 +7600,17 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                         "  {} fork(s), {} us each: {} promise(s) carried, {} demand page(s) and {} other page(s) copied",
                         ld(3), ld(4) / ld(3).max(1) / mhz, ld(0), ld(1), ld(2)
                     );
+                    let ph = &linux::fork::PHASES;
+                    let pl = |i: usize| ph[i].load(core::sync::atomic::Ordering::Relaxed);
+                    let pn = pl(3).max(1);
+                    kprintln!(
+                        "  {} child(ren) reaped: {} us fork to start, {} us start to finish, {} us finish to reaped, each",
+                        pl(3), pl(0) / pn / mhz, pl(1) / pn / mhz, pl(2) / pn / mhz
+                    );
+                    let w = &linux::fork::WAITS;
+                    kprintln!("  a reaping wait4: {} us inside it, {} round(s) of its loop, each",
+                        w[0].load(core::sync::atomic::Ordering::Relaxed) / pn / mhz,
+                        w[1].load(core::sync::atomic::Ordering::Relaxed) / pn);
                     let r = &crate::store::block::READS;
                     let rn = r[0].load(core::sync::atomic::Ordering::Relaxed).max(1);
                     kprintln!(

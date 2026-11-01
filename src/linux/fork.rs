@@ -350,6 +350,13 @@ pub fn fork(f: &Frame) -> u64 {
 
 /// What forks have copied, in pages: promises carried over, demand-supplied
 /// pages duplicated, ordinary pages duplicated; then forks and their cycles.
+/// When each slot's child was forked, picked up and finished, and the sums of
+/// the three gaps -- fork to start, start to finish, finish to reaped -- with
+/// how many were reaped (`linux fills`).
+pub static PHASE: [[core::sync::atomic::AtomicU64; 3]; 64] = [const { [const { core::sync::atomic::AtomicU64::new(0) }; 3] }; 64];
+pub static PHASES: [core::sync::atomic::AtomicU64; 4] = [const { core::sync::atomic::AtomicU64::new(0) }; 4];
+/// For a reaping `wait4`: cycles from entry to return, and rounds of its loop.
+pub static WAITS: [core::sync::atomic::AtomicU64; 2] = [const { core::sync::atomic::AtomicU64::new(0) }; 2];
 pub static COPIED: [core::sync::atomic::AtomicU64; 5] = [const { core::sync::atomic::AtomicU64::new(0) }; 5];
 
 const SIGCHLD: u64 = 17;
@@ -540,6 +547,9 @@ fn fork_inner(f: &Frame, stack: Option<u64>, settid: Option<u64>) -> u64 {
         s[idx].status = None;
         s[idx].session = here();
     }
+    if idx < 64 {
+        PHASE[idx][0].store(crate::time::rdtsc(), Ordering::Relaxed);
+    }
     LIVE.fetch_add(1, Ordering::Release);
 
     let have = unsafe { (*SLOTS.get())[idx].task };
@@ -596,6 +606,9 @@ fn body() {
             let s = unsafe { SLOTS.get() };
             (s[i].work.take().unwrap(), s[i].stack, s[i].guest, s[i].session)
         };
+        if i < 64 {
+            PHASE[i][1].store(crate::time::rdtsc(), Ordering::Relaxed);
+        }
 
         // Flags around the run, for the reason `run_thread` records: `syscall`
         // clears IF through FMASK and a guest that exits leaves through a
@@ -662,6 +675,9 @@ fn body() {
             let s = unsafe { SLOTS.get() };
             s[i].status = Some(syscall::wait_status(code));
             s[i].live = false;
+            if i < 64 {
+                PHASE[i][2].store(crate::time::rdtsc(), Ordering::Relaxed);
+            }
             s[i].parent
         };
         // **A child finishing is the first signal this machine can honestly
@@ -669,6 +685,13 @@ fn body() {
         // installs a handler is not killed by its own children finishing.
         super::signal::raise_at(parent, super::signal::SIGCHLD);
         LIVE.fetch_sub(1, Ordering::Release);
+        // **And the parent is told now.** A child leaves through a longjmp
+        // out of `exit_group`, never through the end of a syscall, which is
+        // where a napping waiter is woken -- so a parent in `wait4` slept out
+        // its nap every time: 300 runs of `true` from bash spent 4.6 ms a
+        // `wait4`, three quarters of a 10 ms iteration whose syscalls cost
+        // 1.3.
+        syscall::wake_nappers();
         if flags & (1 << 9) != 0 {
             crate::cpu::enable_interrupts();
         }
@@ -764,7 +787,10 @@ pub fn wait(pid: i64, status: u64, options: u64) -> u64 {
     // `sleep` under `timeout`, the `gzip` under `tar` -- and they then waited
     // on a child already collected and answered "No child processes".
     let me = syscall::current_guest();
+    let entered = crate::time::rdtsc();
+    let mut rounds = 0u64;
     loop {
+        rounds += 1;
         let sess = here();
         let found = {
             let s = unsafe { SLOTS.get() };
@@ -775,6 +801,16 @@ pub fn wait(pid: i64, status: u64, options: u64) -> u64 {
         if let Some(i) = found {
             let s = unsafe { SLOTS.get() };
             let code = s[i].status.take().unwrap_or(0);
+            if i < 64 {
+                let now = crate::time::rdtsc();
+                let p = |k: usize| PHASE[i][k].load(Ordering::Relaxed);
+                PHASES[0].fetch_add(p(1).saturating_sub(p(0)), Ordering::Relaxed);
+                PHASES[1].fetch_add(p(2).saturating_sub(p(1)), Ordering::Relaxed);
+                PHASES[2].fetch_add(now.saturating_sub(p(2)), Ordering::Relaxed);
+                PHASES[3].fetch_add(1, Ordering::Relaxed);
+                WAITS[0].fetch_add(now - entered, Ordering::Relaxed);
+                WAITS[1].fetch_add(rounds, Ordering::Relaxed);
+            }
             let got = s[i].pid;
             s[i].pid = 0;
             if status != 0 && syscall::owns(status, 4) {
