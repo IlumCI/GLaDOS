@@ -667,7 +667,7 @@ pub extern "sysv64" fn glados_syscall_dispatch32(f: &mut Frame32) {
         365 | 366 => (0, true),
         369 => (sc::sys_send(b, c, d), true),
         370 => (sc::sys_sendmsg(b, c, d), true),
-        371 => (sc::sys_recv(b, c, d), true),
+        371 => (sc::sys_recvfrom(b, c, d, si), true),
         372 => (sc::sys_recvmsg(b, c, d), true),
         373 => (sc::sys_shutdown(b, c), true),
         356 => (sc::sys_memfd_create(b, c), true),

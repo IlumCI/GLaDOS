@@ -544,6 +544,18 @@ def main():
     esp_on_nvme = "--esp-on-nvme" in argv
     if esp_on_nvme:
         argv.remove("--esp-on-nvme")
+    # Which network card the guest gets: the USB adapter by default, or an
+    # e1000 *instead of* it. Adding an e1000 with --qemu-extra gave the guest
+    # two cards on two separate user-mode networks, both 10.0.2.15, and a
+    # segment leaving through the wrong one reached a NAT that had never seen
+    # the connection -- which read as a driver reordering frames.
+    nic = "usb"
+    if "--nic" in argv:
+        i = argv.index("--nic")
+        nic = argv[i + 1]
+        del argv[i:i + 2]
+    if nic not in ("usb", "e1000"):
+        sys.exit(f"--nic takes usb or e1000, not {nic!r}")
     # A different NVMe disk image: a large FAT32 volume a guest reads in place
     # through `linux mount`, which the 192 MB fixture image is far too small
     # to hold. Opened read-only, since nothing writes it and it may be
@@ -1086,7 +1098,8 @@ def main():
         # network device is what the dongle will look like once its driver
         # exists, so proving enumeration against one is not a detour.
         "-netdev", "user,id=usbnet",
-        "-device", "usb-net,bus=xhci.0,netdev=usbnet",
+        *(["-device", "usb-net,bus=xhci.0,netdev=usbnet"] if nic == "usb" else
+          ["-device", "e1000,netdev=usbnet"]),
         "-serial", f"tcp:127.0.0.1:{PORT},server=on,wait=on",
         # The monitor is how a screenshot happens. The serial transcript proves
         # a panel's *behaviour*; it says nothing about whether the thing on

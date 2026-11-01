@@ -5196,9 +5196,13 @@ pub(super) fn sys_socket(domain: u64, kind: u64, proto: u64) -> u64 {
     if domain != 2 {
         return EAFNOSUPPORT;
     }
-    // `SOCK_STREAM` with the close-on-exec and non-blocking bits masked off:
-    // there is no `exec` for the first to matter to, and the second is
-    // answered by every call taking its own timeout.
+    // `SOCK_STREAM` with the close-on-exec and non-blocking bits masked off.
+    // **The second used to be dropped**, under a comment saying every call
+    // took its own timeout instead -- and that timeout was ten seconds. curl
+    // reads a non-blocking socket to see whether anything is waiting before
+    // it sends a request and again before it closes, and each of those reads
+    // sat out the whole ten: a 1.5 s download took 21.7, measured in a packet
+    // capture as two 10.0 s silences on the guest's side.
     if kind & 0xFF != 1 {
         return EPROTONOSUPPORT;
     }
@@ -5206,7 +5210,7 @@ pub(super) fn sys_socket(domain: u64, kind: u64, proto: u64) -> u64 {
         return EPROTONOSUPPORT;
     }
     let entry = super::fs::Fd::Socket(alloc::rc::Rc::new(core::cell::RefCell::new(
-        super::fs::Sock { conn: None },
+        super::fs::Sock { conn: None, nonblock: kind & 0o4000 != 0 },
     )));
     with_fds(|fds, _| match fds.iter().position(|f| f.is_none()) {
         Some(i) => {
@@ -5338,6 +5342,13 @@ pub(super) fn sys_send(fd: u64, buf: u64, len: u64) -> u64 {
 }
 
 pub(super) fn sys_recv(fd: u64, buf: u64, len: u64) -> u64 {
+    sys_recvfrom(fd, buf, len, 0)
+}
+
+/// `recvfrom`, whose flags were dropped on the way in -- so `MSG_DONTWAIT`, the
+/// per-call way of saying "do not wait", waited the full socket timeout.
+pub(super) fn sys_recvfrom(fd: u64, buf: u64, len: u64, flags: u64) -> u64 {
+    const MSG_DONTWAIT: u64 = 0x40;
     if unix_stream(fd).is_some() {
         return sys_read(fd, buf, len);
     }
@@ -5352,7 +5363,17 @@ pub(super) fn sys_recv(fd: u64, buf: u64, len: u64) -> u64 {
         Err(e) => return e,
     };
     let Some(h) = sock.borrow().conn else { return ENOTCONN };
-    let got = without_big(|| crate::net::tcp::recv_upto(h, len as usize, SOCK_TIMEOUT_MS));
+    // Not waiting is a question about what has already arrived: what the
+    // network task has delivered, or what one turn of the stack finds now.
+    let dontwait = flags & MSG_DONTWAIT != 0 || sock.borrow().nonblock;
+    if dontwait {
+        crate::net::tcp::service();
+        if crate::net::tcp::pending(h) == 0 {
+            return if crate::net::tcp::peer_done(h) || !crate::net::tcp::alive(h) { 0 } else { EAGAIN };
+        }
+    }
+    let timeout = if dontwait { 0 } else { SOCK_TIMEOUT_MS };
+    let got = without_big(|| crate::net::tcp::recv_upto(h, len as usize, timeout));
     if got.is_empty() {
         // Zero means end of file, and only end of file. A timeout with the
         // peer still there is `EAGAIN`, because a program reading zero from a
@@ -5769,7 +5790,8 @@ pub(super) fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
                 let p = p.borrow();
                 (if p.writing { 1 } else { 0 }) | if p.nonblock { O_NONBLOCK } else { 0 }
             }
-            Some(Some(super::fs::Fd::Socket(_))) | Some(Some(super::fs::Fd::Memfd(_))) => 2,
+            Some(Some(super::fs::Fd::Socket(k))) => 2 | if k.borrow().nonblock { O_NONBLOCK } else { 0 },
+            Some(Some(super::fs::Fd::Memfd(_))) => 2,
             Some(Some(super::fs::Fd::Stdout)) | Some(Some(super::fs::Fd::Stderr)) => 1,
             Some(Some(super::fs::Fd::Dir(_))) => O_DIRECTORY,
             _ => 0,
@@ -5781,6 +5803,7 @@ pub(super) fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
                 Some(Some(super::fs::Fd::Unix(_, nb))) => nb.set(arg & O_NONBLOCK != 0),
                 Some(Some(super::fs::Fd::Pty(e))) => e.borrow_mut().nonblock = arg & O_NONBLOCK != 0,
                 Some(Some(super::fs::Fd::Pipe(p))) => p.borrow_mut().nonblock = arg & O_NONBLOCK != 0,
+                Some(Some(super::fs::Fd::Socket(k))) => k.borrow_mut().nonblock = arg & O_NONBLOCK != 0,
                 _ => {}
             });
             0
@@ -7691,6 +7714,28 @@ pub(super) fn sys_ioctl(fd: u64, req: u64, arg: u64) -> u64 {
     if let Some(r) = pty_ioctl(fd, req, arg) {
         return r;
     }
+    // FIONBIO and FIONREAD on a TCP socket: the blocking mode, and how much
+    // is waiting to be read without waiting for any.
+    if let Ok(sock) = sock_of(fd) {
+        return match req {
+            0x5421 => {
+                if !reachable(arg, 4, false) {
+                    return EFAULT;
+                }
+                sock.borrow_mut().nonblock = unsafe { core::ptr::read_unaligned(arg as *const u32) } != 0;
+                0
+            }
+            0x541B => {
+                if !reachable(arg, 4, true) {
+                    return EFAULT;
+                }
+                let n = sock.borrow().conn.map(crate::net::tcp::pending).unwrap_or(0);
+                unsafe { core::ptr::write_unaligned(arg as *mut u32, n.min(u32::MAX as usize) as u32) };
+                0
+            }
+            _ => ENOTTY,
+        };
+    }
     if let Some(d) = node.flatten().and_then(super::dev::is_input) {
         return input_ioctl(d, req, arg);
     }
@@ -8785,7 +8830,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_ACCEPT4 => (with_cloexec(sys_accept4(f.rdi, f.rsi, f.rdx, f.r10), f.r10 & 0o2000000 != 0), true),
         SYS_SOCKETPAIR => (sys_socketpair(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_SENDTO => (sys_send(f.rdi, f.rsi, f.rdx), true),
-        SYS_RECVFROM => (sys_recv(f.rdi, f.rsi, f.rdx), true),
+        SYS_RECVFROM => (sys_recvfrom(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_SHUTDOWN => (sys_shutdown(f.rdi, f.rsi), true),
         // Accepted and stored nowhere. Every option a program sets here is
         // about buffering, keepalive or timeouts, and this stack answers all

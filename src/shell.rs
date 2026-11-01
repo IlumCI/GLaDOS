@@ -2794,6 +2794,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     tcp::close(2000);
                     kprintln!("  closed");
                 }
+                ("stats", _) => tcp::report_stats(),
                 _ => tcp::report(),
             }
         }

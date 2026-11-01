@@ -97,6 +97,8 @@ pub struct File {
 /// already given to somebody else.
 pub struct Sock {
     pub conn: Option<crate::net::tcp::Handle>,
+    /// `O_NONBLOCK`, from `SOCK_NONBLOCK`, `fcntl` or `FIONBIO`.
+    pub nonblock: bool,
 }
 
 pub struct Dir {

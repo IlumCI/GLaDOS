@@ -87,7 +87,15 @@ const EOR: u32 = 0x4000_0000;
 const FS: u32 = 0x2000_0000;
 const LS: u32 = 0x1000_0000;
 
-const N_RX: usize = 32;
+/// Receive descriptors. **It was 32, and a burst overflowed it**: a card with
+/// no free descriptor drops the frame (QEMU's e1000 raises a receive overrun
+/// and discards it, as hardware does), and with the stack polled a tick at a
+/// time, 32 frames is 46 KiB -- less than one window. On QEMU's e1000 one
+/// download lost 1,491 of 11,951 segments that way, every one a hole the
+/// sender had to fill again, at 0.43 MB/s where the USB adapter, which queues
+/// rather than drops, did 3.3. 256 is half a megabyte of buffers, which is
+/// what a scaled window can put on the wire between two polls.
+const N_RX: usize = 256;
 const N_TX: usize = 32;
 /// Room for a full frame plus the 4-byte CRC the card appends on receive.
 const BUF_SIZE: usize = 2048;

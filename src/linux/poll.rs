@@ -119,8 +119,15 @@ pub fn ready(fd: &Fd) -> u16 {
             match b.conn {
                 Some(h) => {
                     let mut m = POLLOUT;
-                    if crate::net::tcp::pending(h) > 0 {
+                    // Readable when there is data, and also at end of file:
+                    // a reader polling for the rest of a body learns that
+                    // there is no rest by reading zero, and a poll that
+                    // never said readable kept it waiting out its timeout.
+                    if crate::net::tcp::pending(h) > 0 || crate::net::tcp::peer_done(h) {
                         m |= POLLIN;
+                    }
+                    if !crate::net::tcp::alive(h) {
+                        m |= POLLIN | POLLHUP;
                     }
                     m
                 }

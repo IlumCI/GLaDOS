@@ -71,7 +71,18 @@ const RXD_STAT_EOP: u8 = 1 << 1;
 
 /// Ring lengths. Must keep the byte size a multiple of 128; 32 descriptors of
 /// 16 bytes is 512, which satisfies that with room to spare.
-const N_RX: usize = 32;
+/// Receive descriptors. **It was 32, and a burst overflowed it**: a card with
+/// no free descriptor drops the frame (QEMU's e1000 raises a receive overrun
+/// and discards it, as hardware does), and with the stack polled a tick at a
+/// time, 32 frames is 46 KiB -- less than one window. On QEMU's e1000 one
+/// download lost 1,491 of 11,951 segments that way, every one a hole the
+/// sender had to fill again, at 0.43 MB/s where the USB adapter, which queues
+/// rather than drops, did 3.3. 256 is half a megabyte of buffers, which is
+/// what a scaled window can put on the wire between two polls.
+const N_RX: usize = 256;
+
+/// Frames that arrived in more than one descriptor and were dropped.
+pub static SPLIT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 const N_TX: usize = 32;
 const BUF_SIZE: usize = 2048;
 
@@ -166,20 +177,29 @@ impl E1000 {
     /// Take one received frame, if the card has left one.
     pub fn receive(&mut self) -> Option<Vec<u8>> {
         let i = self.rx_cur;
-        let d = unsafe { &mut *self.rx.add(i) };
-        if d.status & RXD_STAT_DD == 0 {
+        let d = unsafe { self.rx.add(i) };
+        // **Read through volatile loads, status first, then everything it
+        // vouches for.** The card writes the buffer and the length and only
+        // then sets `DD`; plain loads leave the compiler free to read the
+        // length before the status, which pairs a fresh `DD` with the length
+        // the previous frame left in that descriptor. The frame then fails
+        // its checksum and the stream has a hole.
+        let status = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*d).status)) };
+        if status & RXD_STAT_DD == 0 {
             return None;
         }
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
         // A frame split across descriptors would need reassembly. With 2 KiB
         // buffers and a 1500-byte MTU it cannot happen, so this reports rather
         // than silently truncating.
-        if d.status & RXD_STAT_EOP == 0 {
-            d.status = 0;
+        if status & RXD_STAT_EOP == 0 {
+            SPLIT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!((*d).status), 0) };
             self.advance_rx();
             return None;
         }
 
-        let len = d.length as usize;
+        let len = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*d).length)) } as usize;
         let mut out = vec![0u8; len];
         unsafe {
             core::ptr::copy_nonoverlapping(self.rx_bufs[i], out.as_mut_ptr(), len);
@@ -187,7 +207,7 @@ impl E1000 {
 
         // Hand the descriptor back before advancing the tail, or the card can
         // fill a buffer we have not finished copying out of.
-        d.status = 0;
+        unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!((*d).status), 0) };
         self.advance_rx();
         Some(out)
     }

@@ -1,4 +1,4 @@
-//! TCP: one connection at a time, actively opened.
+//! TCP, actively opened.
 //!
 //! Enough to fetch something over HTTP, which is the point -- a byte stream is
 //! the thing every useful protocol is built on, and until one exists the
@@ -11,24 +11,31 @@
 //! arithmetic that survives wraparound, an MSS option, and a receive buffer
 //! that advertises a real window.
 //!
-//! ### What is deliberately not here, and what it costs
+//! ### What is here now that was not, and what each was costing
 //!
-//!   * **No reassembly queue.** An out-of-order segment is dropped and
-//!     acknowledged with the sequence we still want, which is a duplicate ACK
-//!     and makes the peer resend. Correct, and slower than it needs to be
-//!     exactly when the network is already losing packets.
-//!   * **No congestion control.** There is a fixed four-segment cap on flight
-//!     size standing in for it. That is not TCP-friendly and would be rude at
-//!     scale; it is defensible while every send is a short request.
+//!   * **A reassembly queue** (`Tcb::hold`). An out-of-order segment used to
+//!     be dropped with a duplicate ACK, so one loss cost the whole window
+//!     behind it.
+//!   * **Congestion control** (RFC 5681): slow start from ten segments,
+//!     avoidance, fast retransmit on the third duplicate ACK, a collapse to
+//!     one segment on a timeout. It replaced a fixed four segments in flight.
+//!   * **Window scaling** (RFC 7323) and a 1 MiB receive buffer, with window
+//!     updates when a read reopens a nearly closed window. A peer that does
+//!     not scale -- QEMU's user-mode network does not -- sees 64 KiB.
+//!   * **A network task** (`main::net_task`) that drains the cards and runs
+//!     the timers every tick, and keeps draining while frames keep arriving.
+//!     The stack used to move only when the shell was idle or somebody was
+//!     inside a blocking call.
+//!   * **A table of connections**, and a lock on it (`StackGuard::wait`).
+//!
+//! ### What is still not here
+//!
+//!   * **No SACK and no timestamps.** A lost segment is found by duplicate
+//!     ACKs or a timeout; the reassembly queue keeps what came after it.
 //!   * **No Nagle and no delayed ACK.** Both are latency-for-efficiency
-//!     trades. Sending immediately is easier to reason about, and this stack
-//!     has no bulk traffic to be inefficient with.
-//!   * **One connection.** A second `connect` replaces the first. The control
-//!     block is a single static, matching the one-entry ARP cache next door.
-//!   * **No interrupt-driven receive.** The card is polled: during a blocking
-//!     call by `wait_until`, and otherwise by `service` from the shell's idle
-//!     loop. So the stack advances at best 100 times a second while the
-//!     machine sits at a prompt, and not at all while a long command runs.
+//!     trades; every segment is acknowledged at once.
+//!   * **No interrupt-driven receive.** The cards are polled: by the network
+//!     task, and by whoever is waiting.
 //!   * **Shortened TIME_WAIT.** 2 seconds rather than 2*MSL. The hazard 2*MSL
 //!     guards against is an old duplicate landing on a new incarnation of the
 //!     same four-tuple; the local port is drawn fresh from the TSC on every
@@ -58,14 +65,27 @@ const ACK: u8 = 0x10;
 /// are 2048 bytes, so a full-size segment fits with room to spare.
 const MSS: usize = 1460;
 
-/// What we advertise: the most the header can say without window scaling.
-/// It was 32 KiB, on the argument that a small HTTP response never fills it;
-/// a package database is eight megabytes, and the window is the ceiling on
-/// how much the peer may send per round trip.
-const RCV_CAPACITY: usize = 65535;
+/// What we will hold unread, and so the most we advertise.
+///
+/// The window is the ceiling on how much a peer may send per round trip, so
+/// it is the ceiling on throughput: 32 KiB, then 64 KiB, the most the header
+/// can say on its own, was 1.17 MB/s at the 56 ms to an Arch mirror the host
+/// reads at 6 MB/s -- and curl measured 0.71 MB/s against it. A mebibyte, said
+/// through window scaling (RFC 7323), is room for the host's rate twice over.
+/// It is a ceiling and not an allocation: a buffer grows only as far as its
+/// reader falls behind.
+const RCV_CAPACITY: usize = 1 << 20;
+/// The shift we ask for. 65535 << 5 is 2 MiB, the smallest that can say
+/// `RCV_CAPACITY` whole.
+const RCV_SHIFT: u8 = 5;
 
-/// Standing in for congestion control. See the module note.
-const MAX_FLIGHT_SEGMENTS: usize = 4;
+/// The initial congestion window, in segments (RFC 6928).
+const INITIAL_WINDOW: u32 = 10;
+/// How much a sender may have written and not yet seen acknowledged before
+/// `send` waits. Linux's `send` returns once bytes are in the socket buffer;
+/// this one returned once the peer had acknowledged them, which is a round
+/// trip per write and was the whole cost of a request made of several.
+const SND_BUF_CAP: usize = 256 * 1024;
 
 /// RFC 6298 puts the floor at 1 second. Kept, even though round trips here are
 /// measured in microseconds: the floor exists to avoid spurious retransmits
@@ -80,6 +100,32 @@ const MAX_RETRIES: u32 = 8;
 /// Bound on the inbox. TCP already has a story for a dropped segment, so
 /// dropping under pressure is safe in a way that growing without limit is not.
 const MAX_INBOX: usize = 64;
+
+/// What the receive path did, for `tcp stats`: the counters that say why a
+/// transfer is slow, which a rate alone cannot.
+pub mod stats {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    pub static SEGS_IN: AtomicU64 = AtomicU64::new(0);
+    pub static BYTES_IN: AtomicU64 = AtomicU64::new(0);
+    /// A segment past `rcv_nxt`, dropped for want of a reassembly queue.
+    pub static OUT_OF_ORDER: AtomicU64 = AtomicU64::new(0);
+    /// A segment wholly before `rcv_nxt`: the peer resending what we have.
+    pub static DUPLICATE: AtomicU64 = AtomicU64::new(0);
+    /// Bytes cut off because the receive buffer was full.
+    pub static TRIMMED: AtomicU64 = AtomicU64::new(0);
+    /// Segments lost because the inbox was full before anyone pumped it.
+    pub static INBOX_FULL: AtomicU64 = AtomicU64::new(0);
+    pub static WINDOW_UPDATES: AtomicU64 = AtomicU64::new(0);
+    pub static RETRANSMITS: AtomicU64 = AtomicU64::new(0);
+    /// Segments whose checksum did not hold, dropped before any state saw them.
+    pub static BAD_CHECKSUM: AtomicU64 = AtomicU64::new(0);
+    pub fn bump(c: &AtomicU64, n: u64) {
+        c.fetch_add(n, Ordering::Relaxed);
+    }
+    pub fn get(c: &AtomicU64) -> u64 {
+        c.load(Ordering::Relaxed)
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
@@ -164,8 +210,23 @@ struct Tcb {
     snd_una: u32,
     /// Next sequence number to send.
     snd_nxt: u32,
-    /// The peer's advertised receive window.
-    snd_wnd: u16,
+    /// The peer's advertised receive window, scaled.
+    snd_wnd: u32,
+    /// How far the peer's window field is shifted, and ours: both zero unless
+    /// the SYN-ACK carried a window-scale option, which is the only way scaling
+    /// is ever agreed -- a peer that ignores ours reads our windows unscaled.
+    snd_shift: u8,
+    rcv_shift: u8,
+    /// The largest segment the peer will take, from its SYN-ACK. `MSS` until
+    /// it says otherwise.
+    peer_mss: u16,
+    /// Congestion control (RFC 5681): the window the network is trusted
+    /// with, the threshold between slow start and avoidance, and how many
+    /// duplicate acknowledgements have arrived in a row. It replaced a fixed
+    /// four segments in flight, which was 100 KB/s for any upload at 56 ms.
+    cwnd: u32,
+    ssthresh: u32,
+    dupacks: u8,
     /// Initial send sequence, kept to recognise the SYN-ACK.
     iss: u32,
 
@@ -178,6 +239,9 @@ struct Tcb {
     send_buf: Vec<u8>,
     /// Delivered inbound bytes, waiting to be read.
     recv_buf: Vec<u8>,
+    /// Segments that arrived past a hole, by sequence number, waiting for the
+    /// hole to fill (see `hold`).
+    held: Vec<(u32, Vec<u8>)>,
 
     /// Set once close() has been asked for; the FIN goes out after the last
     /// byte of `send_buf` has been sent.
@@ -309,15 +373,78 @@ fn tcp_checksum(src: Ipv4, dst: Ipv4, segment: &[u8]) -> u16 {
     checksum(&buf)
 }
 
+/// The most a connection holds past a hole. Bounded so a peer cannot make the
+/// kernel keep arbitrary data it has not yet had to deliver in order.
+const HOLD_CAP: usize = RCV_CAPACITY / 2;
+
 impl Tcb {
+    /// Bytes that continue the stream at `rcv_nxt`, as far as there is room.
+    fn accept(&mut self, data: &[u8]) {
+        let room = RCV_CAPACITY.saturating_sub(self.recv_buf.len());
+        let take = data.len().min(room);
+        stats::bump(&stats::BYTES_IN, take as u64);
+        stats::bump(&stats::TRIMMED, (data.len() - take) as u64);
+        self.recv_buf.extend_from_slice(&data[..take]);
+        self.rcv_nxt = self.rcv_nxt.wrapping_add(take as u32);
+    }
+
+    /// Keep a segment that arrived past a hole.
+    ///
+    /// **There was no reassembly queue, and a lost segment cost the whole
+    /// window behind it**: every later segment was dropped with a duplicate
+    /// ACK, so the peer resent all of them. Measured on QEMU's e1000, 456
+    /// segments of one download arrived out of order and the transfer took
+    /// 44 s where the same over USB took 26. Held now, so the peer's one
+    /// retransmission of the missing segment fills the hole and everything
+    /// after it is delivered at once. Only what lies inside the window we
+    /// advertised is kept, and only up to `HOLD_CAP`.
+    fn hold(&mut self, seq: u32, data: &[u8]) {
+        let ahead = seq.wrapping_sub(self.rcv_nxt) as usize;
+        let room = RCV_CAPACITY.saturating_sub(self.recv_buf.len());
+        let held: usize = self.held.iter().map(|(_, d)| d.len()).sum();
+        if ahead >= room || held + data.len() > HOLD_CAP {
+            return;
+        }
+        match self.held.binary_search_by(|(s, _)| {
+            let d = s.wrapping_sub(self.rcv_nxt) as usize;
+            d.cmp(&ahead)
+        }) {
+            Ok(i) => {
+                // The same start twice; keep the longer.
+                if self.held[i].1.len() < data.len() {
+                    self.held[i].1 = data.to_vec();
+                }
+            }
+            Err(i) => self.held.insert(i, (seq, data.to_vec())),
+        }
+    }
+
+    /// Deliver whatever the stream has now reached in what is held.
+    fn merge_held(&mut self) {
+        while let Some((seq, _)) = self.held.first() {
+            if seq_gt(*seq, self.rcv_nxt) {
+                break;
+            }
+            let (seq, data) = self.held.remove(0);
+            let end = seq.wrapping_add(data.len() as u32);
+            if seq_gt(end, self.rcv_nxt) {
+                let skip = self.rcv_nxt.wrapping_sub(seq) as usize;
+                self.accept(&data[skip..]);
+            }
+        }
+    }
+
     fn window(&self) -> u16 {
-        RCV_CAPACITY.saturating_sub(self.recv_buf.len()).min(u16::MAX as usize) as u16
+        let room = RCV_CAPACITY.saturating_sub(self.recv_buf.len());
+        (room >> self.rcv_shift).min(u16::MAX as usize) as u16
     }
 
     /// Build one segment. `with_mss` adds the option, which is only legal on a
     /// segment carrying SYN.
     fn segment(&self, flags: u8, seq: u32, payload: &[u8], with_mss: bool) -> Vec<u8> {
-        let header_words = if with_mss { 6 } else { 5 };
+        // MSS, then a NOP and the window-scale option, which pads it to a
+        // word: the two options a SYN carries here.
+        let header_words = if with_mss { 7 } else { 5 };
         let mut s = Vec::with_capacity(header_words * 4 + payload.len());
         s.extend_from_slice(&self.local_port.to_be_bytes());
         s.extend_from_slice(&self.remote_port.to_be_bytes());
@@ -326,13 +453,21 @@ impl Tcb {
         s.extend_from_slice(&ack_num.to_be_bytes());
         s.push((header_words as u8) << 4);
         s.push(flags);
-        s.extend_from_slice(&self.window().to_be_bytes());
+        // A SYN's window is never scaled (RFC 7323 2.2): scaling is not agreed
+        // until both SYNs have been seen.
+        let wnd = if with_mss {
+            RCV_CAPACITY.saturating_sub(self.recv_buf.len()).min(u16::MAX as usize) as u16
+        } else {
+            self.window()
+        };
+        s.extend_from_slice(&wnd.to_be_bytes());
         s.extend_from_slice(&[0, 0]); // checksum, filled below
         s.extend_from_slice(&[0, 0]); // urgent pointer
         if with_mss {
             s.push(2); // kind: maximum segment size
             s.push(4); // length
             s.extend_from_slice(&(MSS as u16).to_be_bytes());
+            s.extend_from_slice(&[1, 3, 3, RCV_SHIFT]); // NOP, window scale
         }
         s.extend_from_slice(payload);
 
@@ -456,9 +591,13 @@ pub fn deliver(src: Ipv4, dst: Ipv4, segment: &[u8]) {
     // Verify the checksum here, once, so the state machine never has to
     // consider whether what it is reading is real.
     if tcp_checksum(src, dst, segment) != 0 {
+        stats::bump(&stats::BAD_CHECKSUM, 1);
         return;
     }
     let inbox = unsafe { &mut *INBOX.get() };
+    if inbox.len() >= MAX_INBOX {
+        stats::bump(&stats::INBOX_FULL, 1);
+    }
     if inbox.len() < MAX_INBOX {
         // The destination is carried too, because routing needs the local
         // address and the header on the wire is the only place it is true.
@@ -488,6 +627,38 @@ pub fn service() {
         }
     }
     pump();
+}
+
+/// Everything the cards hold, then the state machines: the network task's turn.
+///
+/// `service` is bounded at eight frames so a burst cannot stall the prompt it
+/// runs from; this runs on its own task, where draining is the job. Pumped
+/// every sixteen frames, because a segment is queued rather than handled
+/// (`deliver`) and the queue is `MAX_INBOX` long -- draining a full ring into
+/// it in one go would drop the end of the burst it was meant to keep.
+///
+/// Answers how many frames it took, which is what tells the network task
+/// whether the link is busy.
+pub fn drain() -> usize {
+    if !super::ready() {
+        return 0;
+    }
+    let mut total = 0;
+    for _ in 0..64 {
+        let mut got = 0;
+        for _ in 0..16 {
+            if matches!(super::poll(), super::Event::None) {
+                break;
+            }
+            got += 1;
+        }
+        pump();
+        total += got;
+        if got == 0 {
+            break;
+        }
+    }
+    total
 }
 
 /// Drain the inbox and run the timers. Every blocking operation calls this in
@@ -613,6 +784,33 @@ fn reject(src: Ipv4, seg: &[u8]) {
     send_ipv4(src, PROTO_TCP, &r);
 }
 
+/// A SYN's MSS and window-scale options, if it carries them. Anything else
+/// is stepped over by its length; a malformed list ends the walk rather than
+/// being guessed at.
+fn syn_options(mut o: &[u8]) -> (Option<u16>, Option<u8>) {
+    let (mut mss, mut shift) = (None, None);
+    while let [kind, rest @ ..] = o {
+        match *kind {
+            0 => break,
+            1 => o = rest,
+            _ => {
+                let Some(&len) = rest.first() else { break };
+                let len = len as usize;
+                if len < 2 || len > o.len() {
+                    break;
+                }
+                match (*kind, len) {
+                    (2, 4) => mss = Some(u16::from_be_bytes([o[2], o[3]])),
+                    (3, 3) => shift = Some(o[2]),
+                    _ => {}
+                }
+                o = &o[len..];
+            }
+        }
+    }
+    (mss, shift)
+}
+
 fn on_segment(t: &mut Tcb, src: Ipv4, seg: &[u8]) -> Outbox {
     let mut out = Outbox::new();
 
@@ -650,7 +848,17 @@ fn on_segment(t: &mut Tcb, src: Ipv4, seg: &[u8]) -> Outbox {
             }
             t.rcv_nxt = seg_seq.wrapping_add(1);
             t.snd_una = seg_ack;
-            t.snd_wnd = wnd;
+            // Its options say whether scaling is on, and how big a segment
+            // it takes. Its own window here is unscaled, as ours was.
+            let (mss, shift) = syn_options(&seg[20..data_off]);
+            if let Some(m) = mss {
+                t.peer_mss = m.clamp(64, MSS as u16);
+            }
+            if let Some(sh) = shift {
+                t.snd_shift = sh.min(14);
+                t.rcv_shift = RCV_SHIFT;
+            }
+            t.snd_wnd = wnd as u32;
             t.state = State::Established;
             t.disarm_retx();
             if t.timing && seq_ge(seg_ack, t.timed_seq) {
@@ -684,17 +892,62 @@ fn on_segment(t: &mut Tcb, src: Ipv4, seg: &[u8]) -> Outbox {
         } else {
             t.arm_retx();
         }
+        let mss = t.peer_mss as u32;
+        if t.dupacks >= 3 {
+            // Out of fast recovery: the inflation is given back.
+            t.cwnd = t.ssthresh;
+        } else if t.cwnd < t.ssthresh {
+            t.cwnd = t.cwnd.saturating_add((acked as u32).min(mss));
+        } else {
+            t.cwnd = t.cwnd.saturating_add((mss * mss / t.cwnd.max(1)).max(1));
+        }
+        t.dupacks = 0;
+    } else if flags & ACK != 0
+        && seg_ack == t.snd_una
+        && payload.is_empty()
+        && flags & (SYN | FIN) == 0
+        && t.in_flight() > 0
+        && ((wnd as u32) << t.snd_shift) == t.snd_wnd
+    {
+        // A duplicate acknowledgement: the peer has something past a hole.
+        // The third is taken as a loss (fast retransmit); each after it is a
+        // segment that left the network, so one more may enter.
+        t.dupacks = t.dupacks.saturating_add(1);
+        let mss = t.peer_mss as u32;
+        if t.dupacks == 3 {
+            t.ssthresh = (t.in_flight() / 2).max(2 * mss);
+            t.cwnd = t.ssthresh + 3 * mss;
+            let n = t.send_buf.len().min(mss as usize);
+            if n > 0 {
+                stats::bump(&stats::RETRANSMITS, 1);
+                let chunk = t.send_buf[..n].to_vec();
+                out.push(t.segment(ACK | PSH, t.snd_una, &chunk, false));
+            }
+        } else if t.dupacks > 3 {
+            t.cwnd = t.cwnd.saturating_add(mss);
+        }
     }
-    t.snd_wnd = wnd;
+    t.snd_wnd = (wnd as u32) << t.snd_shift;
 
     // --- inbound data ---
     let mut need_ack = false;
     if !payload.is_empty() {
-        if seg_seq == t.rcv_nxt {
-            let room = RCV_CAPACITY.saturating_sub(t.recv_buf.len());
-            let take = payload.len().min(room);
-            t.recv_buf.extend_from_slice(&payload[..take]);
-            t.rcv_nxt = t.rcv_nxt.wrapping_add(take as u32);
+        stats::bump(&stats::SEGS_IN, 1);
+        let end = seg_seq.wrapping_add(payload.len() as u32);
+        if seq_gt(seg_seq, t.rcv_nxt) {
+            stats::bump(&stats::OUT_OF_ORDER, 1);
+            t.hold(seg_seq, payload);
+        } else if seq_gt(end, t.rcv_nxt) {
+            // In order, or a retransmission overlapping what we have: the
+            // part past `rcv_nxt` is new either way.
+            let skip = t.rcv_nxt.wrapping_sub(seg_seq) as usize;
+            if skip > 0 {
+                stats::bump(&stats::DUPLICATE, 1);
+            }
+            t.accept(&payload[skip..]);
+            t.merge_held();
+        } else {
+            stats::bump(&stats::DUPLICATE, 1);
         }
         // Either way the peer gets an ACK. In order it is an acknowledgement;
         // out of order it is a duplicate ACK naming what we still want, which
@@ -775,6 +1028,7 @@ fn window_update(t: &mut Tcb, before: usize) -> Option<(Ends, Outbox)> {
     let was = RCV_CAPACITY.saturating_sub(before);
     let now = RCV_CAPACITY.saturating_sub(t.recv_buf.len());
     if was * 2 < RCV_CAPACITY && now >= was + MSS {
+        stats::bump(&stats::WINDOW_UPDATES, 1);
         Some(((t.local_ip, t.remote), alloc::vec![t.segment(ACK, t.snd_nxt, &[], false)]))
     } else {
         None
@@ -794,7 +1048,8 @@ fn queue_pending(t: &mut Tcb, out: &mut Outbox) {
             break;
         }
         let flight = t.in_flight() as usize;
-        if flight >= MAX_FLIGHT_SEGMENTS * MSS {
+        let cwnd = t.cwnd as usize;
+        if flight >= cwnd {
             break;
         }
         let window = t.snd_wnd as usize;
@@ -802,8 +1057,8 @@ fn queue_pending(t: &mut Tcb, out: &mut Outbox) {
             break;
         }
         let allowed = (window - flight)
-            .min(MAX_FLIGHT_SEGMENTS * MSS - flight)
-            .min(MSS);
+            .min(cwnd - flight)
+            .min(t.peer_mss as usize);
         let avail = t.send_buf.len() - unsent_off;
         let n = allowed.min(avail);
         if n == 0 {
@@ -857,6 +1112,12 @@ fn on_tick(t: &mut Tcb) -> Outbox {
         return out;
     }
     t.retries += 1;
+    stats::bump(&stats::RETRANSMITS, 1);
+    // A timeout is the strongest signal of congestion there is (RFC 5681 3.1).
+    let mss = t.peer_mss as u32;
+    t.ssthresh = (t.in_flight() / 2).max(2 * mss);
+    t.cwnd = mss;
+    t.dupacks = 0;
     // Exponential backoff, and Karn: no RTT sample may be taken from a
     // retransmission, because the ACK cannot be attributed to a transmission.
     t.rto = (t.rto * 2).min(RTO_MAX_TICKS);
@@ -868,7 +1129,7 @@ fn on_tick(t: &mut Tcb) -> Outbox {
         }
         _ => {
             // Go back to the oldest unacknowledged byte and resend from there.
-            let n = t.send_buf.len().min(MSS);
+            let n = t.send_buf.len().min(t.peer_mss as usize);
             if n > 0 {
                 let chunk = t.send_buf[..n].to_vec();
                 out.push(t.segment(ACK | PSH, t.snd_una, &chunk, false));
@@ -971,11 +1232,18 @@ pub fn open(dst: Ipv4, port: u16, timeout_ms: u64) -> Result<Handle, Error> {
         local_port,
         snd_una: iss,
         snd_nxt: iss.wrapping_add(1),
-        snd_wnd: MSS as u16,
+        snd_wnd: MSS as u32,
+        snd_shift: 0,
+        rcv_shift: 0,
+        peer_mss: MSS as u16,
+        cwnd: INITIAL_WINDOW * MSS as u32,
+        ssthresh: u32::MAX / 2,
+        dupacks: 0,
         iss,
         rcv_nxt: 0,
         send_buf: Vec::new(),
         recv_buf: Vec::new(),
+        held: Vec::new(),
         closing: false,
         fin_sent: false,
         fin_seq: 0,
@@ -1026,6 +1294,15 @@ pub fn send_at(h: Handle, data: &[u8], timeout_ms: u64) -> Result<(), Error> {
     if !matches!(state_of(h), State::Established | State::CloseWait) {
         return Err(Error::NotConnected);
     }
+    // Room first: a writer far ahead of the network waits for it to catch
+    // up, and nothing else waits at all -- the bytes are this connection's
+    // to deliver now, as they are a Linux socket's once `send` returns.
+    let room = wait_until(timeout_ms, || {
+        at(h, |t| t.send_buf.len() < SND_BUF_CAP).unwrap_or(true)
+    });
+    if !room {
+        return Err(Error::Timeout);
+    }
     let (ends, out) = at(h, |t| {
         t.send_buf.extend_from_slice(data);
         let mut out = Outbox::new();
@@ -1034,12 +1311,8 @@ pub fn send_at(h: Handle, data: &[u8], timeout_ms: u64) -> Result<(), Error> {
     })
     .ok_or(Error::NotConnected)?;
     flush(ends, out);
-    let done = wait_until(timeout_ms, || {
-        at(h, |t| t.send_buf.is_empty()).unwrap_or(true)
-    });
     match state_of(h) {
         State::Closed => Err(Error::NotConnected),
-        _ if !done => Err(Error::Timeout),
         _ => Ok(()),
     }
 }
@@ -1290,8 +1563,10 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         remote_port: rport,
         local_ip: [10, 0, 2, 15],
         local_port: lport,
-        snd_una: 0, snd_nxt: 0, snd_wnd: 0, iss: 0, rcv_nxt: 0,
-        send_buf: Vec::new(), recv_buf: Vec::new(),
+        snd_una: 0, snd_nxt: 0, snd_wnd: 0, snd_shift: 0, rcv_shift: 0, peer_mss: MSS as u16,
+        cwnd: INITIAL_WINDOW * MSS as u32, ssthresh: u32::MAX / 2, dupacks: 0,
+        iss: 0, rcv_nxt: 0,
+        send_buf: Vec::new(), recv_buf: Vec::new(), held: Vec::new(),
         closing: false, fin_sent: false, fin_seq: 0, peer_fin: false,
         retx_deadline: 0, rto: RTO_MIN_TICKS, retries: 0,
         srtt: 0, rttvar: 0, timing: false, timed_seq: 0, timed_at: 0,
@@ -1443,8 +1718,60 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         super::StackGuard::take().is_some() && super::stack_holder().is_none(),
     ));
 
+    // --- options, reassembly and the scaled window ---
+    out.push((
+        "a SYN's MSS and window scale are read past a NOP",
+        syn_options(&[2, 4, 0x05, 0xb4, 1, 3, 3, 7]) == (Some(1460), Some(7)),
+    ));
+    out.push((
+        "and an option list that lies about a length ends the walk",
+        syn_options(&[3, 9, 1]) == (None, None) && syn_options(&[8, 10, 0, 0]) == (None, None),
+    ));
+    let mut t = mk([10, 0, 0, 2], 80, 50002);
+    t.rcv_nxt = 1000;
+    t.hold(1010, b"klmn");
+    t.hold(1020, b"uvwx");
+    out.push(("a segment past a hole is held, not delivered", t.recv_buf.is_empty() && t.held.len() == 2));
+    t.accept(b"abcdefghij");
+    t.merge_held();
+    out.push((
+        "and filling the hole delivers it, stopping at the next hole",
+        t.recv_buf == b"abcdefghijklmn" && t.rcv_nxt == 1014 && t.held.len() == 1,
+    ));
+    t.accept(b"opqrst");
+    t.merge_held();
+    out.push((
+        "and the next fill delivers the rest",
+        t.recv_buf == b"abcdefghijklmnopqrstuvwx" && t.held.is_empty(),
+    ));
+    t.hold(900, b"zz");
+    out.push(("a segment behind the stream is never held", t.held.is_empty()));
+    t.recv_buf.clear();
+    t.rcv_shift = RCV_SHIFT;
+    out.push((
+        "a scaled window says the whole buffer",
+        (t.window() as usize) << RCV_SHIFT == RCV_CAPACITY & !((1 << RCV_SHIFT) - 1),
+    ));
+    t.rcv_shift = 0;
+    out.push(("and unscaled it says no more than the header can", t.window() == u16::MAX));
+
     *table() = saved;
     out
+}
+
+/// The receive path's counters since boot.
+pub fn report_stats() {
+    use stats::*;
+    kprintln!("  segments in {}  bytes in {}", get(&SEGS_IN), get(&BYTES_IN));
+    kprintln!(
+        "  out of order {}  duplicate {}  trimmed {} B  inbox full {}",
+        get(&OUT_OF_ORDER), get(&DUPLICATE), get(&TRIMMED), get(&INBOX_FULL)
+    );
+    kprintln!(
+        "  window updates {}  retransmits (ours) {}  bad checksum {}",
+        get(&WINDOW_UPDATES), get(&RETRANSMITS), get(&BAD_CHECKSUM)
+    );
+    kprintln!("  e1000 frames split across descriptors {}", get(&crate::dev::e1000::SPLIT));
 }
 
 pub fn report() {
