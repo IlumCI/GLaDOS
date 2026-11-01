@@ -36,6 +36,16 @@ const CBLOCK: u64 = 4096;
 /// At most this many blocks, 128 MiB. Enough for a desktop's worth of
 /// libraries and every directory they live in; oldest out first.
 const CBLOCKS: usize = 32 * 1024;
+/// Names already looked up, by (partition, directory, name): what the
+/// directory holds under that name, or that it holds nothing. Cleared whole
+/// when full rather than kept in order: a quarter of a million names is more
+/// than one image has.
+static DENTRIES: crate::sync::Spin<alloc::collections::BTreeMap<(u64, u64, String), Option<u64>>> =
+    crate::sync::Spin::new(alloc::collections::BTreeMap::new());
+const DENTRY_CAP: usize = 256 * 1024;
+
+/// Blocks read on a miss, as an aligned window around it: 64 KiB.
+const READ_AHEAD: u64 = 16;
 
 struct Cache {
     map: alloc::collections::BTreeMap<(u64, u64), alloc::boxed::Box<[u8]>>,
@@ -214,12 +224,31 @@ impl Image {
         if cache_copy(base, b0, b1, off, out) {
             return Ok(());
         }
-        // One request for the whole span, block-aligned, then remembered.
-        let span = ((b1 - b0 + 1) * CBLOCK) as usize;
-        let mut buf = vec![0u8; span];
-        Self::read_sectors(base, b0 * CBLOCK, &mut buf)?;
-        cache_fill(base, b0, &buf);
-        let skip = (off - b0 * CBLOCK) as usize;
+        // **Read ahead: the aligned window around a miss, in one request.**
+        // A cold page cost one NVMe command per 4 KiB block, and a command's
+        // latency is the whole cost of a small read -- `ldconfig` cold spent
+        // 5.4 s on 3,800 page fills at 1.2 ms each and 0.22 s warm, so the
+        // walk was never the problem. What a program touches next in a file
+        // is usually near what it touched last: an ELF's headers, its
+        // dynamic section and its string table, a directory's next block. A
+        // window that runs past the device's end falls back to the exact
+        // span.
+        let (w0, w1) = if b1 - b0 + 1 < READ_AHEAD {
+            let w0 = b0 & !(READ_AHEAD - 1);
+            (w0, (w0 + READ_AHEAD - 1).max(b1))
+        } else {
+            (b0, b1)
+        };
+        let mut buf = vec![0u8; ((w1 - w0 + 1) * CBLOCK) as usize];
+        let (w0, buf) = if Self::read_sectors(base, w0 * CBLOCK, &mut buf).is_ok() {
+            (w0, buf)
+        } else {
+            let mut exact = vec![0u8; ((b1 - b0 + 1) * CBLOCK) as usize];
+            Self::read_sectors(base, b0 * CBLOCK, &mut exact)?;
+            (b0, exact)
+        };
+        cache_fill(base, w0, &buf);
+        let skip = (off - w0 * CBLOCK) as usize;
         out.copy_from_slice(&buf[skip..skip + out.len()]);
         Ok(())
     }
@@ -374,6 +403,38 @@ impl Image {
         if !dir.is_dir() {
             return Err(Error::NotDir);
         }
+        // **Every answer is remembered, a miss as well as a hit.** One `open`
+        // resolves its path four or five times over -- the link walk, the
+        // follow, whether anything is there, the lookup itself -- and each
+        // component was a binary search copying a block per probe. The image
+        // never changes, so an answer once found is the answer forever; a
+        // name that is not there is cached too, since a package manager asks
+        // after thousands of files that do not exist yet.
+        let key = (self.base, dir.nid, String::from(name));
+        let known = DENTRIES.lock_irq().get(&key).copied();
+        match known {
+            Some(Some(nid)) => return self.inode(nid),
+            Some(None) => return Err(Error::NotFound),
+            None => {}
+        }
+        let found = self.child_search(dir, name);
+        let mut d = DENTRIES.lock_irq();
+        if d.len() >= DENTRY_CAP {
+            d.clear();
+        }
+        match &found {
+            Ok(i) => {
+                d.insert(key, Some(i.nid));
+            }
+            Err(Error::NotFound) => {
+                d.insert(key, None);
+            }
+            Err(_) => {}
+        }
+        found
+    }
+
+    fn child_search(&self, dir: &Inode, name: &str) -> Result<Inode, Error> {
         let want = name.as_bytes();
         let bs = self.block_size() as u64;
         let blocks = dir.size.div_ceil(bs);
@@ -415,8 +476,15 @@ impl Image {
         self.dir(dir).ok()?.into_iter().find(|(n, _, _)| n == name).map(|(_, nid, _)| nid)
     }
 
-    /// `child`, answering the entry's inode number, for the same claim.
+    /// The search itself, past the cache, answering the entry's inode number,
+    /// for the same claim -- which is about the search and must not be
+    /// answered by what an earlier lookup remembered.
     pub fn child_nid(&self, dir: &Inode, name: &str) -> Option<u64> {
+        self.child_search(dir, name).ok().map(|i| i.nid)
+    }
+
+    /// `child` through the cache, for the claim that it agrees with the search.
+    pub fn child_cached_nid(&self, dir: &Inode, name: &str) -> Option<u64> {
         self.child(dir, name).ok().map(|i| i.nid)
     }
 

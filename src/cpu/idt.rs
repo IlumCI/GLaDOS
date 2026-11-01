@@ -490,6 +490,28 @@ pub unsafe extern "sysv64" fn glados_fault_entry(f: *const Frame) {
     // stack is the task's own entry stack, empty because nothing is
     // mid-syscall; at ring 0 it is the stack that was interrupted, below
     // where it stood -- this target's ABI has no red zone.
+    // A write to a page shared copy-on-write: a copy, or the frame back if
+    // nobody else holds it, and the instruction runs again. Present and a
+    // write is what the error code says; anything else about it is a real
+    // fault and falls through.
+    if fr.vector == 14 && fr.err & 1 != 0 && fr.err & 2 != 0 {
+        #[repr(C, align(16))]
+        struct Fx(core::mem::MaybeUninit<[u8; 512]>);
+        let mut fx = Fx(core::mem::MaybeUninit::uninit());
+        unsafe { core::arch::asm!("fxsave64 [{}]", in(reg) fx.0.as_mut_ptr(), options(nostack)) };
+        let cr2 = read_cr2();
+        let ok = crate::mem::paging::cow_writable(cr2) && crate::mem::paging::cow_break(cr2);
+        if ok {
+            // This thread's siblings on other cores may still read the old
+            // frame through their TLBs; a write would fault and correct
+            // itself, a read would not. Only cores on this root are asked.
+            crate::dev::lapic::shootdown(crate::cpu::read_cr3() & crate::mem::paging::ADDR_MASK);
+        }
+        unsafe { core::arch::asm!("fxrstor64 [{}]", in(reg) fx.0.as_ptr(), options(nostack)) };
+        if ok {
+            return;
+        }
+    }
     if fr.vector == 14 && fr.err & 1 == 0 && crate::mem::paging::file_promised(read_cr2(), fr.err & 2 != 0) {
         let user = fr.cs & 3 == 3;
         let top = if user { gdt::task_rsp0() } else { fr.rsp.saturating_sub(64) };

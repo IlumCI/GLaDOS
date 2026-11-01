@@ -293,6 +293,7 @@ fn dup_range(
         // the *frame*, which the identity map reaches whatever the guest's
         // rights on it, so a page `mprotect`ed to `PROT_NONE` survives too.
         if is_promise(raw) {
+            COPIED[0].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if !tables.put_leaf(a, raw) {
                 return false;
             }
@@ -300,10 +301,14 @@ fn dup_range(
             continue;
         }
         if raw & DEMAND != 0 && raw & ADDR_MASK != 0 {
-            let Some(p) = syscall::alloc_pages(4096) else { return false };
-            unsafe { core::ptr::copy_nonoverlapping((raw & ADDR_MASK) as *const u8, p as *mut u8, 4096) };
-            if !tables.put_leaf(a, p | (raw & !ADDR_MASK)) {
-                syscall::free_pages(p, 4096);
+            // **Shared, not copied** (`paging::COW`): both leaves name the
+            // frame read-only, and whoever writes first takes a copy then.
+            COPIED[1].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let Some(leaf) = crate::mem::paging::cow_share(a) else { return false };
+            if !tables.put_leaf(a, leaf) {
+                // The parent's side is shared already; giving the count back
+                // leaves its one leaf the frame's owner again.
+                let _ = crate::mem::paging::cow_release(leaf);
                 return false;
             }
             off += 4096;
@@ -320,6 +325,7 @@ fn dup_range(
                     b
                 }
             };
+            COPIED[2].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             unsafe { core::ptr::copy_nonoverlapping(a as *const u8, (phys + off) as *mut u8, 4096) };
             let ok = if a >= crate::mem::space::WINDOW {
                 tables.map_page(a, phys + off, true, true)
@@ -341,6 +347,10 @@ fn dup_range(
 pub fn fork(f: &Frame) -> u64 {
     fork_with(f, None, None)
 }
+
+/// What forks have copied, in pages: promises carried over, demand-supplied
+/// pages duplicated, ordinary pages duplicated; then forks and their cycles.
+pub static COPIED: [core::sync::atomic::AtomicU64; 5] = [const { core::sync::atomic::AtomicU64::new(0) }; 5];
 
 const SIGCHLD: u64 = 17;
 const CLONE_VFORK: u64 = 0x0000_4000;
@@ -391,6 +401,14 @@ pub fn clone_process(f: &Frame) -> u64 {
 /// `fork`, running the child on `stack` if given, and writing its pid at
 /// `settid` in the child's memory if given.
 fn fork_with(f: &Frame, stack: Option<u64>, settid: Option<u64>) -> u64 {
+    let t0 = crate::time::rdtsc();
+    let r = fork_inner(f, stack, settid);
+    COPIED[3].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    COPIED[4].fetch_add(crate::time::rdtsc() - t0, core::sync::atomic::Ordering::Relaxed);
+    r
+}
+
+fn fork_inner(f: &Frame, stack: Option<u64>, settid: Option<u64>) -> u64 {
     const EAGAIN: u64 = (-11i64) as u64;
     const ENOMEM: u64 = (-12i64) as u64;
     const ENOSYS: u64 = (-38i64) as u64;
@@ -446,6 +464,10 @@ fn fork_with(f: &Frame, stack: Option<u64>, settid: Option<u64>) -> u64 {
             break;
         }
     }
+    // The parent's pages that just became shared were writable a moment ago,
+    // and a thread of the parent on another core may still hold that in its
+    // TLB -- a write through it would land in the child's memory too.
+    syscall::tlb_shootdown();
     if let (Some(a), Some(v)) = (settid, saved) {
         unsafe { core::ptr::write_volatile(a as *mut u32, v) };
     }

@@ -760,8 +760,14 @@ pub struct Lazy {
 /// does -- which also runs with interrupts clear and does this same read. At
 /// ring 0 the kernel is serving a syscall of this guest and holds the lock
 /// already, so taking it is a no-op.
+/// What filling file pages has cost: how many, the cycles spent waiting for
+/// the guest lock, and the cycles spent reading (`linux fills`).
+pub static FILLS: [core::sync::atomic::AtomicU64; 3] = [const { core::sync::atomic::AtomicU64::new(0) }; 3];
+
 fn fill_from_file(page: u64, frame: *mut u8) -> bool {
+    let t0 = crate::time::rdtsc();
     let taken = big_take();
+    let t1 = crate::time::rdtsc();
     let r = (|| {
         let sp = unsafe { guest_slot() }.as_ref()?;
         let l = sp.lazy.iter().rev().find(|l| page >= l.at && page < l.at + l.len)?.clone();
@@ -778,6 +784,10 @@ fn fill_from_file(page: u64, frame: *mut u8) -> bool {
         let out = unsafe { core::slice::from_raw_parts_mut(frame, n) };
         Some(f.read_at(off, out) == n)
     })();
+    let t2 = crate::time::rdtsc();
+    FILLS[0].fetch_add(1, Ordering::Relaxed);
+    FILLS[1].fetch_add(t1 - t0, Ordering::Relaxed);
+    FILLS[2].fetch_add(t2 - t1, Ordering::Relaxed);
     if taken {
         big_unlock();
     }
@@ -1193,6 +1203,23 @@ pub fn replace_guest(
     let fds = core::mem::take(&mut old.fds);
     let cwd = core::mem::take(&mut old.cwd);
     let saved_fs = old.saved_fs;
+    // **The old program's mappings go back too**, by the same rule teardown
+    // uses, while its tables still exist to find their frames through. They
+    // were dropped with the old entry and never freed: every frame a mapping
+    // held -- every page an `exec`ing child had touched -- was lost on each
+    // `execve`. Measured: 300 fork-and-exec of `true` from bash cost 293 MB
+    // of heap, a megabyte a time, and pacman forks and execs for every hook.
+    let maps = core::mem::take(&mut old.maps);
+    for m in maps {
+        if m.from == Source::Paged {
+            free_paged(old, m.at, page_up(m.len) as u64);
+        } else {
+            if m.from == Source::Copied {
+                free_leaves(old, m.at, page_up(m.len) as u64, true);
+            }
+            give_back(m.at, m.len, Some(m.from));
+        }
+    }
     for (at, len) in core::mem::take(&mut old.owned) {
         free_pages(at, len);
     }
@@ -1480,6 +1507,14 @@ pub fn reachable(at: u64, len: usize, need_write: bool) -> bool {
         // a halted machine.
         if crate::mem::paging::promised(page, need_write) && !crate::mem::paging::populate(page, need_write) {
             return false;
+        }
+        // The kernel writing for the guest is a write like any other: a page
+        // still shared with a parent or a child gets its own copy first.
+        if need_write && crate::mem::paging::cow_writable(page) {
+            if !crate::mem::paging::cow_break(page) {
+                return false;
+            }
+            tlb_shootdown();
         }
         match crate::mem::paging::query(page) {
             Some(p) if p.present && (!need_write || p.write) => {}
@@ -2366,6 +2401,7 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, mode: u64) -> u64
                         path: path.clone(),
                         entries: with_links(&path, super::disk::entries(&path)),
                         at: 0,
+                        links: None,
                     }),
                 )),
                 Some(Some(_)) => {
@@ -2461,6 +2497,7 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, mode: u64) -> u64
                             super::proc::entries(&path)
                         },
                         at: 0,
+                        links: None,
                     },
                 )))
             } else {
@@ -2506,6 +2543,7 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, mode: u64) -> u64
                 path: path.clone(),
                 entries: with_links(&path, super::ns::listing(&path)),
                 at: 0,
+                links: None,
             })))
         } else {
             // Asked before the copy is made, not after: the point is to not
@@ -7565,7 +7603,17 @@ pub(super) fn sys_getdents64(fd: u64, buf: u64, len: u64) -> u64 {
     with_fds(|fds, _| match fds.get_mut(fd as usize) {
         Some(Some(super::fs::Fd::Dir(body))) => {
             let d = &mut *body.borrow_mut();
-            let (path, entries, at) = (&d.path, &d.entries, &mut d.at);
+            // Which entries are links, for the whole directory at once (see
+            // `disk::link_names`), the first time it is read; an image
+            // directory is its own answer, anything else is the guest's links.
+            if d.links.is_none() {
+                d.links = Some(if super::disk::claims(&d.path) {
+                    super::disk::link_names(&d.path)
+                } else {
+                    super::link::names_in(&d.path).into_iter().map(|(n, _)| n).collect()
+                });
+            }
+            let (path, entries, at, links) = (&d.path, &d.entries, &mut d.at, d.links.as_ref().unwrap());
             let mut out = alloc::vec::Vec::new();
             while *at < entries.len() {
                 let (name, is_dir, _) = &entries[*at];
@@ -7578,10 +7626,12 @@ pub(super) fn sys_getdents64(fd: u64, buf: u64, len: u64) -> u64 {
                 // `d_type` is trusted over `lstat` by every walker that reads
                 // it: ldconfig took a link for the library it names and never
                 // asked again, so a link reported as DT_REG is a file to it.
-                let kind = if *is_dir {
-                    4 // DT_DIR
-                } else if super::link::is_link(&full) {
+                // A link first, even to a directory: Linux says DT_LNK, and a
+                // walker told DT_DIR for `/lib` descends into `/usr/lib` twice.
+                let kind = if links.contains(name) {
                     10 // DT_LNK
+                } else if *is_dir {
+                    4 // DT_DIR
                 } else {
                     8 // DT_REG
                 };
@@ -9346,7 +9396,8 @@ fn free_leaves(sp: &mut Space, at: u64, len: u64, demand_only: bool) {
             t.take_leaf(at + off)
         };
         let phys = e & crate::mem::paging::ADDR_MASK;
-        if phys != 0 {
+        // A frame shared copy-on-write goes back only with its last leaf.
+        if phys != 0 && crate::mem::paging::cow_release(e) {
             crate::mem::paging::release_to_heap(phys, 4096);
             free_pages(phys, 4096);
         }

@@ -65,6 +65,123 @@ const ACCESS: u64 = 1 << 10;
 /// a program was promised zeros.
 pub(crate) const FILE: u64 = 1 << 11;
 
+/// Software bits 52 and 53 of a present leaf: the frame is shared copy-on-write
+/// with another process, and the page is writable as far as the guest knows.
+///
+/// **`fork` copied every page a process had touched**, and pacman is large:
+/// 47 forks during one install copied 420,621 pages, 1.7 GB, at 25 ms a fork,
+/// for children that mostly `exec` at once. Now parent and child share each
+/// demand-supplied frame read-only, and the first write on either side takes
+/// a copy (`cow_break`) -- or, if it is the last sharer left, simply takes the
+/// frame back. `WANT_W` is what makes the difference between a write that
+/// owed a copy and a write to a page that really is read-only.
+pub(crate) const COW: u64 = 1 << 52;
+pub(crate) const WANT_W: u64 = 1 << 53;
+
+/// How many leaves name each shared frame. A frame absent here belongs to
+/// whichever one leaf names it.
+static SHARED: crate::sync::Spin<alloc::collections::BTreeMap<u64, u32>> =
+    crate::sync::Spin::new(alloc::collections::BTreeMap::new());
+
+/// Share the demand-supplied page at `addr`, under the current root, with a
+/// child: the leaf becomes read-only and copy-on-write, and the answer is the
+/// leaf the child is to have. `None` when the page is not one this can share.
+pub fn cow_share(addr: u64) -> Option<u64> {
+    let mut shared = SHARED.lock_irq();
+    let slot = unsafe { entry_for(addr, false) }?;
+    let e = *slot;
+    if e & PRESENT == 0 || e & DEMAND == 0 || e & ADDR_MASK == 0 {
+        return None;
+    }
+    let writable = e & WRITABLE != 0 || e & WANT_W != 0;
+    let new = (e & !WRITABLE) | COW | if writable { WANT_W } else { 0 };
+    if e != new {
+        *slot = new;
+        unsafe { core::arch::asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags)) };
+    }
+    let n = shared.entry(e & ADDR_MASK).or_insert(1);
+    *n += 1;
+    Some(new)
+}
+
+/// A leaf naming `phys` is being dropped: whether the frame is now nobody's
+/// and may go back to the heap.
+pub fn cow_release(leaf: u64) -> bool {
+    if leaf & COW == 0 {
+        return true;
+    }
+    let mut shared = SHARED.lock_irq();
+    let phys = leaf & ADDR_MASK;
+    match shared.get_mut(&phys) {
+        Some(n) if *n > 1 => {
+            *n -= 1;
+            if *n == 1 {
+                // One sharer left; it still carries the bit, and its next
+                // write finds no entry and takes the frame back.
+                shared.remove(&phys);
+            }
+            false
+        }
+        _ => {
+            shared.remove(&phys);
+            true
+        }
+    }
+}
+
+/// A write to a copy-on-write page at `addr`, under the current root: give
+/// this leaf a frame of its own, or the shared one if nobody else is left.
+/// Answers whether the page is now writable; false for a page that is not
+/// copy-on-write or not writable at all, which is a real fault.
+///
+/// Nothing here waits, so it is safe from the page-fault handler on its own
+/// stack; the copy is made before the leaf changes, so no thread of this
+/// process sees a half-copied page.
+pub fn cow_break(addr: u64) -> bool {
+    let page = addr & !0xFFF;
+    let mut shared = SHARED.lock_irq();
+    let Some(slot) = (unsafe { entry_for(page, false) }) else { return false };
+    let e = *slot;
+    if e & PRESENT == 0 {
+        return false;
+    }
+    if e & COW == 0 {
+        // Another thread of this process got here first.
+        return e & WRITABLE != 0;
+    }
+    if e & WANT_W == 0 {
+        return false;
+    }
+    let phys = e & ADDR_MASK;
+    let others = shared.get(&phys).copied().unwrap_or(1);
+    let frame = if others <= 1 {
+        shared.remove(&phys);
+        phys
+    } else {
+        let Ok(layout) = alloc::alloc::Layout::from_size_align(4096, 4096) else { return false };
+        let f = unsafe { alloc::alloc::alloc(layout) };
+        if f.is_null() {
+            return false;
+        }
+        unsafe { core::ptr::copy_nonoverlapping(phys as *const u8, f, 4096) };
+        let n = shared.get_mut(&phys).unwrap();
+        *n -= 1;
+        if *n == 1 {
+            shared.remove(&phys);
+        }
+        f as u64
+    };
+    *slot = (frame & ADDR_MASK) | (e & !ADDR_MASK & !(COW | WANT_W)) | WRITABLE;
+    unsafe { core::arch::asm!("invlpg [{}]", in(reg) page, options(nostack, preserves_flags)) };
+    true
+}
+
+/// Whether `addr` under the current root is a copy-on-write page the guest may
+/// write -- a write the kernel must break the share for before making it.
+pub fn cow_writable(addr: u64) -> bool {
+    unsafe { entry_for(addr & !0xFFF, false) }.is_some_and(|e| *e & PRESENT != 0 && *e & COW != 0 && *e & WANT_W != 0)
+}
+
 /// What supplies a file promise's bytes: given the page's address and a zeroed
 /// frame, fill the frame and answer whether it could. Registered by
 /// `linux::syscall`, which is where the mappings that know their files live.
@@ -897,7 +1014,14 @@ pub fn protect(at: u64, len: usize, perm: Perm) -> bool {
             addr += PAGE_SIZE;
             continue;
         }
-        *e = (*e & keep) | perm.bits();
+        // A shared frame stays read-only whatever is asked: the right to
+        // write is recorded, and the first write takes a copy (`cow_break`).
+        if *e & COW != 0 {
+            let b = perm.bits();
+            *e = (*e & keep & !WANT_W) | (b & !WRITABLE) | if perm.write { WANT_W } else { 0 };
+        } else {
+            *e = (*e & keep) | perm.bits();
+        }
         // Per page rather than a CR3 reload, because a reload flushes every
         // translation in the machine and this can be called with a guest's
         // whole heap. Skipping it entirely is the failure that matters: the

@@ -341,6 +341,14 @@ pub fn link_target(path: &str) -> Option<Option<String>> {
 /// A directory's entries as `fs::Dir` wants them: name, is a directory, size.
 /// A symlink to a directory counts as one, which is what `d_type` cannot say
 /// and what a program walking the tree wants to know.
+/// Image directory listings already read, by (mount, directory inode). `Rc`
+/// because a guest's whole session runs under the guest lock on one core at a
+/// time -- the lock `entries` holds -- the bargain `fs` makes for descriptors.
+static LISTINGS: Racy<alloc::collections::BTreeMap<(u64, u64), Listing>> =
+    Racy::new(alloc::collections::BTreeMap::new());
+/// Entries kept across every cached listing before the cache starts again.
+const LISTING_CAP: usize = 200_000;
+
 pub fn entries(path: &str) -> Vec<(String, bool, usize)> {
     let _g = big();
     let Some(Some(n)) = lookup(path) else { return Vec::new() };
@@ -355,36 +363,122 @@ pub fn entries(path: &str) -> Vec<(String, bool, usize)> {
             .unwrap_or_default(),
         Vol::Erofs(img) => {
             let Some(ino) = n.inode else { return Vec::new() };
-            let base = path.trim_end_matches('/');
-            let mut out: Vec<(String, bool, usize)> = img
-                .dir(&ino)
-                .map(|d| {
-                    d.into_iter()
-                        .filter(|(name, _, _)| name != "." && name != "..")
-                        .filter(|(name, _, _)| !super::ns::whited_out(&alloc::format!("{}/{}", base, name)))
-                        .filter_map(|(name, nid, _)| {
-                            let mut c = img.inode(nid).ok()?;
-                            if c.is_link() {
-                                let full = alloc::format!("{}/{}", path.trim_end_matches('/'), name);
-                                c = img.lookup(&full, true).unwrap_or(c);
-                            }
-                            Some((name, c.is_dir(), c.size as usize))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let key = (m.id, ino.nid);
+            // **The image's own listing is computed once.** It is an inode read
+            // per entry, for the size and to follow a link to a directory, and
+            // `opendir` on `/usr/lib` -- 2,559 entries -- took 270 ms; a vim
+            // install opened image directories 10,057 times at 304 us each,
+            // pacman checking for conflicts. The image never changes, so neither
+            // does this; what the guest's layer adds or deletes is applied on
+            // top, fresh, every time.
+            let image = image_listing(img, key, &ino, path);
+            let image = image.0;
+            // Deletions, read once for the directory rather than asked after
+            // each name.
+            let gone = gone_in(path);
+            let mut out: Vec<(String, bool, usize)> =
+                image.iter().filter(|e| !gone.contains(&e.0)).cloned().collect();
             // The guest's own files at this directory: what it wrote wins
             // over the image's entry of the same name.
             if super::ns::layered() && m.prefix.is_empty() {
-                for e in super::ns::listing(path) {
-                    out.retain(|x| x.0 != e.0);
-                    out.push(e);
+                let mine = super::ns::listing(path);
+                if !mine.is_empty() {
+                    let names: alloc::collections::BTreeSet<&str> = mine.iter().map(|e| e.0.as_str()).collect();
+                    out.retain(|x| !names.contains(x.0.as_str()));
+                    out.extend(mine.iter().cloned());
+                    out.sort_by(|a, b| a.0.cmp(&b.0));
                 }
-                out.sort_by(|a, b| a.0.cmp(&b.0));
             }
             out
         }
     }
+}
+
+/// The names the guest has deleted from the image in this directory.
+fn gone_in(path: &str) -> alloc::collections::BTreeSet<String> {
+    if !super::ns::layered() {
+        return alloc::collections::BTreeSet::new();
+    }
+    crate::sysbox::listing(&alloc::format!("{}{}", super::ns::GONE, path.trim_end_matches('/')))
+        .into_iter()
+        .filter(|(_, is_dir, _)| !is_dir)
+        .map(|(name, _, _)| name)
+        .collect()
+}
+
+type Listing = (alloc::rc::Rc<Vec<(String, bool, usize)>>, alloc::rc::Rc<alloc::collections::BTreeSet<String>>);
+
+/// The image's own listing of a directory and which of its names are links,
+/// read once (see `LISTINGS`).
+fn image_listing(img: &erofs::Image, key: (u64, u64), ino: &erofs::Inode, path: &str) -> Listing {
+    let cached = unsafe { LISTINGS.get() }.get(&key).cloned();
+            match cached {
+                Some(l) => l,
+                None => {
+                    let raw = img.dir(ino).unwrap_or_default();
+                    let links: alloc::collections::BTreeSet<String> =
+                        raw.iter().filter(|(_, _, t)| *t == 7).map(|(n, _, _)| n.clone()).collect();
+                    let l: Vec<(String, bool, usize)> = Some(raw)
+                        .map(|d| {
+                            d.into_iter()
+                                .filter(|(name, _, _)| name != "." && name != "..")
+                                .filter_map(|(name, nid, _)| {
+                                    let mut c = img.inode(nid).ok()?;
+                                    if c.is_link() {
+                                        let full = alloc::format!("{}/{}", path.trim_end_matches('/'), name);
+                                        c = img.lookup(&full, true).unwrap_or(c);
+                                    }
+                                    Some((name, c.is_dir(), c.size as usize))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let l = (alloc::rc::Rc::new(l), alloc::rc::Rc::new(links));
+                    let c = unsafe { LISTINGS.get() };
+                    let total: usize = c.values().map(|v| v.0.len()).sum();
+                    if total + l.0.len() > LISTING_CAP {
+                        c.clear();
+                    }
+                    c.insert(key, l.clone());
+                    l
+                }
+            }
+}
+
+/// Which names in a directory are links, for `getdents64`'s type byte: the
+/// guest's own, and the image's that the layer has not replaced or deleted.
+///
+/// **Asked once for the directory, not once per name.** `d_type` for a link
+/// was a whole `link::is_link` per entry -- the namespace twice, the image
+/// once -- and a glob of `/usr/lib` spent 18.7 ms in each `getdents64` call:
+/// two hundred of them took 20.7 s. The image's directory blocks already say
+/// which entries are links; the type byte is read off them when the listing
+/// is cached.
+pub fn link_names(path: &str) -> alloc::collections::BTreeSet<String> {
+    let _g = big();
+    let mut out: alloc::collections::BTreeSet<String> =
+        super::link::names_in(path).into_iter().map(|(n, _)| n).collect();
+    let Some((i, _)) = under(path) else { return out };
+    let m = unsafe { &MOUNTS.get()[i] };
+    let Vol::Erofs(img) = &m.vol else { return out };
+    let Some(Some(n)) = lookup(path) else { return out };
+    let Some(ino) = n.inode else { return out };
+    let (_, links) = image_listing(img, (m.id, ino.nid), &ino, path);
+    if links.is_empty() {
+        return out;
+    }
+    let gone = gone_in(path);
+    let mine: alloc::collections::BTreeSet<String> = if super::ns::layered() && m.prefix.is_empty() {
+        super::ns::listing(path).into_iter().map(|e| e.0).collect()
+    } else {
+        alloc::collections::BTreeSet::new()
+    };
+    for l in links.iter() {
+        if !gone.contains(l) && !mine.contains(l) {
+            out.insert(l.clone());
+        }
+    }
+    out
 }
 
 enum Body {
@@ -530,6 +624,10 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             for (name, nid, _) in &list {
                 seen += 1;
                 agree &= img.child_nid(&dir, name) == Some(*nid);
+                // Twice through the cache: the first fills it, the second is
+                // answered from it, and both must be the search's answer.
+                agree &= img.child_cached_nid(&dir, name) == Some(*nid);
+                agree &= img.child_cached_nid(&dir, name) == Some(*nid);
             }
             agree &= img.child_nid(&dir, "\u{7f}no such name") == None && img.child_by_scan(&dir, "\u{7f}no such name").is_none();
         }

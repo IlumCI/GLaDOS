@@ -109,6 +109,9 @@ pub struct Dir {
     /// could offer instead.
     pub entries: Vec<(String, bool, usize)>,
     pub at: usize,
+    /// Which entries are links, worked out on the first `getdents64` and kept
+    /// for the rest of the walk, like the entries themselves.
+    pub links: Option<alloc::collections::BTreeSet<String>>,
 }
 
 /// What a descriptor refers to.

@@ -7584,6 +7584,31 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     Some("off") => linux::prof::ON.store(false, core::sync::atomic::Ordering::Relaxed),
                     _ => linux::prof::report(),
                 },
+                "fills" => {
+                    let f = &linux::syscall::FILLS;
+                    let n = f[0].load(core::sync::atomic::Ordering::Relaxed).max(1);
+                    let mhz = crate::time::tsc_mhz().max(1);
+                    kprintln!(
+                        "  {} file page(s) filled: {} us waiting for the guest lock, {} us reading, each",
+                        f[0].load(core::sync::atomic::Ordering::Relaxed),
+                        f[1].load(core::sync::atomic::Ordering::Relaxed) / n / mhz,
+                        f[2].load(core::sync::atomic::Ordering::Relaxed) / n / mhz
+                    );
+                    let c = &linux::fork::COPIED;
+                    let ld = |i: usize| c[i].load(core::sync::atomic::Ordering::Relaxed);
+                    kprintln!(
+                        "  {} fork(s), {} us each: {} promise(s) carried, {} demand page(s) and {} other page(s) copied",
+                        ld(3), ld(4) / ld(3).max(1) / mhz, ld(0), ld(1), ld(2)
+                    );
+                    let r = &crate::store::block::READS;
+                    let rn = r[0].load(core::sync::atomic::Ordering::Relaxed).max(1);
+                    kprintln!(
+                        "  {} disk read(s), {} sector(s) each, {} us each",
+                        r[0].load(core::sync::atomic::Ordering::Relaxed),
+                        r[1].load(core::sync::atomic::Ordering::Relaxed) / rn,
+                        r[2].load(core::sync::atomic::Ordering::Relaxed) / rn / mhz
+                    );
+                }
                 "unserved" => {
                     if words.next() == Some("clear") {
                         for n in linux::syscall::UNSERVED.iter().chain(linux::syscall::UNSERVED_32.iter()) {

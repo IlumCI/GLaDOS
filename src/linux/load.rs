@@ -43,6 +43,7 @@
 //! `MAP_FIXED` and file-backed mappings, which is how it lays out everything
 //! it loads afterwards. Refused today, and the next rung.
 
+use alloc::string::String;
 use super::{elf, syscall};
 use crate::cpu::code::Exec;
 use alloc::vec::Vec;
@@ -813,6 +814,28 @@ fn read_vec(at: u64) -> Result<Vec<alloc::string::String>, u64> {
     }
 }
 
+/// The interpreter and its one optional argument, from a `#!` line.
+///
+/// Linux reads the first line only, and only so far (`BINPRM_BUF_SIZE`, 256
+/// bytes); everything after the interpreter's name, spaces trimmed, is one
+/// argument however many words it has, which is why `#!/usr/bin/env -S`
+/// exists.
+pub fn shebang(bytes: &[u8]) -> Option<(String, Option<String>)> {
+    let line = bytes.get(2..)?;
+    let line = &line[..line.len().min(254)];
+    let end = line.iter().position(|&b| b == b'\n').unwrap_or(line.len());
+    let line = core::str::from_utf8(&line[..end]).ok()?.trim_matches(|c| c == ' ' || c == '\t' || c == '\r');
+    if line.is_empty() {
+        return None;
+    }
+    let (interp, rest) = match line.find([' ', '\t']) {
+        Some(i) => (&line[..i], line[i..].trim_matches(|c| c == ' ' || c == '\t')),
+        None => (line, ""),
+    };
+    let arg = if rest.is_empty() { None } else { Some(String::from(rest)) };
+    Some((String::from(interp), arg))
+}
+
 /// `execve`: become a different program, without returning.
 ///
 /// **It returns like any other syscall and that is the trick.** The stub ends
@@ -871,12 +894,34 @@ pub fn exec(f: &mut syscall::Frame) -> u64 {
     // while argv[0] stays the name the caller used, which is what a program
     // that dispatches on its own name reads.
     let real = super::fs::resolve("/", &path).map(super::link::follow).unwrap_or_else(|| path.clone());
-    let Some(bytes) = super::disk::program_bytes(&real) else { return ENOENT };
-    let args: Vec<&str> = if argv.is_empty() {
-        alloc::vec![path.as_str()]
-    } else {
-        argv.iter().map(|a| a.as_str()).collect()
-    };
+    let Some(mut bytes) = super::disk::program_bytes(&real) else { return ENOENT };
+    let mut owned: Vec<String> = if argv.is_empty() { alloc::vec![path.clone()] } else { argv.clone() };
+    // **A script names its interpreter, and that is the kernel's job to
+    // read.** `#!/bin/bash` was `ENOEXEC` here, which a shell hides -- bash
+    // runs a file it cannot exec as a script itself -- and nothing else does:
+    // pacman's hooks are scripts started with `execv`, and every one failed
+    // with "Exec format error". Linux's rule exactly: the rest of the first
+    // line is the interpreter and at most one argument, the script's path
+    // takes argv[0]'s place after them, and interpreters may chain four deep.
+    let mut depth = 0;
+    let mut script = path.clone();
+    while bytes.starts_with(b"#!") {
+        depth += 1;
+        if depth > 4 {
+            return (-40i64) as u64; // ELOOP
+        }
+        let Some((interp, arg)) = shebang(&bytes) else { return ENOEXEC };
+        let mut next = alloc::vec![interp.clone()];
+        next.extend(arg);
+        next.push(script.clone());
+        next.extend(owned.into_iter().skip(1));
+        owned = next;
+        let ireal = super::fs::resolve("/", &interp).map(super::link::follow).unwrap_or_else(|| interp.clone());
+        let Some(b) = super::disk::program_bytes(&ireal) else { return ENOENT };
+        bytes = b;
+        script = interp;
+    }
+    let args: Vec<&str> = owned.iter().map(|a| a.as_str()).collect();
     // Everything that can fail happens before anything is destroyed. A failed
     // `execve` returns to a caller that is still whole, which is the one thing
     // every program using it relies on -- it is how a shell reports "command
@@ -976,6 +1021,14 @@ pub fn exec(f: &mut syscall::Frame) -> u64 {
 /// it does not happen.
 pub fn checks() -> Vec<(&'static str, bool)> {
     let mut out = Vec::new();
+    let sb = |t: &str| shebang(t.as_bytes());
+    out.push(("a #! line names its interpreter", sb("#!/bin/bash\nwhile") == Some((String::from("/bin/bash"), None))));
+    out.push((
+        "and the rest of the line is one argument, however many words",
+        sb("#!/usr/bin/env -S python3 -u\n") == Some((String::from("/usr/bin/env"), Some(String::from("-S python3 -u")))),
+    ));
+    out.push(("spaces around the interpreter and a CR are not part of it", sb("#! /bin/sh \r\n") == Some((String::from("/bin/sh"), None))));
+    out.push(("and a #! with nothing after it names nothing", sb("#!\n") == None && sb("#!   ") == None));
     let img = |kind: u16, interp: bool, segs: usize| elf::Image {
         entry: 0,
         kind,
