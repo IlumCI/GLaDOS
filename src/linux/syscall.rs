@@ -768,22 +768,76 @@ fn fill_from_file(page: u64, frame: *mut u8) -> bool {
     let t0 = crate::time::rdtsc();
     let taken = big_take();
     let t1 = crate::time::rdtsc();
-    let r = (|| {
+    // What to read, found under the lock and copied out of it: the record,
+    // the file's image handle and inode, its size and the offset. **The read
+    // itself is made without the lock when this fault took it**, which is a
+    // fault at ring 3: a cold page is a disk command, and holding the guest
+    // lock across it stalled every other thread of every guest -- 5.6 s of
+    // lock held by page fills during one vim install. Nothing is borrowed
+    // across the read either, so two threads filling pages of one file
+    // cannot meet on its `RefCell`; with the borrow held, the second used to
+    // find it taken and hand back a page of zeros.
+    enum Src {
+        Image(crate::store::erofs::Image, crate::store::erofs::Inode, usize, usize),
+        Other(alloc::rc::Rc<core::cell::RefCell<super::disk::DiskFile>>, usize),
+    }
+    let src = (|| {
         let sp = unsafe { guest_slot() }.as_ref()?;
         let l = sp.lazy.iter().rev().find(|l| page >= l.at && page < l.at + l.len)?.clone();
         let off = (l.off + (page - l.at)) as usize;
-        // Already being read through on this task -- the kernel touching a
-        // mapping of the file it is in the middle of reading. Refusing is the
-        // honest answer; it has never been seen.
-        let mut f = l.file.try_borrow_mut().ok()?;
-        if off >= f.size {
-            // Past the end of the file: zero, where Linux would raise SIGBUS.
-            return Some(true);
-        }
-        let n = (f.size - off).min(4096);
-        let out = unsafe { core::slice::from_raw_parts_mut(frame, n) };
-        Some(f.read_at(off, out) == n)
+        let f = l.file.try_borrow().ok()?;
+        Some(match f.erofs_source() {
+            Some((img, ino)) => Src::Image(img, ino, f.size, off),
+            None => {
+                drop(f);
+                Src::Other(l.file.clone(), off)
+            }
+        })
     })();
+    let r = match src {
+        None => None,
+        Some(Src::Image(img, ino, size, off)) => {
+            if off >= size {
+                // Past the end of the file: zero, where Linux would raise SIGBUS.
+                Some(true)
+            } else {
+                let n = (size - off).min(4096);
+                let out = unsafe { core::slice::from_raw_parts_mut(frame, n) };
+                let read = |out: &mut [u8]| img.read(&ino, off as u64, out).unwrap_or(0);
+                // With interrupts on, as any wait in a syscall is: the lock is
+                // given back, so another thread may now `munmap` and ask this
+                // core to drop translations, and a core sitting through a disk
+                // command with interrupts masked cannot answer -- the first
+                // run reported shootdowns unanswered and then hung. This is
+                // the trampoline's path, on the task's own stack, where being
+                // preempted is allowed.
+                let got = if taken {
+                    without_big(|| {
+                        let flags: u64;
+                        unsafe { core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags)) };
+                        crate::cpu::enable_interrupts();
+                        let g = read(out);
+                        if flags & (1 << 9) == 0 {
+                            crate::cpu::disable_interrupts();
+                        }
+                        g
+                    })
+                } else {
+                    read(out)
+                };
+                Some(got == n)
+            }
+        }
+        Some(Src::Other(file, off)) => (|| {
+            let mut f = file.try_borrow_mut().ok()?;
+            if off >= f.size {
+                return Some(true);
+            }
+            let n = (f.size - off).min(4096);
+            let out = unsafe { core::slice::from_raw_parts_mut(frame, n) };
+            Some(f.read_at(off, out) == n)
+        })(),
+    };
     let t2 = crate::time::rdtsc();
     FILLS[0].fetch_add(1, Ordering::Relaxed);
     FILLS[1].fetch_add(t1 - t0, Ordering::Relaxed);
@@ -792,7 +846,8 @@ fn fill_from_file(page: u64, frame: *mut u8) -> bool {
         big_unlock();
     }
     // No record for a leaf that says it is a file: a page of zeros rather
-    // than a dead guest, since nothing else could be there.
+    // than a dead guest, since nothing else could be there. A file that
+    // could not be read is a fault, as it is on Linux.
     r.unwrap_or(true)
 }
 

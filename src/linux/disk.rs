@@ -526,6 +526,18 @@ impl DiskFile {
         Ok(DiskFile { path: String::from(path), size: n.size, at: 0, mount: m.id, body })
     }
 
+    /// What reading this file needs, copied out so the read can be made
+    /// without the guest lock: the image's handle and the inode. `None` on
+    /// FAT, whose reads go through state behind that lock.
+    pub fn erofs_source(&self) -> Option<(erofs::Image, erofs::Inode)> {
+        let Body::Erofs(ino) = &self.body else { return None };
+        let _g = big();
+        match by_id(self.mount).map(|m| &m.vol) {
+            Some(Vol::Erofs(img)) => Some((*img, *ino)),
+            _ => None,
+        }
+    }
+
     /// The permission bits the image gives this file; `None` on FAT.
     pub fn image_mode(&self) -> Option<u32> {
         match &self.body {

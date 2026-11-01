@@ -142,6 +142,10 @@ impl Inode {
     }
 }
 
+/// Copyable: four numbers, and every read through one takes its own locks
+/// (the block cache's and the controller's), so a holder of a copy may read
+/// without the guest lock.
+#[derive(Clone, Copy)]
 pub struct Image {
     /// Partition start, in 512-byte sectors.
     base: u64,
