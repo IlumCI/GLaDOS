@@ -20,6 +20,9 @@ pub mod wall;
 pub mod anim;
 pub mod quality;
 pub mod settings;
+pub mod prefs;
+pub mod setapp;
+pub mod quick;
 pub mod flip;
 pub mod tile;
 pub mod icons;
@@ -170,6 +173,15 @@ pub trait DeskApp {
     /// program asks for; a frame whose stamps did not move repaints nothing.
     fn wake_ms(&self) -> Option<u32> {
         None
+    }
+
+    /// Asked to show something else -- a page, a document -- by whatever
+    /// would otherwise have opened a second window. Answers whether it
+    /// understood. Settings is the one program that does: `win open
+    /// set:wifi` with Settings already open turns the open window to its
+    /// Wi-Fi page rather than stacking a second Settings beside it.
+    fn route(&mut self, _to: &str) -> bool {
+        false
     }
 }
 

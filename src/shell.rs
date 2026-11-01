@@ -7037,6 +7037,25 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 other => kprintln!("  no such action: {}  (try: hold, release, clear, status)", other),
             }
         }
+        // Settings: the home grid, a page by name, or a search across every
+        // setting, printed -- which is how a page is found without a screen.
+        "settings" => {
+            let arg = rest.trim();
+            if let Some(q) = arg.strip_prefix("find ") {
+                for it in crate::gfx::prefs::search(q).iter().take(12) {
+                    let page = crate::gfx::prefs::page(it.page).map(|p| p.title).unwrap_or("");
+                    kprintln!("  {:<28} {} > {}", it.label, page, it.group);
+                }
+            } else if arg == "quick" {
+                crate::gfx::desk::toggle_quick();
+            } else if arg == "list" {
+                for p in crate::gfx::prefs::PAGES.iter() {
+                    kprintln!("  {:<10} {:<24} {}", p.id, p.title, (p.summary)());
+                }
+            } else {
+                crate::gfx::setapp::open(arg);
+            }
+        }
         "win" => {
             use crate::gfx::desk;
             let mut it = rest.split_whitespace();
@@ -7199,6 +7218,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
                 "open" => {
                     let what = it.next().unwrap_or("status");
+                    // Every settings page is a page of the one Settings window.
+                    if what == "settings" || what.starts_with("set:") {
+                        crate::gfx::setapp::open(what.strip_prefix("set:").unwrap_or(""));
+                        return;
+                    }
                     match crate::gfx::ui::panel_named(what) {
                         // The panel names its own window. `win open wifi`
                         // asked for a page, not for a window called "wifi",

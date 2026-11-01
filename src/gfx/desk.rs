@@ -372,6 +372,9 @@ pub enum Mode {
     Start { item: usize },
     /// Flip 3D (Super-Tab): the windows in a stack, and the keyboard turns it.
     Flip,
+    /// Quick settings is open above the tray. `item` is the keyboard's place
+    /// in `quick::layout`.
+    Quick { item: usize },
 }
 
 /// What the pointer is over, for the paint pass.
@@ -613,7 +616,7 @@ const ICONS: [(&str, &str); 10] = [
     ("Write", "write"),
     ("Mines", "mines"),
     ("Oracle", "oracle"),
-    ("Settings", "win open set:desk"),
+    ("Settings", "settings"),
 ];
 
 /// The Start menu, bottom of the bar upward -- the 98 half of the ancestry.
@@ -643,7 +646,7 @@ const START_ITEMS: [(&str, &str); 14] = [
     ("Write", "write"),
     ("Mines", "mines"),
     ("Oracle", "oracle"),
-    ("Settings", "win open set:desk"),
+    ("Settings", "settings"),
     ("Reboot", "reboot"),
     ("Shut down", "shutdown"),
 ];
@@ -1470,6 +1473,28 @@ pub fn open_authoring() {
         w,
         h,
     });
+}
+
+/// Hand a route to the open program titled `title`, raise it and focus it.
+/// Answers false when there is no such window or it did not understand.
+pub fn route_app(title: &str, to: &str) -> bool {
+    let done = with(|d| {
+        let Some(i) = d.windows.iter().rposition(|w| w.title == title) else { return false };
+        let ok = match &mut d.windows[i].content {
+            Content::App(a) => a.route(to),
+            _ => false,
+        };
+        if ok {
+            if d.windows[i].state == WinState::Minimised {
+                d.windows[i].state = WinState::Normal;
+            }
+            d.raise(i);
+        }
+        ok
+    })
+    .unwrap_or(false);
+    super::render::invalidate();
+    done
 }
 
 /// Is a window with this title already open?
@@ -3031,6 +3056,24 @@ fn press_at(x: i32, y: i32) {
         return;
     }
 
+    // Quick settings eats the press the way a menu does: inside it acts,
+    // anywhere else it closes -- its own button included, which is the
+    // button's toggle.
+    if let Some(Mode::Quick { .. }) = with(|d| d.mode) {
+        let (inside, close, sel) = super::quick::press(quick_panel(&fb), x, y);
+        with(|d| {
+            if close {
+                d.mode = Mode::Normal;
+            } else if let Some(k) = sel {
+                d.mode = Mode::Quick { item: k };
+            }
+        });
+        super::render::invalidate();
+        if inside || contains(quick_button(&fb), x, y) {
+            return;
+        }
+    }
+
     if contains(taskbar_rect(&fb), x, y) {
         task_press(&fb, x, y);
         super::render::invalidate();
@@ -3358,6 +3401,10 @@ fn super_key(k: u8) {
             }
         }
         (b'v', _) => toggle_float(),
+        (b'a', _) => {
+            toggle_quick();
+            return;
+        }
         (b'j', _) => toggle_split(),
         (b'f', _) => {
             with(|d| {
@@ -3425,6 +3472,10 @@ pub fn close_focused() {
 /// The focused window's own button minimises it, which is the bar's one
 /// toggle and the reason it can replace stowed icons.
 fn task_press(fb: &Framebuffer, x: i32, y: i32) {
+    if contains(quick_button(fb), x, y) {
+        toggle_quick();
+        return;
+    }
     if contains(start_rect(fb), x, y) {
         with(|d| {
             d.mode = match d.mode {
@@ -4866,7 +4917,7 @@ fn task_layout(fb: &Framebuffer, d: &Desktop) -> Vec<(Rect, usize, bool)> {
         // Stop before whatever is on the right rather than drawing under it.
         // The charge well sits left of the clock when there is one, so the
         // buttons have to break against it and not against the clock.
-        let right = battery_rect(fb).map(|r| r.x).unwrap_or_else(|| clock_rect(fb).x);
+        let right = quick_button(fb).x;
         if x + w > right {
             break;
         }
@@ -5058,7 +5109,7 @@ fn taskbar_tail(fb: &Framebuffer, d: &Desktop) {
     if total > shown {
         let label = alloc::format!("+{}", total - shown);
         let w = theme::text_w_of(&label) + 8;
-        let right = battery_rect(fb).map(|r| r.x).unwrap_or_else(|| clock_rect(fb).x);
+        let right = quick_button(fb).x;
         let bar = taskbar_rect(fb);
         if right > w + 6 {
             let r = Rect::new(right - w - 6, bar.y + 4, w, bar.h - 8);
@@ -5067,6 +5118,26 @@ fn taskbar_tail(fb: &Framebuffer, d: &Desktop) {
             super::shape::rrect(fb, b, 4, super::blend::premul(white, 40));
             let ty = r.y + (r.h.saturating_sub(theme::text_h())) / 2;
             theme::text_over(fb, r.x + 4, ty, &label, theme::TITLE_TEXT);
+        }
+    }
+
+    // Quick settings: three sliders, lit while its panel is open.
+    let q = quick_button(fb);
+    let open = matches!(d.mode, Mode::Quick { .. });
+    if open {
+        let white = fb.encode(Color::new(255, 255, 255));
+        super::shape::rrect(fb, super::shape::Box::new(q.x as i32, q.y as i32, q.w, q.h), 5, super::blend::premul(white, 50));
+    }
+    {
+        let ink = super::blend::opaque(fb.encode(theme::TITLE_TEXT));
+        let lw = q.w * 9 / 16;
+        let lx = q.x + (q.w - lw) / 2;
+        let gap = q.h / 5;
+        for (k, at) in [3u32, 7, 4].iter().enumerate() {
+            let y = q.y + q.h / 2 - gap + k as u32 * gap;
+            fb.over_span(lx, y, lw, ink);
+            let kx = lx as f32 + lw as f32 * *at as f32 / 10.0;
+            super::shape::circle(fb, kx, y as f32 + 0.5, (q.h as f32 / 11.0).max(2.0), ink);
         }
     }
 
@@ -5110,6 +5181,29 @@ pub fn battery_text() -> Option<alloc::string::String> {
         None => ' ',
     };
     Some(alloc::format!("{}{}% ", mark, c.percent))
+}
+
+/// The quick-settings button, left of the tray's readouts. The task buttons
+/// break against it.
+pub fn quick_button(fb: &Framebuffer) -> Rect {
+    let right = battery_rect(fb).map(|r| r.x).unwrap_or_else(|| clock_rect(fb).x);
+    super::quick::button(taskbar_rect(fb), right)
+}
+
+/// The quick-settings panel, over its button.
+pub fn quick_panel(fb: &Framebuffer) -> Rect {
+    super::quick::panel(fb, quick_button(fb), taskbar_rect(fb))
+}
+
+/// Super-A, the tray button and `settings quick`: open or close the panel.
+pub fn toggle_quick() {
+    with(|d| {
+        d.mode = match d.mode {
+            Mode::Quick { .. } => Mode::Normal,
+            _ => Mode::Quick { item: 0 },
+        }
+    });
+    super::render::invalidate();
 }
 
 /// Where the uptime readout goes. Right-hand end of the bar.
@@ -5607,9 +5701,19 @@ fn layers(d: &Desktop, fb: &Framebuffer, screen: Rect) -> Vec<super::scene::Laye
     if let Some(r) = hint_rect(fb, d) {
         grow(r);
     }
+    if let Mode::Quick { .. } = d.mode {
+        let p = quick_panel(fb);
+        let (l, t, r, b) = super::shadow::reach(super::shadow::Spec { radius: 12, sigma: 10.0 }, 0, 4);
+        let x0 = p.x.saturating_sub(l);
+        let y0 = p.y.saturating_sub(t);
+        grow(Rect::new(x0, y0, (p.x + p.w + r).min(fb.width()) - x0, (p.y + p.h + b).min(fb.height()) - y0));
+    }
     if let Some(b) = over {
         let mut st = Stamp::new();
         (d.mode, d.hover, d.query.as_str(), focus).hash(&mut st);
+        if let Mode::Quick { .. } = d.mode {
+            super::quick::stamp().hash(&mut st);
+        }
         if let Hover::Task(t) = d.hover {
             d.windows.get(t).map(|w| w.title.as_str()).hash(&mut st);
             // The preview is live: it follows the window's image.
@@ -6603,8 +6707,12 @@ fn paint_scene(target: &Framebuffer, d: &Desktop, screen: Rect) {
                 | Mode::Drag { .. }
                 | Mode::DragSize { .. }
                 | Mode::Start { .. }
+                | Mode::Quick { .. }
                 | Mode::Flip => {}
             }
+        }
+        if let Mode::Quick { item } = d.mode {
+            super::quick::paint(&fb, quick_panel(&fb), item);
         }
         if let Mode::Start { item } = d.mode {
             let p = start_menu_rect(&fb);
@@ -7049,6 +7157,14 @@ pub fn key(k: u8) -> Route {
                 }
                 _ => {}
             }
+            Route::Handled
+        }
+
+        Mode::Quick { item } => {
+            let Some(fb) = super::primary() else { return Route::Handled };
+            let (sel, close) = super::quick::key(quick_panel(&fb), item, k);
+            with(|d| d.mode = if close { Mode::Normal } else { Mode::Quick { item: sel } });
+            super::render::invalidate();
             Route::Handled
         }
 
