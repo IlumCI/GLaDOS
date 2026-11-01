@@ -58,9 +58,11 @@ const ACK: u8 = 0x10;
 /// are 2048 bytes, so a full-size segment fits with room to spare.
 const MSS: usize = 1460;
 
-/// What we advertise. Large enough that a peer sending a small HTTP response
-/// never stalls waiting for a window update.
-const RCV_CAPACITY: usize = 32768;
+/// What we advertise: the most the header can say without window scaling.
+/// It was 32 KiB, on the argument that a small HTTP response never fills it;
+/// a package database is eight megabytes, and the window is the ceiling on
+/// how much the peer may send per round trip.
+const RCV_CAPACITY: usize = 65535;
 
 /// Standing in for congestion control. See the module note.
 const MAX_FLIGHT_SEGMENTS: usize = 4;
@@ -406,11 +408,15 @@ fn flush(ends: Ends, out: Outbox) {
 /// so nesting inside the heap's `lock_irq` is safe, and `pump` nesting `at`
 /// inside its own masked reap block is safe for the same reason.
 ///
-/// **This is sufficient because every task is pinned to core 0.** Interrupts
-/// off stops preemption, and preemption is the only way a second task can start
-/// on one core. `task::unpin` exists and nothing calls it; the day something
-/// does, this has to become a real lock, and so does the guard.
+/// **This was sufficient while every task was pinned to core 0**, and said
+/// that the day something was unpinned it would have to become a real lock.
+/// Guest threads were unpinned long before anybody came back here, so the
+/// guard below is that lock.
 fn at<R>(h: Handle, f: impl FnOnce(&mut Tcb) -> R) -> Option<R> {
+    // Not sufficient any more on its own: see `StackGuard::wait`. Interrupts
+    // off still keeps this task from being preempted with `&mut Tcb` live;
+    // the guard keeps every other core out of the table meanwhile.
+    let _g = super::StackGuard::wait();
     crate::cpu::without_interrupts(|| table().get_mut(h)?.as_mut().map(f))
 }
 
@@ -432,6 +438,7 @@ pub fn state_of(h: Handle) -> State {
 
 /// How many connections are open, for a report.
 pub fn open_count() -> usize {
+    let _g = super::StackGuard::wait();
     table().iter().filter(|t| t.is_some()).count()
 }
 
@@ -750,6 +757,30 @@ fn on_segment(t: &mut Tcb, src: Ipv4, seg: &[u8]) -> Outbox {
     out
 }
 
+/// A window update, after a read has drained `before` bytes' worth of the
+/// receive buffer down to what it holds now.
+///
+/// **Nothing told the peer the window had opened again**, so a download that
+/// filled the buffer stalled at a zero window until the sender's persist
+/// timer probed it: `pacman -Syy` read 8 MB in 465 s, every `recvfrom` taking
+/// half a second for nine kilobytes. An ACK is the only way a receiver says
+/// so. Sent when the window had fallen under half and has grown by at least
+/// a segment, which is the receiver's half of silly-window avoidance (RFC
+/// 1122 4.2.3.3): not an update per byte read, and never one the peer could
+/// not use.
+fn window_update(t: &mut Tcb, before: usize) -> Option<(Ends, Outbox)> {
+    if !matches!(t.state, State::Established | State::FinWait1 | State::FinWait2) {
+        return None;
+    }
+    let was = RCV_CAPACITY.saturating_sub(before);
+    let now = RCV_CAPACITY.saturating_sub(t.recv_buf.len());
+    if was * 2 < RCV_CAPACITY && now >= was + MSS {
+        Some(((t.local_ip, t.remote), alloc::vec![t.segment(ACK, t.snd_nxt, &[], false)]))
+    } else {
+        None
+    }
+}
+
 /// Send whatever the window allows, then the FIN if one is due.
 fn queue_pending(t: &mut Tcb, out: &mut Outbox) {
     if t.state == State::SynSent || t.state == State::Closed {
@@ -928,6 +959,9 @@ pub fn open(dst: Ipv4, port: u16, timeout_ms: u64) -> Result<Handle, Error> {
     // reuses a four-tuple a previous one has just finished with.
     let local_port = 49152 + (entropy() % 16384) as u16;
 
+    // Finding a free slot and filling it are one step, or two cores opening
+    // at once are handed the same slot.
+    let claim = super::StackGuard::wait();
     let Some(h) = alloc_slot() else { return Err(Error::NoSlot) };
     let tcb = Tcb {
         state: State::SynSent,
@@ -958,6 +992,7 @@ pub fn open(dst: Ipv4, port: u16, timeout_ms: u64) -> Result<Handle, Error> {
         deadline_wait: 0,
     };
     table()[h] = Some(tcb);
+    drop(claim);
 
     let (ends, syn) = at(h, |t| {
         t.arm_retx();
@@ -1019,7 +1054,16 @@ pub fn recv_at(h: Handle, timeout_ms: u64) -> Vec<u8> {
     wait_until(timeout_ms, || {
         at(h, |t| !t.recv_buf.is_empty() || t.peer_fin).unwrap_or(true)
     });
-    at(h, |t| core::mem::take(&mut t.recv_buf)).unwrap_or_default()
+    let (v, upd) = at(h, |t| {
+        let before = t.recv_buf.len();
+        let v = core::mem::take(&mut t.recv_buf);
+        (v, window_update(t, before))
+    })
+    .unwrap_or_default();
+    if let Some((ends, out)) = upd {
+        flush(ends, out);
+    }
+    v
 }
 
 /// `recv_at` taking at most `max` bytes, leaving the rest for the next call.
@@ -1033,11 +1077,17 @@ pub fn recv_upto(h: Handle, max: usize, timeout_ms: u64) -> Vec<u8> {
     wait_until(timeout_ms, || {
         at(h, |t| !t.recv_buf.is_empty() || t.peer_fin).unwrap_or(true)
     });
-    at(h, |t| {
-        let n = t.recv_buf.len().min(max);
-        t.recv_buf.drain(..n).collect()
+    let (v, upd) = at(h, |t| {
+        let before = t.recv_buf.len();
+        let n = before.min(max);
+        let v: Vec<u8> = t.recv_buf.drain(..n).collect();
+        (v, window_update(t, before))
     })
-    .unwrap_or_default()
+    .unwrap_or_default();
+    if let Some((ends, out)) = upd {
+        flush(ends, out);
+    }
+    v
 }
 
 /// Whether the peer has finished sending on one connection.
@@ -1088,7 +1138,14 @@ pub fn recv(timeout_ms: u64) -> Vec<u8> {
     wait_until(timeout_ms, || {
         with_tcb(|t| !t.recv_buf.is_empty() || t.peer_fin).unwrap_or(true)
     });
-    if let Some(v) = with_tcb(|t| core::mem::take(&mut t.recv_buf)) {
+    if let Some((v, upd)) = with_tcb(|t| {
+        let before = t.recv_buf.len();
+        let v = core::mem::take(&mut t.recv_buf);
+        (v, window_update(t, before))
+    }) {
+        if let Some((ends, out)) = upd {
+            flush(ends, out);
+        }
         if !v.is_empty() {
             return v;
         }
@@ -1184,6 +1241,7 @@ pub fn close(timeout_ms: u64) {
 /// is now empty are rejected by `route`, which is the right outcome for the
 /// connection being abandoned and for its neighbours both.
 fn abort() {
+    let _g = super::StackGuard::wait();
     if let Some(h) = unsafe { CURRENT.get().take() } {
         table()[h] = None;
     }
@@ -1206,6 +1264,7 @@ pub fn abort_from(local: Ipv4) {
 }
 
 pub fn abort_at(h: Handle) {
+    let _g = super::StackGuard::wait();
     if h < MAX_CONNS {
         table()[h] = None;
     }

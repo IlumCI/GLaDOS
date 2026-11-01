@@ -5268,13 +5268,36 @@ pub(super) fn sys_connect(fd: u64, at: u64, len: u64) -> u64 {
     };
     // The borrow ends before the connect: opening one pumps the stack, which
     // can deliver to another socket, which would want this same table.
-    match crate::net::tcp::open(ip, port, SOCK_TIMEOUT_MS) {
+    match without_big(|| crate::net::tcp::open(ip, port, SOCK_TIMEOUT_MS)) {
         Ok(h) => {
             sock.borrow_mut().conn = Some(h);
             0
         }
         Err(e) => sock_err(e),
     }
+}
+
+/// Run a network wait with the guest lock given back.
+///
+/// **A download held every guest still.** `recvfrom` waited for the network
+/// under the guest lock, 454 ms a call during `pacman -Sy`, and every other
+/// guest thread -- and the display server they pump -- queued behind it. The
+/// TCP stack has its own lock now (`net::StackGuard::wait`), which is what
+/// makes this safe: two guests' sockets on two cores no longer meet in it
+/// with only the guest lock between them. Nothing borrowed from guest state
+/// may be held across it, and guest memory may change under it: the socket
+/// calls copy their handle out first, copy what they send before, and ask
+/// `reachable` again before copying what they received.
+pub(super) fn without_big<T>(f: impl FnOnce() -> T) -> T {
+    let held = holds_big();
+    if held {
+        big_unlock();
+    }
+    let r = f();
+    if held {
+        big_lock();
+    }
+    r
 }
 
 /// How long a socket call waits before answering.
@@ -5305,8 +5328,10 @@ pub(super) fn sys_send(fd: u64, buf: u64, len: u64) -> u64 {
         Err(e) => return e,
     };
     let Some(h) = sock.borrow().conn else { return ENOTCONN };
-    let data = unsafe { core::slice::from_raw_parts(buf as *const u8, len as usize) };
-    match crate::net::tcp::send_at(h, data, SOCK_TIMEOUT_MS) {
+    // Copied before the lock goes: another thread of this guest may unmap the
+    // buffer while this one waits for the network.
+    let data = unsafe { core::slice::from_raw_parts(buf as *const u8, len as usize) }.to_vec();
+    match without_big(|| crate::net::tcp::send_at(h, &data, SOCK_TIMEOUT_MS)) {
         Ok(()) => len,
         Err(e) => sock_err(e),
     }
@@ -5327,7 +5352,7 @@ pub(super) fn sys_recv(fd: u64, buf: u64, len: u64) -> u64 {
         Err(e) => return e,
     };
     let Some(h) = sock.borrow().conn else { return ENOTCONN };
-    let got = crate::net::tcp::recv_upto(h, len as usize, SOCK_TIMEOUT_MS);
+    let got = without_big(|| crate::net::tcp::recv_upto(h, len as usize, SOCK_TIMEOUT_MS));
     if got.is_empty() {
         // Zero means end of file, and only end of file. A timeout with the
         // peer still there is `EAGAIN`, because a program reading zero from a
@@ -5338,6 +5363,12 @@ pub(super) fn sys_recv(fd: u64, buf: u64, len: u64) -> u64 {
     // connection for the next read (it once took everything and this copied
     // what fitted, under a comment saying the rest was kept).
     let n = got.len();
+    // Asked again, because the lock was given back for the wait and the
+    // buffer may have been unmapped meanwhile. The bytes are lost then, as
+    // they would be to a program that freed its own buffer mid-read.
+    if !reachable(buf, n, true) {
+        return EFAULT;
+    }
     unsafe { core::ptr::copy_nonoverlapping(got.as_ptr(), buf as *mut u8, n) };
     n as u64
 }
@@ -5350,7 +5381,7 @@ pub(super) fn sys_shutdown(fd: u64, _how: u64) -> u64 {
     let taken = sock.borrow_mut().conn.take();
     match taken {
         Some(h) => {
-            crate::net::tcp::close_at(h, SOCK_TIMEOUT_MS);
+            without_big(|| crate::net::tcp::close_at(h, SOCK_TIMEOUT_MS));
             0
         }
         None => ENOTCONN,
