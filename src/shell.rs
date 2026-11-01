@@ -7611,6 +7611,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     kprintln!("  a reaping wait4: {} us inside it, {} round(s) of its loop, each",
                         w[0].load(core::sync::atomic::Ordering::Relaxed) / pn / mhz,
                         w[1].load(core::sync::atomic::Ordering::Relaxed) / pn);
+                    let ff = &crate::cpu::idt::FILE_FAULTS;
+                    let fl = &linux::syscall::FILL_FAIL;
+                    let g = |a: &core::sync::atomic::AtomicU64| a.load(core::sync::atomic::Ordering::Relaxed);
+                    kprintln!("  file faults: {} by trampoline, {} on the IST stack, {} refused; fills failed: {} no record, {} short image read, {} short other read",
+                        g(&ff[0]), g(&ff[1]), g(&ff[2]), g(&fl[0]), g(&fl[1]), g(&fl[2]));
                     let r = &crate::store::block::READS;
                     let rn = r[0].load(core::sync::atomic::Ordering::Relaxed).max(1);
                     kprintln!(

@@ -83,6 +83,11 @@ const GUEST_STACK: usize = 1024 * 1024;
 /// enough that a guest which runs away hits the ceiling instead of the heap.
 const GUEST_BRK: usize = 256 * 1024;
 
+/// How much of the top of a guest's stack is backed at load rather than
+/// promised: room for the arguments, the environment and the aux vector,
+/// which are written there before the guest runs.
+const STACK_BACKED: usize = 128 * 1024;
+
 /// Where a guest's own memory lives when it has a space, and why it is here.
 ///
 /// **Every guest gets the same two addresses, and that is the whole point.**
@@ -547,23 +552,40 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
         _ => None,
     };
 
-    let brk = Exec::new(GUEST_BRK).ok_or("no room for a break region")?;
-    let stack = Exec::new(GUEST_STACK).ok_or("no room for a stack")?;
+    // **With a space, the stack and the break are promised, not allocated.**
+    // Every page of both was backed and mapped at load, so every `fork`
+    // copied all of them -- 320 pages of a 1 MiB stack and a 256 KiB break,
+    // nearly none ever touched -- and every `exec` allocated them again.
+    // Promised, a page is supplied zeroed when first touched and a fork
+    // shares what has been (`paging::COW`). Only the top of the stack is
+    // backed now, because the arguments, environment and aux vector are
+    // written there before the guest has tables to fault through.
+    let brk = Exec::new(if virt { 4096 } else { GUEST_BRK }).ok_or("no room for a break region")?;
+    let stack_backed = if virt { STACK_BACKED } else { GUEST_STACK };
+    let stack = Exec::new(stack_backed).ok_or("no room for a stack")?;
 
     // Where the guest will see them, which is where the kernel put them only
     // when there is no space to map them into.
     let (stack_at, brk_at) = match space.as_mut() {
         Some(sp) => {
-            for (backing, at, len) in
-                [(stack.addr(), lay.stack, GUEST_STACK), (brk.addr(), lay.brk, GUEST_BRK)]
-            {
+            let rw = crate::mem::paging::Perm { present: true, write: true, exec: true, user: true };
+            let promised = GUEST_STACK - stack_backed;
+            for (at, len) in [(lay.stack, promised), (lay.brk, GUEST_BRK)] {
                 let mut off = 0u64;
                 while off < len as u64 {
-                    if !sp.map_page(at + off, backing + off, true, true) {
+                    if !sp.promise_page(at + off, rw) {
                         return Err("the guest's stack or break could not be mapped");
                     }
                     off += 4096;
                 }
+            }
+            let top = lay.stack + promised as u64;
+            let mut off = 0u64;
+            while off < stack_backed as u64 {
+                if !sp.map_page(top + off, stack.addr() + off, true, true) {
+                    return Err("the guest's stack or break could not be mapped");
+                }
+                off += 4096;
             }
             (lay.stack, lay.brk)
         }
@@ -590,10 +612,12 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
             .map(|s| base + (s.vaddr - lo) + (img.phoff - s.offset) as u64)
     });
     let build = if bits32 { syscall::build_stack32 } else { syscall::build_stack };
+    // The backed part is the top of the region, so that is what is built in:
+    // the same top address, a smaller span below it.
     let stack_top = build(
         stack.addr() as *mut u8,
-        stack_at,
-        GUEST_STACK,
+        stack_at + (GUEST_STACK - stack_backed) as u64,
+        stack_backed,
         args,
         syscall::Aux {
             phdr: phdr.unwrap_or(0),

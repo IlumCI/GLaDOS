@@ -490,6 +490,16 @@ pub unsafe extern "sysv64" fn glados_fault_entry(f: *const Frame) {
     // stack is the task's own entry stack, empty because nothing is
     // mid-syscall; at ring 0 it is the stack that was interrupted, below
     // where it stood -- this target's ABI has no red zone.
+    // **A fault somebody else already resolved.** Two threads touching a new
+    // page at once both fault; the first fills it, and the second's handler
+    // runs to find a present page and no promise -- and took that for a real
+    // fault and killed the guest. A thread curl had just started died of it
+    // inside libcurl's own code, the page sitting there filled. Not present
+    // when raised and present now is a retry, not a crash. Only a
+    // not-present fault: a protection fault on a present page is real.
+    if fr.vector == 14 && fr.err & 1 == 0 && crate::mem::paging::resolved(read_cr2(), fr.err) {
+        return;
+    }
     // A write to a page shared copy-on-write: a copy, or the frame back if
     // nobody else holds it, and the instruction runs again. Present and a
     // write is what the error code says; anything else about it is a real
@@ -515,6 +525,11 @@ pub unsafe extern "sysv64" fn glados_fault_entry(f: *const Frame) {
     if fr.vector == 14 && fr.err & 1 == 0 && crate::mem::paging::file_promised(read_cr2(), fr.err & 2 != 0) {
         let user = fr.cs & 3 == 3;
         let top = if user { gdt::task_rsp0() } else { fr.rsp.saturating_sub(64) };
+        if top == 0 {
+            FILE_FAULTS[1].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        } else {
+            FILE_FAULTS[0].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
         if top != 0 {
             let dst = ((top - size_of::<Frame>() as u64) & !0xF) as *mut Frame;
             let f = f as *mut Frame;
@@ -546,6 +561,13 @@ pub unsafe extern "sysv64" fn glados_fault_entry(f: *const Frame) {
     }
     // The pointer is the stub's own stack pointer, so what it names outlives
     // every use below: nothing past this point returns.
+    if fr.vector == 14 && fr.cs & 3 == 3 {
+        let cr2 = read_cr2();
+        crate::serial_println!(
+            "[pf] ring 3 at {:#x} (rip {:#x}, err {:#x}): leaf {:#x}",
+            cr2, fr.rip, fr.err, crate::mem::paging::leaf(cr2 & !0xFFF).unwrap_or(u64::MAX)
+        );
+    }
     fault(fr)
 }
 
@@ -583,6 +605,10 @@ extern "sysv64" {
     fn glados_fill_trampoline();
 }
 
+/// File faults by route: through the trampoline, kept on the IST stack for
+/// want of a task stack, and refused once they got there (`linux fills`).
+pub static FILE_FAULTS: [core::sync::atomic::AtomicU64; 3] = [const { core::sync::atomic::AtomicU64::new(0) }; 3];
+
 /// Keep a file promise, on a stack where waiting is allowed; a promise that
 /// cannot be kept is the fault it always was.
 #[no_mangle]
@@ -596,6 +622,11 @@ unsafe extern "sysv64" fn glados_fill_fault(f: *mut Frame) {
     let kept = crate::mem::paging::populate(cr2 & !0xFFF, fr.err & 2 != 0);
     unsafe { core::arch::asm!("fxrstor64 [{}]", in(reg) fx.0.as_ptr(), options(nostack)) };
     if !kept {
+        FILE_FAULTS[2].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::serial_println!(
+            "[fill] refused at {:#x} (rip {:#x}, err {:#x}), leaf {:#x}",
+            cr2, fr.rip, fr.err, crate::mem::paging::leaf(cr2 & !0xFFF).unwrap_or(0)
+        );
         fault(fr)
     }
 }

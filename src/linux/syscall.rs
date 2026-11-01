@@ -763,20 +763,19 @@ pub struct Lazy {
 /// What filling file pages has cost: how many, the cycles spent waiting for
 /// the guest lock, and the cycles spent reading (`linux fills`).
 pub static FILLS: [core::sync::atomic::AtomicU64; 3] = [const { core::sync::atomic::AtomicU64::new(0) }; 3];
+/// Fills that failed, by why: no record for the page, a short read of an
+/// image file, a short read of another file.
+pub static FILL_FAIL: [core::sync::atomic::AtomicU64; 3] = [const { core::sync::atomic::AtomicU64::new(0) }; 3];
 
 fn fill_from_file(page: u64, frame: *mut u8) -> bool {
     let t0 = crate::time::rdtsc();
     let taken = big_take();
     let t1 = crate::time::rdtsc();
-    // What to read, found under the lock and copied out of it: the record,
-    // the file's image handle and inode, its size and the offset. **The read
-    // itself is made without the lock when this fault took it**, which is a
-    // fault at ring 3: a cold page is a disk command, and holding the guest
-    // lock across it stalled every other thread of every guest -- 5.6 s of
-    // lock held by page fills during one vim install. Nothing is borrowed
-    // across the read either, so two threads filling pages of one file
-    // cannot meet on its `RefCell`; with the borrow held, the second used to
-    // find it taken and hand back a page of zeros.
+    // What to read, found and copied out first: the record, the file's image
+    // handle and inode, its size and the offset. **Nothing is borrowed across
+    // the read**, so two threads filling pages of one file cannot meet on its
+    // `RefCell`; with the borrow held, the second found it taken and was
+    // handed a page of zeros.
     enum Src {
         Image(crate::store::erofs::Image, crate::store::erofs::Inode, usize, usize),
         Other(alloc::rc::Rc<core::cell::RefCell<super::disk::DiskFile>>, usize),
@@ -795,7 +794,10 @@ fn fill_from_file(page: u64, frame: *mut u8) -> bool {
         })
     })();
     let r = match src {
-        None => None,
+        None => {
+            FILL_FAIL[0].fetch_add(1, Ordering::Relaxed);
+            None
+        }
         Some(Src::Image(img, ino, size, off)) => {
             if off >= size {
                 // Past the end of the file: zero, where Linux would raise SIGBUS.
@@ -803,28 +805,18 @@ fn fill_from_file(page: u64, frame: *mut u8) -> bool {
             } else {
                 let n = (size - off).min(4096);
                 let out = unsafe { core::slice::from_raw_parts_mut(frame, n) };
-                let read = |out: &mut [u8]| img.read(&ino, off as u64, out).unwrap_or(0);
-                // With interrupts on, as any wait in a syscall is: the lock is
-                // given back, so another thread may now `munmap` and ask this
-                // core to drop translations, and a core sitting through a disk
-                // command with interrupts masked cannot answer -- the first
-                // run reported shootdowns unanswered and then hung. This is
-                // the trampoline's path, on the task's own stack, where being
-                // preempted is allowed.
-                let got = if taken {
-                    without_big(|| {
-                        let flags: u64;
-                        unsafe { core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags)) };
-                        crate::cpu::enable_interrupts();
-                        let g = read(out);
-                        if flags & (1 << 9) == 0 {
-                            crate::cpu::disable_interrupts();
-                        }
-                        g
-                    })
-                } else {
-                    read(out)
-                };
+                // Under the guest lock. It was let go for the read, and that
+                // let another thread `mprotect` or `munmap` the page in the
+                // middle of filling it: the promise's leaf changed under the
+                // compare-and-swap and the fill was refused, which a thread
+                // curl had just started took as a real fault and died of. The
+                // controller's own lock is also taken with interrupts masked,
+                // so a filler preempted inside it could stall a syscall on its
+                // core for good. A fill on real NVMe is a hundred microseconds.
+                let got = img.read(&ino, off as u64, out).unwrap_or(0);
+                if got != n {
+                    FILL_FAIL[1].fetch_add(1, Ordering::Relaxed);
+                }
                 Some(got == n)
             }
         }
@@ -1275,6 +1267,7 @@ pub fn replace_guest(
             give_back(m.at, m.len, Some(m.from));
         }
     }
+    free_region_demand(old);
     for (at, len) in core::mem::take(&mut old.owned) {
         free_pages(at, len);
     }
@@ -1716,6 +1709,7 @@ fn teardown_locked() -> usize {
                     f.flush();
                 }
             }
+            free_region_demand(sp);
             let maps = core::mem::take(&mut sp.maps);
             for m in maps {
                 // A guest is free to exit having mprotected its mappings to
@@ -1809,6 +1803,7 @@ fn release_guest_locked(i: usize) {
             f.flush();
         }
     }
+    free_region_demand(&mut sp);
     let maps = core::mem::take(&mut sp.maps);
     for m in maps {
         if m.from == Source::Paged {
@@ -9428,6 +9423,26 @@ pub static MAP_NAMES: Racy<Vec<(u64, u64, u64, String)>> = Racy::new(Vec::new())
 /// leaf is read raw: a page the guest `mprotect`ed to `PROT_NONE` has no
 /// present bit and still has a frame, and `phys_of` -- which asks for present
 /// -- leaked it. A promise has no frame and only its leaf goes.
+/// Frames supplied on demand inside a guest's own regions -- the stack and the
+/// break are promised (`load`), and a fork shares what was touched -- given
+/// back. The rest of each region is backed by a block its `Guest` or `owned`
+/// frees, and this leaves those leaves alone.
+fn free_region_demand(sp: &mut Space) {
+    let mut r: alloc::vec::Vec<(u64, u64)> = alloc::vec![
+        (sp.image.at, page_up(sp.image.len) as u64),
+        (sp.stack.at, page_up(sp.stack.len) as u64),
+        (sp.brk_start, sp.brk_end.saturating_sub(sp.brk_start)),
+    ];
+    if let Some(i) = sp.interp {
+        r.push((i.at, page_up(i.len) as u64));
+    }
+    for (at, len) in r {
+        if len > 0 {
+            free_leaves(sp, at, len, true);
+        }
+    }
+}
+
 fn free_paged(sp: &mut Space, at: u64, len: u64) {
     free_leaves(sp, at, len, false);
 }

@@ -460,13 +460,6 @@ pub fn pop() -> Option<u8> {
     }
 
     pub fn pop_any() -> Option<u8> {
-        // `pop` reports the origin of what it hands back, because the ring
-        // holds both kinds and only it knows which slot this came from.
-        if let Some(k) = pop() {
-            return Some(k);
-        }
-        let b = crate::serial::read_byte()?;
-        FROM_SERIAL.store(true, Ordering::Relaxed);
         // Drain the UART FIFO into the ring while it has data, not one byte
         // per poll. The shell polls at its own cadence -- hlt woken by the
         // 100 Hz timer -- and a 45-character command arrives in a burst the
@@ -475,17 +468,25 @@ pub fn pop() -> Option<u8> {
         // only when the line followed other output; reading until empty
         // closes the window entirely. The ring is the buffer it always
         // should have been.
+        //
+        // **Into the ring first, and only then out of it.** This took the
+        // first byte off the UART and handed it back directly whenever `pop`
+        // had nothing to give -- and `pop` gives nothing while a key is in
+        // flight to the compositor, with older bytes still waiting in the
+        // ring. The new byte then overtook them: a typed `linux fills` arrived
+        // as `linux filsl`, and `linux run` as `linuxx r ruunn`. One road
+        // through the ring is the only order there is.
         let mut guard = 0;
         while guard < 64 {
             guard += 1;
             match crate::serial::read_byte() {
-                // Marked as serial, because it is: these are the rest of the
-                // same burst whose first byte is being returned below.
                 Some(next) => push_from(translate(next), true),
                 None => break,
             }
         }
-        Some(translate(b))
+        // `pop` reports the origin of what it hands back, because the ring
+        // holds both kinds and only it knows which slot this came from.
+        pop()
     }
 
 /// How many bytes are waiting to be read.

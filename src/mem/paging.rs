@@ -176,6 +176,24 @@ pub fn cow_break(addr: u64) -> bool {
     true
 }
 
+/// Whether the access a page fault describes would now succeed: the leaf for
+/// `addr` is present and allows a user access, a write, a fetch, as the error
+/// code asks. True means the fault was resolved by somebody else between the
+/// processor raising it and the handler looking -- another thread filling the
+/// same page -- and the instruction only has to run again.
+pub fn resolved(addr: u64, err: u64) -> bool {
+    let Some(e) = (unsafe { entry_for(addr & !0xFFF, false) }).map(|e| *e) else { return false };
+    if e & PRESENT == 0 {
+        return false;
+    }
+    let user = err & 4 != 0;
+    let write = err & 2 != 0;
+    let fetch = err & 16 != 0;
+    (!user || e & USER != 0)
+        && (!write || e & WRITABLE != 0)
+        && (!fetch || e & NX == 0 || !crate::cpu::nx_on())
+}
+
 /// Whether `addr` under the current root is a copy-on-write page the guest may
 /// write -- a write the kernel must break the share for before making it.
 pub fn cow_writable(addr: u64) -> bool {
@@ -866,12 +884,24 @@ pub fn populate(addr: u64, write: bool) -> bool {
             }
         }
     }
-    let new = (frame as u64 & ADDR_MASK) | (e & !ACCESS) | PRESENT;
-    match cell.compare_exchange(e, new, Ordering::AcqRel, Ordering::Acquire) {
-        Ok(_) => true,
-        Err(now) => {
-            unsafe { alloc::alloc::dealloc(frame, layout) };
-            now & PRESENT != 0 && (!write || now & WRITABLE != 0)
+    let mut e = e;
+    loop {
+        let new = (frame as u64 & ADDR_MASK) | (e & !ACCESS) | PRESENT;
+        match cell.compare_exchange(e, new, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return true,
+            // **Still a promise, with new rights**: an `mprotect` landed while
+            // the page was being filled. What was filled is still this page's,
+            // so it goes in under the rights the leaf has now -- refusing it
+            // was a fault the guest had not earned.
+            Err(now) if is_promise(now) && now & ACCESS != 0 && (!write || now & WRITABLE != 0)
+                && now & FILE == e & FILE =>
+            {
+                e = now;
+            }
+            Err(now) => {
+                unsafe { alloc::alloc::dealloc(frame, layout) };
+                return now & PRESENT != 0 && (!write || now & WRITABLE != 0);
+            }
         }
     }
 }
