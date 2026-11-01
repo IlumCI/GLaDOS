@@ -190,6 +190,37 @@ they land on the last byte. `convert_hybrid` makes the same bargain on input:
 every tensor must be written or explicitly skipped, and anything else is an
 error instead of a silent omission.
 
+### The [glados] package repository
+
+`orange` is pacman with apt-style verbs (`orange install|remove|update|upgrade|
+search|info|list|files|owns|clean`, and any `-` flag goes straight to pacman);
+the GLaDOS shell's `orange` runs it in a guest. Its own packages live in
+`packaging/<name>/PKGBUILD`, built by the host's makepkg:
+
+```bash
+python3 tools/pkgrepo.py build        # out/repo/x86_64: packages, glados.db, all signed
+python3 tools/pkgrepo.py check        # every signature, against the shipped key only
+python3 tools/pkgrepo.py serve 8070   # for a guest: build the image with GLADOS_REPO_SERVER=http://10.0.2.2:8070
+python3 tools/pkgrepo.py publish --yes
+```
+
+The repository is the assets of the `repo-x86_64` release on IlumCI/GLaDOS,
+and `.github/workflows/repo.yml` rebuilds and uploads it when `packaging/`
+changes. **It has its own key**, not the update key or the verdict key: one
+that can put a package on every machine is a third power. The private half
+is `~/.local/share/glados/repo-gnupg` and the CI secret `REPO_SIGNING_KEY`;
+the public half is `packaging/glados-keyring`, which the image installs and
+`pacman-key --populate glados` trusts. pkgrepo.py pins the fingerprint and
+refuses a keyring package that does not carry it.
+
+`rootfs.py` installs the built packages into the image as real local
+packages, so `pacman -Qo /usr/bin/orange` answers `orange` and `orange
+upgrade` updates it. `[glados]` sits ahead of `[core]` with packages and
+database both required to be signed. Driven under QEMU against a local
+server: an upgrade verified and installed, and a package signed by another
+key inside a correctly signed database was refused ("required key missing
+from keyring").
+
 ### The corpus, and getting one into a running machine
 
 `/ai/train` holds the routing corpus as one blob per example, `applet<tab>task`.

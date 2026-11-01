@@ -1,0 +1,16 @@
+# The key that signs the [glados] repository, in the form pacman-key
+# --populate reads, as archlinux-keyring carries Arch's.
+pkgname=glados-keyring
+pkgver=1
+pkgrel=1
+pkgdesc="The key that signs packages in the GLaDOS repository"
+arch=('any')
+url="https://github.com/IlumCI/GLaDOS"
+license=('custom')  # the project has no licence file yet
+install=glados-keyring.install
+source=('glados.gpg' 'glados-trusted' 'glados-revoked')
+sha256sums=('SKIP' 'SKIP' 'SKIP')
+
+package() {
+    install -Dm644 -t "$pkgdir/usr/share/pacman/keyrings/" "$srcdir"/glados{.gpg,-trusted,-revoked}
+}

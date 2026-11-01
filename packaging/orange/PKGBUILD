@@ -1,0 +1,15 @@
+# The front end of GLaDOS's package manager: apt-style verbs over pacman.
+pkgname=orange
+pkgver=1.0
+pkgrel=1
+pkgdesc="The package manager of GLaDOS: apt-style verbs and pacman flags over pacman"
+arch=('any')
+url="https://github.com/IlumCI/GLaDOS"
+license=('custom')  # the project has no licence file yet
+depends=('pacman' 'bash')
+source=('orange')
+sha256sums=('SKIP')
+
+package() {
+    install -Dm755 "$srcdir/orange" "$pkgdir/usr/bin/orange"
+}

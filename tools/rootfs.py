@@ -37,6 +37,7 @@ Usage:
 """
 
 import argparse
+import re
 import gzip
 import hashlib
 import os
@@ -229,64 +230,37 @@ def skipped_version(name):
     return "0"
 
 
-ORANGE = r"""#!/bin/bash
-# orange -- the package manager of GLaDOS.
-#
-# pacman underneath, so what it installs, checks and records is the
-# distribution's own work; apt-style verbs and pacman/yay-style flags both
-# work. Its own home is the [glados] repository, so it updates like any
-# other package.
-#
-#   orange install <pkg>...    orange -S <pkg>...
-#   orange remove <pkg>...     orange -Rs <pkg>...
-#   orange update              orange -Sy
-#   orange upgrade             orange -Syu      (orange -Syyu forces a refresh)
-#   orange search <words>      orange -Ss <words>
-#   orange info <pkg>          installed: -Qi, otherwise -Si
-#   orange list                orange -Q
-#   orange files <pkg>         orange -Ql <pkg>
-#   orange owns <path>         orange -Qo <path>
-#   orange clean               orange -Sc
-#
-# Anything starting with '-' goes to pacman as it is.
-
-usage() {
-    sed -n '9,20p' "$0" | sed 's/^# \{0,1\}//'
-}
-
-pac() {
-    exec /usr/bin/pacman "$@"
-}
-
-verb=$1
-[ $# -gt 0 ] && shift
-case "$verb" in
-    install|add|get)      pac -S "$@" ;;
-    remove|uninstall|rm)  pac -Rs "$@" ;;
-    update|refresh)       pac -Sy "$@" ;;
-    upgrade)              pac -Syu "$@" ;;
-    search|find)          pac -Ss "$@" ;;
-    info|show)
-        if /usr/bin/pacman -Q "$@" >/dev/null 2>&1; then pac -Qi "$@"; else pac -Si "$@"; fi ;;
-    list)                 pac -Q "$@" ;;
-    files)                pac -Ql "$@" ;;
-    owns)                 pac -Qo "$@" ;;
-    clean)                pac -Sc "$@" ;;
-    help|-h|--help|"")    usage ;;
-    -*)                   pac "$verb" "$@" ;;
-    *)
-        echo "orange: '$verb' is not a command -- 'orange help' lists them" >&2
-        exit 1 ;;
-esac
-"""
+GLADOS_SERVER = os.environ.get(
+    "GLADOS_REPO_SERVER", "https://github.com/IlumCI/GLaDOS/releases/download/repo-x86_64")
 
 
-def orange():
-    """`orange`, the package manager's front end, until it ships from the
-    [glados] repository."""
-    path = TREE / "usr/bin/orange"
-    path.write_text(ORANGE)
-    path.chmod(0o755)
+def glados_packages(names):
+    """The [glados] repository's own packages, installed like any other: unpacked
+    and recorded in the local database, so pacman owns their files and `orange
+    upgrade` brings new versions. They are what tools/pkgrepo.py built --
+    `orange` itself, and the keyring that makes the repository trusted -- and
+    the image is refused without them rather than built with a package manager
+    that cannot update itself."""
+    repo = ROOT / "out/repo/x86_64"
+    pkgs = sorted(repo.glob("*.pkg.tar.zst"))
+    if not pkgs:
+        sys.exit("rootfs: no [glados] packages -- run tools/pkgrepo.py build first")
+    for p in pkgs:
+        unpack(p)
+        names.append(local_db(p, True))
+    print(f"  [glados]: {', '.join(pkgname(p.name) for p in pkgs)}")
+
+
+def glados_repo_conf():
+    """`[glados]` in pacman.conf, ahead of the distribution's repositories so a
+    package of ours wins a name it shares, and signed throughout: a package and
+    the database both, by the key glados-keyring carries."""
+    conf = TREE / "etc/pacman.conf"
+    text = conf.read_text()
+    block = f"[glados]\nSigLevel = Required DatabaseRequired\nServer = {GLADOS_SERVER}\n\n"
+    text = re.sub(r"\[glados\]\n(?:[^\[\n][^\n]*\n|\n)*", "", text)
+    text = text.replace("[core]", block + "[core]", 1)
+    conf.write_text(text)
 
 
 def keyring():
@@ -310,7 +284,10 @@ def keyring():
     keys = TREE / "usr/share/pacman/keyrings"
     base = ["fakeroot", "pacman-key", "--gpgdir", str(home), "--config", str(TREE / "etc/pacman.conf")]
     subprocess.run(base + ["--init"], check=True, capture_output=True)
-    subprocess.run(base + ["--populate-from", str(keys), "--populate", "archlinux"], check=True, capture_output=True)
+    # The distribution's keys, and the [glados] repository's from its own
+    # keyring package.
+    subprocess.run(base + ["--populate-from", str(keys), "--populate", "archlinux", "glados"],
+                   check=True, capture_output=True)
     subprocess.run(["gpgconf", "--homedir", str(home), "--kill", "all"], capture_output=True)
     for sock in home.glob("S.*"):
         sock.unlink()
@@ -564,6 +541,9 @@ def image():
 
 def build(reuse=False):
     if reuse and TREE.exists():
+        glados_packages([])
+        glados_repo_conf()
+        keyring()
         readable()
         data_hooks()
         image()
@@ -581,11 +561,12 @@ def build(reuse=False):
         names.append(local_db(p, pkgname(p.name) in PACKAGES))
         if i % 25 == 0:
             print(f"  {i} unpacked")
+    glados_packages(names)
     pacman_conf(names)
+    glados_repo_conf()
     resolver()
     ca_bundle()
     keyring()
-    orange()
     readable()
     settings()
     data_hooks()

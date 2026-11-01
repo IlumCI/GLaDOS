@@ -1,0 +1,49 @@
+#!/bin/bash
+# orange -- the package manager of GLaDOS.
+#
+# pacman underneath, so what it installs, checks and records is the
+# distribution's own work; apt-style verbs and pacman/yay-style flags both
+# work. Its own home is the [glados] repository, so it updates like any
+# other package.
+#
+#   orange install <pkg>...    orange -S <pkg>...
+#   orange remove <pkg>...     orange -Rs <pkg>...
+#   orange update              orange -Sy
+#   orange upgrade             orange -Syu      (orange -Syyu forces a refresh)
+#   orange search <words>      orange -Ss <words>
+#   orange info <pkg>          installed: -Qi, otherwise -Si
+#   orange list                orange -Q
+#   orange files <pkg>         orange -Ql <pkg>
+#   orange owns <path>         orange -Qo <path>
+#   orange clean               orange -Sc
+#
+# Anything starting with '-' goes to pacman as it is.
+
+usage() {
+    sed -n '9,20p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+pac() {
+    exec /usr/bin/pacman "$@"
+}
+
+verb=$1
+[ $# -gt 0 ] && shift
+case "$verb" in
+    install|add|get)      pac -S "$@" ;;
+    remove|uninstall|rm)  pac -Rs "$@" ;;
+    update|refresh)       pac -Sy "$@" ;;
+    upgrade)              pac -Syu "$@" ;;
+    search|find)          pac -Ss "$@" ;;
+    info|show)
+        if /usr/bin/pacman -Q "$@" >/dev/null 2>&1; then pac -Qi "$@"; else pac -Si "$@"; fi ;;
+    list)                 pac -Q "$@" ;;
+    files)                pac -Ql "$@" ;;
+    owns)                 pac -Qo "$@" ;;
+    clean)                pac -Sc "$@" ;;
+    help|-h|--help|"")    usage ;;
+    -*)                   pac "$verb" "$@" ;;
+    *)
+        echo "orange: '$verb' is not a command -- 'orange help' lists them" >&2
+        exit 1 ;;
+esac
