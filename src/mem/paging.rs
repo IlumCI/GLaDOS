@@ -49,6 +49,36 @@ pub(crate) const DEMAND: u64 = 1 << 9;
 /// present bit cannot carry it, since present is what a promise is not.
 const ACCESS: u64 = 1 << 10;
 
+/// Software bit 11, on a demand-paged leaf: the page's bytes come from a file
+/// rather than being zero. Kept when the promise is supplied, which costs
+/// nothing (the processor ignores bit 11) and keeps the leaf saying what it is.
+///
+/// Why this exists: a file mapping was a copy of the whole range at `mmap`
+/// time, and `ldconfig` maps every library in `/usr/lib` whole to read a few
+/// hundred bytes of each -- 88 s after every pacman transaction, nearly all of
+/// it reading libLLVM and friends off the disk. A promise that knows it is a
+/// file reads one page when one page is touched.
+///
+/// **The bit is what says to ask the filler, not the filler's own records.**
+/// An anonymous promise never consults them, so a stale record left over a
+/// range that has since become ordinary memory cannot put a file's bytes where
+/// a program was promised zeros.
+pub(crate) const FILE: u64 = 1 << 11;
+
+/// What supplies a file promise's bytes: given the page's address and a zeroed
+/// frame, fill the frame and answer whether it could. Registered by
+/// `linux::syscall`, which is where the mappings that know their files live.
+static FILLER: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+pub fn set_filler(f: fn(u64, *mut u8) -> bool) {
+    FILLER.store(f as usize, core::sync::atomic::Ordering::Release);
+}
+
+/// A promise whose page will be read from a file (see `FILE`).
+pub(crate) fn promise_file(perm: Perm) -> u64 {
+    promise(perm) | FILE
+}
+
 /// Whether an entry is a promise: demand-paged, and not yet given a page.
 /// Frame zero is the tell, which is safe because the heap never hands out
 /// physical page 0 -- the identity map's first page is the null guard.
@@ -665,6 +695,13 @@ pub fn promised(addr: u64, write: bool) -> bool {
     is_promise(e) && e & ACCESS != 0 && (!write || e & WRITABLE != 0)
 }
 
+/// `promised`, for a page whose bytes come from a file: keeping it reads a
+/// disk, which may wait and so may switch tasks, and the page-fault handler
+/// must not do that on the stack it arrives on (see `idt::glados_fault_entry`).
+pub fn file_promised(addr: u64, write: bool) -> bool {
+    promised(addr, write) && unsafe { entry_for(addr, false) }.is_some_and(|e| *e & FILE != 0)
+}
+
 /// Keep a promise: give the page at `addr` a zeroed frame, if the current
 /// root promises it one and the access is allowed. Answers whether the page
 /// is now there for that access -- true as well when another thread got
@@ -697,6 +734,20 @@ pub fn populate(addr: u64, write: bool) -> bool {
     let frame = unsafe { alloc::alloc::alloc_zeroed(layout) };
     if frame.is_null() {
         return false;
+    }
+    // A file's page is filled before it is installed, so no thread of the
+    // guest can see it half-read. A filler that cannot read it answers false
+    // and the access faults, which is Linux's SIGBUS in the only form a guest
+    // here can get it.
+    if e & FILE != 0 {
+        let f = FILLER.load(core::sync::atomic::Ordering::Acquire);
+        if f != 0 {
+            let fill: fn(u64, *mut u8) -> bool = unsafe { core::mem::transmute(f) };
+            if !fill(addr & !0xFFF, frame) {
+                unsafe { alloc::alloc::dealloc(frame, layout) };
+                return false;
+            }
+        }
     }
     let new = (frame as u64 & ADDR_MASK) | (e & !ACCESS) | PRESENT;
     match cell.compare_exchange(e, new, Ordering::AcqRel, Ordering::Acquire) {
@@ -842,7 +893,7 @@ pub fn protect(at: u64, len: usize, perm: Perm) -> bool {
         // physical page 0, mapped into a guest -- which is what `mprotect` on
         // a reservation nobody has touched yet would otherwise do.
         if is_promise(*e) {
-            *e = promise(perm);
+            *e = promise(perm) | (*e & FILE);
             addr += PAGE_SIZE;
             continue;
         }

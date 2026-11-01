@@ -141,6 +141,22 @@ pub struct Image {
     root: u64,
 }
 
+/// Entry `i`'s name in one directory block of `count` entries, without the
+/// NUL padding the last one may carry. Empty for an offset out of range, which
+/// sorts first and so sends a search somewhere harmless.
+fn dirent_name(blk: &[u8], i: usize, count: usize) -> &[u8] {
+    let start = u16_at(blk, i * 12 + 8) as usize;
+    let end = if i + 1 < count { u16_at(blk, i * 12 + 20) as usize } else { blk.len() };
+    if start > end || end > blk.len() {
+        return &[];
+    }
+    let mut name = &blk[start..end];
+    while let [rest @ .., 0] = name {
+        name = rest;
+    }
+    name
+}
+
 fn u16_at(b: &[u8], o: usize) -> u16 {
     u16::from_le_bytes([b[o], b[o + 1]])
 }
@@ -343,10 +359,65 @@ impl Image {
         Ok(out)
     }
 
+    /// One name in a directory, by binary search.
+    ///
+    /// **It read the whole directory and made a `String` of every entry, for
+    /// every component of every path**, and `/usr/lib` is thousands of
+    /// entries: a `stat` there cost 9 ms, and `ldconfig` spent 35 s of a 48 s
+    /// run in `newfstatat`. The format is built for better. `mkfs.erofs`
+    /// sorts a directory's entries by name, bytewise, across its blocks as
+    /// well as inside each -- which is how Linux's own reader looks a name up,
+    /// first choosing the block and then the entry. So this reads a block's
+    /// first and last names to choose, about log2 of the block count of them,
+    /// and searches one block, with one buffer and no allocation per entry.
     fn child(&self, dir: &Inode, name: &str) -> Result<Inode, Error> {
-        let entries = self.dir(dir)?;
-        let (_, nid, _) = entries.iter().find(|(n, _, _)| n == name).ok_or(Error::NotFound)?;
-        self.inode(*nid)
+        if !dir.is_dir() {
+            return Err(Error::NotDir);
+        }
+        let want = name.as_bytes();
+        let bs = self.block_size() as u64;
+        let blocks = dir.size.div_ceil(bs);
+        let mut buf = vec![0u8; bs as usize];
+        let (mut lo, mut hi) = (0u64, blocks);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let n = self.read(dir, mid * bs, &mut buf)?;
+            let blk = &buf[..n];
+            let count = if blk.len() < 12 { 0 } else { u16_at(blk, 8) as usize / 12 };
+            if count == 0 || count * 12 > blk.len() {
+                return Err(Error::NotFound);
+            }
+            if want < dirent_name(blk, 0, count) {
+                hi = mid;
+                continue;
+            }
+            if want > dirent_name(blk, count - 1, count) {
+                lo = mid + 1;
+                continue;
+            }
+            // In this block if anywhere.
+            let (mut a, mut b) = (0usize, count);
+            while a < b {
+                let m = a + (b - a) / 2;
+                match want.cmp(dirent_name(blk, m, count)) {
+                    core::cmp::Ordering::Less => b = m,
+                    core::cmp::Ordering::Greater => a = m + 1,
+                    core::cmp::Ordering::Equal => return self.inode(u64_at(blk, m * 12)),
+                }
+            }
+            return Err(Error::NotFound);
+        }
+        Err(Error::NotFound)
+    }
+
+    /// The same answer the slow way, for the claim that the fast one agrees.
+    pub fn child_by_scan(&self, dir: &Inode, name: &str) -> Option<u64> {
+        self.dir(dir).ok()?.into_iter().find(|(n, _, _)| n == name).map(|(_, nid, _)| nid)
+    }
+
+    /// `child`, answering the entry's inode number, for the same claim.
+    pub fn child_nid(&self, dir: &Inode, name: &str) -> Option<u64> {
+        self.child(dir, name).ok().map(|i| i.nid)
     }
 
     /// Resolve a path inside the image. `follow` says whether a symlink in

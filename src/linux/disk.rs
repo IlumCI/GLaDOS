@@ -514,5 +514,26 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push(("a path under no mount is not claimed", !claims("/tmp/x")));
     out.push(("a mount point must be absolute", mount("rel", 1).is_err()));
     out.push(("the kernel's own trees are never the root image's", own("/proc/self/maps") && own("/tmp") && !own("/tmpx")));
+    // **A name is found by binary search, which is only right if the image
+    // sorts its directories**, as `mkfs.erofs` does. Checked against a scan
+    // of every entry in a few real directories, when a root image is
+    // mounted -- an image built some other way would lose files silently, so
+    // this is where it should say so instead.
+    let _g = big();
+    let m = unsafe { MOUNTS.get() };
+    if let Some(Vol::Erofs(img)) = m.iter().find(|x| x.prefix.is_empty()).map(|x| &x.vol) {
+        let mut agree = true;
+        let mut seen = 0usize;
+        for d in ["", "usr/bin", "usr/lib", "etc"] {
+            let Ok(dir) = img.lookup(d, true) else { continue };
+            let Ok(list) = img.dir(&dir) else { continue };
+            for (name, nid, _) in &list {
+                seen += 1;
+                agree &= img.child_nid(&dir, name) == Some(*nid);
+            }
+            agree &= img.child_nid(&dir, "\u{7f}no such name") == None && img.child_by_scan(&dir, "\u{7f}no such name").is_none();
+        }
+        out.push(("a directory lookup by binary search finds every entry a scan finds", agree && seen > 0));
+    }
     out
 }

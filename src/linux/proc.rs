@@ -87,7 +87,8 @@ pub fn is_file(path: &str) -> bool {
     matches!(
         path,
         "/proc/self/exe" | "/proc/self/cmdline" | "/proc/self/environ" | "/proc/self/maps"
-            | "/proc/self/mounts" | "/proc/mounts" | "/proc/meminfo" | CPU_MAX_FREQ | RESOLV
+            | "/proc/self/mounts" | "/proc/mounts" | "/proc/meminfo" | "/proc/version" | CPU_MAX_FREQ
+            | RESOLV
     ) || super::drm::sys_is_file(path)
 }
 
@@ -177,6 +178,14 @@ pub fn read(path: &str) -> Option<Vec<u8>> {
         "/proc/self/maps" => Some(maps().into_bytes()),
         "/proc/self/mounts" | "/proc/mounts" => Some(mounts().into_bytes()),
         RESOLV => Some(resolv().into_bytes()),
+        // `uname`'s three answers in the line Linux writes them in. Only its
+        // existence is asked for by the program that found it missing --
+        // LibreOffice's launcher takes a missing `/proc/version` to mean
+        // `/proc` is not mounted, and stops -- but every field is one `uname`
+        // already gives, so nothing in it is invented to satisfy a check.
+        "/proc/version" => Some(
+            format!("Linux version {} (glados) #1 SMP {}\n", crate::VERSION, "ring 0, with guests at ring 3").into_bytes(),
+        ),
         // **Every field here is one this machine knows**, which is what
         // admits the file under the rule above: total and free are the
         // kernel heap's, the same figures `sysinfo` already answers, and

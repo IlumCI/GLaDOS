@@ -733,6 +733,83 @@ pub fn ring3_load(r: Option<crate::task::Ring3>) {
 /// `Clone` because `fork` copies the list wholesale: a child inherits every
 /// mapping its parent had, at the same addresses, and the pages behind them
 /// were duplicated before this list was.
+/// A file mapping that is read a page at a time, when each page is first
+/// touched, instead of copied whole at `mmap`.
+///
+/// The pages are a `Source::Paged` mapping like any demand-paged memory, so
+/// unmapping, trimming and teardown already know how to give them back; what
+/// this adds is where their bytes come from. Only a leaf carrying
+/// `paging::FILE` ever asks, and a later record over the same addresses wins,
+/// so a record left behind by a partial `munmap` is never what fills memory
+/// that has since become something else.
+#[derive(Clone)]
+pub struct Lazy {
+    pub at: u64,
+    pub len: u64,
+    /// The file offset `at` maps.
+    pub off: u64,
+    pub file: alloc::rc::Rc<core::cell::RefCell<super::disk::DiskFile>>,
+}
+
+/// Fill a file promise: `paging::populate`'s filler, so it runs from the page
+/// fault handler at either privilege level, and from `reachable`.
+///
+/// **A fault at ring 3 may take the guest lock**, which is what makes reading
+/// a disk from the fault path sound here: it arrives on the faulting task's
+/// own entry stack (`gdt::set_rsp0`), holding nothing, exactly as a syscall
+/// does -- which also runs with interrupts clear and does this same read. At
+/// ring 0 the kernel is serving a syscall of this guest and holds the lock
+/// already, so taking it is a no-op.
+fn fill_from_file(page: u64, frame: *mut u8) -> bool {
+    let taken = big_take();
+    let r = (|| {
+        let sp = unsafe { guest_slot() }.as_ref()?;
+        let l = sp.lazy.iter().rev().find(|l| page >= l.at && page < l.at + l.len)?.clone();
+        let off = (l.off + (page - l.at)) as usize;
+        // Already being read through on this task -- the kernel touching a
+        // mapping of the file it is in the middle of reading. Refusing is the
+        // honest answer; it has never been seen.
+        let mut f = l.file.try_borrow_mut().ok()?;
+        if off >= f.size {
+            // Past the end of the file: zero, where Linux would raise SIGBUS.
+            return Some(true);
+        }
+        let n = (f.size - off).min(4096);
+        let out = unsafe { core::slice::from_raw_parts_mut(frame, n) };
+        Some(f.read_at(off, out) == n)
+    })();
+    if taken {
+        big_unlock();
+    }
+    // No record for a leaf that says it is a file: a page of zeros rather
+    // than a dead guest, since nothing else could be there.
+    r.unwrap_or(true)
+}
+
+/// Promise `[at, at + len)` as pages of the file behind `file`, from `off`.
+/// The caller has the range and its tables; nothing is read here.
+fn promise_file(sp: &mut Space, at: u64, len: u64, off: u64, prot: u64,
+    file: alloc::rc::Rc<core::cell::RefCell<super::disk::DiskFile>>) -> bool
+{
+    crate::mem::paging::set_filler(fill_from_file);
+    let perm = crate::mem::paging::Perm {
+        present: prot != 0,
+        write: prot & PROT_WRITE != 0,
+        exec: prot & PROT_EXEC != 0,
+        user: true,
+    };
+    let Some(t) = sp.tables.as_mut() else { return false };
+    let mut o = 0u64;
+    while o < len {
+        if !t.put_leaf(at + o, crate::mem::paging::promise_file(perm)) {
+            return false;
+        }
+        o += 4096;
+    }
+    sp.lazy.push(Lazy { at, len, off, file });
+    true
+}
+
 #[derive(Clone, Copy)]
 pub struct Mapping {
     pub at: u64,
@@ -917,6 +994,8 @@ pub struct Space {
     /// Resource limits this process has set, as (resource, soft, hard);
     /// one it has not set answers the machine's own figure.
     pub rlimits: Vec<(u64, u64, u64)>,
+    /// File mappings whose pages are read when touched (`Lazy`), newest last.
+    pub lazy: Vec<Lazy>,
     pub holder: Option<alloc::boxed::Box<super::load::Guest>>,
     /// Heap ranges this guest owns outright, freed when it is torn down.
     ///
@@ -1138,6 +1217,7 @@ pub fn replace_guest(
         nice: 0,
         ioprio: 0,
         rlimits: Vec::new(),
+        lazy: Vec::new(),
         holder: None,
         owned: alloc::vec::Vec::new(),
         mmap_next: r.mmap_at,
@@ -1237,6 +1317,7 @@ pub fn clone_guest(
         nice: p.nice,
         ioprio: p.ioprio,
         rlimits: p.rlimits.clone(),
+        lazy: p.lazy.clone(),
         holder: None,
         tables: Some(tables),
         owned,
@@ -1441,6 +1522,7 @@ pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
             nice: 0,
             ioprio: 0,
             rlimits: Vec::new(),
+            lazy: Vec::new(),
             holder: None,
             owned: alloc::vec::Vec::new(),
             mmap_next: r.mmap_at,
@@ -7910,6 +7992,60 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
         }
     }
 
+    // **A file on a mounted volume is read when it is touched**, a page at a
+    // time, when the guest has tables of its own to promise pages in (see
+    // `Lazy`). Two shapes: a fresh range, and `ld.so` laying a segment over a
+    // reservation it already holds -- the second only where every page there
+    // is demand-paged, since those are the pages that can be handed back one
+    // at a time and promised again.
+    if !anon && off % PAGE == 0 && !(flags & MAP_SHARED != 0 && prot & PROT_WRITE != 0) {
+        let file = unsafe { guest_slot() }.as_ref().and_then(|sp| {
+            sp.tables.as_ref()?;
+            match sp.fds.get(fd as usize).and_then(|f| f.as_ref()) {
+                Some(super::fs::Fd::Disk(b)) => Some(b.clone()),
+                _ => None,
+            }
+        });
+        if let Some(file) = file {
+            let want = page_up(len as usize) as u64;
+            if want == 0 {
+                return EINVAL;
+            }
+            if flags & MAP_FIXED == 0 {
+                let at = unsafe { guest_slot() }.as_mut().and_then(|sp| {
+                    let at = arena_take(sp, want)?;
+                    if !promise_file(sp, at, want, off, prot, file) {
+                        free_paged(sp, at, want);
+                        arena_give(sp, at, want);
+                        return None;
+                    }
+                    sp.maps.push(Mapping { at, len: want as usize, from: Source::Paged });
+                    Some(at)
+                });
+                return at.unwrap_or(ENOMEM);
+            }
+            if addr != 0 && addr % PAGE == 0 && owns(addr, want as usize) {
+                let done = unsafe { guest_slot() }.as_mut().is_some_and(|sp| {
+                    let all_demand = sp.tables.as_ref().is_some_and(|t| {
+                        (0..want / 4096).all(|i| t.leaf(addr + i * 4096).is_some_and(|e| e & crate::mem::paging::DEMAND != 0))
+                    });
+                    if !all_demand {
+                        return false;
+                    }
+                    // What was there goes back first: these pages may hold
+                    // what an earlier mapping read, and the file is what is
+                    // promised now.
+                    free_leaves(sp, addr, want, true);
+                    promise_file(sp, addr, want, off, prot, file)
+                });
+                if done {
+                    tlb_shootdown();
+                    return addr;
+                }
+            }
+        }
+    }
+
     let backing = if anon {
         None
     } else {
@@ -8299,6 +8435,9 @@ pub(super) fn sys_munmap(at: u64, len: u64) -> u64 {
     // mapping of an odd length -- every library a linker maps -- could never
     // be unmapped at all.
     let want = page_up(len as usize);
+    // A file read when touched holds its file open until its pages go.
+    let end = at.saturating_add(want as u64);
+    sp.lazy.retain(|l| !(l.at >= at && l.at + l.len <= end));
     match sp.maps.iter().position(|m| m.at == at && page_up(m.len) == want) {
         Some(i) => {
             let m = sp.maps.remove(i);
