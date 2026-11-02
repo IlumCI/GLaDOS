@@ -243,12 +243,14 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     ));
 
     // The directory is outside what a guest may write. This is the property
-    // the module exists for, and it is checked against `fs.rs`'s own jail
+    // the module exists for, and it is checked against the jail's own rule
     // rather than restated: if that jail ever widens, this fails here instead
-    // of becoming an escalation nobody noticed.
+    // of becoming an escalation nobody noticed. Asked of the namespace path a
+    // write would land on (`ns::reaches`), because under a root image a guest
+    // writes its own `/linux/bin` freely -- into its layer, not this one.
     out.push((
         "a guest cannot write the program directory",
-        !super::fs::writable(DIR) && !super::fs::writable(&(DIR.to_string() + "/sh")),
+        !super::ns::reaches(DIR) && !super::ns::reaches(&(DIR.to_string() + "/sh")),
     ));
     // The manifests decide what the model may *say*, so a guest that could
     // write them could widen its own reachable argument set -- the same
@@ -256,8 +258,8 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // along, and it would be easy to put this one inside `/tmp` by accident.
     out.push((
         "nor the declared-argument directory",
-        !super::fs::writable(ARGS_DIR)
-            && !super::fs::writable(&(ARGS_DIR.to_string() + "/quickjs")),
+        !super::ns::reaches(ARGS_DIR)
+            && !super::ns::reaches(&(ARGS_DIR.to_string() + "/quickjs")),
     ));
 
     // A program nobody declared arguments for offers none, which is what keeps

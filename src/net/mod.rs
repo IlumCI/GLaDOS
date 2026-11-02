@@ -87,6 +87,33 @@ impl StackGuard {
             Err(_) => None,
         }
     }
+
+    /// `take`, waiting for whoever is inside instead of refusing.
+    ///
+    /// **The stack is not one core's any more.** Guest threads run on every
+    /// core but the first and reach TCP through their sockets, while the
+    /// shell's idle loop and every kernel fetch drive it from core 0, so
+    /// `tcp::at`'s "interrupts off is enough because everything is pinned to
+    /// core 0" stopped being true the day guests left it. `poll` and `pump`
+    /// can afford a refusal -- the next one comes ten milliseconds later --
+    /// but a read of one connection cannot: it has to happen, and it must not
+    /// happen while another core is reaping that connection. So it waits,
+    /// yielding, which is safe in the way `take`'s doc says spinning is not:
+    /// the holder this task may have preempted gets the core back.
+    pub(crate) fn wait() -> Self {
+        loop {
+            if let Some(g) = Self::take() {
+                return g;
+            }
+            let flags: u64;
+            unsafe { core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags)) };
+            crate::cpu::enable_interrupts();
+            crate::task::yield_now();
+            if flags & (1 << 9) == 0 {
+                crate::cpu::disable_interrupts();
+            }
+        }
+    }
 }
 
 impl Drop for StackGuard {

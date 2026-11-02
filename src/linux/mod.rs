@@ -43,6 +43,10 @@ pub mod program;
 pub mod session;
 pub mod i386;
 pub mod disk;
+pub mod ns;
+pub mod link;
+pub mod timer;
+pub mod pty;
 pub mod syscall;
 pub mod prof;
 pub mod snd;
@@ -72,6 +76,10 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     out.extend(session::checks());
     out.extend(i386::checks());
     out.extend(disk::checks());
+    out.extend(ns::checks());
+    out.extend(link::checks());
+    out.extend(timer::checks());
+    out.extend(pty::checks());
     out
 }
 
@@ -100,6 +108,44 @@ pub fn busy() -> Option<&'static str> {
 /// happens on the job's own task, because a loaded `Guest` holds raw pointers
 /// to its pages and is not a thing to hand between tasks.
 pub fn start_job(path: &str, args: &[&str]) -> Result<u32, &'static str> {
+    start_job_as(path, args, false)
+}
+
+/// A supervised service: a job whose console output goes to the service log.
+pub fn start_service_job(path: &str, args: &[&str]) -> Result<u32, &'static str> {
+    start_job_as(path, args, true)
+}
+
+/// `start_job`, with some variables of the environment replaced for this job
+/// alone.
+///
+/// Applied on the job's own task, immediately before its loader reads them,
+/// through the same per-task override `execve` uses. Changing the global
+/// environment around a `start_job` instead was a race: the loader runs when
+/// the job's task does, so the value put back afterwards was sometimes the
+/// one it read -- which is how a headless LibreOffice came up on GTK anyway.
+pub fn start_job_env(path: &str, args: &[&str], overrides: &[&str]) -> Result<u32, &'static str> {
+    let ov: alloc::vec::Vec<alloc::string::String> = overrides.iter().map(|s| alloc::string::String::from(*s)).collect();
+    start_job_inner(path, args, false, ov)
+}
+
+/// `start_job_env`, its console output kept out of the terminal the way a
+/// service's is.
+pub fn start_job_env_quiet(path: &str, args: &[&str], overrides: &[&str]) -> Result<u32, &'static str> {
+    let ov: alloc::vec::Vec<alloc::string::String> = overrides.iter().map(|s| alloc::string::String::from(*s)).collect();
+    start_job_inner(path, args, true, ov)
+}
+
+fn start_job_as(path: &str, args: &[&str], quiet: bool) -> Result<u32, &'static str> {
+    start_job_inner(path, args, quiet, alloc::vec::Vec::new())
+}
+
+fn start_job_inner(
+    path: &str,
+    args: &[&str],
+    quiet: bool,
+    overrides: alloc::vec::Vec<alloc::string::String>,
+) -> Result<u32, &'static str> {
     if let Some(why) = busy() {
         return Err(why);
     }
@@ -107,15 +153,28 @@ pub fn start_job(path: &str, args: &[&str]) -> Result<u32, &'static str> {
     let mut argv: alloc::vec::Vec<alloc::string::String> = alloc::vec![alloc::string::String::from(path)];
     argv.extend(args.iter().map(|a| alloc::string::String::from(*a)));
     let title = argv.join(" ");
-    crate::job::start(
+    // A quiet job's console output goes to the service log, and its end is
+    // its caller's to report: the notice was a line per LibreOffice launch in
+    // the terminal of somebody asking a spreadsheet a question.
+    (if quiet { crate::job::start_quiet } else { crate::job::start })(
         &RUNTIME,
         title,
         alloc::boxed::Box::new(move || {
             let argv: alloc::vec::Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+            if !overrides.is_empty() {
+                let name = |e: &str| alloc::string::String::from(e.split_once('=').map_or(e, |(n, _)| n));
+                let mut env = syscall::environ();
+                env.retain(|e| !overrides.iter().any(|o| name(o) == name(e)));
+                env.extend(overrides.iter().cloned());
+                syscall::set_exec_env(env);
+            }
             let mut g = match load::load(&bytes, &argv) {
                 Ok(g) => g,
                 Err(why) => return alloc::format!("will not run it: {}", why),
             };
+            if quiet {
+                session::ask_quiet();
+            }
             // Safety: the same call `linux run` makes, on a task of its own
             // and with no deadline -- see `syscall::run`.
             let r = unsafe { load::run(&mut g, 0) };

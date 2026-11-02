@@ -87,7 +87,8 @@ pub fn is_file(path: &str) -> bool {
     matches!(
         path,
         "/proc/self/exe" | "/proc/self/cmdline" | "/proc/self/environ" | "/proc/self/maps"
-            | "/proc/meminfo" | CPU_MAX_FREQ
+            | "/proc/self/mounts" | "/proc/mounts" | "/proc/meminfo" | "/proc/version" | CPU_MAX_FREQ
+            | RESOLV
     ) || super::drm::sys_is_file(path)
 }
 
@@ -103,6 +104,57 @@ pub fn link(path: &str) -> Option<String> {
         "/proc/self/exe" => syscall::guest_image(),
         _ => super::drm::sys_link(path),
     }
+}
+
+/// Where a guest's resolver is told what to ask.
+const RESOLV: &str = "/run/glados/resolv.conf";
+
+/// The resolver configuration, written by the machine from what DHCP told
+/// it. The image's `/etc/resolv.conf` is a link here, which is how
+/// systemd-resolved owns the file on a desktop: a file in the image would
+/// win over anything this module serves at the same path.
+///
+/// **Over TCP (`use-vc`), because a guest has no UDP.** Its sockets are TCP
+/// only; the kernel's own UDP is one port held by one task for its own
+/// resolver, not a socket layer. glibc speaks DNS over TCP when told to, and
+/// every resolver worth asking answers there -- a router's, QEMU's virtual
+/// one (which forwards it to the host's), a public one. Without this the
+/// image's own file was empty and pacman could not find a mirror.
+///
+/// The DHCP server first, then a public one in case it will not take TCP.
+fn resolv() -> String {
+    let d = crate::net::dns_server();
+    let mut out = String::from("# Written by GLaDOS from the network's own settings.\n");
+    if d != [0, 0, 0, 0] {
+        out.push_str(&format!("nameserver {}.{}.{}.{}\n", d[0], d[1], d[2], d[3]));
+    }
+    out.push_str("nameserver 1.1.1.1\noptions use-vc timeout:3 attempts:2\n");
+    out
+}
+
+/// The mount table, in `/proc/self/mounts`'s format: device, mount point,
+/// type, options, and two zeros.
+///
+/// **pacman would not install anything without it.** It checks free space per
+/// mount point before a transaction, finds the mount points through
+/// `/etc/mtab` -- a symlink to this file in every Arch root -- and with the
+/// file missing it reported "not enough free disk space" about a disk it had
+/// not looked at. Every field is one this machine knows: the root is the
+/// writable layer over the image, which is memory and which `statfs` already
+/// answers as such; a partition is read-only FAT; `/proc` and `/dev` are this
+/// module's and `dev.rs`'s.
+fn mounts() -> String {
+    let mut out = String::new();
+    for (at, kind, _) in super::disk::mounts() {
+        let line = match kind {
+            "erofs" => format!("layer {} overlay rw 0 0\n", at),
+            "fat" => format!("disk {} vfat ro 0 0\n", at),
+            other => format!("{} {} {} ro 0 0\n", other, at, other),
+        };
+        out.push_str(&line);
+    }
+    out.push_str("proc /proc proc rw 0 0\ndev /dev devtmpfs rw 0 0\n");
+    out
 }
 
 /// The bytes of a synthetic file, or nothing when this machine cannot say.
@@ -124,6 +176,16 @@ pub fn read(path: &str) -> Option<Vec<u8>> {
         "/proc/self/cmdline" => Some(joined(&syscall::guest_argv())),
         "/proc/self/environ" => Some(joined(&syscall::environ())),
         "/proc/self/maps" => Some(maps().into_bytes()),
+        "/proc/self/mounts" | "/proc/mounts" => Some(mounts().into_bytes()),
+        RESOLV => Some(resolv().into_bytes()),
+        // `uname`'s three answers in the line Linux writes them in. Only its
+        // existence is asked for by the program that found it missing --
+        // LibreOffice's launcher takes a missing `/proc/version` to mean
+        // `/proc` is not mounted, and stops -- but every field is one `uname`
+        // already gives, so nothing in it is invented to satisfy a check.
+        "/proc/version" => Some(
+            format!("Linux version {} (glados) #1 SMP {}\n", crate::VERSION, "ring 0, with guests at ring 3").into_bytes(),
+        ),
         // **Every field here is one this machine knows**, which is what
         // admits the file under the rule above: total and free are the
         // kernel heap's, the same figures `sysinfo` already answers, and

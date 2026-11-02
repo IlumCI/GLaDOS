@@ -28,6 +28,67 @@ use alloc::vec::Vec;
 
 pub const LIST: &str = "/etc/services";
 
+/// Where the session's sockets live: `XDG_RUNTIME_DIR` for every guest, and
+/// the directory the Wayland socket's name already sits under.
+pub const RUNTIME_DIR: &str = "/run/glados";
+/// The session bus's address, as every guest is told it.
+pub const SESSION_BUS: &str = "unix:path=/run/glados/bus";
+
+/// The services a Linux session has whenever a root image is mounted, in the
+/// same shape as `/etc/services`. D-Bus first because nearly every desktop
+/// program asks for the session bus before it draws anything, and GTK, GLib
+/// and LibreOffice each wait on it or warn without it.
+const SESSION: &str = "session-bus /usr/bin/dbus-daemon --session --address=unix:path=/run/glados/bus --nofork --nopidfile";
+
+/// Make the session ready for programs from a root image: the runtime
+/// directory, the bus address in every guest's environment, and the
+/// supervisor reloaded so the built-in services start on its next turn.
+/// What services have printed, newest last, bounded so a chatty one cannot
+/// take the heap. `services log` shows it.
+static LOG: crate::sync::Spin<Vec<u8>> = crate::sync::Spin::new(Vec::new());
+const LOG_CAP: usize = 16 * 1024;
+
+pub fn log(bytes: &[u8]) {
+    let mut l = LOG.lock_irq();
+    l.extend_from_slice(bytes);
+    if l.len() > LOG_CAP {
+        let cut = l.len() - LOG_CAP;
+        l.drain(..cut);
+    }
+}
+
+pub fn print_log() {
+    let text = String::from_utf8_lossy(&LOG.lock_irq()).into_owned();
+    for line in text.lines() {
+        crate::kprintln!("  {}", line);
+    }
+}
+
+pub fn begin_session() {
+    if !crate::sysbox::is_dir(RUNTIME_DIR) {
+        crate::sysbox::make_dir(RUNTIME_DIR);
+    }
+    super::syscall::set_env(&alloc::format!("DBUS_SESSION_BUS_ADDRESS={}", SESSION_BUS));
+    super::syscall::set_env(&alloc::format!("XDG_RUNTIME_DIR={}", RUNTIME_DIR));
+    // What a desktop session on this machine is, said once here rather than
+    // by every caller. Each was a hurdle found by hand: no `HOME` and a
+    // program writes its profile into whatever directory it was started in;
+    // GTK 4 asks for a GL renderer there is no driver for; Qt and GDK probe
+    // for X11 first and LibreOffice picks its toolkit by guessing the desktop
+    // it is on. `linux env` still overrides any of them for one run.
+    for e in [
+        "HOME=/root",
+        "GDK_BACKEND=wayland",
+        "QT_QPA_PLATFORM=wayland",
+        "SAL_USE_VCLPLUGIN=gtk3",
+        "GSK_RENDERER=cairo",
+        "XDG_SESSION_TYPE=wayland",
+    ] {
+        super::syscall::set_env(e);
+    }
+    load();
+}
+
 struct Service {
     name: String,
     path: String,
@@ -68,9 +129,21 @@ pub fn parse(text: &str) -> Vec<(String, String, Vec<String>)> {
 /// again to pick up an edited list.
 pub fn load() {
     let text = crate::sysbox::read_blob(LIST).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+    let mut wanted = parse(&text);
+    // The session a Linux desktop program expects, whenever there is a root
+    // image to run it from. A line in `/etc/services` with the same name
+    // replaces the built-in one, which is how an operator changes or turns
+    // off a session service without a new kernel.
+    if super::disk::root_mounted() {
+        for (name, path, args) in parse(SESSION) {
+            if !wanted.iter().any(|(n, _, _)| *n == name) {
+                wanted.push((name, path, args));
+            }
+        }
+    }
     let s = unsafe { SERVICES.get() };
     let mut next = Vec::new();
-    for (name, path, args) in parse(&text) {
+    for (name, path, args) in wanted {
         // A service already running under the same command keeps its job.
         let old = s.iter().position(|o| o.name == name && o.path == path && o.args == args).map(|i| s.remove(i));
         next.push(old.unwrap_or(Service {
@@ -131,7 +204,7 @@ pub fn tick() {
             continue;
         }
         let args: Vec<&str> = sv.args.iter().map(|a| a.as_str()).collect();
-        match super::start_job(&sv.path, &args) {
+        match super::start_service_job(&sv.path, &args) {
             Ok(id) => {
                 sv.job = Some(id);
                 sv.started = now;

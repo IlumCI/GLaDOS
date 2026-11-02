@@ -201,6 +201,9 @@ extern "x86-interrupt" fn timer_isr(frame: idt::InterruptStackFrame) {
 /// The vector a TLB shootdown arrives on.
 pub const VECTOR_SHOOTDOWN: u8 = 0xF3;
 static SHOT_ACKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+/// Which cores answered the shootdown in flight, so one that never does can
+/// be named rather than counted.
+static SHOT_FROM: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Another core changed a guest's page tables: drop every cached
 /// translation. A CR3 reload is the whole of it -- guest pages are never
@@ -211,6 +214,7 @@ extern "x86-interrupt" fn shootdown_isr(_frame: idt::InterruptStackFrame) {
         core::arch::asm!("mov {t}, cr3", "mov cr3, {t}", t = out(reg) _, options(nostack, preserves_flags));
     }
     SHOT_ACKS.fetch_add(1, Ordering::AcqRel);
+    SHOT_FROM.fetch_or(1u64 << (crate::smp::this_cpu() as u64 & 63), Ordering::AcqRel);
     eoi();
 }
 
@@ -218,21 +222,80 @@ extern "x86-interrupt" fn shootdown_isr(_frame: idt::InterruptStackFrame) {
 /// milliseconds say one never will. A core with interrupts off for that long
 /// is holding something no guest is waiting on, and a guest waiting forever
 /// for it would be a worse failure than one stale translation.
-pub fn shootdown() {
+/// The root each core last loaded into CR3, or `u64::MAX` before it has
+/// loaded any -- see `holding` for what that means.
+static ROOT_OF: [core::sync::atomic::AtomicU64; 64] =
+    [const { core::sync::atomic::AtomicU64::new(u64::MAX) }; 64];
+
+/// Called by `paging::activate`, the one place CR3 is written for a root.
+pub fn note_root(root: u64) {
+    // Not before per-core state exists: the first CR3 load is the identity
+    // map going live, long before anything can say which core this is, and
+    // asking then faults. Every core is on the kernel's root until it says
+    // otherwise, which is what `holding` assumes of a core that never has.
+    if !crate::cpu::percpu::armed() {
+        return;
+    }
+    let c = crate::smp::this_cpu() as usize;
+    if c < 64 {
+        ROOT_OF[c].store(root, Ordering::Release);
+    }
+}
+
+/// The cores that may be holding translations for `root`: every core whose
+/// CR3 names it. A core that has never loaded one is on the kernel's root,
+/// which is the root every core starts on -- `smp::init` hands the
+/// application processors the bootstrap processor's -- so it holds a guest
+/// root's translations exactly when the guest has no root of its own.
+fn holding(root: u64) -> u64 {
+    let kernel = crate::mem::space::kernel_root();
+    let mut m = 0u64;
+    for c in 0..crate::smp::online().min(64) {
+        let r = ROOT_OF[c].load(Ordering::Acquire);
+        let r = if r == u64::MAX { kernel } else { r };
+        if r == root {
+            m |= 1 << c;
+        }
+    }
+    m
+}
+
+/// Ask every other core to flush, and wait until each that could be holding
+/// a translation for `root` has.
+///
+/// **Waited for only where it matters.** Without PCIDs a CR3 write drops
+/// every translation the old root had, so a core on some other root holds
+/// nothing of this one and has nothing to answer for. It still gets the
+/// interrupt -- the flush is cheap and harmless -- but nobody spins on it.
+/// Waiting on every core is what made one core briefly running with
+/// interrupts off cost every guest `mmap` five milliseconds, holding the
+/// guest lock throughout: LibreOffice reported "a TLB shootdown went
+/// unanswered" dozens of times a launch, always for core 0, which since
+/// `task::PIN_NOT_BSP` never runs a guest at all.
+pub fn shootdown(root: u64) {
     let others = crate::smp::online().saturating_sub(1);
     if others == 0 {
         return;
     }
+    let me = 1u64 << (crate::smp::this_cpu() as u64 & 63);
+    let want = holding(root) & !me;
     SHOT_ACKS.store(0, Ordering::Release);
+    SHOT_FROM.store(0, Ordering::Release);
     ipi_settle();
     // Fixed delivery, assert, destination shorthand "all excluding self".
     write(REG_ICR_LO, VECTOR_SHOOTDOWN as u32 | 1 << 14 | 0b11 << 18);
     ipi_settle();
     let mhz = crate::time::tsc_mhz().max(1);
     let t0 = unsafe { core::arch::x86_64::_rdtsc() };
-    while SHOT_ACKS.load(Ordering::Acquire) < others {
+    while SHOT_FROM.load(Ordering::Acquire) & want != want {
         if unsafe { core::arch::x86_64::_rdtsc() } - t0 > 5_000 * mhz {
-            crate::serial_println!("[smp] a TLB shootdown went unanswered by {} core(s)", others - SHOT_ACKS.load(Ordering::Acquire));
+            let missing = want & !SHOT_FROM.load(Ordering::Acquire);
+            crate::serial_println!(
+                "[smp] a TLB shootdown went unanswered by {} core(s): mask {:#x} from core {}",
+                missing.count_ones(),
+                missing,
+                crate::smp::this_cpu()
+            );
             break;
         }
         core::hint::spin_loop();

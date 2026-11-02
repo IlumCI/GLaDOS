@@ -21,6 +21,7 @@ pub mod rtl8168;
 pub mod rndis;
 pub mod battery;
 pub mod ec;
+pub mod typist;
 pub mod usbhid;
 pub mod virtio;
 pub mod xhci;

@@ -1,0 +1,615 @@
+#!/usr/bin/env python3
+"""Build the root filesystem Linux guests see, as an EROFS image.
+
+Why this exists
+---------------
+Every hurdle in getting LibreOffice to run was the machine failing to provide
+something a Linux program takes for granted: a data file under `/usr/share`,
+a library the program `dlopen`s rather than links, a writable cache, a name
+in the case it was written, a symlink. Each was fixed by hand for one program
+(`out/office/mkoffice.sh` is the record of that), and the next program would
+have needed the same again. A program should find a normal Linux system where
+it expects one, so this builds one.
+
+It is a distribution's own packages, unpacked: Arch's, resolved by the host's
+`pacman` against a *private* copy of its sync databases, so that what the host
+happens to have installed does not hide a dependency. `pacman -Sp` only
+prints URLs and needs no root; the packages are fetched into a cache and
+unpacked here, symlinks and modes intact, which is what a FAT staging volume
+could never carry.
+
+The image is EROFS -- Linux's own read-only filesystem, simple when
+uncompressed, with symlinks, modes and owners -- written by `mkfs.erofs`,
+which `out/rootfs/tools/` holds out of Arch's package rather than the host
+having it installed. Nothing fetched goes in this repository, for the reason no
+checkpoint and no game does: it is somebody else's bytes.
+
+Package scripts are not run -- there is no chroot here -- so the steps they
+exist for that produce *data* are done directly against the tree: compiled
+GSettings schemas and the MIME database. Caches a program can build for itself
+at run time (fontconfig) are left to it.
+
+Usage:
+
+    python3 tools/rootfs.py resolve        # what the set expands to
+    python3 tools/rootfs.py build          # fetch, unpack, image
+    python3 tools/rootfs.py --selftest
+"""
+
+import argparse
+import re
+import gzip
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+OUT = ROOT / "out" / "rootfs"
+CACHE = OUT / "cache"
+TREE = OUT / "root"
+DB = OUT / "db"
+IMAGE = ROOT / ".qemu" / "root.erofs"
+MKFS = OUT / "tools" / "x" / "usr" / "bin" / "mkfs.erofs"
+
+# What a desktop program expects to find, and the first programs we want.
+# Dependencies are pacman's to resolve; this names intent, not closure.
+PACKAGES = [
+    "filesystem", "glibc", "bash", "coreutils",
+    "fontconfig", "ttf-liberation", "ttf-dejavu",
+    "gtk3", "adwaita-icon-theme", "adwaita-icon-theme-legacy", "hicolor-icon-theme",
+    "shared-mime-info", "xkeyboard-config", "gsettings-desktop-schemas",
+    "dbus",
+    # The ordinary userland a script or a person expects to find.
+    "grep", "sed", "gawk", "findutils", "diffutils", "which", "less", "nano",
+    "tar", "gzip", "xz", "file", "procps-ng", "util-linux",
+    # The shell sci-fish starts from.
+    "fish", "git",
+    # pacman itself, which `orange` runs: the image is its own installed
+    # system as far as pacman can tell (see `local_db`), so installing and
+    # upgrading in a guest is the distribution's own tool doing it.
+    "pacman", "pacman-mirrorlist", "archlinux-keyring", "ca-certificates",
+    # One program per toolkit, so "a Wayland program works" is measured
+    # across the ways one can be written rather than on one: GTK 3
+    # (LibreOffice), GTK 4 (its own widget factory), Qt 6, a native client,
+    # video, and weston's own demo clients, which exercise one protocol each.
+    # Nothing from GNOME's application set: GTK 4 is tested through the
+    # toolkit's own demos, not through somebody's desktop.
+    "foot", "gtk4-demos", "qt6-wayland", "featherpad",
+    "imv", "mpv", "weston",
+    "libreoffice-fresh",
+]
+
+# Packages replaced by an older build, and why. gdk-pixbuf 2.43 and later
+# decode every image format in a glycin helper process inside a bwrap
+# sandbox, spoken to over D-Bus; 2.42 decodes in-process and keeps the soname.
+PINS = {
+    "gdk-pixbuf2": "https://archive.archlinux.org/packages/g/gdk-pixbuf2/gdk-pixbuf2-2.42.12-2-x86_64.pkg.tar.zst",
+}
+
+# Packages never wanted in a guest root, whatever pulls them in: they exist
+# to run under a Linux kernel's init or to sandbox, neither of which is here.
+SKIP = {"systemd", "systemd-libs-dummy", "bubblewrap", "glycin", "linux-api-headers"}
+
+
+MIRROR = "https://geo.mirror.pkgbuild.com"
+REPOS = ["core", "extra", "multilib"]
+
+
+def private_db():
+    """Fresh sync databases from the mirror, and an empty local database, so
+    pacman resolves the whole closure rather than what the host lacks.
+
+    Fetched rather than copied from the host: the host's are as old as its
+    last `-Sy`, the mirror has since rotated packages out, and a set resolved
+    against a stale database names files that answer 404. Refreshing the
+    host's own would need root."""
+    (DB / "local").mkdir(parents=True, exist_ok=True)
+    sync = DB / "sync"
+    sync.mkdir(parents=True, exist_ok=True)
+    for repo in REPOS:
+        url = f"{MIRROR}/{repo}/os/x86_64/{repo}.db"
+        with urllib.request.urlopen(url) as r, open(sync / f"{repo}.db", "wb") as f:
+            shutil.copyfileobj(r, f)
+
+
+def resolve(pkgs):
+    private_db()
+    r = subprocess.run(
+        ["pacman", "--dbpath", str(DB), "--noconfirm", "-Sp", *pkgs],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        sys.exit(f"pacman could not resolve the set:\n{r.stderr}")
+    urls = [l.strip() for l in r.stdout.splitlines() if l.startswith(("http", "file:"))]
+    out = []
+    for u in urls:
+        name = pkgname(u.rsplit("/", 1)[-1])
+        if name in SKIP:
+            continue
+        out.append(PINS.get(name, u))
+    return out
+
+
+def pkgname(filename):
+    """`gdk-pixbuf2-2.44.7-1-x86_64.pkg.tar.zst` -> `gdk-pixbuf2`: the name is
+    everything before the last three dash-separated fields."""
+    base = filename.split(".pkg.tar")[0]
+    return base.rsplit("-", 3)[0]
+
+
+def fetch(url):
+    CACHE.mkdir(parents=True, exist_ok=True)
+    dst = CACHE / url.rsplit("/", 1)[-1]
+    if not dst.exists() or dst.stat().st_size == 0:
+        tmp = dst.with_suffix(".part")
+        with urllib.request.urlopen(url) as r, open(tmp, "wb") as f:
+            shutil.copyfileobj(r, f)
+        tmp.rename(dst)
+    return dst
+
+
+def local_db(pkg, explicit):
+    """Record the package in pacman's local database, as `pacman -U` would.
+
+    The image is made by unpacking, not by pacman, so without this pacman in
+    a guest sees an empty system: `-Q` lists nothing and the first install
+    tries to bring in glibc again over the top of the running one. The record
+    is read from the package's own `.PKGINFO` and `.MTREE`, the two files
+    pacman itself builds it from.
+
+    `desc` carries what pacman knows about a package, `files` what it owns and
+    which of those are configuration it must not overwrite, `mtree` the
+    package's own manifest, kept compressed as shipped."""
+    tmp = OUT / "meta"
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    tmp.mkdir(parents=True)
+    subprocess.run(["tar", "-C", str(tmp), "-xf", str(pkg), ".PKGINFO", ".MTREE"],
+                   capture_output=True)
+    info = {}
+    for line in (tmp / ".PKGINFO").read_text(errors="replace").splitlines():
+        if " = " in line and not line.startswith("#"):
+            k, v = line.split(" = ", 1)
+            info.setdefault(k, []).append(v)
+    one = lambda k: info.get(k, [""])[0]
+    name, ver = one("pkgname"), one("pkgver")
+    entry = TREE / "var/lib/pacman/local" / f"{name}-{ver}"
+    entry.mkdir(parents=True, exist_ok=True)
+    fields = [
+        ("NAME", [name]), ("VERSION", [ver]), ("BASE", info.get("pkgbase", [])),
+        ("DESC", info.get("pkgdesc", [])), ("URL", info.get("url", [])),
+        ("ARCH", info.get("arch", [])), ("BUILDDATE", info.get("builddate", [])),
+        ("INSTALLDATE", [str(INSTALLED)]), ("PACKAGER", info.get("packager", [])),
+        ("SIZE", info.get("size", [])), ("REASON", [] if explicit else ["1"]),
+        ("GROUPS", info.get("group", [])), ("LICENSE", info.get("license", [])),
+        ("VALIDATION", ["pgp"]), ("REPLACES", info.get("replaces", [])),
+        ("DEPENDS", info.get("depend", [])), ("OPTDEPENDS", info.get("optdepend", [])),
+        ("CONFLICTS", info.get("conflict", [])), ("PROVIDES", info.get("provides", [])),
+    ]
+    (entry / "desc").write_text("".join(f"%{k}%\n" + "".join(f"{v}\n" for v in vs) + "\n" for k, vs in fields if vs))
+    # What the package owns, from its manifest: every path but pacman's own
+    # dot-files, directories with a trailing slash, in the order pacman sorts.
+    paths = []
+    mtree = tmp / ".MTREE"
+    if mtree.exists():
+        for line in gzip.decompress(mtree.read_bytes()).decode(errors="replace").splitlines():
+            if not line.startswith("./") or line.startswith("./."):
+                continue
+            path = line.split(" ", 1)[0][2:].encode().decode("unicode_escape").encode("latin-1").decode("utf-8", "replace")
+            paths.append(path + "/" if " type=dir" in line else path)
+        shutil.copy(mtree, entry / "mtree")
+    backup = []
+    for b in info.get("backup", []):
+        f = TREE / b
+        digest = hashlib.md5(f.read_bytes()).hexdigest() if f.is_file() else ""
+        backup.append(f"{b}\t{digest}")
+    text = "%FILES%\n" + "".join(f"{p}\n" for p in sorted(paths)) + "\n"
+    if backup:
+        text += "%BACKUP%\n" + "".join(f"{b}\n" for b in backup) + "\n"
+    (entry / "files").write_text(text)
+    return name
+
+
+# One install time for every record, so one set of packages makes one image.
+INSTALLED = 1767225600
+
+
+def skipped_version(name):
+    """The version the mirror had of a package left out, which is what a
+    versioned dependency on it is checked against -- glibc wants
+    `linux-api-headers>=4.10`, and an unversioned provide does not meet it."""
+    r = subprocess.run(["pacman", "--dbpath", str(DB), "-Si", name], capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        if line.startswith("Version"):
+            return line.split(":", 1)[1].strip()
+    return "0"
+
+
+GLADOS_SERVER = os.environ.get(
+    "GLADOS_REPO_SERVER", "https://github.com/IlumCI/GLaDOS/releases/download/repo-x86_64")
+
+
+def glados_packages(names):
+    """The [glados] repository's own packages, installed like any other: unpacked
+    and recorded in the local database, so pacman owns their files and `orange
+    upgrade` brings new versions. They are what tools/pkgrepo.py built --
+    `orange` itself, and the keyring that makes the repository trusted -- and
+    the image is refused without them rather than built with a package manager
+    that cannot update itself."""
+    repo = ROOT / "out/repo/x86_64"
+    pkgs = sorted(repo.glob("*.pkg.tar.zst"))
+    if not pkgs:
+        sys.exit("rootfs: no [glados] packages -- run tools/pkgrepo.py build first")
+    for p in pkgs:
+        unpack(p)
+        names.append(local_db(p, True))
+    print(f"  [glados]: {', '.join(pkgname(p.name) for p in pkgs)}")
+
+
+def glados_repo_conf():
+    """`[glados]` in pacman.conf, ahead of the distribution's repositories so a
+    package of ours wins a name it shares, and signed throughout: a package and
+    the database both, by the key glados-keyring carries."""
+    conf = TREE / "etc/pacman.conf"
+    text = conf.read_text()
+    block = f"[glados]\nSigLevel = Required DatabaseRequired\nServer = {GLADOS_SERVER}\n\n"
+    text = re.sub(r"\[glados\]\n(?:[^\[\n][^\n]*\n|\n)*", "", text)
+    text = text.replace("[core]", block + "[core]", 1)
+    conf.write_text(text)
+
+
+def keyring():
+    """pacman's keyring, made as an installed Arch system makes it: a local
+    master key, then the distribution's keys from the image's own
+    archlinux-keyring, signed and trusted as `pacman-key --populate` does.
+
+    Made here, on the host, because `pacman-key` wants root, a gpg-agent and
+    entropy, and a guest offers none of those at install time. `fakeroot`
+    satisfies its root check -- it writes only into the image tree. The
+    agent it started is stopped and its sockets removed, so the image does
+    not carry a socket somebody else's process once listened on. The local
+    master key's secret half is in the image as it is on any Arch machine;
+    it signs nothing but the distribution's keys, here before anybody has
+    the image.
+
+    Without this, signature checking -- left on -- refuses every package."""
+    home = TREE / "etc/pacman.d/gnupg"
+    if home.exists():
+        shutil.rmtree(home)
+    keys = TREE / "usr/share/pacman/keyrings"
+    base = ["fakeroot", "pacman-key", "--gpgdir", str(home), "--config", str(TREE / "etc/pacman.conf")]
+    subprocess.run(base + ["--init"], check=True, capture_output=True)
+    # The distribution's keys, and the [glados] repository's from its own
+    # keyring package.
+    subprocess.run(base + ["--populate-from", str(keys), "--populate", "archlinux", "glados"],
+                   check=True, capture_output=True)
+    subprocess.run(["gpgconf", "--homedir", str(home), "--kill", "all"], capture_output=True)
+    for sock in home.glob("S.*"):
+        sock.unlink()
+    n = subprocess.run(["gpg", "--homedir", str(home), "--list-keys", "--with-colons"],
+                       capture_output=True, text=True).stdout.count("\npub:")
+    print(f"  pacman's keyring: {n} key(s)")
+
+
+def ca_bundle():
+    """The TLS trust bundle every OpenSSL program reads, extracted from the
+    image's own Mozilla root list the way `update-ca-trust` does on install.
+
+    That is a package hook, and hooks do not run here, so the image shipped
+    the links to `/etc/ca-certificates/extracted/tls-ca-bundle.pem` and not
+    the file: curl and pacman refused every HTTPS server with "error adding
+    trust anchors". A root goes in when it is marked trusted and either says
+    nothing about its purposes or names server authentication among them --
+    the `--purpose server-auth` filter the hook applies. The list is the
+    image's, not the host's."""
+    src = TREE / "usr/share/ca-certificates/trust-source/mozilla.trust.p11-kit"
+    text = src.read_text()
+    blocks = text.split("[p11-kit-object-v1]")
+    server_auth = bytes.fromhex("06082b06010505070301")
+    # Purpose restrictions are separate objects keyed by the certificate's
+    # label: the extended key usage extension, percent-encoded DER.
+    eku = {}
+    for b in blocks:
+        if "class: x-certificate-extension" in b and "object-id: 2.5.29.37" in b:
+            label = b.split('label: "', 1)[1].split('"', 1)[0]
+            raw = b.split('value: "', 1)[1].split('"', 1)[0]
+            der = bytearray()
+            i = 0
+            while i < len(raw):
+                if raw[i] == "%":
+                    der.append(int(raw[i + 1:i + 3], 16))
+                    i += 3
+                else:
+                    der.append(ord(raw[i]))
+                    i += 1
+            eku[label] = bytes(der)
+    pems = []
+    for b in blocks:
+        if "trusted: true" not in b or "-----BEGIN CERTIFICATE-----" not in b:
+            continue
+        label = b.split('label: "', 1)[1].split('"', 1)[0]
+        if label in eku and server_auth not in eku[label]:
+            continue
+        pem = "-----BEGIN CERTIFICATE-----" + b.split("-----BEGIN CERTIFICATE-----", 1)[1].split("-----END CERTIFICATE-----", 1)[0] + "-----END CERTIFICATE-----\n"
+        pems.append(f"# {label}\n" + pem)
+    out = TREE / "etc/ca-certificates/extracted/tls-ca-bundle.pem"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("".join(pems))
+    print(f"  TLS trust bundle: {len(pems)} root(s)")
+
+
+def resolver():
+    """Names looked up in /etc/hosts and then by DNS, and nothing else: the
+    image's nsswitch asks systemd's resolver and its container and hostname
+    modules first, none of which exists here. /etc/resolv.conf itself is the
+    kernel's (`linux::proc`), written from what DHCP said."""
+    p = TREE / "etc/nsswitch.conf"
+    text = p.read_text()
+    lines = [("hosts: files dns" if l.startswith("hosts:") else l) for l in text.splitlines()]
+    p.write_text("\n".join(lines) + "\n")
+    conf = TREE / "etc/resolv.conf"
+    if conf.exists() or conf.is_symlink():
+        conf.unlink()
+    conf.symlink_to("../run/glados/resolv.conf")
+
+
+def pacman_conf(names):
+    """pacman's configuration for a guest, and the packages the system stands
+    in for.
+
+    The mirror is the one the image was resolved against. gdk-pixbuf2 is held
+    at its pin (see PINS) or the first upgrade would bring back the version
+    that needs a sandbox. And the packages left out on purpose (SKIP) are
+    recorded as provided by one local entry, `glados-system`, so a dependency
+    on them is met -- systemd is not missing here, it is the kernel's job --
+    rather than the first install pulling in an init this machine cannot
+    run."""
+    d = TREE / "etc/pacman.d"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "mirrorlist").write_text(f"# The mirror the image was built from.\nServer = {MIRROR}/$repo/os/$arch\n")
+    conf = TREE / "etc/pacman.conf"
+    text = conf.read_text() if conf.exists() else "[options]\n"
+    if "IgnorePkg = gdk-pixbuf2" not in text:
+        text = text.replace("[options]\n", "[options]\nIgnorePkg = gdk-pixbuf2\n# No sandbox to drop privileges into: downloads run as the guest's root.\nDisableSandbox\n", 1)
+    # The download user is created by systemd-sysusers, which never runs here.
+    text = "\n".join(("#" + l) if l.strip().startswith("DownloadUser") else l for l in text.split("\n"))
+    conf.write_text(text)
+    entry = TREE / "var/lib/pacman/local/glados-system-1-1"
+    entry.mkdir(parents=True, exist_ok=True)
+    (entry / "desc").write_text(
+        "%NAME%\nglados-system\n\n%VERSION%\n1-1\n\n"
+        "%DESC%\nWhat the GLaDOS kernel provides in place of a Linux init and sandbox\n\n"
+        "%ARCH%\nany\n\n%INSTALLDATE%\n" + str(INSTALLED) + "\n\n%VALIDATION%\nnone\n\n"
+        "%PROVIDES%\n" + "".join(f"{s}={skipped_version(s)}\n" for s in sorted(SKIP)) + "\n")
+    (entry / "files").write_text("%FILES%\n\n")
+    (TREE / "var/lib/pacman/local/ALPM_DB_VERSION").write_text("9\n")
+    print(f"  pacman's local database: {len(names) + 1} package(s)")
+
+
+def unpack(pkg):
+    # pacman's own metadata files at the top are not part of the system.
+    r = subprocess.run(
+        ["tar", "-C", str(TREE), "--exclude=.PKGINFO", "--exclude=.BUILDINFO",
+         "--exclude=.MTREE", "--exclude=.INSTALL", "--exclude=.CHANGELOG",
+         "-xpf", str(pkg)],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        sys.exit(f"could not unpack {pkg.name}: {r.stderr}")
+
+
+def readable():
+    """Give the owner read on files and read and search on directories that
+    lack them. A few setuid helpers ship as `---s--x---`, readable only by a
+    root this build is not; `mkfs.erofs` must read them to copy them. Adding
+    the owner's read bit changes nothing a guest relies on, since nothing
+    here runs setuid."""
+    for dirpath, dirnames, filenames in os.walk(TREE):
+        for d in dirnames:
+            p = Path(dirpath) / d
+            if not p.is_symlink():
+                m = p.stat().st_mode
+                if m & 0o500 != 0o500:
+                    p.chmod(m | 0o500)
+        for f in filenames:
+            p = Path(dirpath) / f
+            if not p.is_symlink():
+                m = p.stat().st_mode
+                if not m & 0o400:
+                    p.chmod(m | 0o400)
+
+
+def settings():
+    """Defaults the image ships, written where the programs read them.
+
+    GTK 3's icon theme is AdwaitaLegacy, the PNG set: Adwaita itself is SVG
+    now, and the gdk-pixbuf pinned above decodes SVG only through a loader
+    this image does not carry -- so GTK found no `image-missing` and aborted
+    on its first icon."""
+    gtk = TREE / "etc/gtk-3.0"
+    gtk.mkdir(parents=True, exist_ok=True)
+    (gtk / "settings.ini").write_text("[Settings]\ngtk-icon-theme-name=AdwaitaLegacy\n")
+    sci_fish()
+
+
+# sci-fish: fish underneath, oh-my-zsh on top. fish already does the half that
+# matters -- autosuggestions, highlighting as you type, completions that read
+# man pages -- so what is added is the look people mean by "oh-my-zsh": the
+# robbyrussell prompt and the abbreviations its plugins teach. Only when
+# started as `sci-fish`, so plain `fish` is still fish.
+SCI_FISH = r"""# sci-fish -- the look of oh-my-zsh's robbyrussell theme on fish.
+# Active when the shell was started as `sci-fish` (SCI_FISH is set).
+if not set -q SCI_FISH
+    exit
+end
+
+set -g fish_greeting (set_color --bold brred)"sci-fish"(set_color normal)" -- fish underneath, robbyrussell on top. 'help' is fish's manual."
+
+function fish_prompt
+    set -l last $status
+    if test $last -eq 0
+        set_color --bold brgreen
+    else
+        set_color --bold brred
+    end
+    printf '\u279c  '
+    set_color --bold cyan
+    if test "$PWD" = "$HOME"
+        printf '~'
+    else
+        printf '%s' (string replace -r '^.*/' '' -- $PWD)
+        test "$PWD" = /; and printf '/'
+    end
+    if command -sq git; and git rev-parse --is-inside-work-tree >/dev/null 2>&1
+        set -l branch (git symbolic-ref --short HEAD 2>/dev/null; or git rev-parse --short HEAD 2>/dev/null)
+        set_color --bold blue
+        printf ' git:('
+        set_color --bold red
+        printf '%s' $branch
+        set_color --bold blue
+        printf ')'
+        if not git diff --quiet --ignore-submodules HEAD 2>/dev/null
+            set_color --bold yellow
+            printf ' \u2717'
+        end
+    end
+    set_color normal
+    printf ' '
+end
+
+function fish_right_prompt
+end
+
+# The abbreviations oh-my-zsh's common plugins teach; abbreviations rather
+# than aliases, so what runs is shown in full before it does.
+abbr -a ll 'ls -lh'
+abbr -a la 'ls -lAh'
+abbr -a l 'ls -lah'
+abbr -a md 'mkdir -p'
+abbr -a .. 'cd ..'
+abbr -a ... 'cd ../..'
+abbr -a g git
+abbr -a gst 'git status'
+abbr -a ga 'git add'
+abbr -a gc 'git commit'
+abbr -a gco 'git checkout'
+abbr -a gd 'git diff'
+abbr -a gl 'git pull'
+abbr -a gp 'git push'
+abbr -a glog 'git log --oneline --decorate --graph'
+"""
+
+
+def sci_fish():
+    conf = TREE / "etc/fish/conf.d"
+    conf.mkdir(parents=True, exist_ok=True)
+    (conf / "sci-fish.fish").write_text(SCI_FISH)
+    launcher = TREE / "usr/bin/sci-fish"
+    launcher.write_text('#!/bin/sh\n# sci-fish: fish, looking like oh-my-zsh. See /etc/fish/conf.d/sci-fish.fish.\nSCI_FISH=1\nexport SCI_FISH\nexec fish "$@"\n')
+    launcher.chmod(0o755)
+    # foot's own terminal shell, so a terminal opened on the desktop is one.
+    foot = TREE / "etc/xdg/foot"
+    foot.mkdir(parents=True, exist_ok=True)
+    (foot / "foot.ini").write_text("[main]\nshell=/usr/bin/sci-fish\nfont=monospace:size=11\n")
+
+
+def data_hooks():
+    """What package scripts would have produced that is data rather than a
+    service: compiled schemas and the MIME database."""
+    schemas = TREE / "usr/share/glib-2.0/schemas"
+    if schemas.is_dir():
+        subprocess.run(["glib-compile-schemas", str(schemas)], check=True)
+    mime = TREE / "usr/share/mime"
+    if mime.is_dir():
+        subprocess.run(["update-mime-database", str(mime)], check=True, capture_output=True)
+
+
+def image():
+    if not MKFS.exists():
+        sys.exit(f"no mkfs.erofs at {MKFS}; fetch erofs-utils into out/rootfs/tools first")
+    IMAGE.parent.mkdir(parents=True, exist_ok=True)
+    # Uncompressed and with 4 KiB blocks, so the kernel's reader is a reader
+    # of plain blocks; `-T0` pins every timestamp so one set of packages makes
+    # one image, byte for byte.
+    subprocess.run([str(MKFS), "-T0", "-b4096", "--all-root", str(IMAGE), str(TREE)], check=True)
+
+
+def build(reuse=False):
+    if reuse and TREE.exists():
+        glados_packages([])
+        glados_repo_conf()
+        keyring()
+        readable()
+        data_hooks()
+        image()
+        print(f"{IMAGE}  {IMAGE.stat().st_size / 2**20:.0f} MiB")
+        return
+    urls = resolve(PACKAGES)
+    print(f"{len(urls)} package(s)")
+    if TREE.exists():
+        shutil.rmtree(TREE)
+    TREE.mkdir(parents=True)
+    names = []
+    for i, u in enumerate(urls, 1):
+        p = fetch(u)
+        unpack(p)
+        names.append(local_db(p, pkgname(p.name) in PACKAGES))
+        if i % 25 == 0:
+            print(f"  {i} unpacked")
+    glados_packages(names)
+    pacman_conf(names)
+    glados_repo_conf()
+    resolver()
+    ca_bundle()
+    keyring()
+    readable()
+    settings()
+    data_hooks()
+    image()
+    size = IMAGE.stat().st_size
+    print(f"{IMAGE}  {size / 2**20:.0f} MiB")
+
+
+def selftest():
+    claims = [
+        ("a plain package name is everything before version, release and arch",
+         pkgname("gtk3-1:3.24.52-1-x86_64.pkg.tar.zst") == "gtk3"),
+        ("and a name with dashes in it keeps them",
+         pkgname("gdk-pixbuf2-2.44.7-1-x86_64.pkg.tar.zst") == "gdk-pixbuf2"),
+        ("a pin's own filename names the package it replaces",
+         all(pkgname(u.rsplit("/", 1)[-1]) == k for k, u in PINS.items())),
+        ("nothing pinned is also skipped", not (set(PINS) & SKIP)),
+    ]
+    bad = 0
+    for what, ok in claims:
+        print(f"  {'ok  ' if ok else 'FAIL'}  {what}")
+        bad += not ok
+    sys.exit(1 if bad else 0)
+
+
+def main():
+    a = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    a.add_argument("cmd", nargs="?", choices=["resolve", "build"])
+    a.add_argument("--selftest", action="store_true")
+    a.add_argument("--reuse", action="store_true", help="image the tree already unpacked")
+    args = a.parse_args()
+    if args.selftest:
+        selftest()
+    elif args.cmd == "resolve":
+        urls = resolve(PACKAGES)
+        for u in urls:
+            print(u)
+        print(f"{len(urls)} package(s)", file=sys.stderr)
+    elif args.cmd == "build":
+        build(args.reuse)
+    else:
+        a.print_help()
+
+
+if __name__ == "__main__":
+    main()

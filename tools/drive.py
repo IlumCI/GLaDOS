@@ -62,6 +62,7 @@ import os
 import shutil
 import socket
 import subprocess
+import re
 import sys
 import time
 from pathlib import Path
@@ -186,6 +187,63 @@ def monitor(lines, gap=0.35):
             mon.recv(4096)
         except OSError:
             pass
+
+
+def monitor_ask(cmd, wait=1.0):
+    """One monitor command, answered: what QEMU printed back."""
+    with socket.create_connection(("127.0.0.1", MONITOR_PORT), timeout=3) as mon:
+        mon.settimeout(1.0)
+        try:
+            mon.recv(65536)
+        except OSError:
+            pass
+        mon.sendall((cmd + "\n").encode())
+        time.sleep(wait)
+        out = b""
+        try:
+            while True:
+                d = mon.recv(65536)
+                if not d:
+                    break
+                out += d
+        except OSError:
+            pass
+    return out.decode("utf-8", "replace")
+
+
+def vm_stopped(proc):
+    """Why the guest is no longer running, or None while it is.
+
+    Asked only when the serial line has gone quiet, so a working guest costs
+    nothing. A paused-on-shutdown VM is a reset (a triple fault, under
+    `-no-reboot`) or a power-off; an exited QEMU is QEMU itself dying.
+    """
+    if proc.poll() is not None:
+        return f"QEMU exited with status {proc.returncode}"
+    try:
+        st = monitor_ask("info status", wait=0.3)
+    except OSError:
+        return None
+    if "paused (shutdown)" in st:
+        return "the guest reset or powered off (paused on shutdown)"
+    if "internal-error" in st or "guest-panicked" in st:
+        return st.strip().splitlines()[-2] if st.strip() else "stopped"
+    return None
+
+
+def dump_regs(dest=".qemu/regs.txt"):
+    """Every vCPU's registers, for a guest that just stopped. Symbolise a RIP
+    with `llvm-symbolizer --obj=target/.../deps/glados-*.efi --inlining`."""
+    try:
+        text = monitor_ask("info registers -a", wait=1.5)
+    except OSError as e:
+        print(f"[drive] could not read registers: {e}", file=sys.stderr)
+        return
+    Path(dest).write_text(text, encoding="utf-8")
+    for line in text.splitlines():
+        if line.startswith("CPU#") or line.startswith("RIP=") or line.startswith("CR0="):
+            print(f"[drive]   {line[:100]}", file=sys.stderr)
+    print(f"[drive] registers -> {dest}", file=sys.stderr)
 
 
 def capture(dest):
@@ -486,11 +544,29 @@ def main():
     esp_on_nvme = "--esp-on-nvme" in argv
     if esp_on_nvme:
         argv.remove("--esp-on-nvme")
+    # Which network card the guest gets: the USB adapter by default, or an
+    # e1000 *instead of* it. Adding an e1000 with --qemu-extra gave the guest
+    # two cards on two separate user-mode networks, both 10.0.2.15, and a
+    # segment leaving through the wrong one reached a NAT that had never seen
+    # the connection -- which read as a driver reordering frames.
+    nic = "usb"
+    if "--nic" in argv:
+        i = argv.index("--nic")
+        nic = argv[i + 1]
+        del argv[i:i + 2]
+    if nic not in ("usb", "e1000"):
+        sys.exit(f"--nic takes usb or e1000, not {nic!r}")
     # A different NVMe disk image: a large FAT32 volume a guest reads in place
     # through `linux mount`, which the 192 MB fixture image is far too small
     # to hold. Opened read-only, since nothing writes it and it may be
     # gigabytes of somebody's installed software.
     nvme_image = None
+    # --nvme-rw: attach --nvme-image writable. Read-only stays the default,
+    # because the usual image is somebody's game install and a stray store
+    # format would overwrite it; a disk meant to carry a store asks for this.
+    nvme_rw = "--nvme-rw" in argv
+    if nvme_rw:
+        argv.remove("--nvme-rw")
     if "--nvme-image" in argv:
         i = argv.index("--nvme-image")
         nvme_image = Path(argv[i + 1]).resolve()
@@ -823,6 +899,13 @@ def main():
     # finds no bootloader and reports "Not Found", which looks nothing like
     # "you forgot to copy the build".
     built = ROOT / "target/x86_64-unknown-uefi/release/glados.efi"
+    # The `quick` profile (no LTO, for iterating) wins when it is the newer of
+    # the two, and says so: booting the older one is the stale-binary trap
+    # this file already warns about for debug builds.
+    quick = ROOT / "target/x86_64-unknown-uefi/quick/glados.efi"
+    if quick.exists() and (not built.exists() or quick.stat().st_mtime > built.stat().st_mtime):
+        built = quick
+        print("[drive] booting the quick build (newer than release)", file=sys.stderr)
     # `GLADOS_EFI` boots another build -- an A/B against an older commit,
     # built in a worktree, without disturbing this tree's artifact.
     if os.environ.get("GLADOS_EFI"):
@@ -1004,7 +1087,7 @@ def main():
         # volume it booted from, and anything that writes the ESP from a running
         # machine is untestable. OVMF enumerates NVMe as a boot device, so
         # nothing else has to change.
-        "-drive", (f"file={nvme_image},if=none,id=nvm0,format=raw,readonly=on" if nvme_image else
+        "-drive", (f"file={nvme_image},if=none,id=nvm0,format=raw{'' if nvme_rw else ',readonly=on'}" if nvme_image else
                    f"file={esp_image if esp_on_nvme else ROOT / '.qemu/nvme.img'},if=none,id=nvm0,format=raw"),
         "-device", "nvme,serial=GLADOSQEMU0001,drive=nvm0",
         # A USB controller to develop against. QEMU emulates xHCI faithfully
@@ -1015,7 +1098,8 @@ def main():
         # network device is what the dongle will look like once its driver
         # exists, so proving enumeration against one is not a detour.
         "-netdev", "user,id=usbnet",
-        "-device", "usb-net,bus=xhci.0,netdev=usbnet",
+        *(["-device", "usb-net,bus=xhci.0,netdev=usbnet"] if nic == "usb" else
+          ["-device", "e1000,netdev=usbnet"]),
         "-serial", f"tcp:127.0.0.1:{PORT},server=on,wait=on",
         # The monitor is how a screenshot happens. The serial transcript proves
         # a panel's *behaviour*; it says nothing about whether the thing on
@@ -1030,7 +1114,13 @@ def main():
           ["-display", "sdl", "-name", "GLaDOS"] if window else ["-display", "none"]),
         *(["-vga", "none", "-device", f"VGA,xres={res[0]},yres={res[1]}"] if res else
           ["-vga", "none", "-device", "VGA,xres=1920,yres=1080"] if hd else []),
-        "-no-reboot",
+        # Pause rather than exit when the guest resets, which with
+        # `-no-reboot` alone it did: a triple fault took QEMU and every
+        # register with it, and this harness then sat out its whole timeout
+        # reading a closed socket as a quiet guest. Paused, the monitor still
+        # answers, so `vm_stopped` sees it within seconds and `dump_regs`
+        # keeps the state that says why.
+        "-no-reboot", "-action", "shutdown=pause",
         *qemu_late,
     ]
 
@@ -1071,6 +1161,8 @@ def main():
     # depend on a prompt coming back afterwards. See the beat below.
     force_send = False
 
+    quiet_since = time.time()
+    stopped = None
     try:
         while time.time() < deadline:
             try:
@@ -1079,6 +1171,24 @@ def main():
                 chunk = b""
             except OSError:
                 break
+            if chunk:
+                quiet_since = time.time()
+                # A kernel fault reports, prints this and spins with the VM
+                # still running, so the monitor never says it stopped -- the
+                # report is the only sign, and it is in the serial stream.
+                if b"\n  halted." in (buf[-4096:] + chunk) and stopped is None:
+                    stopped = "the kernel faulted and halted (the report is above)"
+                    print(f"\n[drive] STOPPED: {stopped}", file=sys.stderr)
+                    dump_regs()
+                    emit(chunk)
+                    break
+            elif time.time() - quiet_since > 3.0:
+                quiet_since = time.time()
+                stopped = vm_stopped(proc)
+                if stopped:
+                    print(f"\n[drive] STOPPED: {stopped}", file=sys.stderr)
+                    dump_regs()
+                    break
             if chunk:
                 buf += chunk
                 emit(chunk)
@@ -1173,8 +1283,15 @@ def main():
                         pending = None
 
             # The shell echoes a prompt when it is ready for the next line.
+            # A compositor notice printed after the prompt -- "[gfx] the
+            # compositor is painting again" lands whenever the host stalls the
+            # guest, often on the prompt's own line -- or a service's restart
+            # notice ("[services] session-bus ended ...") hid the prompt, and the run sat there with
+            # every command unsent. Such lines are stripped before asking.
+            quiet = re.sub(rb"(\s*\[(gfx|services|job)\][^\n]*)+\s*$", b"", buf[-4096:]) if not chunk else buf
             if (force_send or buf.endswith(PROMPT)
-                    or (not chunk and buf.rstrip().endswith(PROMPT.strip()))):
+                    or (not chunk and buf.rstrip().endswith(PROMPT.strip()))
+                    or (not chunk and quiet.rstrip().endswith(PROMPT.strip()))):
                 if queue:
                     line = queue.pop(0)
                     # `@wait N` is a beat rather than a command: it is handled
@@ -1334,8 +1451,11 @@ def main():
             proc.kill()
 
     if not sent_all:
-        print(f"\n[drive] TIMEOUT after {timeout}s with {len(queue)} commands unsent",
-              file=sys.stderr)
+        if stopped:
+            print(f"\n[drive] guest stopped with {len(queue)} commands unsent", file=sys.stderr)
+        else:
+            print(f"\n[drive] TIMEOUT after {timeout}s with {len(queue)} commands unsent",
+                  file=sys.stderr)
         # A guest crash usually leaves its cause in QEMU's own log -- a `-d
         # int` trace carries the vector and RIP of every exception. Discarding
         # stderr here is how a fault stays mysterious.

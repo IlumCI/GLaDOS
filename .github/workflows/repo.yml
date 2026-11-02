@@ -1,0 +1,64 @@
+name: repo
+
+# The [glados] pacman repository: every packaging/*/PKGBUILD built by Arch's
+# own makepkg, signed with the repository's key, and published as the assets
+# of the `repo-x86_64` release, which is the Server line in an image's
+# pacman.conf. tools/pkgrepo.py is the whole of it, so this is exactly what a
+# person runs by hand.
+#
+# Its own key and its own secret, REPO_SIGNING_KEY, deliberately: the update
+# key ships kernels to every machine and the verdict key answers proposals,
+# and a key that can put a package on every machine is a third thing again.
+# The public half is packaging/glados-keyring, and pkgrepo.py refuses to sign
+# with a key that is not the one it carries.
+
+on:
+  push:
+    branches: [main]
+    paths: ["packaging/**", "tools/pkgrepo.py", ".github/workflows/repo.yml"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and sign, but publish nothing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: repo
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: tools
+        run: pacman -Syu --noconfirm --needed git github-cli python
+      - uses: actions/checkout@v4
+      # makepkg refuses to run as root, and the container is root.
+      - name: builder
+        run: |
+          useradd -m builder
+          chown -R builder "$GITHUB_WORKSPACE"
+      - name: key
+        env:
+          KEY: ${{ secrets.REPO_SIGNING_KEY }}
+        run: |
+          install -d -m700 -o builder /home/builder/repo-gnupg
+          printf '%s\n' "$KEY" | su builder -c 'GNUPGHOME=/home/builder/repo-gnupg gpg --batch --import'
+      - name: build and check
+        run: su builder -c "cd '$GITHUB_WORKSPACE' && python3 tools/pkgrepo.py build --key-home /home/builder/repo-gnupg"
+      - name: publish
+        if: ${{ github.event_name == 'push' || inputs.dry_run == false }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          python3 tools/pkgrepo.py publish --yes
+      # The key is gone with the container, and removed anyway, on every path.
+      - name: forget the key
+        if: always()
+        run: rm -rf /home/builder/repo-gnupg

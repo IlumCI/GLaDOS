@@ -2,6 +2,7 @@
 
 pub mod block;
 pub mod cas;
+pub mod erofs;
 pub mod fat;
 pub mod fatw;
 pub mod sha256;

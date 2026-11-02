@@ -45,6 +45,13 @@ static MAIN_GUEST: [AtomicUsize; MAX] = [const { AtomicUsize::new(NONE) }; MAX];
 static DEADLINE: [AtomicU64; MAX] = [const { AtomicU64::new(0) }; MAX];
 static EXITING: [AtomicBool; MAX] = [const { AtomicBool::new(false) }; MAX];
 static QUARANTINED: [AtomicBool; MAX] = [const { AtomicBool::new(false) }; MAX];
+/// A session whose console output goes to the service log rather than the
+/// screen: a supervised service, which nobody is watching and whose
+/// warnings would otherwise print over whatever the operator is typing.
+static QUIET: [AtomicBool; MAX] = [const { AtomicBool::new(false) }; MAX];
+/// A task about to start a session asks for it to be quiet here, and the
+/// session takes the request when it is claimed on that task.
+static QUIET_NEXT: [AtomicBool; crate::task::MAX_TASKS] = [const { AtomicBool::new(false) }; crate::task::MAX_TASKS];
 static TRACE: Racy<[Vec<Call>; MAX]> = Racy::new([const { Vec::new() }; MAX]);
 /// The most recent calls once the trace above is full, as a ring.
 ///
@@ -64,6 +71,7 @@ pub fn claim() -> Option<usize> {
             DEADLINE[i].store(0, Ordering::Release);
             EXITING[i].store(false, Ordering::Release);
             QUARANTINED[i].store(false, Ordering::Release);
+            QUIET[i].store(QUIET_NEXT[task_index()].swap(false, Ordering::AcqRel), Ordering::Release);
             unsafe { (*TRACE.get())[i].clear() };
             unsafe { (*TAIL.get())[i] = (Vec::new(), 0) };
             return Some(i);
@@ -88,6 +96,16 @@ pub fn live_count() -> usize {
 
 fn task_index() -> usize {
     crate::task::current().min(crate::task::MAX_TASKS - 1)
+}
+
+/// The next session this task claims prints to the service log.
+pub fn ask_quiet() {
+    QUIET_NEXT[task_index()].store(true, Ordering::Release);
+}
+
+/// Whether the session this task speaks for is quiet.
+pub fn quiet() -> bool {
+    current().is_some_and(|s| QUIET[s].load(Ordering::Acquire))
 }
 
 /// This task speaks for session `s` from now on.

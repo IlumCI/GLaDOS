@@ -46,7 +46,20 @@ pub fn block_count() -> u64 {
 /// `buf` should be page-aligned (see `nvme::alloc_dma`). It is not required --
 /// PRP2 is computed from the buffer offset -- but a straddling buffer costs an
 /// extra page per command for no benefit.
+/// Reads issued, blocks read, and cycles spent in them, for `linux fills`.
+pub static READS: [core::sync::atomic::AtomicU64; 3] = [const { core::sync::atomic::AtomicU64::new(0) }; 3];
+
 pub fn read(lba: u64, blocks: u32, buf: &mut [u8]) -> Result<(), Error> {
+    let t0 = crate::time::rdtsc();
+    let r = read_inner(lba, blocks, buf);
+    use core::sync::atomic::Ordering::Relaxed;
+    READS[0].fetch_add(1, Relaxed);
+    READS[1].fetch_add(blocks as u64, Relaxed);
+    READS[2].fetch_add(crate::time::rdtsc() - t0, Relaxed);
+    r
+}
+
+fn read_inner(lba: u64, blocks: u32, buf: &mut [u8]) -> Result<(), Error> {
     let bs = block_size() as usize;
     if buf.len() < blocks as usize * bs {
         return Err(Error::TooSmall);

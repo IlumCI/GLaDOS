@@ -173,11 +173,13 @@ def published(releases):
     into the news column as a link nobody else can open. And a `payload-*`
     release holds inputs CI bakes into the images -- weights, firmware, the
     connectome -- which are not releases of anything a visitor downloads; the
-    images already carry them, so listing them as news says otherwise.
+    images already carry them, so listing them as news says otherwise. A
+    `repo-*` release is the [glados] package repository, whose assets are
+    what pacman fetches, rewritten whenever a package changes.
     """
     return [r for r in releases
             if not r.get("draft")
-            and not r["tag_name"].startswith(("payload-", "miner-"))]
+            and not r["tag_name"].startswith(("payload-", "miner-", "repo-"))]
 
 
 def size_str(n):

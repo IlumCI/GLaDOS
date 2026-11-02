@@ -2675,6 +2675,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         "mine" => mine_cmd(rest),
         "wlan" | "wifi" => wifi_cmd(rest),
         "services" => match rest.trim() {
+            "log" => crate::linux::services::print_log(),
             "reload" => {
                 crate::linux::services::load();
                 crate::linux::services::report();
@@ -2793,6 +2794,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     tcp::close(2000);
                     kprintln!("  closed");
                 }
+                ("stats", _) => tcp::report_stats(),
                 _ => tcp::report(),
             }
         }
@@ -3549,6 +3551,12 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             if p <= 1.0 {
                 kprintln!("  (1.0 is off -- a loop can reinforce itself unchecked)");
             }
+        }
+        "logits" if rest.starts_with("check") => {
+            let mut w = rest.split_whitespace().skip(1);
+            let n = w.next().and_then(|x| x.parse().ok()).unwrap_or(1500);
+            let seed = w.next().and_then(|x| x.parse().ok()).unwrap_or(7);
+            crate::ai::prefill_check(n, seed);
         }
         "logits" => {
             let ids: Vec<usize> = rest.split_whitespace().filter_map(|s| s.parse().ok()).collect();
@@ -5558,6 +5566,16 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 );
             }
         }
+        // The model doing office work through LibreOffice -- see `office`.
+        "office" => crate::office::command(rest),
+        "colleague" if !rest.trim().is_empty() => crate::office::colleague(rest),
+        // The package manager, from the machine's own shell: `orange install
+        // figlet` runs the guest's `orange` (pacman underneath) the way a
+        // Linux shell would.
+        "orange" => {
+            let line = alloc::format!("linux run /usr/bin/bash /usr/bin/orange {}", rest.trim());
+            execute(&line, boot, acpi, interp);
+        }
         "launch" => match crate::apps::launch(rest.trim()) {
             Ok(id) => kprintln!("  [job {}] {} started", id, rest.trim()),
             Err(why) => kprintln!("  {}", why),
@@ -6522,6 +6540,27 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             kprintln!("{}", crate::gfx::text::OFL_CASCADIA);
             kprintln!("  crates and their licences: NOTICE.md in the source tree");
         }
+        "kbd" if rest.trim() == "trace" => {
+            // The bytes through `pop_any`, oldest first, as a line per run of
+            // one kind on one core and task.
+            let t = crate::dev::kbd::TRACE.lock_irq().clone();
+            let mut line = alloc::string::String::new();
+            let mut last: Option<(u8, u8, u16)> = None;
+            for (k, b, c, task) in t.iter() {
+                if last != Some((*k, *c, *task)) {
+                    if !line.is_empty() {
+                        kprintln!("  {}", line);
+                    }
+                    line = alloc::format!("{} core {} task {}: ", *k as char, c, task);
+                    last = Some((*k, *c, *task));
+                }
+                let ch = *b as char;
+                if ch.is_ascii_graphic() || ch == ' ' { line.push(ch) } else { line.push_str(&alloc::format!("<{:02x}>", b)) }
+            }
+            if !line.is_empty() {
+                kprintln!("  {}", line);
+            }
+        }
         "kbd" => {
             let (irqs, ring, shell, routed) = crate::dev::kbd::stats();
             kprintln!("  {} keyboard interrupt(s), {} routed by the compositor", irqs, routed);
@@ -7235,6 +7274,10 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             let mut words = rest.split_whitespace();
             match words.next().unwrap_or("") {
                 "run" => {
+                    // Split as a shell would, so `bash -c 'echo a b'` hands
+                    // bash one argument rather than three fragments of quote.
+                    let quoted = guest_words(rest.trim_start().strip_prefix("run").unwrap_or(""));
+                    let mut words = quoted.iter().map(|w| w.as_str());
                     let Some(path) = words.next() else {
                         kprintln!("  usage: linux run <path to an ELF in the namespace>");
                         return;
@@ -7402,6 +7445,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                 }
                 "bg" => {
+                    let quoted = guest_words(rest.trim_start().strip_prefix("bg").unwrap_or(""));
+                    let mut words = quoted.iter().map(|w| w.as_str());
                     let Some(path) = words.next() else {
                         kprintln!("  usage: linux bg <path> [args...]   -- runs beside the shell");
                         return;
@@ -7413,16 +7458,22 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     }
                 }
                 "mount" => {
-                    // linux mount <guest path> <partition>: a FAT volume the
-                    // next guests read in place, by range.
+                    // linux mount <guest path> <partition>: a FAT volume or
+                    // an EROFS image the next guests read in place, by range.
+                    // An EROFS image at / is the guests' root filesystem.
                     match (words.next(), words.next().and_then(|n| n.parse::<u32>().ok())) {
                         (Some(at), Some(n)) => match linux::disk::mount(at, n) {
+                            Ok(()) if at == "/" => {
+                                kprintln!("  partition {} is the guests' root filesystem, under /proc, /dev, /run, /tmp and the namespace", n);
+                                linux::services::begin_session();
+                                kprintln!("  session: {} for runtime files, the session bus at {}", linux::services::RUNTIME_DIR, linux::services::SESSION_BUS);
+                            }
                             Ok(()) => kprintln!("  partition {} is at {} for guests, read-only, read in place", n, at),
                             Err(e) => kprintln!("  {}", e),
                         },
                         _ => {
-                            for (p, cb) in linux::disk::mounts() {
-                                kprintln!("  {}  FAT, {} B clusters", p, cb);
+                            for (p, kind, bs) in linux::disk::mounts() {
+                                kprintln!("  {}  {}, {} B blocks", p, kind, bs);
                             }
                             kprintln!("  usage: linux mount <path> <partition>   ('fat' lists partitions)");
                         }
@@ -7530,7 +7581,14 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 "cores" => {
                     match words.next() {
                         Some("one") => linux::syscall::SPREAD.store(false, core::sync::atomic::Ordering::Relaxed),
-                        Some("all") => linux::syscall::SPREAD.store(true, core::sync::atomic::Ordering::Relaxed),
+                        Some("all") => {
+                            linux::syscall::SPREAD.store(true, core::sync::atomic::Ordering::Relaxed);
+                            linux::syscall::SPARE_BSP.store(true, core::sync::atomic::Ordering::Relaxed);
+                        }
+                        Some("any") => {
+                            linux::syscall::SPREAD.store(true, core::sync::atomic::Ordering::Relaxed);
+                            linux::syscall::SPARE_BSP.store(false, core::sync::atomic::Ordering::Relaxed);
+                        }
                         _ => {}
                     }
                     kprintln!(
@@ -7547,6 +7605,63 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                     Some("off") => linux::prof::ON.store(false, core::sync::atomic::Ordering::Relaxed),
                     _ => linux::prof::report(),
                 },
+                "fills" => {
+                    let f = &linux::syscall::FILLS;
+                    let n = f[0].load(core::sync::atomic::Ordering::Relaxed).max(1);
+                    let mhz = crate::time::tsc_mhz().max(1);
+                    kprintln!(
+                        "  {} file page(s) filled: {} us waiting for the guest lock, {} us reading, each",
+                        f[0].load(core::sync::atomic::Ordering::Relaxed),
+                        f[1].load(core::sync::atomic::Ordering::Relaxed) / n / mhz,
+                        f[2].load(core::sync::atomic::Ordering::Relaxed) / n / mhz
+                    );
+                    let c = &linux::fork::COPIED;
+                    let ld = |i: usize| c[i].load(core::sync::atomic::Ordering::Relaxed);
+                    kprintln!(
+                        "  {} fork(s), {} us each: {} promise(s) carried, {} demand page(s) and {} other page(s) copied",
+                        ld(3), ld(4) / ld(3).max(1) / mhz, ld(0), ld(1), ld(2)
+                    );
+                    let ph = &linux::fork::PHASES;
+                    let pl = |i: usize| ph[i].load(core::sync::atomic::Ordering::Relaxed);
+                    let pn = pl(3).max(1);
+                    kprintln!(
+                        "  {} child(ren) reaped: {} us fork to start, {} us start to finish, {} us finish to reaped, each",
+                        pl(3), pl(0) / pn / mhz, pl(1) / pn / mhz, pl(2) / pn / mhz
+                    );
+                    let w = &linux::fork::WAITS;
+                    kprintln!("  a reaping wait4: {} us inside it, {} round(s) of its loop, each",
+                        w[0].load(core::sync::atomic::Ordering::Relaxed) / pn / mhz,
+                        w[1].load(core::sync::atomic::Ordering::Relaxed) / pn);
+                    let ff = &crate::cpu::idt::FILE_FAULTS;
+                    let fl = &linux::syscall::FILL_FAIL;
+                    let g = |a: &core::sync::atomic::AtomicU64| a.load(core::sync::atomic::Ordering::Relaxed);
+                    kprintln!("  file faults: {} by trampoline, {} on the IST stack, {} refused; fills failed: {} no record, {} short image read, {} short other read",
+                        g(&ff[0]), g(&ff[1]), g(&ff[2]), g(&fl[0]), g(&fl[1]), g(&fl[2]));
+                    let r = &crate::store::block::READS;
+                    let rn = r[0].load(core::sync::atomic::Ordering::Relaxed).max(1);
+                    kprintln!(
+                        "  {} disk read(s), {} sector(s) each, {} us each",
+                        r[0].load(core::sync::atomic::Ordering::Relaxed),
+                        r[1].load(core::sync::atomic::Ordering::Relaxed) / rn,
+                        r[2].load(core::sync::atomic::Ordering::Relaxed) / rn / mhz
+                    );
+                }
+                "unserved" => {
+                    if words.next() == Some("clear") {
+                        for n in linux::syscall::UNSERVED.iter().chain(linux::syscall::UNSERVED_32.iter()) {
+                            n.store(0, core::sync::atomic::Ordering::Relaxed);
+                        }
+                        kprintln!("  forgotten");
+                    } else {
+                        let rows = linux::syscall::unserved();
+                        if rows.is_empty() {
+                            kprintln!("  no guest has been refused a call");
+                        }
+                        for (name, i386, n, nr) in rows {
+                            kprintln!("  {:>8}  {:>3} {}{}", n, nr, name, if i386 { "  (i386)" } else { "" });
+                        }
+                    }
+                }
                 "misses" => {
                     let on = words.next() != Some("off");
                     linux::syscall::MISSES.store(on, core::sync::atomic::Ordering::Relaxed);
@@ -10947,4 +11062,49 @@ fn readable_listing(text: &str) -> Option<alloc::string::String> {
         out.push('\n');
     }
     Some(out)
+}
+
+/// A guest's argv from a typed line: words split on whitespace, with single
+/// quotes taken literally, double quotes grouping, and a backslash escaping
+/// the next character outside single quotes. What a POSIX shell does for the
+/// cases a person types; no expansion of any kind, since there is nothing here
+/// to expand against.
+pub fn guest_words(line: &str) -> alloc::vec::Vec<alloc::string::String> {
+    let mut out = alloc::vec::Vec::new();
+    let mut cur = alloc::string::String::new();
+    let mut started = false;
+    let mut chars = line.chars();
+    let (mut single, mut double) = (false, false);
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !double => {
+                single = !single;
+                started = true;
+            }
+            '"' if !single => {
+                double = !double;
+                started = true;
+            }
+            '\\' if !single => {
+                if let Some(n) = chars.next() {
+                    cur.push(n);
+                    started = true;
+                }
+            }
+            c if c.is_whitespace() && !single && !double => {
+                if started {
+                    out.push(core::mem::take(&mut cur));
+                    started = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        out.push(cur);
+    }
+    out
 }

@@ -43,6 +43,7 @@ mod mem;
 mod mind;
 mod mine;
 mod net;
+mod office;
 mod pkg;
 /// What a program written somewhere else may ask of this machine.
 mod port;
@@ -606,6 +607,16 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
             None => kprintln!("  could not spawn the clock task"),
         }
     }
+    // The thing that keeps the network moving. Receive is polled, and the
+    // stack advanced only when the shell sat idle or somebody was inside a
+    // blocking call -- so while a guest worked between two reads, its peer's
+    // segments waited in the card, nothing was acknowledged, and the sender
+    // sat on a full window. `pacman -Syy` read 8 MB at 330 KB/s over a link
+    // the host drives at 6 MB/s.
+    match task::spawn("net", net_task) {
+        Some(i) => kprintln!("  spawned '{}' as task {}", "net", i),
+        None => kprintln!("  could not spawn the network task"),
+    }
     // The thing that owns the frame.
     //
     // Painting used to be push-model with no owner: sixteen scattered
@@ -770,6 +781,15 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         let line = mine::boot::apply(p);
         kprintln!("
 [miner] {}", line);
+    }
+
+    // The guests' root filesystem, if a disk carries one, and the session it
+    // brings (a runtime directory and the session bus). Found rather than
+    // asked for: a Linux program on the desktop should not need somebody to
+    // know a partition number first.
+    if let Some(p) = linux::disk::auto_root() {
+        linux::services::begin_session();
+        kprintln!("[linux] the root filesystem is partition {}, with a session bus", p);
     }
 
     // What is installed, so the desktop can offer it. Read off every FAT
@@ -1129,6 +1149,35 @@ fn radio_task() {
             net::wifi_poll();
         }
         task::yield_now();
+    }
+}
+
+/// The network task: every frame the cards hold, each tick.
+///
+/// A tick and not a spin: the core it shares is core 0's, with the shell and
+/// the compositor on it, and an idle link costs one empty poll per card a
+/// tick. What it buys is that acknowledgements leave within ten milliseconds
+/// of the data, whoever is reading -- which is what keeps a sender's window
+/// moving.
+///
+/// **And it stays on the card while the card has frames.** Sleeping a tick
+/// after every drain capped a stream at one window per tick: QEMU's network
+/// does not scale windows, so 64 KiB per 10 ms -- a local download measured
+/// 6.5 MB/s, exactly that, where the same file had come at 36 MB/s while the
+/// guest's own blocking read spun the stack itself. Busy means another pass
+/// at once, idle means a tick's sleep, so the core is spent only while data is
+/// moving. Whatever arrived, a guest napping on a socket is woken to read it,
+/// as a syscall would wake it: no syscall announces a packet.
+fn net_task() {
+    loop {
+        let got = net::tcp::drain();
+        if got > 0 {
+            linux::syscall::wake_nappers();
+            task::yield_now();
+        } else {
+            let next = dev::lapic::ticks() + 1;
+            let _ = task::sleep_until(next);
+        }
     }
 }
 

@@ -70,6 +70,36 @@ pub const SYS_OPEN: u64 = 2;
 pub const SYS_CLOSE: u64 = 3;
 pub const SYS_STAT: u64 = 4;
 pub const SYS_FSTAT: u64 = 5;
+pub const SYS_STATFS: u64 = 137;
+pub const SYS_PWRITE64: u64 = 18;
+pub const SYS_RENAME: u64 = 82;
+pub const SYS_MKDIRAT: u64 = 258;
+pub const SYS_FCHDIR: u64 = 81;
+pub const SYS_UMASK: u64 = 95;
+pub const SYS_GETPGRP: u64 = 111;
+pub const SYS_GETRESUID: u64 = 118;
+pub const SYS_GETRESGID: u64 = 120;
+pub const SYS_PRCTL: u64 = 157;
+pub const SYS_FADVISE64: u64 = 221;
+pub const SYS_STATX: u64 = 332;
+pub const SYS_UNLINKAT: u64 = 263;
+pub const SYS_UTIMENSAT: u64 = 280;
+pub const SYS_FSYNC: u64 = 74;
+pub const SYS_FDATASYNC: u64 = 75;
+pub const SYS_SYNC: u64 = 162;
+pub const SYS_SYNCFS: u64 = 306;
+pub const SYS_FLOCK: u64 = 73;
+pub const SYS_CHMOD: u64 = 90;
+pub const SYS_FCHMOD: u64 = 91;
+pub const SYS_CHOWN: u64 = 92;
+pub const SYS_FCHOWN: u64 = 93;
+pub const SYS_LCHOWN: u64 = 94;
+pub const SYS_FCHOWNAT: u64 = 260;
+pub const SYS_FCHMODAT: u64 = 268;
+pub const SYS_FALLOCATE: u64 = 285;
+pub const SYS_RENAMEAT: u64 = 264;
+pub const SYS_RENAMEAT2: u64 = 316;
+pub const SYS_FSTATFS: u64 = 138;
 pub const SYS_LSTAT: u64 = 6;
 pub const SYS_LSEEK: u64 = 8;
 pub const SYS_IOCTL: u64 = 16;
@@ -77,11 +107,33 @@ pub const SYS_PREAD64: u64 = 17;
 pub const SYS_SET_ROBUST_LIST: u64 = 273;
 pub const SYS_RSEQ: u64 = 334;
 pub const SYS_PRLIMIT64: u64 = 302;
+pub const SYS_GETRLIMIT: u64 = 97;
+pub const SYS_SETRLIMIT: u64 = 160;
 pub const SYS_GETRANDOM: u64 = 318;
 pub const SYS_TIME: u64 = 201;
 pub const SYS_SYSINFO: u64 = 99;
 pub const SYS_SCHED_GETAFFINITY: u64 = 204;
 pub const SYS_READLINK: u64 = 89;
+pub const SYS_LINK: u64 = 86;
+pub const SYS_CREAT: u64 = 85;
+pub const SYS_PAUSE: u64 = 34;
+pub const SYS_GETPRIORITY: u64 = 140;
+pub const SYS_MLOCK: u64 = 149;
+pub const SYS_MUNLOCK: u64 = 150;
+pub const SYS_MLOCKALL: u64 = 151;
+pub const SYS_MUNLOCKALL: u64 = 152;
+pub const SYS_SETPRIORITY: u64 = 141;
+pub const SYS_SCHED_GETPARAM: u64 = 143;
+pub const SYS_SCHED_SETSCHEDULER: u64 = 144;
+pub const SYS_SCHED_GETSCHEDULER: u64 = 145;
+pub const SYS_IOPRIO_SET: u64 = 251;
+pub const SYS_IOPRIO_GET: u64 = 252;
+pub const SYS_ALARM: u64 = 37;
+pub const SYS_RT_SIGSUSPEND: u64 = 130;
+pub const SYS_CLOSE_RANGE: u64 = 436;
+pub const SYS_SYMLINK: u64 = 88;
+pub const SYS_LINKAT: u64 = 265;
+pub const SYS_SYMLINKAT: u64 = 266;
 pub const SYS_READLINKAT: u64 = 267;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_GETDENTS64: u64 = 217;
@@ -168,6 +220,7 @@ pub const SYS_EXIT_GROUP: u64 = 231;
 pub(super) const ENOSYS: u64 = (-38i64) as u64;
 pub(super) const EBADF: u64 = (-9i64) as u64;
 pub(super) const EPERM: u64 = (-1i64) as u64;
+pub(super) const ESRCH: u64 = (-3i64) as u64;
 pub(super) const ENOMEM: u64 = (-12i64) as u64;
 pub(super) const EINVAL: u64 = (-22i64) as u64;
 pub(super) const EFAULT: u64 = (-14i64) as u64;
@@ -184,8 +237,14 @@ pub(super) const EINTR: u64 = (-4i64) as u64;
 pub(super) const ENAMETOOLONG: u64 = (-36i64) as u64;
 pub(super) const EROFS: u64 = (-30i64) as u64;
 pub(super) const EEXIST: u64 = (-17i64) as u64;
+/// Too many links followed in one lookup.
+pub(super) const ELOOP: u64 = (-40i64) as u64;
 pub(super) const ERANGE: u64 = (-34i64) as u64;
 pub(super) const ENOTEMPTY: u64 = (-39i64) as u64;
+pub(super) const EXDEV: u64 = (-18i64) as u64;
+pub(super) const EIO: u64 = (-5i64) as u64;
+pub(super) const ENODATA: u64 = (-61i64) as u64;
+pub(super) const ENXIO: u64 = (-6i64) as u64;
 pub(super) const ENODEV: u64 = (-19i64) as u64;
 pub(super) const ENOSPC: u64 = (-28i64) as u64;
 /// `O_NONBLOCK`, which on an event device is the difference between a program
@@ -194,6 +253,7 @@ const O_NONBLOCK: u64 = 0o4000;
 
 /// `AT_EMPTY_PATH`: operate on the descriptor rather than on a path under it.
 const AT_EMPTY_PATH: u64 = 0x1000;
+const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 pub(super) const EAFNOSUPPORT: u64 = (-97i64) as u64;
 pub(super) const EPROTONOSUPPORT: u64 = (-93i64) as u64;
 pub(super) const ENOTSOCK: u64 = (-88i64) as u64;
@@ -207,6 +267,7 @@ pub(super) const ENOBUFS: u64 = (-105i64) as u64;
 const O_WRONLY: u64 = 1;
 const O_RDWR: u64 = 2;
 const O_DIRECTORY: u64 = 0x10000;
+const O_NOFOLLOW: u64 = 0x20000;
 const O_CREAT: u64 = 0x40;
 const O_TRUNC: u64 = 0x200;
 const O_APPEND: u64 = 0x400;
@@ -593,15 +654,28 @@ pub fn arm_core() {
     }
 }
 
-/// Sixteen KiB, aligned, and static rather than heap-allocated.
+/// `GUEST_SYSCALL_STACK`, aligned, and static rather than heap-allocated.
 ///
-/// Static because the address has to be known to the stub, and 16 KiB because
+/// Static because the address has to be known to the stub, and that size because
 /// the dispatcher below is ordinary Rust that formats and prints -- a stack
 /// sized for the assembly rather than for what it calls is the classic way to
 /// make a trap handler that works until somebody adds a `kprintln!`.
 #[repr(align(16))]
-struct Stack([u8; 16 * 1024]);
-static mut SYSCALL_STACK: Stack = Stack([0; 16 * 1024]);
+struct Stack([u8; GUEST_SYSCALL_STACK]);
+static mut SYSCALL_STACK: Stack = Stack([0; GUEST_SYSCALL_STACK]);
+
+/// Every guest syscall stack's size: the main thread's, a session's, a
+/// thread's and a forked child's.
+///
+/// **Sixty-four KiB, raised from sixteen on a wrong diagnosis, and kept.**
+/// dbus-daemon faulting in `ld.so` was blamed on running off a 16 KiB stack,
+/// because four boots crashed and then three with bigger stacks did not. The
+/// crash happened on about half of boots for an unrelated reason -- an open
+/// file naming its volume by a position a remount moved (`disk::RETIRED`) --
+/// and seven boots of a coin flip had looked like a cause. The size stays
+/// because nothing guards the end of one of these stacks, so running off it
+/// would corrupt a guest silently, and the margin costs 48 KiB per thread.
+pub const GUEST_SYSCALL_STACK: usize = 64 * 1024;
 
 /// The three globals the stub reaches through, as one value.
 ///
@@ -659,6 +733,140 @@ pub fn ring3_load(r: Option<crate::task::Ring3>) {
 /// `Clone` because `fork` copies the list wholesale: a child inherits every
 /// mapping its parent had, at the same addresses, and the pages behind them
 /// were duplicated before this list was.
+/// A file mapping that is read a page at a time, when each page is first
+/// touched, instead of copied whole at `mmap`.
+///
+/// The pages are a `Source::Paged` mapping like any demand-paged memory, so
+/// unmapping, trimming and teardown already know how to give them back; what
+/// this adds is where their bytes come from. Only a leaf carrying
+/// `paging::FILE` ever asks, and a later record over the same addresses wins,
+/// so a record left behind by a partial `munmap` is never what fills memory
+/// that has since become something else.
+#[derive(Clone)]
+pub struct Lazy {
+    pub at: u64,
+    pub len: u64,
+    /// The file offset `at` maps.
+    pub off: u64,
+    pub file: alloc::rc::Rc<core::cell::RefCell<super::disk::DiskFile>>,
+}
+
+/// Fill a file promise: `paging::populate`'s filler, so it runs from the page
+/// fault handler at either privilege level, and from `reachable`.
+///
+/// **A fault at ring 3 may take the guest lock**, which is what makes reading
+/// a disk from the fault path sound here: it arrives on the faulting task's
+/// own entry stack (`gdt::set_rsp0`), holding nothing, exactly as a syscall
+/// does -- which also runs with interrupts clear and does this same read. At
+/// ring 0 the kernel is serving a syscall of this guest and holds the lock
+/// already, so taking it is a no-op.
+/// What filling file pages has cost: how many, the cycles spent waiting for
+/// the guest lock, and the cycles spent reading (`linux fills`).
+pub static FILLS: [core::sync::atomic::AtomicU64; 3] = [const { core::sync::atomic::AtomicU64::new(0) }; 3];
+/// Fills that failed, by why: no record for the page, a short read of an
+/// image file, a short read of another file.
+pub static FILL_FAIL: [core::sync::atomic::AtomicU64; 3] = [const { core::sync::atomic::AtomicU64::new(0) }; 3];
+
+fn fill_from_file(page: u64, frame: *mut u8) -> bool {
+    let t0 = crate::time::rdtsc();
+    let taken = big_take();
+    let t1 = crate::time::rdtsc();
+    // What to read, found and copied out first: the record, the file's image
+    // handle and inode, its size and the offset. **Nothing is borrowed across
+    // the read**, so two threads filling pages of one file cannot meet on its
+    // `RefCell`; with the borrow held, the second found it taken and was
+    // handed a page of zeros.
+    enum Src {
+        Image(crate::store::erofs::Image, crate::store::erofs::Inode, usize, usize),
+        Other(alloc::rc::Rc<core::cell::RefCell<super::disk::DiskFile>>, usize),
+    }
+    let src = (|| {
+        let sp = unsafe { guest_slot() }.as_ref()?;
+        let l = sp.lazy.iter().rev().find(|l| page >= l.at && page < l.at + l.len)?.clone();
+        let off = (l.off + (page - l.at)) as usize;
+        let f = l.file.try_borrow().ok()?;
+        Some(match f.erofs_source() {
+            Some((img, ino)) => Src::Image(img, ino, f.size, off),
+            None => {
+                drop(f);
+                Src::Other(l.file.clone(), off)
+            }
+        })
+    })();
+    let r = match src {
+        None => {
+            FILL_FAIL[0].fetch_add(1, Ordering::Relaxed);
+            None
+        }
+        Some(Src::Image(img, ino, size, off)) => {
+            if off >= size {
+                // Past the end of the file: zero, where Linux would raise SIGBUS.
+                Some(true)
+            } else {
+                let n = (size - off).min(4096);
+                let out = unsafe { core::slice::from_raw_parts_mut(frame, n) };
+                // Under the guest lock. It was let go for the read, and that
+                // let another thread `mprotect` or `munmap` the page in the
+                // middle of filling it: the promise's leaf changed under the
+                // compare-and-swap and the fill was refused, which a thread
+                // curl had just started took as a real fault and died of. The
+                // controller's own lock is also taken with interrupts masked,
+                // so a filler preempted inside it could stall a syscall on its
+                // core for good. A fill on real NVMe is a hundred microseconds.
+                let got = img.read(&ino, off as u64, out).unwrap_or(0);
+                if got != n {
+                    FILL_FAIL[1].fetch_add(1, Ordering::Relaxed);
+                }
+                Some(got == n)
+            }
+        }
+        Some(Src::Other(file, off)) => (|| {
+            let mut f = file.try_borrow_mut().ok()?;
+            if off >= f.size {
+                return Some(true);
+            }
+            let n = (f.size - off).min(4096);
+            let out = unsafe { core::slice::from_raw_parts_mut(frame, n) };
+            Some(f.read_at(off, out) == n)
+        })(),
+    };
+    let t2 = crate::time::rdtsc();
+    FILLS[0].fetch_add(1, Ordering::Relaxed);
+    FILLS[1].fetch_add(t1 - t0, Ordering::Relaxed);
+    FILLS[2].fetch_add(t2 - t1, Ordering::Relaxed);
+    if taken {
+        big_unlock();
+    }
+    // No record for a leaf that says it is a file: a page of zeros rather
+    // than a dead guest, since nothing else could be there. A file that
+    // could not be read is a fault, as it is on Linux.
+    r.unwrap_or(true)
+}
+
+/// Promise `[at, at + len)` as pages of the file behind `file`, from `off`.
+/// The caller has the range and its tables; nothing is read here.
+fn promise_file(sp: &mut Space, at: u64, len: u64, off: u64, prot: u64,
+    file: alloc::rc::Rc<core::cell::RefCell<super::disk::DiskFile>>) -> bool
+{
+    crate::mem::paging::set_filler(fill_from_file);
+    let perm = crate::mem::paging::Perm {
+        present: prot != 0,
+        write: prot & PROT_WRITE != 0,
+        exec: prot & PROT_EXEC != 0,
+        user: true,
+    };
+    let Some(t) = sp.tables.as_mut() else { return false };
+    let mut o = 0u64;
+    while o < len {
+        if !t.put_leaf(at + o, crate::mem::paging::promise_file(perm)) {
+            return false;
+        }
+        o += 4096;
+    }
+    sp.lazy.push(Lazy { at, len, off, file });
+    true
+}
+
 #[derive(Clone, Copy)]
 pub struct Mapping {
     pub at: u64,
@@ -833,6 +1041,18 @@ pub struct Space {
     /// replacing this field drops what it held.
     /// Handlers, masks and the frame a handler interrupted.
     pub signals: super::signal::State,
+    /// The niceness `setpriority` set and `getpriority` reports, -20..=19.
+    /// Kept and answered, and not acted on: this scheduler has no priorities
+    /// for it to change.
+    pub nice: i32,
+    /// The I/O priority `ioprio_set` set, as its packed class and level; the
+    /// same bargain as `nice`, with no I/O scheduler underneath.
+    pub ioprio: u32,
+    /// Resource limits this process has set, as (resource, soft, hard);
+    /// one it has not set answers the machine's own figure.
+    pub rlimits: Vec<(u64, u64, u64)>,
+    /// File mappings whose pages are read when touched (`Lazy`), newest last.
+    pub lazy: Vec<Lazy>,
     pub holder: Option<alloc::boxed::Box<super::load::Guest>>,
     /// Heap ranges this guest owns outright, freed when it is torn down.
     ///
@@ -1030,6 +1250,24 @@ pub fn replace_guest(
     let fds = core::mem::take(&mut old.fds);
     let cwd = core::mem::take(&mut old.cwd);
     let saved_fs = old.saved_fs;
+    // **The old program's mappings go back too**, by the same rule teardown
+    // uses, while its tables still exist to find their frames through. They
+    // were dropped with the old entry and never freed: every frame a mapping
+    // held -- every page an `exec`ing child had touched -- was lost on each
+    // `execve`. Measured: 300 fork-and-exec of `true` from bash cost 293 MB
+    // of heap, a megabyte a time, and pacman forks and execs for every hook.
+    let maps = core::mem::take(&mut old.maps);
+    for m in maps {
+        if m.from == Source::Paged {
+            free_paged(old, m.at, page_up(m.len) as u64);
+        } else {
+            if m.from == Source::Copied {
+                free_leaves(old, m.at, page_up(m.len) as u64, true);
+            }
+            give_back(m.at, m.len, Some(m.from));
+        }
+    }
+    free_region_demand(old);
     for (at, len) in core::mem::take(&mut old.owned) {
         free_pages(at, len);
     }
@@ -1051,6 +1289,10 @@ pub fn replace_guest(
         brk_mapped: r.brk_mapped,
         tables,
         signals: super::signal::State::default(),
+        nice: 0,
+        ioprio: 0,
+        rlimits: Vec::new(),
+        lazy: Vec::new(),
         holder: None,
         owned: alloc::vec::Vec::new(),
         mmap_next: r.mmap_at,
@@ -1141,8 +1383,16 @@ pub fn clone_guest(
             // Not inside a handler, whatever the parent was doing: the child
             // resumes at the fork, not at the parent's interrupted frame.
             depth: 0,
+            // Nor in the parent's suspend, and with no alarm: Linux clears a
+            // child's pending alarm.
+            after_suspend: None,
+            alarm_at: 0,
             ..p.signals
         },
+        nice: p.nice,
+        ioprio: p.ioprio,
+        rlimits: p.rlimits.clone(),
+        lazy: p.lazy.clone(),
         holder: None,
         tables: Some(tables),
         owned,
@@ -1298,6 +1548,22 @@ pub fn reachable(at: u64, len: usize, need_write: bool) -> bool {
     let Some(end) = at.checked_add(len as u64) else { return false };
     let mut page = at & !(PAGE - 1);
     while page < end {
+        // A page promised and never touched is the guest's as much as any
+        // other, and the kernel is about to touch it: supplied here rather
+        // than left to a fault at ring 0, so the copy that follows meets an
+        // ordinary page and running out of memory is an `EFAULT` rather than
+        // a halted machine.
+        if crate::mem::paging::promised(page, need_write) && !crate::mem::paging::populate(page, need_write) {
+            return false;
+        }
+        // The kernel writing for the guest is a write like any other: a page
+        // still shared with a parent or a child gets its own copy first.
+        if need_write && crate::mem::paging::cow_writable(page) {
+            if !crate::mem::paging::cow_break(page) {
+                return false;
+            }
+            tlb_shootdown();
+        }
         match crate::mem::paging::query(page) {
             Some(p) if p.present && (!need_write || p.write) => {}
             _ => {
@@ -1336,6 +1602,10 @@ pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
             brk_mapped: r.brk_mapped,
             tables,
             signals: super::signal::State::default(),
+            nice: 0,
+            ioprio: 0,
+            rlimits: Vec::new(),
+            lazy: Vec::new(),
             holder: None,
             owned: alloc::vec::Vec::new(),
             mmap_next: r.mmap_at,
@@ -1373,7 +1643,26 @@ pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
 /// A guest that exits without unmapping is the ordinary case, not an error --
 /// `exit_group` is how programs end -- so the teardown is where mappings are
 /// actually reclaimed and `munmap` is only the early return of one.
+/// Dismantle the current guest, under the guest lock.
+///
+/// **Under the lock, because the far end of a pipe is somebody else's.**
+/// `run` calls this after the guest has left and the lock with it, and
+/// closing the session's descriptors borrows every pipe it held -- while the
+/// process at the other end of one, on another core and inside a syscall,
+/// can be reading it. dbus-daemon talks to every LibreOffice there is, so a
+/// LibreOffice ending beside a busy bus panicked the kernel: "RefCell already
+/// borrowed" in `unix::read`. Every other touch of a pipe holds the lock;
+/// this one did not.
 pub fn teardown() -> usize {
+    let took = big_take();
+    let freed = teardown_locked();
+    if took {
+        big_unlock();
+    }
+    freed
+}
+
+fn teardown_locked() -> usize {
     // **Before anything else, and unconditionally for this session.** A guest
     // that took the display and then faulted is exactly the case this has to
     // cover, and a release conditional on a tidy exit would leave the desktop
@@ -1391,6 +1680,23 @@ pub fn teardown() -> usize {
         super::fork::reset(s);
     }
     let mut freed = 0;
+    // **Off the guest's root before its tables go**, here and not only in
+    // the callers. `run` calls this and its caller clears the task's root
+    // afterwards -- with the session's trace printed in between, a window a
+    // timer tick lands in. `Space::drop` moves this core's CR3 away, but the
+    // task's own record still named the freed tables, and the next switch
+    // back to it loaded them: core 0 in `run`, on a guest root, reading the
+    // kernel's own statics through page tables back in the heap, and a reset
+    // with nothing printed. `execve` had the same hole and closes it the
+    // same way; doing it here closes it for every door at once.
+    unsafe {
+        if let Some(root) = guest_slot().as_ref().and_then(|sp| sp.tables.as_ref()).map(|t| t.root()) {
+            let me_t = crate::task::current();
+            if crate::task::root_of(me_t) == root {
+                crate::task::set_root(me_t, 0);
+            }
+        }
+    }
     unsafe {
         if let Some(sp) = guest_slot().as_mut() {
             // A guest that writes and exits without closing is the ordinary
@@ -1403,6 +1709,7 @@ pub fn teardown() -> usize {
                     f.flush();
                 }
             }
+            free_region_demand(sp);
             let maps = core::mem::take(&mut sp.maps);
             for m in maps {
                 // A guest is free to exit having mprotected its mappings to
@@ -1413,6 +1720,9 @@ pub fn teardown() -> usize {
                 if m.from == Source::Paged {
                     free_paged(sp, m.at, page_up(m.len) as u64);
                 } else {
+                    if m.from == Source::Copied {
+                        free_leaves(sp, m.at, page_up(m.len) as u64, true);
+                    }
                     give_back(m.at, m.len, Some(m.from));
                 }
                 freed += 1;
@@ -1477,17 +1787,31 @@ pub fn teardown() -> usize {
 /// The caller must already be off this entry's root; dropping the entry drops
 /// the tables.
 pub fn release_guest(i: usize) {
+    // Under the lock for `teardown`'s reason: a child's descriptors are
+    // pipes whose far ends other processes may be using right now.
+    let took = big_take();
+    release_guest_locked(i);
+    if took {
+        big_unlock();
+    }
+}
+
+fn release_guest_locked(i: usize) {
     let Some(mut sp) = (unsafe { slot_at(i) }).take() else { return };
     for slot in sp.fds.iter_mut() {
         if let Some(f) = slot.take() {
             f.flush();
         }
     }
+    free_region_demand(&mut sp);
     let maps = core::mem::take(&mut sp.maps);
     for m in maps {
         if m.from == Source::Paged {
             free_paged(&mut sp, m.at, page_up(m.len) as u64);
         } else {
+            if m.from == Source::Copied {
+                free_leaves(&mut sp, m.at, page_up(m.len) as u64, true);
+            }
             give_back(m.at, m.len, Some(m.from));
         }
     }
@@ -1597,7 +1921,7 @@ const TRACE_CAP: usize = 1024;
 pub fn arm() {
     arm_core();
     unsafe {
-        let top = core::ptr::addr_of!(SYSCALL_STACK.0) as u64 + (16 * 1024);
+        let top = core::ptr::addr_of!(SYSCALL_STACK.0) as u64 + GUEST_SYSCALL_STACK as u64;
         (*core_entry()).syscall_stack = top;
         // And the 32-bit door beside it.
         super::i386::arm();
@@ -1647,11 +1971,45 @@ pub(super) fn record(mut c: Call) {
             );
         }
     }
+    if c.ret == ENOSYS {
+        let base = (c.nr & !(1 << 31)) as usize;
+        let row = if c.nr & (1 << 31) != 0 { &UNSERVED_32 } else { &UNSERVED };
+        if let Some(n) = row.get(base) {
+            n.fetch_add(1, Ordering::Relaxed);
+        }
+    }
     if MISSES.load(Ordering::Relaxed) && c.path_len > 0 && (c.ret as i64) < 0 {
         let p = core::str::from_utf8(&c.path[..c.path_len as usize]).unwrap_or("?");
         crate::kprintln!("  [miss] {} {} -> {}", name_of(c.nr), p, c.ret as i64);
     }
     super::session::record(c, TRACE_CAP);
+}
+
+/// Every call any guest has been answered `ENOSYS` for since boot (or since
+/// `linux unserved clear`), by number: unimplemented, or implemented and
+/// refusing a flag.
+///
+/// **The sweep's instrument.** The trace is one guest's last thousand calls;
+/// what to implement next is a question about many programs, and the answer
+/// is a count over all of them. `UNSERVED_32` is the i386 table's, which
+/// numbers its calls differently.
+pub static UNSERVED: [core::sync::atomic::AtomicU32; 512] = [const { core::sync::atomic::AtomicU32::new(0) }; 512];
+pub static UNSERVED_32: [core::sync::atomic::AtomicU32; 512] = [const { core::sync::atomic::AtomicU32::new(0) }; 512];
+
+/// (name, i386, count) for every call refused at least once, most first.
+pub fn unserved() -> Vec<(&'static str, bool, u32, usize)> {
+    let mut out = Vec::new();
+    for (i386, row) in [(false, &UNSERVED), (true, &UNSERVED_32)] {
+        for (nr, n) in row.iter().enumerate() {
+            let n = n.load(Ordering::Relaxed);
+            if n > 0 {
+                let tag = if i386 { nr as u64 | (1 << 31) } else { nr as u64 };
+                out.push((name_of(tag), i386, n, nr));
+            }
+        }
+    }
+    out.sort_by(|a, b| b.2.cmp(&a.2));
+    out
 }
 
 /// Print every path a guest named and was refused, as it happens.
@@ -1669,6 +2027,27 @@ pub static MEMLOG: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBo
 /// other fd is `-EBADF` rather than silently accepted -- a write to fd 7 that
 /// reported success would be a program whose output vanished.
 pub(super) fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
+    if let Some(r) = write_pty(fd, buf, len) {
+        return r;
+    }
+    if let Some(e) = with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Event(e))) => Some(e.clone()),
+        _ => None,
+    })
+    .flatten()
+    {
+        if len < 8 {
+            return EINVAL;
+        }
+        if !reachable(buf, 8, false) {
+            return EFAULT;
+        }
+        let v = unsafe { core::ptr::read_unaligned(buf as *const u64) };
+        return match e.borrow_mut().add(v) {
+            Ok(()) => 8,
+            Err(()) => if v == u64::MAX { EINVAL } else { EAGAIN },
+        };
+    }
     // **Ask the table, not the number.** This compared `fd` against 1 and 2,
     // which is right until a guest does the one thing every shell does:
     // `close(1)` then `open(...)` hands the file descriptor 1, and a write to
@@ -1766,6 +2145,10 @@ pub(super) fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
     // at all and still got the full length back. A write that reports success
     // and produces no output is the worst shape this call can take, because
     // the guest has no way to find out.
+    if super::session::quiet() {
+        super::services::log(bytes);
+        return len as u64;
+    }
     crate::kprint!("{}", alloc::string::String::from_utf8_lossy(bytes));
     len as u64
 }
@@ -1855,10 +2238,17 @@ pub(super) fn with_fds<T>(f: impl FnOnce(&mut Vec<Option<super::fs::Fd>>, &str) 
 /// shortcut: a caller passing a closed descriptor with an absolute path is
 /// correct code, so checking the descriptor first would refuse it.
 fn at_base(fds: &[Option<super::fs::Fd>], dirfd: u64, cwd: &str) -> Result<String, u64> {
-    if (dirfd as i64) == super::fs::AT_FDCWD {
+    // **An `int`, so only the low 32 bits are the argument.** glibc passes
+    // `AT_FDCWD` as -100 in `edi`, and a 32-bit move leaves the register
+    // `0xffffff9c`: compared as a 64-bit -100 it was a descriptor nobody had
+    // opened, and `stat`, `chmod`, `ln`, `mv` and `rm -r` on a relative path
+    // all answered "Bad file descriptor" about a file `touch` had just made.
+    // Linux truncates, so this does.
+    let dirfd = dirfd as u32 as i32 as i64;
+    if dirfd == super::fs::AT_FDCWD {
         return Ok(String::from(cwd));
     }
-    let i = dirfd as i64;
+    let i = dirfd;
     if i < 0 || i as usize >= fds.len() {
         return Err(EBADF);
     }
@@ -1910,10 +2300,71 @@ pub(super) fn new_fence_fd(fence: u64) -> u64 {
     .unwrap_or(EBADF)
 }
 
+/// Close-on-exec, per guest and descriptor.
+///
+/// **Kept at last, because there is an `execve` for it to matter to.** It was
+/// accepted and stored nowhere, so every pipe a parent opened close-on-exec to
+/// learn whether its child's `exec` worked stayed open in the child: the
+/// parent read it forever, waiting for an end of file that only the exec
+/// closing it produces. foot hung there, its shell already running inside
+/// it. Every slot assignment clears the bit, so a reused number cannot
+/// inherit it; the calls that take a CLOEXEC flag set it afterwards.
+static CLOEXEC: Racy<alloc::collections::BTreeSet<(usize, u64)>> = Racy::new(alloc::collections::BTreeSet::new());
+
+pub fn cloexec_set(fd: u64, on: bool) {
+    let k = (current_guest(), fd);
+    let set = unsafe { CLOEXEC.get() };
+    if on {
+        set.insert(k);
+    } else {
+        set.remove(&k);
+    }
+}
+
+fn cloexec_get(fd: u64) -> bool {
+    unsafe { CLOEXEC.get() }.contains(&(current_guest(), fd))
+}
+
+/// A child of `fork` has its parent's flags, as it has its descriptors.
+pub fn cloexec_copy(parent: usize, child: usize) {
+    let set = unsafe { CLOEXEC.get() };
+    set.retain(|(g, _)| *g != child);
+    let mine: Vec<u64> = set.iter().filter(|(g, _)| *g == parent).map(|(_, f)| *f).collect();
+    for f in mine {
+        set.insert((child, f));
+    }
+}
+
+/// At `execve`: close every flagged descriptor of this guest.
+pub fn close_on_exec() {
+    let g = current_guest();
+    let set = unsafe { CLOEXEC.get() };
+    let doomed: Vec<u64> = set.iter().filter(|(gg, _)| *gg == g).map(|(_, f)| *f).collect();
+    set.retain(|(gg, _)| *gg != g);
+    with_fds(|fds, _| {
+        for f in doomed {
+            if let Some(slot) = fds.get_mut(f as usize) {
+                if let Some(old) = slot.take() {
+                    old.flush();
+                }
+            }
+        }
+    });
+}
+
+/// Set the flag on what a creating call returned, if it asked for it.
+fn with_cloexec(r: u64, want: bool) -> u64 {
+    if want && (r as i64) >= 0 {
+        cloexec_set(r, true);
+    }
+    r
+}
+
 pub(super) fn place_fd(fds: &mut Vec<Option<super::fs::Fd>>, entry: super::fs::Fd) -> u64 {
     match fds.iter().position(|f| f.is_none()) {
         Some(slot) => {
             fds[slot] = Some(entry);
+            cloexec_set(slot as u64, false);
             slot as u64
         }
         None => {
@@ -1921,12 +2372,13 @@ pub(super) fn place_fd(fds: &mut Vec<Option<super::fs::Fd>>, entry: super::fs::F
                 return EMFILE;
             }
             fds.push(Some(entry));
+            cloexec_set((fds.len() - 1) as u64, false);
             (fds.len() - 1) as u64
         }
     }
 }
 
-pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u64 {
+pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, mode: u64) -> u64 {
     let raw = match read_cstr(path_at) {
         Ok(v) => v,
         Err(e) => return e,
@@ -1940,7 +2392,11 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
         return ENOENT;
     }
     let cwd_relative = !raw.starts_with('/');
-    with_fds(|fds, cwd| {
+    // A file this open creates takes the mode it was created with, less the
+    // usual umask: a compiler's output and a package's `install -m 755` are
+    // executable from their first byte.
+    let mut created: Option<String> = None;
+    let r = with_fds(|fds, cwd| {
         // Only consulted for a relative path, so a closed `dirfd` beside an
         // absolute one is not refused -- see `at_base`.
         let base = if cwd_relative {
@@ -1952,9 +2408,40 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
             String::new()
         };
         let Some(path) = super::fs::resolve(&base, &raw) else { return ENOENT };
+        // The last component is followed unless the caller said not to, and
+        // then a link there is ELOOP, which is what `O_NOFOLLOW` promises.
+        if flags & O_NOFOLLOW != 0 && super::link::is_link(&path) {
+            return ELOOP;
+        }
+        // A loop of links is ELOOP, not a missing file: "too many levels of
+        // symbolic links" is the message that says what is wrong.
+        let path = match super::link::walk(&path, true) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        if flags & O_CREAT != 0 && !occupied(&path) {
+            created = Some(path.clone());
+        }
         // A mounted volume, read in place by range. Before everything else,
         // so a mount point shadows whatever the namespace has at that path.
-        if super::disk::claims(&path) {
+        // **A write to the root image goes to the guest's layer.** The file
+        // is copied up first unless the open truncates it, so what the guest
+        // then reads back is what it wrote over what was there. A file that
+        // does not exist yet is simply created in the layer. A named mount
+        // stays read-only all the way down.
+        if wants_write && super::disk::root_claims(&path) && super::ns::writable(&path) {
+            if let Some(Some(n)) = super::disk::lookup(&path) {
+                if n.is_dir {
+                    return EISDIR;
+                }
+                if flags & (O_CREAT | O_EXCL) == (O_CREAT | O_EXCL) {
+                    return EEXIST;
+                }
+                if flags & O_TRUNC == 0 && !super::ns::copy_up(&path) {
+                    return EIO;
+                }
+            }
+        } else if super::disk::claims(&path) {
             if wants_write {
                 return EROFS;
             }
@@ -1962,8 +2449,9 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
                 Some(Some(n)) if n.is_dir => super::fs::Fd::Dir(alloc::rc::Rc::new(
                     core::cell::RefCell::new(super::fs::Dir {
                         path: path.clone(),
-                        entries: super::disk::entries(&path),
+                        entries: with_links(&path, super::disk::entries(&path)),
                         at: 0,
+                        links: None,
                     }),
                 )),
                 Some(Some(_)) => {
@@ -1989,6 +2477,36 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
         // per write is the objection. A character device is not in the store,
         // so the objection does not apply -- and `/dev/fb0` opened read-only
         // is a framebuffer nothing can draw on.
+        // A pseudo-terminal: `/dev/ptmx` makes one and answers its master,
+        // `/dev/pts/N` opens the slave of one that exists and is unlocked.
+        if path == "/dev/ptmx" || path == "/dev/tty" || path.starts_with("/dev/pts/") {
+            let nonblock = flags & O_NONBLOCK != 0;
+            let end = if path == "/dev/ptmx" {
+                super::pty::open_master(nonblock)
+            } else if path == "/dev/tty" {
+                // The controlling terminal: the slave this process's stdin is,
+                // if it is one.
+                match with_fds(|fds, _| match fds.first() {
+                    Some(Some(super::fs::Fd::Pty(e))) => Some(e.borrow().pty.borrow().num),
+                    _ => None,
+                })
+                .flatten()
+                {
+                    Some(n) => match super::pty::open_slave(n, nonblock) {
+                        Ok(e) => e,
+                        Err(e) => return e as u64,
+                    },
+                    None => return ENXIO,
+                }
+            } else {
+                let Some(n) = super::pty::slave_number(&path) else { return ENOENT };
+                match super::pty::open_slave(n, nonblock) {
+                    Ok(e) => e,
+                    Err(e) => return e as u64,
+                }
+            };
+            return place_fd(fds, super::fs::Fd::Pty(end));
+        }
         if let Some(n) = super::dev::node(&path) {
             if flags & O_DIRECTORY != 0 {
                 return ENOTDIR;
@@ -2029,6 +2547,7 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
                             super::proc::entries(&path)
                         },
                         at: 0,
+                        links: None,
                     },
                 )))
             } else {
@@ -2058,9 +2577,13 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
         if wants_write && !super::fs::writable(&path) {
             return EROFS;
         }
-        let is_dir = sysbox::is_dir(&path);
+        let is_dir = super::ns::is_dir(&path);
+        // A path that is not there is `ENOENT` whatever the flags say, and only
+        // something that exists and is a file is `ENOTDIR`. LibreOffice opens
+        // its temp directories with `O_DIRECTORY` to learn whether to create
+        // them, and an `ENOTDIR` there ends it with an uncaught exception.
         if flags & O_DIRECTORY != 0 && !is_dir {
-            return ENOTDIR;
+            return if super::ns::blob_len(&path).is_some() { ENOTDIR } else { ENOENT };
         }
         let entry = if is_dir {
             if wants_write {
@@ -2068,14 +2591,15 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
             }
             super::fs::Fd::Dir(alloc::rc::Rc::new(core::cell::RefCell::new(super::fs::Dir {
                 path: path.clone(),
-                entries: sysbox::listing(&path),
+                entries: with_links(&path, super::ns::listing(&path)),
                 at: 0,
+                links: None,
             })))
         } else {
             // Asked before the copy is made, not after: the point is to not
             // allocate the file, so a check that reads it first and then
             // measures has already lost.
-            let size = sysbox::blob_len(&path);
+            let size = super::ns::blob_len(&path);
             if size.is_none() && flags & O_CREAT == 0 {
                 return ENOENT;
             }
@@ -2098,7 +2622,7 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
             let data = if flags & O_TRUNC != 0 || size.is_none() {
                 alloc::vec::Vec::new()
             } else {
-                match sysbox::read_blob(&path) {
+                match super::ns::read_blob(&path) {
                     Some(d) => d,
                     None => return ENOENT,
                 }
@@ -2130,7 +2654,21 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
             None => EMFILE,
         }
     })
-    .unwrap_or(EBADF)
+    .unwrap_or(EBADF);
+    if let Some(p) = created {
+        if (r as i64) >= 0 {
+            super::ns::set_mode(&p, (mode as u32) & 0o7777 & !0o022);
+            // The file exists from the moment it is created, not from its
+            // last close: ldconfig `chmod`s its cache by name while the
+            // descriptor that wrote it is still open, and a name that only
+            // appears at close answered ENOENT -- which libalpm reported as
+            // ldconfig dying of signal 6 after every transaction.
+            if super::ns::blob_len(&p).is_none() && super::fs::writable(&p) {
+                super::ns::write_blob(&p, alloc::vec::Vec::new());
+            }
+        }
+    }
+    r
 }
 
 /// Duplicate a descriptor onto the lowest free number, or onto a given one.
@@ -2149,6 +2687,20 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, _mode: u64) -> u6
 /// the jail, then ask the tree. Splitting them would put the `EROFS` check in
 /// three places, which is how one of them ends up missing it.
 pub(super) fn sys_name_op(path_at: u64, op: u8) -> u64 {
+    sys_name_op_at(super::fs::AT_FDCWD as u64, path_at, op)
+}
+
+/// `mkdirat`, and `unlinkat` with or without `AT_REMOVEDIR`. coreutils asks
+/// for these and not the bare calls, so `mkdir -p` and `rm` answered ENOSYS.
+pub(super) fn sys_unlinkat(dirfd: u64, path_at: u64, flags: u64) -> u64 {
+    const AT_REMOVEDIR: u64 = 0x200;
+    if flags & !AT_REMOVEDIR != 0 {
+        return EINVAL;
+    }
+    sys_name_op_at(dirfd, path_at, if flags & AT_REMOVEDIR != 0 { b'r' } else { b'u' })
+}
+
+pub(super) fn sys_name_op_at(dirfd: u64, path_at: u64, op: u8) -> u64 {
     let raw = match read_cstr(path_at) {
         Ok(v) => v,
         Err(e) => return e,
@@ -2156,41 +2708,418 @@ pub(super) fn sys_name_op(path_at: u64, op: u8) -> u64 {
     if raw.is_empty() {
         return ENOENT;
     }
-    let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
-    let Some(path) = found else { return ENOENT };
+    let path = match at_path(dirfd, &raw) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
     if !super::fs::writable(&path) {
         return EROFS;
     }
-    let is_dir = sysbox::is_dir(&path);
+    // A link the guest made: removed by `unlink`, in the way of `mkdir`, not
+    // a directory to `rmdir`.
+    if super::link::own(&path).is_some() {
+        return match op {
+            b'm' => EEXIST,
+            b'r' => ENOTDIR,
+            _ => {
+                super::link::remove(&path);
+                if super::disk::image_lookup(&path, false).is_some() {
+                    super::ns::white_out(&path);
+                }
+                0
+            }
+        };
+    }
+    // The root image underneath, when there is one: a directory it has
+    // exists, a file it has can be deleted -- which leaves a whiteout, since
+    // the image itself cannot forget anything.
+    let below = super::disk::image_lookup(&path, false);
+    let is_dir = super::ns::is_dir(&path) || below.as_ref().is_some_and(|n| n.is_dir);
     match op {
         b'm' => {
-            if is_dir || sysbox::blob_len(&path).is_some() {
+            if is_dir || super::ns::blob_len(&path).is_some() || below.is_some() {
                 return EEXIST;
             }
-            if sysbox::make_dir(&path) { 0 } else { EPERM }
+            if super::ns::make_dir(&path) { 0 } else { EPERM }
         }
         b'r' => {
             if !is_dir {
-                return ENOTDIR;
+                let there = super::ns::blob_len(&path).is_some() || below.is_some();
+                return if there { ENOTDIR } else { ENOENT };
             }
             // `rmdir` removes an empty directory and nothing else. The tree
             // would happily detach a full one, and that would be a recursive
-            // delete wearing the name of the safe call.
-            if !sysbox::listing(&path).is_empty() {
+            // delete wearing the name of the safe call. Empty means empty in
+            // both: the merged listing, not the layer's alone.
+            let empty = if below.is_some() {
+                super::disk::entries(&path).is_empty()
+            } else {
+                super::ns::listing(&path).is_empty()
+            };
+            if !empty {
                 return ENOTEMPTY;
             }
-            if sysbox::detach(&path) { 0 } else { EPERM }
+            if super::ns::is_dir(&path) && !super::ns::detach(&path) {
+                return EPERM;
+            }
+            if below.is_some() && !super::ns::white_out(&path) {
+                return EPERM;
+            }
+            0
         }
         _ => {
             if is_dir {
                 return EISDIR;
             }
-            if sysbox::blob_len(&path).is_none() {
+            let upper = super::ns::blob_len(&path).is_some();
+            if !upper && below.is_none() {
                 return ENOENT;
             }
-            if sysbox::detach(&path) { 0 } else { EPERM }
+            if upper && !super::ns::detach(&path) {
+                return EPERM;
+            }
+            if below.is_some() && !super::ns::white_out(&path) {
+                return EPERM;
+            }
+            super::ns::forget_mode(&path);
+            0
         }
     }
+}
+
+/// A directory's entries with the guest's own links in it: `ls` and every
+/// tree walk find a link by listing its directory.
+fn with_links(dir: &str, mut entries: Vec<(String, bool, usize)>) -> Vec<(String, bool, usize)> {
+    for (name, len) in super::link::names_in(dir) {
+        if !entries.iter().any(|e| e.0 == name) {
+            entries.push((name, false, len));
+        }
+    }
+    entries
+}
+
+/// `getpriority` and `setpriority` for this process (`PRIO_PROCESS`, pid 0
+/// or its own). The raw call answers `20 - nice`, which glibc turns back;
+/// `nice -n 5 true` stopped at "cannot get niceness" with this ENOSYS.
+pub(super) fn sys_priority(which: u64, who: u64, set: Option<u64>) -> u64 {
+    if which as u32 != 0 {
+        return EINVAL;
+    }
+    let Some(sp) = (unsafe { guest_slot() }).as_mut() else { return EINVAL };
+    if who as u32 != 0 && who as u32 as u64 != super::fork::pid_of_guest(current_guest()) {
+        return ESRCH;
+    }
+    match set {
+        None => (20 - sp.nice) as u64,
+        Some(v) => {
+            sp.nice = (v as u32 as i32).clamp(-20, 19);
+            0
+        }
+    }
+}
+
+/// `ioprio_get` and `ioprio_set` for this process, kept and answered.
+pub(super) fn sys_ioprio(which: u64, who: u64, set: Option<u64>) -> u64 {
+    if which as u32 != 1 {
+        return EINVAL;
+    }
+    let Some(sp) = (unsafe { guest_slot() }).as_mut() else { return EINVAL };
+    if who as u32 != 0 && who as u32 as u64 != super::fork::pid_of_guest(current_guest()) {
+        return ESRCH;
+    }
+    match set {
+        None => sp.ioprio as u64,
+        Some(v) => {
+            sp.ioprio = v as u32;
+            0
+        }
+    }
+}
+
+/// `close_range`: close every descriptor from `first` to `last`, or with
+/// `CLOSE_RANGE_CLOEXEC` mark them close-on-exec instead. glibc's
+/// `posix_spawn` and every daemon that tidies its descriptors before an
+/// `exec` asks for it, and falls back to closing them one at a time -- up to
+/// the descriptor limit -- when it is refused.
+pub(super) fn sys_close_range(first: u64, last: u64, flags: u64) -> u64 {
+    const CLOSE_RANGE_CLOEXEC: u64 = 4;
+    if flags & !CLOSE_RANGE_CLOEXEC != 0 || first as u32 > last as u32 {
+        return EINVAL;
+    }
+    let (first, last) = (first as u32 as usize, last as u32 as usize);
+    let open: Vec<usize> = with_fds(|fds, _| {
+        (first..=last.min(fds.len().saturating_sub(1))).filter(|&i| matches!(fds.get(i), Some(Some(_)))).collect()
+    })
+    .unwrap_or_default();
+    for fd in open {
+        if flags & CLOSE_RANGE_CLOEXEC != 0 {
+            cloexec_set(fd as u64, true);
+        } else {
+            sys_close(fd as u64);
+        }
+    }
+    0
+}
+
+/// `chmod` and `fchmodat`: the bits are recorded beside the layer
+/// (`ns::MODES`) for any path a guest may write, image files included --
+/// the bits are the guest's to set even where the bytes stay the image's.
+pub(super) fn sys_chmodat(dirfd: u64, path_at: u64, mode: u64) -> u64 {
+    let raw = match read_cstr(path_at) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if raw.is_empty() {
+        return ENOENT;
+    }
+    let path = match at_path(dirfd, &raw) {
+        Ok(p) => super::link::follow(p),
+        Err(e) => return e,
+    };
+    chmod_path(&path, mode)
+}
+
+pub(super) fn sys_fchmod(fd: u64, mode: u64) -> u64 {
+    let path = with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::File(b))) => Some(b.borrow().path.clone()),
+        Some(Some(super::fs::Fd::Disk(b))) => Some(b.borrow().path.clone()),
+        Some(Some(super::fs::Fd::Dir(d))) => Some(d.borrow().path.clone()),
+        Some(Some(_)) => None,
+        _ => None,
+    })
+    .flatten();
+    match path {
+        Some(p) => chmod_path(&p, mode),
+        // A pipe or a socket has no bits worth keeping, and Linux accepts it.
+        None => 0,
+    }
+}
+
+fn chmod_path(path: &str, mode: u64) -> u64 {
+    if !occupied(path) && super::proc::claims(path) == false && super::dev::node(path).is_none() {
+        return ENOENT;
+    }
+    if !super::fs::writable(path) {
+        return EROFS;
+    }
+    if super::ns::set_mode(path, mode as u32) { 0 } else { EIO }
+}
+
+/// Whether anything is at a guest path: the guest's layer, a link it made,
+/// or the image underneath where the layer has not deleted it.
+fn occupied(path: &str) -> bool {
+    super::ns::blob_len(path).is_some()
+        || super::ns::is_dir(path)
+        || super::link::own(path).is_some()
+        || super::disk::image_lookup(path, false).is_some()
+}
+
+/// `symlinkat` and `symlink`: a link made in the guest's layer (see `link`).
+///
+/// The target is stored as written and not checked, which is Linux: a link
+/// may point at nothing yet, and a package unpacks its links before the
+/// files they name.
+pub(super) fn sys_symlinkat(target_at: u64, dirfd: u64, path_at: u64) -> u64 {
+    let (target, raw) = match (read_cstr(target_at), read_cstr(path_at)) {
+        (Ok(t), Ok(p)) => (t, p),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    if target.is_empty() || raw.is_empty() {
+        return ENOENT;
+    }
+    let path = match at_path(dirfd, &raw) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if !super::fs::writable(&path) {
+        return EROFS;
+    }
+    if occupied(&path) {
+        return EEXIST;
+    }
+    let parent = path.rsplit_once('/').map(|(p, _)| if p.is_empty() { "/" } else { p }).unwrap_or("/");
+    let parent_there = parent == "/"
+        || super::ns::is_dir(parent)
+        || super::disk::image_lookup(parent, true).is_some_and(|n| n.is_dir);
+    if !parent_there {
+        return ENOENT;
+    }
+    if super::link::make(&path, &target) { 0 } else { EIO }
+}
+
+/// `linkat` and `link`: a hard link, made as a copy.
+///
+/// **A copy, and that is a deviation with a reason.** The store is keyed by
+/// content, so a copy costs nothing and the two names share their bytes on
+/// disk as Linux's two names share an inode -- until one is written, when
+/// Linux would change both and this changes one. What a program uses a hard
+/// link for in practice is an atomic second name (a lock file, a backup
+/// before an edit, git's object store), and a copy serves each. A link to a
+/// link is a second link with the same target unless `AT_SYMLINK_FOLLOW`.
+pub(super) fn sys_linkat(olddir: u64, old_at: u64, newdir: u64, new_at: u64, flags: u64) -> u64 {
+    const AT_SYMLINK_FOLLOW: u64 = 0x400;
+    if flags & !(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH) != 0 {
+        return EINVAL;
+    }
+    let (a, b) = match (read_cstr(old_at), read_cstr(new_at)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    if a.is_empty() || b.is_empty() {
+        return ENOENT;
+    }
+    let (from, to) = match (at_path(olddir, &a), at_path(newdir, &b)) {
+        (Ok(f), Ok(t)) => (f, t),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    if !super::fs::writable(&to) {
+        return EROFS;
+    }
+    if occupied(&to) {
+        return EEXIST;
+    }
+    let from = if flags & AT_SYMLINK_FOLLOW != 0 { super::link::follow(from) } else { from };
+    if let Some(t) = super::link::own(&from) {
+        return if super::link::make(&to, &t) { 0 } else { EIO };
+    }
+    if super::ns::is_dir(&from) || super::disk::image_lookup(&from, false).is_some_and(|n| n.is_dir) {
+        return EPERM;
+    }
+    let bytes = match super::ns::read_blob(&from) {
+        Some(b) => b,
+        None => match super::disk::read_all(&from) {
+            Some(b) => b,
+            None => return ENOENT,
+        },
+    };
+    if super::ns::write_blob(&to, bytes) { 0 } else { EIO }
+}
+
+/// `utimensat`: set a file's times. Nothing here keeps times -- every file
+/// reports the epoch -- so this answers whether the file is there and stores
+/// nothing, which is what `touch` needs to finish. A null path with a
+/// descriptor is `futimens`.
+pub(super) fn sys_utimensat(dirfd: u64, path_at: u64) -> u64 {
+    if path_at == 0 {
+        return with_fds(|fds, _| if matches!(fds.get(dirfd as usize), Some(Some(_))) { 0 } else { EBADF }).unwrap_or(EBADF);
+    }
+    let raw = match read_cstr(path_at) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let path = match at_path(dirfd, &raw) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let there = matches!(super::disk::lookup(&path), Some(Some(_)))
+        || super::ns::blob_len(&path).is_some()
+        || super::ns::is_dir(&path)
+        || super::dev::node(&path).is_some();
+    if there { 0 } else { ENOENT }
+}
+
+/// `rename`, `renameat` and `renameat2`, over the namespace's own move.
+///
+/// Every program that saves safely writes a temporary file and renames it over
+/// the real one, so a kernel without this has no programs that save:
+/// LibreOffice writes its profile that way and gives up on "cannot move".
+/// Both ends must be inside the jail, and a source on a mounted volume is
+/// `EXDEV`, which is what Linux answers across filesystems and what tells a
+/// program to copy instead. `RENAME_NOREPLACE` is honoured; `RENAME_EXCHANGE`
+/// and `RENAME_WHITEOUT` are refused rather than half done.
+pub(super) fn sys_renameat(olddir: u64, old_at: u64, newdir: u64, new_at: u64, flags: u64) -> u64 {
+    const RENAME_NOREPLACE: u64 = 1;
+    if flags & !RENAME_NOREPLACE != 0 {
+        return EINVAL;
+    }
+    let (a, b) = match (read_cstr(old_at), read_cstr(new_at)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    if a.is_empty() || b.is_empty() {
+        return ENOENT;
+    }
+    let from = match at_path(olddir, &a) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let to = match at_path(newdir, &b) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    // A named mount is read-only, and Linux answers a move off another
+    // filesystem with EXDEV, which tells a program to copy.
+    if super::disk::claims(&from) && !super::disk::root_claims(&from) {
+        return EXDEV;
+    }
+    if !super::fs::writable(&from) || !super::fs::writable(&to) {
+        return EROFS;
+    }
+    // A link the guest made moves as a link: what it points at stays put.
+    if super::link::own(&from).is_some() {
+        if super::ns::is_dir(&to) {
+            return EISDIR;
+        }
+        let there = super::ns::blob_len(&to).is_some() || super::link::own(&to).is_some();
+        if there && flags & RENAME_NOREPLACE != 0 {
+            return EEXIST;
+        }
+        if super::ns::blob_len(&to).is_some() {
+            super::ns::detach(&to);
+        }
+        super::link::remove(&to);
+        return if super::link::rename(&from, &to) { 0 } else { EIO };
+    }
+    // A file on the root image moves by being copied up first; the image's
+    // copy is then whited out, so the old name is gone as a move promises. A
+    // directory there answers EXDEV: moving a tree out of an image is a copy
+    // of the whole tree, which is the program's to do.
+    let from_below = super::disk::image_lookup(&from, false);
+    if super::ns::blob_len(&from).is_none() && super::ns::is_dir(&from) == false {
+        match &from_below {
+            Some(n) if n.is_dir => return EXDEV,
+            Some(_) => {
+                if !super::ns::copy_up(&from) {
+                    return EIO;
+                }
+            }
+            None => return ENOENT,
+        }
+    }
+    let src_dir = super::ns::is_dir(&from);
+    let to_below = super::disk::image_lookup(&to, false);
+    let dst_dir = super::ns::is_dir(&to) || to_below.as_ref().is_some_and(|n| n.is_dir);
+    let dst_there = dst_dir || super::ns::blob_len(&to).is_some() || to_below.is_some();
+    if dst_there && flags & RENAME_NOREPLACE != 0 {
+        return EEXIST;
+    }
+    if dst_dir && !src_dir {
+        return EISDIR;
+    }
+    if src_dir && dst_there && !dst_dir {
+        return ENOTDIR;
+    }
+    if dst_dir && from != to && !super::ns::listing(&to).is_empty() {
+        return ENOTEMPTY;
+    }
+    if !super::ns::rename(&from, &to) {
+        return EINVAL;
+    }
+    if from_below.is_some() && from != to {
+        super::ns::white_out(&from);
+    }
+    0
+}
+
+/// A path resolved against a directory descriptor, as `openat` resolves one.
+/// An absolute path ignores the descriptor, which is POSIX.
+fn at_path(dirfd: u64, raw: &str) -> Result<String, u64> {
+    let base = if raw.starts_with('/') {
+        String::from("/")
+    } else {
+        with_fds(|fds, cwd| at_base(fds, dirfd, cwd)).unwrap_or(Err(EBADF))?
+    };
+    super::fs::resolve(&base, raw).ok_or(ENOENT)
 }
 
 /// The working directory, which is `/` and has never been anything else.
@@ -2220,9 +3149,10 @@ pub(super) fn sys_chdir(path_at: u64) -> u64 {
     };
     let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
     let Some(path) = found else { return ENOENT };
+    let path = super::link::follow(path);
     let is_dir = match super::disk::lookup(&path) {
         Some(on) => on.is_some_and(|n| n.is_dir),
-        None => sysbox::is_dir(&path) || super::dev::is_dir(&path) || super::proc::is_dir(&path) || path == "/",
+        None => super::ns::is_dir(&path) || super::dev::is_dir(&path) || super::proc::is_dir(&path) || path == "/",
     };
     if !is_dir {
         return ENOTDIR;
@@ -2234,6 +3164,520 @@ pub(super) fn sys_chdir(path_at: u64) -> u64 {
         }
         None => EBADF,
     }
+}
+
+enum Waitable {
+    Event(alloc::rc::Rc<core::cell::RefCell<super::timer::EventFd>>),
+    Timer(alloc::rc::Rc<core::cell::RefCell<super::timer::TimerFd>>),
+}
+
+fn waitable(fd: u64) -> Option<Waitable> {
+    with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Event(e))) => Some(Waitable::Event(e.clone())),
+        Some(Some(super::fs::Fd::Timer(t))) => Some(Waitable::Timer(t.clone())),
+        _ => None,
+    })
+    .flatten()
+}
+
+fn read_event_or_timer(fd: u64, buf: u64, len: u64) -> Option<u64> {
+    let w = waitable(fd)?;
+    if len < 8 {
+        return Some(EINVAL);
+    }
+    loop {
+        let (got, nonblock) = match &w {
+            Waitable::Event(e) => {
+                let mut e = e.borrow_mut();
+                (e.take(), e.nonblock)
+            }
+            Waitable::Timer(t) => {
+                let mut t = t.borrow_mut();
+                (t.take(mono_ns()), t.nonblock)
+            }
+        };
+        if let Some(v) = got {
+            unsafe { core::ptr::write_unaligned(buf as *mut u64, v) };
+            return Some(8);
+        }
+        if nonblock {
+            return Some(EAGAIN);
+        }
+        if overran(crate::dev::lapic::ticks()) {
+            unsafe { kill_blocked() }
+        }
+        crate::sky::server::pump();
+        wait_turn();
+    }
+}
+
+fn pty_of(fd: u64) -> Option<alloc::rc::Rc<core::cell::RefCell<super::pty::End>>> {
+    with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Pty(e))) => Some(e.clone()),
+        _ => None,
+    })
+    .flatten()
+}
+
+fn read_pty(fd: u64, buf: u64, len: u64) -> Option<u64> {
+    let end = pty_of(fd)?;
+    let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
+    loop {
+        let (master, nonblock, pty) = {
+            let e = end.borrow();
+            (e.master, e.nonblock, e.pty.clone())
+        };
+        let got = if master {
+            match pty.borrow_mut().master_read(out) {
+                Some(Ok(n)) => Some(n as u64),
+                Some(Err(())) => Some(EIO),
+                None => None,
+            }
+        } else {
+            pty.borrow_mut().slave_read(out).map(|n| n as u64)
+        };
+        if let Some(r) = got {
+            return Some(r);
+        }
+        if nonblock {
+            return Some(EAGAIN);
+        }
+        if overran(crate::dev::lapic::ticks()) {
+            unsafe { kill_blocked() }
+        }
+        crate::sky::server::pump();
+        wait_turn();
+    }
+}
+
+fn write_pty(fd: u64, buf: u64, len: usize) -> Option<u64> {
+    let end = pty_of(fd)?;
+    if len == 0 {
+        return Some(0);
+    }
+    if !reachable(buf, len, false) {
+        return Some(EFAULT);
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(buf as *const u8, len) };
+    let (master, pty) = {
+        let e = end.borrow();
+        (e.master, e.pty.clone())
+    };
+    if master {
+        // Typed at the terminal. A key that means a signal goes to the
+        // foreground process group.
+        let (sig, pgrp) = {
+            let mut p = pty.borrow_mut();
+            (p.input(bytes), p.pgrp)
+        };
+        if let (Some(s), true) = (sig, pgrp != 0) {
+            super::signal::kill(pgrp as i64, s);
+        }
+        return Some(len as u64);
+    }
+    let wrote = pty.borrow_mut().slave_write(bytes);
+    Some(match wrote {
+        Some(n) => n as u64,
+        None => EAGAIN,
+    })
+}
+
+/// The terminal ioctls, on either end.
+fn pty_ioctl(fd: u64, req: u64, arg: u64) -> Option<u64> {
+    let end = pty_of(fd)?;
+    let (master, pty) = {
+        let e = end.borrow();
+        (e.master, e.pty.clone())
+    };
+    let need = |n: usize, write: bool| reachable(arg, n, write);
+    Some(match req {
+        // TCGETS
+        0x5401 => {
+            if !need(super::pty::TERMIOS_LEN, true) {
+                return Some(EFAULT);
+            }
+            let t = pty.borrow().termios();
+            unsafe { core::ptr::copy_nonoverlapping(t.as_ptr(), arg as *mut u8, t.len()) };
+            0
+        }
+        // TCSETS, TCSETSW, TCSETSF (the last also flushes pending input)
+        0x5402..=0x5404 => {
+            if !need(super::pty::TERMIOS_LEN, false) {
+                return Some(EFAULT);
+            }
+            let mut t = [0u8; super::pty::TERMIOS_LEN];
+            unsafe { core::ptr::copy_nonoverlapping(arg as *const u8, t.as_mut_ptr(), t.len()) };
+            let mut p = pty.borrow_mut();
+            if req == 0x5404 {
+                p.flush(true, false);
+            }
+            p.set_termios(&t);
+            0
+        }
+        // TCGETS2: the same, as `struct termios2` -- the 36 bytes and the
+        // input and output speeds. glibc 2.42 implements `tcgetattr` with
+        // this and not TCGETS, so without it every terminal read ENOTTY and
+        // `isatty` was false on a terminal.
+        0x802C_542A => {
+            if !need(44, true) {
+                return Some(EFAULT);
+            }
+            let t = pty.borrow().termios();
+            unsafe {
+                core::ptr::copy_nonoverlapping(t.as_ptr(), arg as *mut u8, t.len());
+                core::ptr::write_unaligned((arg + 36) as *mut u32, 38_400);
+                core::ptr::write_unaligned((arg + 40) as *mut u32, 38_400);
+            }
+            0
+        }
+        // TCSETS2, TCSETSW2, TCSETSF2: the speeds are taken and mean nothing.
+        0x402C_542B..=0x402C_542D => {
+            if !need(44, false) {
+                return Some(EFAULT);
+            }
+            let mut t = [0u8; super::pty::TERMIOS_LEN];
+            unsafe { core::ptr::copy_nonoverlapping(arg as *const u8, t.as_mut_ptr(), t.len()) };
+            let mut p = pty.borrow_mut();
+            if req == 0x402C_542D {
+                p.flush(true, false);
+            }
+            p.set_termios(&t);
+            0
+        }
+        // TIOCGWINSZ
+        0x5413 => {
+            if !need(8, true) {
+                return Some(EFAULT);
+            }
+            let w = pty.borrow().winsize;
+            unsafe {
+                for (i, v) in w.iter().enumerate() {
+                    core::ptr::write_unaligned((arg + i as u64 * 2) as *mut u16, *v);
+                }
+            }
+            0
+        }
+        // TIOCSWINSZ: and the foreground group is told, as SIGWINCH.
+        0x5414 => {
+            if !need(8, false) {
+                return Some(EFAULT);
+            }
+            let mut w = [0u16; 4];
+            for (i, v) in w.iter_mut().enumerate() {
+                *v = unsafe { core::ptr::read_unaligned((arg + i as u64 * 2) as *const u16) };
+            }
+            let pgrp = {
+                let mut p = pty.borrow_mut();
+                let changed = p.winsize != w;
+                p.winsize = w;
+                if changed { p.pgrp } else { 0 }
+            };
+            if pgrp != 0 {
+                super::signal::kill(pgrp as i64, 28); // SIGWINCH
+            }
+            0
+        }
+        // TIOCGPGRP, TIOCGSID
+        0x540F | 0x5429 => {
+            if !need(4, true) {
+                return Some(EFAULT);
+            }
+            let g = pty.borrow().pgrp.max(1);
+            unsafe { core::ptr::write_unaligned(arg as *mut u32, g) };
+            0
+        }
+        // TIOCSPGRP
+        0x5410 => {
+            if !need(4, false) {
+                return Some(EFAULT);
+            }
+            pty.borrow_mut().pgrp = unsafe { core::ptr::read_unaligned(arg as *const u32) };
+            0
+        }
+        // TIOCSCTTY: becoming the controlling terminal; the caller leads it.
+        0x540E => {
+            let mut p = pty.borrow_mut();
+            if p.pgrp == 0 {
+                p.pgrp = super::fork::current_pid() as u32;
+            }
+            0
+        }
+        // TIOCNOTTY, TCXONC, TCSBRK, TCSBRKP: nothing to stop or break.
+        0x5422 | 0x540A | 0x5409 | 0x5425 => 0,
+        // TCFLSH: 0 input, 1 output, 2 both.
+        0x540B => {
+            let mut p = pty.borrow_mut();
+            p.flush(arg != 1, arg != 0);
+            0
+        }
+        // FIONREAD / TIOCINQ, TIOCOUTQ
+        0x541B | 0x5411 => {
+            if !need(4, true) {
+                return Some(EFAULT);
+            }
+            let n = pty.borrow().readable_bytes(master) as u32;
+            unsafe { core::ptr::write_unaligned(arg as *mut u32, n) };
+            0
+        }
+        // TIOCGPTN: the master's terminal number, for ptsname.
+        0x8004_5430 if master => {
+            if !need(4, true) {
+                return Some(EFAULT);
+            }
+            let n = pty.borrow().num;
+            unsafe { core::ptr::write_unaligned(arg as *mut u32, n) };
+            0
+        }
+        // TIOCSPTLCK: lock or unlock the slave.
+        0x4004_5431 if master => {
+            if !need(4, false) {
+                return Some(EFAULT);
+            }
+            pty.borrow_mut().locked = unsafe { core::ptr::read_unaligned(arg as *const u32) } != 0;
+            0
+        }
+        // TIOCGPTLCK
+        0x8004_5439 if master => {
+            if !need(4, true) {
+                return Some(EFAULT);
+            }
+            let l = pty.borrow().locked as u32;
+            unsafe { core::ptr::write_unaligned(arg as *mut u32, l) };
+            0
+        }
+        // TIOCGPTPEER: the slave as a descriptor, without a path.
+        0x5441 if master => {
+            let n = pty.borrow().num;
+            match super::pty::open_slave(n, arg & O_NONBLOCK != 0) {
+                Ok(e) => install_fd(super::fs::Fd::Pty(e)),
+                Err(e) => e as u64,
+            }
+        }
+        // FIONBIO
+        0x5421 => {
+            if !need(4, false) {
+                return Some(EFAULT);
+            }
+            end.borrow_mut().nonblock = unsafe { core::ptr::read_unaligned(arg as *const u32) } != 0;
+            0
+        }
+        _ => ENOTTY,
+    })
+}
+
+/// `eventfd` and `eventfd2`.
+pub(super) fn sys_eventfd(init: u64, flags: u64) -> u64 {
+    const EFD_SEMAPHORE: u64 = 1;
+    const EFD_NONBLOCK: u64 = 0o4000;
+    const EFD_CLOEXEC: u64 = 0o2000000;
+    if flags & !(EFD_SEMAPHORE | EFD_NONBLOCK | EFD_CLOEXEC) != 0 {
+        return EINVAL;
+    }
+    let e = super::timer::EventFd { count: init & 0xFFFF_FFFF, semaphore: flags & EFD_SEMAPHORE != 0, nonblock: flags & EFD_NONBLOCK != 0 };
+    install_fd(super::fs::Fd::Event(alloc::rc::Rc::new(core::cell::RefCell::new(e))))
+}
+
+/// `timerfd_create` on the clocks this kernel keeps.
+pub(super) fn sys_timerfd_create(clock: u64, flags: u64) -> u64 {
+    const TFD_NONBLOCK: u64 = 0o4000;
+    const TFD_CLOEXEC: u64 = 0o2000000;
+    if flags & !(TFD_NONBLOCK | TFD_CLOEXEC) != 0 {
+        return EINVAL;
+    }
+    // REALTIME, MONOTONIC, BOOTTIME and their ALARM forms (8, 9).
+    if !matches!(clock, 0 | 1 | 7 | 8 | 9) {
+        return EINVAL;
+    }
+    let t = super::timer::TimerFd::new(clock, flags & TFD_NONBLOCK != 0);
+    install_fd(super::fs::Fd::Timer(alloc::rc::Rc::new(core::cell::RefCell::new(t))))
+}
+
+fn timer_of(fd: u64) -> Result<alloc::rc::Rc<core::cell::RefCell<super::timer::TimerFd>>, u64> {
+    match waitable(fd) {
+        Some(Waitable::Timer(t)) => Ok(t),
+        Some(_) => Err(EINVAL),
+        None => Err(if with_fds(|fds, _| matches!(fds.get(fd as usize), Some(Some(_)))) == Some(true) { EINVAL } else { EBADF }),
+    }
+}
+
+fn read_ts(at: u64) -> Result<u64, u64> {
+    if !reachable(at, 16, false) {
+        return Err(EFAULT);
+    }
+    let sec = unsafe { core::ptr::read_unaligned(at as *const i64) };
+    let nsec = unsafe { core::ptr::read_unaligned((at + 8) as *const i64) };
+    if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
+        return Err(EINVAL);
+    }
+    Ok((sec as u64).saturating_mul(1_000_000_000).saturating_add(nsec as u64))
+}
+
+fn write_itimerspec(at: u64, (value, interval): (u64, u64)) -> u64 {
+    if at == 0 {
+        return 0;
+    }
+    if !reachable(at, 32, true) {
+        return EFAULT;
+    }
+    unsafe {
+        core::ptr::write_unaligned(at as *mut u64, interval / 1_000_000_000);
+        core::ptr::write_unaligned((at + 8) as *mut u64, interval % 1_000_000_000);
+        core::ptr::write_unaligned((at + 16) as *mut u64, value / 1_000_000_000);
+        core::ptr::write_unaligned((at + 24) as *mut u64, value % 1_000_000_000);
+    }
+    0
+}
+
+/// `timerfd_settime`: `struct itimerspec` is the interval, then the value.
+/// An absolute deadline on the real-time clock is moved onto the monotonic
+/// one at the moment it is set, which is exact unless the wall clock is
+/// stepped afterwards -- and nothing here steps it.
+pub(super) fn sys_timerfd_settime(fd: u64, flags: u64, new: u64, old: u64) -> u64 {
+    const TFD_TIMER_ABSTIME: u64 = 1;
+    let t = match timer_of(fd) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let (interval, value) = match (read_ts(new), read_ts(new + 16)) {
+        (Ok(i), Ok(v)) => (i, v),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    let now = mono_ns();
+    let abs = if flags & TFD_TIMER_ABSTIME != 0 && value != 0 {
+        let clock = t.borrow().clock;
+        let base = match clock {
+            0 | 8 => clock_pair(0).map(|(s, n)| s.saturating_mul(1_000_000_000) + n).unwrap_or(now),
+            _ => now,
+        };
+        Some(now.saturating_add(value.saturating_sub(base)))
+    } else {
+        None
+    };
+    let was = t.borrow_mut().set(now, value, interval, abs);
+    write_itimerspec(old, was)
+}
+
+pub(super) fn sys_timerfd_gettime(fd: u64, cur: u64) -> u64 {
+    let t = match timer_of(fd) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    if cur == 0 {
+        return EFAULT;
+    }
+    let now_val = t.borrow_mut().get(mono_ns());
+    write_itimerspec(cur, now_val)
+}
+
+/// `fchdir`: into the directory an open descriptor names. `mkdir -p` walks
+/// down this way, one component at a time, and stopped at the first.
+pub(super) fn sys_fchdir(fd: u64) -> u64 {
+    let path = with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Dir(d))) => Ok(d.borrow().path.clone()),
+        Some(Some(_)) => Err(ENOTDIR),
+        _ => Err(EBADF),
+    })
+    .unwrap_or(Err(EBADF));
+    match path {
+        Ok(p) => match unsafe { guest_slot() }.as_mut() {
+            Some(sp) => {
+                sp.cwd = p;
+                0
+            }
+            None => EBADF,
+        },
+        Err(e) => e,
+    }
+}
+
+/// The file-creation mask. Kept and handed back, and applied to nothing,
+/// because nothing here stores a mode a guest chose: every file reports 0644
+/// or 0755. Answering the previous value is the whole contract.
+static UMASK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0o022);
+
+pub(super) fn sys_umask(mask: u64) -> u64 {
+    UMASK.swap(mask & 0o777, Ordering::Relaxed)
+}
+
+/// `getresuid` and `getresgid`: real, effective and saved, all root -- the
+/// same answer `getuid` and friends give.
+fn sys_getres(r: u64, e: u64, sv: u64) -> u64 {
+    for p in [r, e, sv] {
+        if p != 0 && !reachable(p, 4, true) {
+            return EFAULT;
+        }
+    }
+    for p in [r, e, sv] {
+        if p != 0 {
+            unsafe { core::ptr::write_unaligned(p as *mut u32, 0) };
+        }
+    }
+    0
+}
+
+/// `prctl`. A thread's name is the one thing programs set unasked (GLib and
+/// LibreOffice name every thread), so `PR_SET_NAME` is accepted and
+/// `PR_GET_NAME` answers a fixed name; everything else is EINVAL, which is
+/// what a kernel without the option answers.
+fn sys_prctl(op: u64, arg: u64) -> u64 {
+    const PR_SET_NAME: u64 = 15;
+    const PR_GET_NAME: u64 = 16;
+    match op {
+        PR_SET_NAME => 0,
+        PR_GET_NAME => {
+            if !reachable(arg, 16, true) {
+                return EFAULT;
+            }
+            let mut b = [0u8; 16];
+            b[..5].copy_from_slice(b"guest");
+            unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), arg as *mut u8, 16) };
+            0
+        }
+        _ => EINVAL,
+    }
+}
+
+/// `statx`, built from `stat` rather than beside it, so the two cannot
+/// disagree about a file: the 144-byte `struct stat` is written into the
+/// caller's 256-byte buffer first, read back, and laid out again as the
+/// newer structure. The mask asked for is not consulted -- the basic set is
+/// always answered, which is what `STATX_BASIC_STATS` says it is.
+pub(super) fn sys_statx(dirfd: u64, path_at: u64, flags: u64, buf: u64) -> u64 {
+    if !reachable(buf, 256, true) {
+        return EFAULT;
+    }
+    let r = sys_statat(dirfd, path_at, buf, flags & (AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW));
+    if r != 0 {
+        return r;
+    }
+    let rd = |o: u64| unsafe { core::ptr::read_unaligned((buf + o) as *const u64) };
+    let (dev, ino, nlink) = (rd(0), rd(8), rd(16));
+    let mode = rd(24) as u32;
+    let (uid, gid) = (rd(28) as u32, rd(32) as u32);
+    let (rdev, size, blksize, blocks) = (rd(40), rd(48), rd(56), rd(64));
+    let (at, atn, mt, mtn, ct, ctn) = (rd(72), rd(80), rd(88), rd(96), rd(104), rd(112));
+    let mut x = [0u8; 256];
+    let put32 = |x: &mut [u8; 256], o: usize, v: u32| x[o..o + 4].copy_from_slice(&v.to_le_bytes());
+    let put64 = |x: &mut [u8; 256], o: usize, v: u64| x[o..o + 8].copy_from_slice(&v.to_le_bytes());
+    put32(&mut x, 0, 0x7ff); // STATX_BASIC_STATS
+    put32(&mut x, 4, blksize as u32);
+    put32(&mut x, 16, nlink as u32);
+    put32(&mut x, 20, uid);
+    put32(&mut x, 24, gid);
+    x[28..30].copy_from_slice(&(mode as u16).to_le_bytes());
+    put64(&mut x, 32, ino);
+    put64(&mut x, 40, size);
+    put64(&mut x, 48, blocks);
+    for (o, sec, ns) in [(64, at, atn), (96, ct, ctn), (112, mt, mtn)] {
+        put64(&mut x, o, sec);
+        put32(&mut x, o + 8, ns as u32);
+    }
+    put32(&mut x, 128, ((rdev >> 8) & 0xfff) as u32);
+    put32(&mut x, 132, (rdev & 0xff) as u32);
+    put32(&mut x, 136, ((dev >> 8) & 0xfff) as u32);
+    put32(&mut x, 140, (dev & 0xff) as u32);
+    unsafe { core::ptr::copy_nonoverlapping(x.as_ptr(), buf as *mut u8, 256) };
+    0
 }
 
 pub(super) fn sys_getcwd(buf: u64, len: u64) -> u64 {
@@ -2303,6 +3747,52 @@ pub(super) fn wait_turn() {
 /// wait cost at least a tick: a 32-bit game on Zink spent 23 ms a poll in 993
 /// polls over twenty seconds. Such a waiter yields instead and looks again.
 pub(super) fn wait_turn_for(device: bool) {
+    wait_turn_nap(device, 1)
+}
+
+/// The longest a waiter naps before looking again, when nothing it watches
+/// can change except through a syscall.
+///
+/// **A tick was the nap for everybody, and an idle LibreOffice is what it
+/// cost.** Twenty threads each waking a hundred times a second to look at a
+/// condition nothing had changed, every look taking the guest lock: profiled,
+/// 17.5 seconds of lock-waiting in 12 seconds of wall time, all of it
+/// spinning, on the very cores the model's matrix helpers run on in their
+/// idle time -- and decode ran at a tenth of its speed with a word processor
+/// open and nobody touching it. A waiter is woken the moment a call that can
+/// change what it waits on finishes (`may_wake`), so the nap's own length
+/// only matters for what no syscall announces; `needs_tick` names those and
+/// they keep a tick.
+pub(super) const NAP_MAX: u64 = 10;
+
+/// Whether a descriptor can become ready with no syscall to say so -- a
+/// timer expiring, a key or a packet arriving, a fence signalling, audio
+/// draining -- so a waiter watching it must keep looking every tick.
+pub(super) fn needs_tick(fd: u64) -> bool {
+    use super::fs::Fd;
+    with_fds(|t, _| match t.get(fd as usize) {
+        Some(Some(Fd::Timer(_))) | Some(Some(Fd::Socket(_))) | Some(Some(Fd::Epoll(_))) => true,
+        Some(Some(Fd::Dev(b))) => !matches!(b.borrow().node, super::dev::Node::Null | super::dev::Node::Zero | super::dev::Node::Random),
+        _ => false,
+    })
+    .unwrap_or(true)
+}
+
+/// The nap a waiter should take: a tick if it watches something only time or
+/// a device can change, otherwise up to `NAP_MAX`, and never past its own
+/// deadline.
+pub(super) fn nap_ticks(short: bool, start: u64, limit: Option<u64>) -> u64 {
+    if short {
+        return 1;
+    }
+    let left = match limit {
+        Some(l) => (start + l).saturating_sub(crate::dev::lapic::ticks()),
+        None => NAP_MAX,
+    };
+    left.clamp(1, NAP_MAX)
+}
+
+pub(super) fn wait_turn_nap(device: bool, ticks: u64) {
     let held = holds_big();
     let me = crate::task::current();
     let nap = !device && NAP.load(Ordering::Relaxed) && me < crate::task::MAX_TASKS;
@@ -2318,7 +3808,7 @@ pub(super) fn wait_turn_for(device: bool) {
         // kept rather than lost (`task::wake` on a task not yet asleep).
         NAPPING[me].store(true, Ordering::Release);
         NAPPERS.fetch_add(1, Ordering::AcqRel);
-        crate::task::set_wake(crate::dev::lapic::ticks() + 1);
+        crate::task::set_wake(crate::dev::lapic::ticks() + ticks.max(1));
     }
     if held {
         big_unlock();
@@ -2424,6 +3914,7 @@ pub fn big_lock() {
     }
     let ticket = NEXT_TICKET.fetch_add(1, Ordering::AcqRel);
     let mut spins = 0u32;
+    let t0 = if SERVING.load(Ordering::Acquire) != ticket { crate::time::rdtsc() } else { 0 };
     while SERVING.load(Ordering::Acquire) != ticket {
         let flags: u64;
         unsafe { core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags)) };
@@ -2439,7 +3930,11 @@ pub fn big_lock() {
             crate::cpu::disable_interrupts();
         }
     }
+    if t0 != 0 {
+        super::prof::note_big_wait(crate::time::rdtsc() - t0);
+    }
     BIG.store(me, Ordering::Release);
+    super::prof::held();
 }
 
 /// Take the guest lock unless this task already holds it, and say whether
@@ -2455,6 +3950,9 @@ pub fn big_take() -> bool {
 
 pub fn big_unlock() {
     let me = crate::task::current();
+    if BIG.load(Ordering::Relaxed) == me {
+        super::prof::releasing();
+    }
     if BIG.compare_exchange(me, NOBODY, Ordering::AcqRel, Ordering::Acquire).is_ok() {
         SERVING.fetch_add(1, Ordering::AcqRel);
     }
@@ -2469,13 +3967,24 @@ pub fn tlb_shootdown() {
     if crate::smp::online() <= 1 || !FEAT_SHOOT.load(Ordering::Relaxed) {
         return;
     }
-    crate::dev::lapic::shootdown();
+    crate::dev::lapic::shootdown(crate::cpu::read_cr3() & crate::mem::paging::ADDR_MASK);
 }
 
 pub(super) fn sleep_for(sec: u64, nsec: u64) -> u64 {
     if nsec >= 1_000_000_000 {
         return EINVAL;
     }
+    let t0 = crate::time::rdtsc();
+    let r = sleep_for_inner(sec, nsec);
+    let mhz = crate::time::tsc_mhz().max(1);
+    super::prof::note_sleep(
+        sec.saturating_mul(1_000_000_000).saturating_add(nsec),
+        (crate::time::rdtsc() - t0) * 1000 / mhz,
+    );
+    r
+}
+
+fn sleep_for_inner(sec: u64, nsec: u64) -> u64 {
     let hz = crate::TIMER_HZ as u64;
     let want = sec.saturating_mul(hz) + nsec * hz / 1_000_000_000;
     let until = crate::dev::lapic::ticks().saturating_add(want);
@@ -2572,13 +4081,15 @@ pub(super) fn sys_clock_nanosleep(clock: u64, flags: u64, req: u64) -> u64 {
         return EINVAL;
     }
     let Some((ns, nn)) = clock_pair(clock) else { return EINVAL };
-    let want = sec as u128 * 1_000_000_000 + nsec as u128;
-    let now = ns as u128 * 1_000_000_000 + nn as u128;
+    // In 64 bits, for the reason `mono_ns` gives: nanoseconds since 1970
+    // fit until 2554.
+    let want = sec.saturating_mul(1_000_000_000).saturating_add(nsec);
+    let now = ns.saturating_mul(1_000_000_000).saturating_add(nn);
     if want <= now {
         return 0;
     }
     let d = want - now;
-    sleep_for((d / 1_000_000_000) as u64, (d % 1_000_000_000) as u64)
+    sleep_for(d / 1_000_000_000, d % 1_000_000_000)
 }
 
 /// Write through a descriptor that names a file.
@@ -2638,6 +4149,40 @@ fn write_file(fd: u64, buf: u64, len: usize) -> u64 {
         len as u64
     })
     .unwrap_or(EBADF)
+}
+
+/// Write at an offset without moving the cursor, which is `write_file` with the
+/// cursor saved around it -- one descriptor, one task, so nothing can see the
+/// cursor in between. LibreOffice writes every file of its profile this way,
+/// and `ENOSYS` here left each one empty and its first read back an error.
+pub(super) fn sys_pwrite64(fd: u64, buf: u64, len: u64, off: u64) -> u64 {
+    if (off as i64) < 0 {
+        return EINVAL;
+    }
+    let saved = with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::File(body))) => {
+            let mut f = body.borrow_mut();
+            let was = f.at;
+            f.at = off as usize;
+            Ok(was)
+        }
+        Some(Some(super::fs::Fd::Disk(_))) => Err(EBADF),
+        Some(Some(super::fs::Fd::Dir(_))) => Err(EISDIR),
+        Some(Some(_)) => Err(ESPIPE),
+        _ => Err(EBADF),
+    })
+    .unwrap_or(Err(EBADF));
+    let was = match saved {
+        Ok(w) => w,
+        Err(e) => return e,
+    };
+    let r = write_file(fd, buf, len as usize);
+    with_fds(|fds, _| {
+        if let Some(Some(super::fs::Fd::File(body))) = fds.get(fd as usize) {
+            body.borrow_mut().at = was;
+        }
+    });
+    r
 }
 
 /// Gather-write: one call, a vector of buffers.
@@ -2758,10 +4303,12 @@ fn install_fd(entry: super::fs::Fd) -> u64 {
     with_fds(|fds, _| match fds.iter().position(|f| f.is_none()) {
         Some(i) => {
             fds[i] = Some(entry);
+            cloexec_set(i as u64, false);
             i as u64
         }
         None if fds.len() < MAX_FDS => {
             fds.push(Some(entry));
+            cloexec_set((fds.len() - 1) as u64, false);
             (fds.len() - 1) as u64
         }
         None => EMFILE,
@@ -2772,10 +4319,19 @@ fn install_fd(entry: super::fs::Fd) -> u64 {
 /// The `AF_UNIX` socket a descriptor names, if it is one.
 fn unix_sock(fd: u64) -> Option<alloc::rc::Rc<core::cell::RefCell<super::unix::Sock>>> {
     with_fds(|fds, _| match fds.get(fd as usize) {
-        Some(Some(super::fs::Fd::Unix(b))) => Some(b.clone()),
+        Some(Some(super::fs::Fd::Unix(b, _))) => Some(b.clone()),
         _ => None,
     })
     .flatten()
+}
+
+/// Whether a Unix socket descriptor is in non-blocking mode.
+fn unix_nonblock(fd: u64) -> bool {
+    with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::Unix(_, nb))) => nb.get(),
+        _ => false,
+    })
+    .unwrap_or(false)
 }
 
 /// The pipe end a descriptor names, if it is one.
@@ -2834,6 +4390,10 @@ pub(super) fn do_pipe(at: u64, flags: u64) -> u64 {
             }
         });
         return w;
+    }
+    if flags & 0o2000000 != 0 {
+        cloexec_set(r, true);
+        cloexec_set(w, true);
     }
     unsafe {
         core::ptr::write_unaligned(at as *mut i32, r as i32);
@@ -2926,18 +4486,21 @@ pub(super) fn sys_epoll_wait(epfd: u64, evs: u64, maxevents: u64, timeout: u64) 
         return EINVAL;
     }
     let bytes = maxevents as usize * super::epoll::EV_LEN;
-    if !reachable(evs, bytes, true) {
-        return EFAULT;
-    }
     let limit = super::poll::ticks_for_ms(timeout as u32 as i32 as i64);
     let start = crate::dev::lapic::ticks();
     loop {
+        // Every pass, for `do_poll`'s reason: the wait lets another thread
+        // unmap the buffer under this one.
+        if !reachable(evs, bytes, true) {
+            return EFAULT;
+        }
         // Copied out before asking, because answering for a member reaches the
         // descriptor table and the set must not be borrowed across that.
         let entries: alloc::vec::Vec<super::epoll::Watch> = set.borrow().entries().to_vec();
         let out = unsafe { core::slice::from_raw_parts_mut(evs as *mut u8, bytes) };
         let mut n = 0usize;
         let mut fired: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        let short = entries.iter().any(|w| needs_tick(w.fd));
         for w in &entries {
             if n >= maxevents as usize {
                 break;
@@ -2974,7 +4537,7 @@ pub(super) fn sys_epoll_wait(epfd: u64, evs: u64, maxevents: u64, timeout: u64) 
         }
         // The display server answers while its client waits.
         crate::sky::server::pump();
-        wait_turn();
+        wait_turn_nap(false, nap_ticks(short, start, limit));
     }
 }
 
@@ -3200,19 +4763,19 @@ pub(super) fn sys_accept4(fd: u64, addr: u64, alen: u64, flags: u64) -> u64 {
                         core::ptr::write(alen as *mut u32, 2);
                     }
                 }
-                let entry = super::fs::Fd::Unix(alloc::rc::Rc::new(core::cell::RefCell::new(
-                    super::unix::Sock::Stream { pipe, side },
-                )));
+                // `SOCK_NONBLOCK` is the *new* socket's mode; whether this
+                // call waits is the listener's own.
+                let entry = super::fs::Fd::unix(super::unix::Sock::Stream { pipe, side }, flags & SOCK_NONBLOCK != 0);
                 return install_fd(entry);
             }
             Ok(None) => {
-                if flags & SOCK_NONBLOCK != 0 {
+                if unix_nonblock(fd) {
                     return EAGAIN;
                 }
                 if unsafe { kill_if_overdue() } {
                     return EAGAIN;
                 }
-                wait_turn();
+                wait_turn_nap(false, if needs_tick(fd) { 1 } else { NAP_MAX });
             }
         }
     }
@@ -3229,11 +4792,8 @@ pub(super) fn sys_socketpair(domain: u64, kind: u64, _proto: u64, sv: u64) -> u6
         return EFAULT;
     }
     let (a, b) = super::unix::pair();
-    let mk = |pipe, side| {
-        super::fs::Fd::Unix(alloc::rc::Rc::new(core::cell::RefCell::new(
-            super::unix::Sock::Stream { pipe, side },
-        )))
-    };
+    let nonblock = kind & 0o4000 != 0;
+    let mk = |pipe, side| super::fs::Fd::unix(super::unix::Sock::Stream { pipe, side }, nonblock);
     let fa = install_fd(mk(a, super::unix::Side::A));
     if fa > MAX_FDS as u64 {
         return fa;
@@ -3241,6 +4801,10 @@ pub(super) fn sys_socketpair(domain: u64, kind: u64, _proto: u64, sv: u64) -> u6
     let fb = install_fd(mk(b, super::unix::Side::B));
     if fb > MAX_FDS as u64 {
         return fb;
+    }
+    if kind & 0o2000000 != 0 {
+        cloexec_set(fa, true);
+        cloexec_set(fb, true);
     }
     unsafe {
         core::ptr::write(sv as *mut u32, fa as u32);
@@ -3522,6 +5086,114 @@ fn unix_stream(fd: u64) -> Option<(alloc::rc::Rc<core::cell::RefCell<super::unix
     }
 }
 
+/// `getsockopt`, answering what this kernel actually knows.
+///
+/// It answered 0 and wrote nothing, which is worse than refusing: the caller
+/// reads its own uninitialised buffer as the answer. For `SO_PEERCRED` that
+/// buffer is the peer's identity, and D-Bus's EXTERNAL authentication compares
+/// it with the uid the client claims -- so every connection to a session bus
+/// was refused on garbage. Every guest is root, here as in `getuid`.
+fn sys_getsockopt(fd: u64, level: u64, name: u64, val: u64, lenp: u64) -> u64 {
+    const SOL_SOCKET: u64 = 1;
+    const SO_TYPE: u64 = 3;
+    const SO_ERROR: u64 = 4;
+    const SO_SNDBUF: u64 = 7;
+    const SO_RCVBUF: u64 = 8;
+    const SO_PEERCRED: u64 = 17;
+    const SO_ACCEPTCONN: u64 = 30;
+    const SO_DOMAIN: u64 = 39;
+    const ENOPROTOOPT: u64 = (-92i64) as u64;
+    if with_fds(|fds, _| matches!(fds.get(fd as usize), Some(Some(_)))) != Some(true) {
+        return EBADF;
+    }
+    if !reachable(lenp, 4, true) {
+        return EFAULT;
+    }
+    let room = unsafe { core::ptr::read_unaligned(lenp as *const u32) } as usize;
+    let unix = unix_sock(fd).is_some();
+    let answer: Vec<u8> = match (level, name) {
+        (SOL_SOCKET, SO_PEERCRED) => {
+            let mut b = Vec::with_capacity(12);
+            b.extend_from_slice(&(super::fork::current_pid() as u32).to_le_bytes());
+            b.extend_from_slice(&0u32.to_le_bytes());
+            b.extend_from_slice(&0u32.to_le_bytes());
+            b
+        }
+        (SOL_SOCKET, SO_TYPE) => 1u32.to_le_bytes().to_vec(), // SOCK_STREAM
+        (SOL_SOCKET, SO_DOMAIN) => (if unix { 1u32 } else { 2u32 }).to_le_bytes().to_vec(),
+        (SOL_SOCKET, SO_ERROR) => 0u32.to_le_bytes().to_vec(),
+        (SOL_SOCKET, SO_SNDBUF) | (SOL_SOCKET, SO_RCVBUF) => 212_992u32.to_le_bytes().to_vec(),
+        (SOL_SOCKET, SO_ACCEPTCONN) => {
+            let listening = unix_sock(fd).is_some_and(|s| matches!(&*s.borrow(), super::unix::Sock::Listening { .. }));
+            (listening as u32).to_le_bytes().to_vec()
+        }
+        // A TCP option is a number, and zero is the default for every one a
+        // program reads back (TCP_NODELAY off, no keepalive).
+        (6, _) => 0u32.to_le_bytes().to_vec(),
+        _ => return ENOPROTOOPT,
+    };
+    let n = answer.len().min(room);
+    if n > 0 && !reachable(val, n, true) {
+        return EFAULT;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(answer.as_ptr(), val as *mut u8, n);
+        core::ptr::write_unaligned(lenp as *mut u32, n as u32);
+    }
+    0
+}
+
+/// `getsockname` and `getpeername` for a Unix socket: the family, and the
+/// bound name when this end has one. Abstract and unnamed ends answer the
+/// family alone, which is what Linux answers for an unnamed socket.
+fn sys_sockname(fd: u64, addr: u64, lenp: u64, peer: bool) -> u64 {
+    let Some(sock) = unix_sock(fd) else { return if peer { ENOTCONN } else { 0 } };
+    if !reachable(lenp, 4, true) {
+        return EFAULT;
+    }
+    let room = unsafe { core::ptr::read_unaligned(lenp as *const u32) } as usize;
+    let name = match (&*sock.borrow(), peer) {
+        (super::unix::Sock::Bound(p), false) | (super::unix::Sock::Listening { path: p, .. }, false) => p.clone(),
+        (super::unix::Sock::Stream { .. }, _) | (_, false) => String::new(),
+        _ => return ENOTCONN,
+    };
+    let mut b = Vec::with_capacity(2 + name.len() + 1);
+    b.extend_from_slice(&1u16.to_le_bytes()); // AF_UNIX
+    if !name.is_empty() {
+        b.extend_from_slice(name.as_bytes());
+        b.push(0);
+    }
+    let n = b.len().min(room);
+    if n > 0 && !reachable(addr, n, true) {
+        return EFAULT;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(b.as_ptr(), addr as *mut u8, n);
+        core::ptr::write_unaligned(lenp as *mut u32, b.len() as u32);
+    }
+    0
+}
+
+/// `clock_getres`: the TSC clocks resolve to a nanosecond, the coarse one to
+/// a tick. A clock this kernel does not keep is EINVAL, as for `gettime`.
+fn sys_clock_getres(which: u64, at: u64) -> u64 {
+    let ns: u64 = match which {
+        0..=4 | 7 => 1,
+        5 | 6 => 1_000_000_000 / crate::TIMER_HZ as u64,
+        _ => return EINVAL,
+    };
+    if at != 0 {
+        if !reachable(at, 16, true) {
+            return EFAULT;
+        }
+        unsafe {
+            core::ptr::write_unaligned(at as *mut u64, 0);
+            core::ptr::write_unaligned((at + 8) as *mut u64, ns);
+        }
+    }
+    0
+}
+
 pub(super) fn sys_sendmsg(fd: u64, hdr: u64, _flags: u64) -> u64 {
     let Some((pipe, side)) = unix_stream(fd) else { return ENOTCONN };
     let (iov, cnt, ctl, ctl_len) = match msghdr_in(hdr, false) {
@@ -3570,7 +5242,7 @@ pub(super) fn sys_recvmsg(fd: u64, hdr: u64, flags: u64) -> u64 {
             Err(-11) => {}
             Err(e) => return e as u64,
         }
-        if flags & MSG_DONTWAIT != 0 {
+        if flags & MSG_DONTWAIT != 0 || unix_nonblock(fd) {
             return EAGAIN;
         }
         if overran(crate::dev::lapic::ticks()) {
@@ -3606,17 +5278,19 @@ pub(super) fn sys_socket(domain: u64, kind: u64, proto: u64) -> u64 {
         if proto != 0 {
             return EPROTONOSUPPORT;
         }
-        let entry = super::fs::Fd::Unix(alloc::rc::Rc::new(core::cell::RefCell::new(
-            super::unix::Sock::Fresh,
-        )));
+        let entry = super::fs::Fd::unix(super::unix::Sock::Fresh, kind & 0o4000 != 0);
         return install_fd(entry);
     }
     if domain != 2 {
         return EAFNOSUPPORT;
     }
-    // `SOCK_STREAM` with the close-on-exec and non-blocking bits masked off:
-    // there is no `exec` for the first to matter to, and the second is
-    // answered by every call taking its own timeout.
+    // `SOCK_STREAM` with the close-on-exec and non-blocking bits masked off.
+    // **The second used to be dropped**, under a comment saying every call
+    // took its own timeout instead -- and that timeout was ten seconds. curl
+    // reads a non-blocking socket to see whether anything is waiting before
+    // it sends a request and again before it closes, and each of those reads
+    // sat out the whole ten: a 1.5 s download took 21.7, measured in a packet
+    // capture as two 10.0 s silences on the guest's side.
     if kind & 0xFF != 1 {
         return EPROTONOSUPPORT;
     }
@@ -3624,7 +5298,7 @@ pub(super) fn sys_socket(domain: u64, kind: u64, proto: u64) -> u64 {
         return EPROTONOSUPPORT;
     }
     let entry = super::fs::Fd::Socket(alloc::rc::Rc::new(core::cell::RefCell::new(
-        super::fs::Sock { conn: None },
+        super::fs::Sock { conn: None, nonblock: kind & 0o4000 != 0 },
     )));
     with_fds(|fds, _| match fds.iter().position(|f| f.is_none()) {
         Some(i) => {
@@ -3686,13 +5360,36 @@ pub(super) fn sys_connect(fd: u64, at: u64, len: u64) -> u64 {
     };
     // The borrow ends before the connect: opening one pumps the stack, which
     // can deliver to another socket, which would want this same table.
-    match crate::net::tcp::open(ip, port, SOCK_TIMEOUT_MS) {
+    match without_big(|| crate::net::tcp::open(ip, port, SOCK_TIMEOUT_MS)) {
         Ok(h) => {
             sock.borrow_mut().conn = Some(h);
             0
         }
         Err(e) => sock_err(e),
     }
+}
+
+/// Run a network wait with the guest lock given back.
+///
+/// **A download held every guest still.** `recvfrom` waited for the network
+/// under the guest lock, 454 ms a call during `pacman -Sy`, and every other
+/// guest thread -- and the display server they pump -- queued behind it. The
+/// TCP stack has its own lock now (`net::StackGuard::wait`), which is what
+/// makes this safe: two guests' sockets on two cores no longer meet in it
+/// with only the guest lock between them. Nothing borrowed from guest state
+/// may be held across it, and guest memory may change under it: the socket
+/// calls copy their handle out first, copy what they send before, and ask
+/// `reachable` again before copying what they received.
+pub(super) fn without_big<T>(f: impl FnOnce() -> T) -> T {
+    let held = holds_big();
+    if held {
+        big_unlock();
+    }
+    let r = f();
+    if held {
+        big_lock();
+    }
+    r
 }
 
 /// How long a socket call waits before answering.
@@ -3705,6 +5402,13 @@ pub(super) fn sys_connect(fd: u64, at: u64, len: u64) -> u64 {
 const SOCK_TIMEOUT_MS: u64 = 10_000;
 
 pub(super) fn sys_send(fd: u64, buf: u64, len: u64) -> u64 {
+    // A connected Unix socket takes `sendto` with no address exactly as it
+    // takes `write`. It answered ENOTSOCK, which no D-Bus client survives:
+    // the first thing one sends on a new connection is a single zero byte,
+    // by `sendto`.
+    if unix_stream(fd).is_some() {
+        return sys_write(fd, buf, len as usize);
+    }
     if len == 0 {
         return 0;
     }
@@ -3716,14 +5420,26 @@ pub(super) fn sys_send(fd: u64, buf: u64, len: u64) -> u64 {
         Err(e) => return e,
     };
     let Some(h) = sock.borrow().conn else { return ENOTCONN };
-    let data = unsafe { core::slice::from_raw_parts(buf as *const u8, len as usize) };
-    match crate::net::tcp::send_at(h, data, SOCK_TIMEOUT_MS) {
+    // Copied before the lock goes: another thread of this guest may unmap the
+    // buffer while this one waits for the network.
+    let data = unsafe { core::slice::from_raw_parts(buf as *const u8, len as usize) }.to_vec();
+    match without_big(|| crate::net::tcp::send_at(h, &data, SOCK_TIMEOUT_MS)) {
         Ok(()) => len,
         Err(e) => sock_err(e),
     }
 }
 
 pub(super) fn sys_recv(fd: u64, buf: u64, len: u64) -> u64 {
+    sys_recvfrom(fd, buf, len, 0)
+}
+
+/// `recvfrom`, whose flags were dropped on the way in -- so `MSG_DONTWAIT`, the
+/// per-call way of saying "do not wait", waited the full socket timeout.
+pub(super) fn sys_recvfrom(fd: u64, buf: u64, len: u64, flags: u64) -> u64 {
+    const MSG_DONTWAIT: u64 = 0x40;
+    if unix_stream(fd).is_some() {
+        return sys_read(fd, buf, len);
+    }
     if len == 0 {
         return 0;
     }
@@ -3735,18 +5451,34 @@ pub(super) fn sys_recv(fd: u64, buf: u64, len: u64) -> u64 {
         Err(e) => return e,
     };
     let Some(h) = sock.borrow().conn else { return ENOTCONN };
-    let got = crate::net::tcp::recv_at(h, SOCK_TIMEOUT_MS);
+    // Not waiting is a question about what has already arrived: what the
+    // network task has delivered, or what one turn of the stack finds now.
+    let dontwait = flags & MSG_DONTWAIT != 0 || sock.borrow().nonblock;
+    if dontwait {
+        crate::net::tcp::service();
+        if crate::net::tcp::pending(h) == 0 {
+            return if crate::net::tcp::peer_done(h) || !crate::net::tcp::alive(h) { 0 } else { EAGAIN };
+        }
+    }
+    let timeout = if dontwait { 0 } else { SOCK_TIMEOUT_MS };
+    let got = without_big(|| crate::net::tcp::recv_upto(h, len as usize, timeout));
     if got.is_empty() {
         // Zero means end of file, and only end of file. A timeout with the
         // peer still there is `EAGAIN`, because a program reading zero from a
         // live connection concludes the other end hung up.
         return if crate::net::tcp::peer_done(h) { 0 } else { EAGAIN };
     }
-    let n = got.len().min(len as usize);
+    // Never more than the buffer holds: `recv_upto` left the rest on the
+    // connection for the next read (it once took everything and this copied
+    // what fitted, under a comment saying the rest was kept).
+    let n = got.len();
+    // Asked again, because the lock was given back for the wait and the
+    // buffer may have been unmapped meanwhile. The bytes are lost then, as
+    // they would be to a program that freed its own buffer mid-read.
+    if !reachable(buf, n, true) {
+        return EFAULT;
+    }
     unsafe { core::ptr::copy_nonoverlapping(got.as_ptr(), buf as *mut u8, n) };
-    // Anything past the guest's buffer would need pushing back, which this
-    // stack has nowhere to put. Refused as short rather than lost: the caller
-    // asked for `len` and got `len`, and the rest is still on the connection.
     n as u64
 }
 
@@ -3758,7 +5490,7 @@ pub(super) fn sys_shutdown(fd: u64, _how: u64) -> u64 {
     let taken = sock.borrow_mut().conn.take();
     match taken {
         Some(h) => {
-            crate::net::tcp::close_at(h, SOCK_TIMEOUT_MS);
+            without_big(|| crate::net::tcp::close_at(h, SOCK_TIMEOUT_MS));
             0
         }
         None => ENOTCONN,
@@ -3818,6 +5550,7 @@ pub(super) fn sys_access(path_at: u64, mode: u64) -> u64 {
     }
     let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
     let Some(path) = found else { return ENOENT };
+    let path = super::link::follow(path);
     // **A mounted volume is not in the namespace**, so asking only `sysbox`
     // answered `ENOENT` for every file on one. `open` and `stat` already ask
     // the disk first; `access` was the call that did not, and the Source
@@ -3826,26 +5559,34 @@ pub(super) fn sys_access(path_at: u64, mode: u64) -> u64 {
     // installed.
     if let Some(on) = super::disk::lookup(&path) {
         let Some(n) = on else { return ENOENT };
-        if mode & 2 != 0 {
+        // Writable when it is the root image and the guest has a layer to
+        // copy it up into; a named mount never is.
+        if mode & 2 != 0 && !(super::disk::root_claims(&path) && super::ns::writable(&path)) {
             return EROFS;
         }
+        // X_OK for root: a directory, or any execute bit. A FAT file has no
+        // modes and is run as a program from there, so it counts.
         if mode & 1 != 0 && !n.is_dir {
-            return EACCES;
+            let perm = perm_of(&path, n.inode.map(|i| i.mode));
+            if perm.is_some_and(|p| p & 0o111 == 0) {
+                return EACCES;
+            }
         }
         return 0;
     }
     if super::dev::node(&path).is_some() || super::dev::is_dir(&path) || super::proc::claims(&path) {
         return 0;
     }
-    if !sysbox::is_dir(&path) && sysbox::blob_len(&path).is_none() {
+    if !super::ns::is_dir(&path) && super::ns::blob_len(&path).is_none() {
         return ENOENT;
     }
-    // W_OK is bit 1. X_OK is granted on directories and refused on files,
-    // since nothing here can be executed by name.
+    // W_OK is bit 1. X_OK is a directory or an execute bit: this said
+    // "nothing here can be executed by name" long after `execve` ran files
+    // from the layer, and a package installed there was not executable.
     if mode & 2 != 0 && !super::fs::writable(&path) {
         return EACCES;
     }
-    if mode & 1 != 0 && !sysbox::is_dir(&path) {
+    if mode & 1 != 0 && !super::ns::is_dir(&path) && perm_of(&path, None).unwrap_or(0o644) & 0o111 == 0 {
         return EACCES;
     }
     0
@@ -3953,18 +5694,69 @@ pub(super) fn sys_uname(buf: u64) -> u64 {
 /// actually moves. A caller timing something short with `REALTIME` will
 /// measure zero, and that is a property of the hardware rather than of this
 /// call.
+/// The guest's CLOCK_MONOTONIC, in nanoseconds, for timers elsewhere.
+pub fn mono_now() -> u64 {
+    mono_ns()
+}
+
+/// Nanoseconds of TSC time, never less than the last answer.
+fn mono_ns() -> u64 {
+    static LAST_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    // **No 128-bit division**: this target links `__udivti3` and it answers
+    // garbage (CLAUDE.md, "Numbers, in four rungs"). Written as one, the
+    // clock read 2^64-7 nanoseconds after its first call, the clamp held it
+    // there, and every timeout a program measured was a century long -- the
+    // D-Bus daemon closed new connections as unauthenticated for that.
+    // Whole microseconds and the remainder, each in 64 bits.
+    let mhz = crate::time::tsc_mhz().max(1);
+    let tsc = crate::time::rdtsc();
+    let now = (tsc / mhz) * 1000 + (tsc % mhz) * 1000 / mhz;
+    LAST_NS.fetch_max(now, Ordering::Relaxed).max(now)
+}
+
+/// Unix nanoseconds minus `mono_ns`, taken from the RTC at the first ask.
+/// Zero means not yet taken; a real offset is never zero.
+static WALL_OFFSET: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 pub(super) fn clock_pair(which: u64) -> Option<(u64, u64)> {
     match which {
         // CLOCK_REALTIME and its coarse twin.
+        //
+        // **The RTC once, then the TSC.** This read the CMOS clock on every
+        // call: one-second resolution with the microseconds always zero, a
+        // slow port read on the locked path, and `None` -- so `EINVAL` --
+        // whenever the RTC was mid-update. LibreOffice's GTK timer source
+        // compares wall times to the microsecond and never saw one move, so
+        // its scheduler never ran: no repaint, no status bar, and no typed
+        // character ever reached the page. The offset is taken at the first
+        // ask and never re-read, so this clock does not step under a running
+        // program; it drifts with the TSC, which is what the monotonic clocks
+        // already trust.
         0 | 5 => {
-            let dt = crate::dev::rtc::now()?;
-            Some((crate::dev::rtc::unix_seconds(&dt) as u64, 0))
+            let off = match WALL_OFFSET.load(Ordering::Acquire) {
+                0 => {
+                    let dt = crate::dev::rtc::now()?;
+                    let unix_ns = crate::dev::rtc::unix_seconds(&dt) as u64 * 1_000_000_000;
+                    let o = unix_ns.wrapping_sub(mono_ns());
+                    // The first writer wins, so two cores asking at once agree.
+                    match WALL_OFFSET.compare_exchange(0, o, Ordering::AcqRel, Ordering::Acquire) {
+                        Ok(_) => o,
+                        Err(other) => other,
+                    }
+                }
+                o => o,
+            };
+            let ns = mono_ns().wrapping_add(off);
+            Some((ns / 1_000_000_000, ns % 1_000_000_000))
         }
         // MONOTONIC_COARSE: the tick, which is what "coarse" promises.
+        // The same timeline as MONOTONIC, rounded down to a tick: it was the
+        // tick count itself, which starts at the kernel's boot rather than the
+        // TSC's, so the two clocks a program compares disagreed by seconds.
         6 => {
-            let t = crate::dev::lapic::ticks();
-            let hz = crate::TIMER_HZ as u64;
-            Some((t / hz, (t % hz) * (1_000_000_000 / hz)))
+            let tick = 1_000_000_000 / crate::TIMER_HZ as u64;
+            let ns = mono_ns() / tick * tick;
+            Some((ns / 1_000_000_000, ns % 1_000_000_000))
         }
         // MONOTONIC, raw, boottime and the two process clocks -- answered
         // from the TSC, to the nanosecond.
@@ -3977,10 +5769,17 @@ pub(super) fn clock_pair(which: u64) -> Option<(u64, u64)> {
         // passed", skipped the notify, and waited for a host that had
         // already gone to sleep -- forever, with both sides idle. The same
         // bargain is in every protocol that rate-limits a doorbell by time.
+        //
+        // **And never less than it last said.** The TSC read is the core's
+        // own, and a thread that moves between cores whose counters disagree
+        // by a hair sees time step back. GTK's frame clock treats that as a
+        // fault and says so on every frame -- a flood that filled the console
+        // and starved the harness -- and a monotonic clock that is not
+        // monotonic is a bug whatever reads it. One `fetch_max`, so the fast
+        // path stays off the guest lock.
         1 | 2 | 3 | 4 | 7 => {
-            let mhz = crate::time::tsc_mhz().max(1) as u128;
-            let ns = crate::time::rdtsc() as u128 * 1000 / mhz;
-            Some(((ns / 1_000_000_000) as u64, (ns % 1_000_000_000) as u64))
+            let ns = mono_ns();
+            Some((ns / 1_000_000_000, ns % 1_000_000_000))
         }
         _ => None,
     }
@@ -4056,28 +5855,51 @@ pub(super) fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
     }
     match cmd {
         0 => sys_dup(fd, None).max_free_from(arg), // F_DUPFD
-        1 => 0,                                    // F_GETFD, nothing is close-on-exec
-        2 => 0,                                    // F_SETFD, accepted and not stored
+        1 => cloexec_get(fd) as u64,               // F_GETFD
+        2 => {
+            cloexec_set(fd, arg & 1 != 0);         // F_SETFD
+            0
+        }
         // F_GETFL and F_SETFL: a device keeps its blocking mode, which is
         // how libasound turns a stream it opened non-blocking back into a
-        // blocking one. Elsewhere no flag it could set applies.
+        // blocking one.
+        //
+        // **And the access mode is the descriptor's own.** Every file
+        // answered 0 -- `O_RDONLY` -- so `fdopen(fd, "w")`, which checks the
+        // mode against what it is asked for, refused a file opened for
+        // writing: git could not write `HEAD.lock` and `git init` failed.
+        // A pipe's write end said the same, which is what `popen` fdopens.
         3 => with_fds(|fds, _| match fds.get(fd as usize) {
             Some(Some(super::fs::Fd::Dev(b))) => 2 | if b.borrow().nonblock { O_NONBLOCK } else { 0 },
+            Some(Some(super::fs::Fd::Unix(_, nb))) => 2 | if nb.get() { O_NONBLOCK } else { 0 },
+            Some(Some(super::fs::Fd::Pty(e))) => 2 | if e.borrow().nonblock { O_NONBLOCK } else { 0 },
+            Some(Some(super::fs::Fd::File(f))) => if f.borrow().writable { 2 } else { 0 },
+            Some(Some(super::fs::Fd::Pipe(p))) => {
+                let p = p.borrow();
+                (if p.writing { 1 } else { 0 }) | if p.nonblock { O_NONBLOCK } else { 0 }
+            }
+            Some(Some(super::fs::Fd::Socket(k))) => 2 | if k.borrow().nonblock { O_NONBLOCK } else { 0 },
+            Some(Some(super::fs::Fd::Memfd(_))) => 2,
+            Some(Some(super::fs::Fd::Stdout)) | Some(Some(super::fs::Fd::Stderr)) => 1,
+            Some(Some(super::fs::Fd::Dir(_))) => O_DIRECTORY,
             _ => 0,
         })
         .unwrap_or(0),
         4 => {
-            with_fds(|fds, _| {
-                if let Some(Some(super::fs::Fd::Dev(b))) = fds.get(fd as usize) {
-                    b.borrow_mut().nonblock = arg & O_NONBLOCK != 0;
-                }
+            with_fds(|fds, _| match fds.get(fd as usize) {
+                Some(Some(super::fs::Fd::Dev(b))) => b.borrow_mut().nonblock = arg & O_NONBLOCK != 0,
+                Some(Some(super::fs::Fd::Unix(_, nb))) => nb.set(arg & O_NONBLOCK != 0),
+                Some(Some(super::fs::Fd::Pty(e))) => e.borrow_mut().nonblock = arg & O_NONBLOCK != 0,
+                Some(Some(super::fs::Fd::Pipe(p))) => p.borrow_mut().nonblock = arg & O_NONBLOCK != 0,
+                Some(Some(super::fs::Fd::Socket(k))) => k.borrow_mut().nonblock = arg & O_NONBLOCK != 0,
+                _ => {}
             });
             0
         }
         // Record locks, in both widths. One process at a time owns any file
         // it writes here, so there is nobody to lock against.
         5 | 6 | 7 | 12 | 13 | 14 => 0,
-        1030 => sys_dup(fd, None).max_free_from(arg), // F_DUPFD_CLOEXEC
+        1030 => with_cloexec(sys_dup(fd, None).max_free_from(arg), true), // F_DUPFD_CLOEXEC
         // File seals on a memfd: accepted and not enforced. A client seals
         // its buffer so the compositor can trust its size, and the compositor
         // here copies a commit out under its own bounds check anyway.
@@ -4607,7 +6429,16 @@ pub(super) fn sys_dup(from: u64, to: Option<u64>) -> u64 {
                 None => return EMFILE,
             },
         };
+        // **Replacing a descriptor closes it, and closing commits.** Dropping
+        // the old entry here skipped the commit, so `echo hi > file` lost its
+        // file: bash opens it, `dup2`s it onto stdout, writes, then `dup2`s
+        // the saved stdout back over it -- and the last name for the body went
+        // with no flush, leaving nothing in the namespace.
+        if let Some(old) = fds[slot].take() {
+            old.flush();
+        }
         fds[slot] = Some(copy);
+        cloexec_set(slot as u64, false);
         slot as u64
     })
     .unwrap_or(EBADF)
@@ -4708,14 +6539,19 @@ pub(super) fn do_poll(fds: u64, nfds: u64, limit: Option<u64>) -> u64 {
         return EINVAL;
     }
     let bytes = nfds as usize * PFD_LEN;
-    // Writable, because `revents` is written back into the guest's own array.
-    // That is the whole calling convention: the guest keeps one array across
-    // many calls and the kernel touches only the last field of each entry.
-    if bytes > 0 && !reachable(fds, bytes, true) {
-        return EFAULT;
-    }
     let start = crate::dev::lapic::ticks();
+    let mut short = false;
     loop {
+        // Writable, because `revents` is written back into the guest's own
+        // array: the guest keeps one array across many calls and the kernel
+        // touches only the last field of each entry. Asked on every pass and
+        // not once before the loop, because the wait below lets the guest's
+        // other threads run, and one of them unmapping the array while this
+        // one sleeps turned the next pass's read into a kernel page fault --
+        // GTK4 did exactly that.
+        if bytes > 0 && !reachable(fds, bytes, true) {
+            return EFAULT;
+        }
         let mut n = 0u64;
         for i in 0..nfds as usize {
             let at = fds + (i * PFD_LEN) as u64;
@@ -4724,6 +6560,9 @@ pub(super) fn do_poll(fds: u64, nfds: u64, limit: Option<u64>) -> u64 {
             // A negative descriptor is skipped with its answer cleared. That
             // is how a program switches one entry off without rebuilding its
             // array, and refusing it would break every caller that does.
+            if raw >= 0 && !short {
+                short = needs_tick(raw as u64);
+            }
             let rev = if raw < 0 {
                 0
             } else {
@@ -4755,7 +6594,11 @@ pub(super) fn do_poll(fds: u64, nfds: u64, limit: Option<u64>) -> u64 {
         }
         // The display server answers while its client waits.
         crate::sky::server::pump();
-        wait_turn_for(polls_fence(fds, nfds));
+        if polls_fence(fds, nfds) {
+            wait_turn_for(true);
+        } else {
+            wait_turn_nap(false, nap_ticks(short, start, limit));
+        }
     }
 }
 
@@ -4853,6 +6696,11 @@ fn do_select(nfds: u64, rp: u64, wp: u64, ep: u64, limit: Option<u64>) -> u64 {
         if n > 0 || expired(start, limit) {
             for (slot, p) in [rp, wp, ep].iter().enumerate() {
                 if *p != 0 && nb > 0 {
+                    // Asked again: the sets were reachable when they were read,
+                    // and the waits since let another thread unmap them.
+                    if !reachable(*p, nb, true) {
+                        return EFAULT;
+                    }
                     unsafe {
                         core::ptr::copy_nonoverlapping(out[slot].as_ptr(), *p as *mut u8, nb)
                     };
@@ -4876,6 +6724,14 @@ pub(super) fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
     }
     if !reachable(buf, len as usize, true) {
         return EFAULT;
+    }
+    // A counter or a clock: eight bytes, the count or the expirations, and
+    // a wait while there are none unless the descriptor is non-blocking.
+    if let Some(r) = read_event_or_timer(fd, buf, len) {
+        return r;
+    }
+    if let Some(r) = read_pty(fd, buf, len) {
+        return r;
     }
     // An event device is read through its own path, because two things here do
     // not fit a call that takes an offset: the cursor is a sequence number
@@ -4942,6 +6798,7 @@ pub(super) fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
             let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
             match super::unix::read(&pipe, side, out) {
                 Ok(n) => return n as u64,
+                Err(-11) if unix_nonblock(fd) => return EAGAIN,
                 Err(-11) => {}
                 Err(e) => return e as u64,
             }
@@ -5154,7 +7011,16 @@ pub(super) fn sys_readlinkat(dirfd: u64, path_at: u64, buf: u64, size: u64) -> u
         None => None,
     };
     let Some(path) = found else { return ENOENT };
-    let Some(target) = super::proc::link(&path) else {
+    // A link in the root image. Its target is copied as written: relative
+    // targets stay relative, which is what `realpath` builds on.
+    let target = match super::link::own(&path) {
+        Some(t) => Some(t),
+        None => match super::disk::link_target(&path) {
+            Some(Some(t)) if !super::ns::whited_out(&path) => Some(t),
+            _ => super::proc::link(&path),
+        },
+    };
+    let Some(target) = target else {
         // **A directory is not a symlink, and saying it does not exist is a
         // different claim.** `blob_len` answers for a blob and nothing else,
         // so every directory on the way to a file answered `ENOENT` here --
@@ -5169,8 +7035,8 @@ pub(super) fn sys_readlinkat(dirfd: u64, path_at: u64, buf: u64, size: u64) -> u
         // a crash it cannot explain.
         return if super::proc::claims(&path)
             || matches!(super::disk::lookup(&path), Some(Some(_)))
-            || sysbox::blob_len(&path).is_some()
-            || sysbox::is_dir(&path)
+            || super::ns::blob_len(&path).is_some()
+            || super::ns::is_dir(&path)
         {
             EINVAL
         } else {
@@ -5186,9 +7052,11 @@ pub(super) fn sys_readlinkat(dirfd: u64, path_at: u64, buf: u64, size: u64) -> u
 }
 
 pub(super) fn sys_time(tloc: u64) -> u64 {
-    let secs = crate::dev::rtc::now()
-        .map(|dt| crate::dev::rtc::unix_seconds(&dt) as u64)
-        .unwrap_or(0);
+    // **The same clock `clock_gettime(CLOCK_REALTIME)` reads**, which is the
+    // RTC once and the TSC after. This read the CMOS clock on every call, 82
+    // us of port reads each, and pacman asks for the time over three thousand
+    // times in one install. Two clocks a program compares must also agree.
+    let secs = clock_pair(0).map(|(s, _)| s).unwrap_or(0);
     // The pointer is optional, which is unusual enough to be worth saying: the
     // value comes back in the return register either way, and a program that
     // wants it in memory as well passes somewhere to put it.
@@ -5305,27 +7173,55 @@ pub(super) fn sys_prlimit64(_pid: u64, resource: u64, new: u64, old: u64) -> u64
     const RLIMIT_STACK: u64 = 3;
     const RLIMIT_NOFILE: u64 = 7;
     const RLIM_INFINITY: u64 = u64::MAX;
-    if new != 0 {
-        return EPERM;
-    }
-    if old == 0 {
+    const RLIM_NLIMITS: u64 = 16;
+    if resource >= RLIM_NLIMITS {
         return EINVAL;
     }
-    if !reachable(old, 16, true) {
-        return EFAULT;
-    }
-    let Some(sp) = (unsafe { guest_slot() }).as_ref() else { return EINVAL };
-    let n = match resource {
+    let Some(sp) = (unsafe { guest_slot() }).as_mut() else { return EINVAL };
+    // What the machine can actually give, which is the hard limit nothing
+    // may be raised past: more descriptors than the table holds would be a
+    // promise the next `open` breaks.
+    let ceiling = match resource {
         RLIMIT_STACK => sp.stack.len as u64,
         RLIMIT_DATA => sp.brk_end.saturating_sub(sp.brk_start),
         RLIMIT_NOFILE => MAX_FDS as u64,
         _ => RLIM_INFINITY,
     };
-    // Soft and hard are the same number, because there is nothing here that
-    // could raise one to reach the other.
-    unsafe {
-        core::ptr::write_unaligned(old as *mut u64, n);
-        core::ptr::write_unaligned((old + 8) as *mut u64, n);
+    let (soft, hard) = sp
+        .rlimits
+        .iter()
+        .find(|r| r.0 == resource)
+        .map(|r| (r.1, r.2))
+        .unwrap_or((ceiling, ceiling));
+    if old != 0 {
+        if !reachable(old, 16, true) {
+            return EFAULT;
+        }
+        unsafe {
+            core::ptr::write_unaligned(old as *mut u64, soft);
+            core::ptr::write_unaligned((old + 8) as *mut u64, hard);
+        }
+    }
+    // **Setting one is allowed, down and back up to what is real.** Every
+    // set was EPERM, and gpg treats failing to turn core dumps off as fatal
+    // -- it will not risk a crash writing a secret key to disk -- so pacman
+    // could check no signature at all; dbus warned on its descriptor limit
+    // too. Lowering is always fine; raising stops at the ceiling above,
+    // which is the one thing this kernel cannot pretend about.
+    if new != 0 {
+        if !reachable(new, 16, false) {
+            return EFAULT;
+        }
+        let ns = unsafe { core::ptr::read_unaligned(new as *const u64) };
+        let nh = unsafe { core::ptr::read_unaligned((new + 8) as *const u64) };
+        if ns > nh {
+            return EINVAL;
+        }
+        if nh > ceiling {
+            return EPERM;
+        }
+        sp.rlimits.retain(|r| r.0 != resource);
+        sp.rlimits.push((resource, ns, nh));
     }
     0
 }
@@ -5426,6 +7322,31 @@ pub(super) fn write_stat(buf: u64, kind: super::fs::Kind, size: usize, ino: u64)
     write_stat_rdev(buf, kind, size, ino, 0)
 }
 
+/// `write_stat` with the file's own permission bits where it has some (see
+/// `perm_of`), in place of the kind's default.
+pub(super) fn write_stat_perm(buf: u64, kind: super::fs::Kind, size: usize, ino: u64, perm: Option<u32>) -> u64 {
+    match perm {
+        None => write_stat_rdev(buf, kind, size, ino, 0),
+        Some(p) => {
+            PERM_OVERRIDE.store(p | 0x8000_0000, Ordering::Relaxed);
+            let r = write_stat_rdev(buf, kind, size, ino, 0);
+            PERM_OVERRIDE.store(0, Ordering::Relaxed);
+            r
+        }
+    }
+}
+
+/// The permission bits the next `stat` written should carry, flagged by the
+/// top bit. A guest's syscalls are serialised by the guest lock, so one
+/// static does; threading it through four writers of the structure would
+/// put the mode in every caller that has no file to ask about.
+static PERM_OVERRIDE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// A path's permission bits: what a guest set, else the image inode's.
+pub(super) fn perm_of(path: &str, image: Option<u32>) -> Option<u32> {
+    super::ns::mode_of(path).or(image.map(|m| m & 0o7777))
+}
+
 /// `write_stat` for a device node, whose `st_rdev` is how a program tells
 /// which device it is. libdrm reads `major(st_rdev)` and `minor(st_rdev)` to
 /// find the render node's `/sys/dev/char/<major>:<minor>` directory, and a
@@ -5433,6 +7354,11 @@ pub(super) fn write_stat(buf: u64, kind: super::fs::Kind, size: usize, ino: u64)
 pub(super) fn write_stat_rdev(buf: u64, kind: super::fs::Kind, size: usize, ino: u64, rdev: u64) -> u64 {
     let mut b = super::fs::stat_bytes(kind, size, ino);
     b[40..48].copy_from_slice(&rdev.to_le_bytes());
+    let over = PERM_OVERRIDE.load(Ordering::Relaxed);
+    if over & 0x8000_0000 != 0 {
+        let m = (kind.mode() & !0o7777) | (over & 0o7777);
+        b[24..28].copy_from_slice(&m.to_le_bytes());
+    }
     if abi32() && STAT_OLD.load(Ordering::Relaxed) {
         return write_stat_old(buf, size, &b);
     }
@@ -5510,14 +7436,95 @@ fn write_stat64(buf: u64, w: &[u8; 144]) -> u64 {
     0
 }
 
+/// `struct statfs` for x86-64, 120 bytes, and the answer for one path.
+///
+/// LibreOffice's configuration manager asks this of every registry file
+/// before it reads it, and an `ENOSYS` there is an uncaught exception at
+/// start-up. Both kinds of file here live in memory or on a FAT volume, so the
+/// type is one of those two and the sizes are the heap's: a namespace file
+/// *is* heap, and a mounted volume is read-only, which `f_flags` says.
+fn write_statfs(buf: u64, on_disk: bool) -> u64 {
+    const MSDOS_SUPER_MAGIC: u64 = 0x4d44;
+    const TMPFS_MAGIC: u64 = 0x0102_1994;
+    const ST_RDONLY: u64 = 1;
+    if !reachable(buf, 120, true) {
+        return EFAULT;
+    }
+    let (used, total) = crate::mem::heap::HEAP.stats();
+    let bs = 4096u64;
+    let blocks = total as u64 / bs;
+    let free = (total.saturating_sub(used)) as u64 / bs;
+    let mut w = [0u64; 15];
+    w[0] = if on_disk { MSDOS_SUPER_MAGIC } else { TMPFS_MAGIC };
+    w[1] = bs;
+    w[2] = blocks;
+    w[3] = if on_disk { 0 } else { free };
+    w[4] = w[3];
+    w[8] = 255; // f_namelen
+    w[9] = bs; // f_frsize
+    w[10] = if on_disk { ST_RDONLY } else { 0 };
+    unsafe { core::ptr::write_unaligned(buf as *mut [u64; 15], w) };
+    0
+}
+
+pub(super) fn sys_statfs(path_at: u64, buf: u64) -> u64 {
+    let raw = match read_cstr(path_at) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let found = with_fds(|_, cwd| super::fs::resolve(cwd, &raw)).flatten();
+    let Some(path) = found else { return ENOENT };
+    // The root image is not read-only to a guest: what it writes there goes
+    // to its layer, which is memory, and that is what to report. Answered as
+    // a read-only volume, pacman refused every install with "partition / is
+    // mounted read only". A named mount -- a FAT partition -- is read-only.
+    let layer = super::disk::root_claims(&path) && super::ns::writable(&path);
+    if let Some(on) = super::disk::lookup(&path) {
+        if layer && (on.is_some() || super::ns::is_dir(&path) || super::ns::blob_len(&path).is_some()) {
+            return write_statfs(buf, false);
+        }
+        return if on.is_some() { write_statfs(buf, true) } else { ENOENT };
+    }
+    let known = path == "/"
+        || super::ns::is_dir(&path)
+        || super::ns::blob_len(&path).is_some()
+        || super::dev::node(&path).is_some()
+        || super::dev::is_dir(&path)
+        || super::proc::claims(&path);
+    if !known {
+        return ENOENT;
+    }
+    write_statfs(buf, false)
+}
+
+pub(super) fn sys_fstatfs(fd: u64, buf: u64) -> u64 {
+    let on_disk = with_fds(|fds, _| match fds.get(fd as usize) {
+        // A file of the root image is on the layer's volume as far as a
+        // guest can tell -- see `sys_statfs`.
+        Some(Some(super::fs::Fd::Disk(b))) => {
+            let p = b.borrow().path.clone();
+            Some(!(super::disk::root_claims(&p) && super::ns::writable(&p)))
+        }
+        Some(Some(_)) => Some(false),
+        _ => None,
+    })
+    .flatten();
+    match on_disk {
+        Some(d) => write_statfs(buf, d),
+        None => EBADF,
+    }
+}
+
 pub(super) fn sys_fstat(fd: u64, buf: u64) -> u64 {
     let found = with_fds(|fds, _| match fds.get(fd as usize) {
         Some(Some(super::fs::Fd::Disk(b))) => {
             let f = b.borrow();
+            PERM_OVERRIDE.store(perm_of(&f.path, f.image_mode()).map_or(0, |p| p | 0x8000_0000), Ordering::Relaxed);
             Some((super::fs::Kind::File, f.size, super::fs::ino_of(&f.path), 0))
         }
         Some(Some(super::fs::Fd::File(b))) => {
             let f = b.borrow();
+            PERM_OVERRIDE.store(perm_of(&f.path, None).map_or(0, |p| p | 0x8000_0000), Ordering::Relaxed);
             Some((super::fs::Kind::File, f.data.len(), super::fs::ino_of(&f.path), 0))
         }
         Some(Some(super::fs::Fd::Dir(b))) => {
@@ -5531,14 +7538,21 @@ pub(super) fn sys_fstat(fd: u64, buf: u64) -> u64 {
         // The standard three report as pipes, which is the only answer that
         // agrees with the rest of this module: `lseek` on them is `ESPIPE` and
         // `read` on stdin is a permanent end of file.
+        Some(Some(super::fs::Fd::Pty(e))) => {
+            let e = e.borrow();
+            let n = e.pty.borrow().num as u64;
+            Some((super::fs::Kind::Char, 0, 0x7000 + n, if e.master { (5 << 8) | 2 } else { (136 << 8) | n }))
+        }
         Some(Some(_)) => Some((super::fs::Kind::Fifo, 0, 1, 0)),
         _ => None,
     })
     .flatten();
-    match found {
+    let r = match found {
         Some((k, n, ino, rdev)) => write_stat_rdev(buf, k, n, ino, rdev),
         None => EBADF,
-    }
+    };
+    PERM_OVERRIDE.store(0, Ordering::Relaxed);
+    r
 }
 
 pub(super) fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 {
@@ -5575,12 +7589,28 @@ pub(super) fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 
         None => None,
     };
     let Some(path) = found else { return ENOENT };
-    if let Some(on) = super::disk::lookup(&path) {
+    // A link the guest made is the guest's layer's: `lstat` sees the link,
+    // `stat` what it leads to.
+    if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        if let Some(t) = super::link::own(&path) {
+            return write_stat(buf, super::fs::Kind::Link, t.len(), super::fs::ino_of(&path));
+        }
+    }
+    let path = if flags & AT_SYMLINK_NOFOLLOW != 0 { path } else { super::link::follow(path) };
+    let on = if flags & AT_SYMLINK_NOFOLLOW != 0 { super::disk::lookup_nofollow(&path) } else { super::disk::lookup(&path) };
+    if let Some(on) = on {
         return match on {
-            Some(n) if n.is_dir => write_stat(buf, super::fs::Kind::Dir, 0, super::fs::ino_of(&path)),
-            Some(n) => write_stat(buf, super::fs::Kind::File, n.size, super::fs::ino_of(&path)),
+            Some(n) if n.is_link => write_stat(buf, super::fs::Kind::Link, n.size, super::fs::ino_of(&path)),
+            Some(n) if n.is_dir => write_stat_perm(buf, super::fs::Kind::Dir, 0, super::fs::ino_of(&path), perm_of(&path, n.inode.map(|i| i.mode))),
+            Some(n) => write_stat_perm(buf, super::fs::Kind::File, n.size, super::fs::ino_of(&path), perm_of(&path, n.inode.map(|i| i.mode))),
             None => ENOENT,
         };
+    }
+    if path == "/dev/ptmx" {
+        return write_stat_rdev(buf, super::fs::Kind::Char, 0, super::fs::ino_of(&path), (5 << 8) | 2);
+    }
+    if let Some(n) = super::pty::slave_number(&path) {
+        return write_stat_rdev(buf, super::fs::Kind::Char, 0, super::fs::ino_of(&path), (136 << 8) | n as u64);
     }
     if let Some(n) = super::dev::node(&path) {
         return write_stat_rdev(buf, super::fs::Kind::Char, super::dev::size(n), super::fs::ino_of(&path), super::dev::rdev(n));
@@ -5599,15 +7629,15 @@ pub(super) fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 
         let n = super::proc::read(&path).map(|d| d.len()).unwrap_or(0);
         return write_stat(buf, super::fs::Kind::File, n, super::fs::ino_of(&path));
     }
-    if sysbox::is_dir(&path) {
-        return write_stat(buf, super::fs::Kind::Dir, 0, super::fs::ino_of(&path));
+    if super::ns::is_dir(&path) {
+        return write_stat_perm(buf, super::fs::Kind::Dir, 0, super::fs::ino_of(&path), perm_of(&path, None));
     }
     // `blob_len` rather than `read_blob`: the only field wanted here is the
     // size, and reading the blob to find it copies the whole file into the
     // heap and drops it. `stat` on a large checkpoint is an ordinary thing for
     // a program to do and was an allocation of the whole checkpoint.
-    match sysbox::blob_len(&path) {
-        Some(n) => write_stat(buf, super::fs::Kind::File, n, super::fs::ino_of(&path)),
+    match super::ns::blob_len(&path) {
+        Some(n) => write_stat_perm(buf, super::fs::Kind::File, n, super::fs::ino_of(&path), perm_of(&path, None)),
         None => ENOENT,
     }
 }
@@ -5625,7 +7655,17 @@ pub(super) fn sys_getdents64(fd: u64, buf: u64, len: u64) -> u64 {
     with_fds(|fds, _| match fds.get_mut(fd as usize) {
         Some(Some(super::fs::Fd::Dir(body))) => {
             let d = &mut *body.borrow_mut();
-            let (path, entries, at) = (&d.path, &d.entries, &mut d.at);
+            // Which entries are links, for the whole directory at once (see
+            // `disk::link_names`), the first time it is read; an image
+            // directory is its own answer, anything else is the guest's links.
+            if d.links.is_none() {
+                d.links = Some(if super::disk::claims(&d.path) {
+                    super::disk::link_names(&d.path)
+                } else {
+                    super::link::names_in(&d.path).into_iter().map(|(n, _)| n).collect()
+                });
+            }
+            let (path, entries, at, links) = (&d.path, &d.entries, &mut d.at, d.links.as_ref().unwrap());
             let mut out = alloc::vec::Vec::new();
             while *at < entries.len() {
                 let (name, is_dir, _) = &entries[*at];
@@ -5635,9 +7675,19 @@ pub(super) fn sys_getdents64(fd: u64, buf: u64, len: u64) -> u64 {
                 }
                 full.push_str(name);
                 let next = (*at + 1) as u64;
-                if !super::fs::dirent(
-                    &mut out, room, super::fs::ino_of(&full), next, *is_dir, name,
-                ) {
+                // `d_type` is trusted over `lstat` by every walker that reads
+                // it: ldconfig took a link for the library it names and never
+                // asked again, so a link reported as DT_REG is a file to it.
+                // A link first, even to a directory: Linux says DT_LNK, and a
+                // walker told DT_DIR for `/lib` descends into `/usr/lib` twice.
+                let kind = if links.contains(name) {
+                    10 // DT_LNK
+                } else if *is_dir {
+                    4 // DT_DIR
+                } else {
+                    8 // DT_REG
+                };
+                if !super::fs::dirent(&mut out, room, super::fs::ino_of(&full), next, kind, name) {
                     break;
                 }
                 *at += 1;
@@ -5762,6 +7812,31 @@ pub(super) fn sys_ioctl(fd: u64, req: u64, arg: u64) -> u64 {
     let known = with_fds(|fds, _| matches!(fds.get(fd as usize), Some(Some(_)))).unwrap_or(false);
     if !known {
         return EBADF;
+    }
+    if let Some(r) = pty_ioctl(fd, req, arg) {
+        return r;
+    }
+    // FIONBIO and FIONREAD on a TCP socket: the blocking mode, and how much
+    // is waiting to be read without waiting for any.
+    if let Ok(sock) = sock_of(fd) {
+        return match req {
+            0x5421 => {
+                if !reachable(arg, 4, false) {
+                    return EFAULT;
+                }
+                sock.borrow_mut().nonblock = unsafe { core::ptr::read_unaligned(arg as *const u32) } != 0;
+                0
+            }
+            0x541B => {
+                if !reachable(arg, 4, true) {
+                    return EFAULT;
+                }
+                let n = sock.borrow().conn.map(crate::net::tcp::pending).unwrap_or(0);
+                unsafe { core::ptr::write_unaligned(arg as *mut u32, n.min(u32::MAX as usize) as u32) };
+                0
+            }
+            _ => ENOTTY,
+        };
     }
     if let Some(d) = node.flatten().and_then(super::dev::is_input) {
         return input_ioctl(d, req, arg);
@@ -6095,6 +8170,60 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
         }
     }
 
+    // **A file on a mounted volume is read when it is touched**, a page at a
+    // time, when the guest has tables of its own to promise pages in (see
+    // `Lazy`). Two shapes: a fresh range, and `ld.so` laying a segment over a
+    // reservation it already holds -- the second only where every page there
+    // is demand-paged, since those are the pages that can be handed back one
+    // at a time and promised again.
+    if !anon && off % PAGE == 0 && !(flags & MAP_SHARED != 0 && prot & PROT_WRITE != 0) {
+        let file = unsafe { guest_slot() }.as_ref().and_then(|sp| {
+            sp.tables.as_ref()?;
+            match sp.fds.get(fd as usize).and_then(|f| f.as_ref()) {
+                Some(super::fs::Fd::Disk(b)) => Some(b.clone()),
+                _ => None,
+            }
+        });
+        if let Some(file) = file {
+            let want = page_up(len as usize) as u64;
+            if want == 0 {
+                return EINVAL;
+            }
+            if flags & MAP_FIXED == 0 {
+                let at = unsafe { guest_slot() }.as_mut().and_then(|sp| {
+                    let at = arena_take(sp, want)?;
+                    if !promise_file(sp, at, want, off, prot, file) {
+                        free_paged(sp, at, want);
+                        arena_give(sp, at, want);
+                        return None;
+                    }
+                    sp.maps.push(Mapping { at, len: want as usize, from: Source::Paged });
+                    Some(at)
+                });
+                return at.unwrap_or(ENOMEM);
+            }
+            if addr != 0 && addr % PAGE == 0 && owns(addr, want as usize) {
+                let done = unsafe { guest_slot() }.as_mut().is_some_and(|sp| {
+                    let all_demand = sp.tables.as_ref().is_some_and(|t| {
+                        (0..want / 4096).all(|i| t.leaf(addr + i * 4096).is_some_and(|e| e & crate::mem::paging::DEMAND != 0))
+                    });
+                    if !all_demand {
+                        return false;
+                    }
+                    // What was there goes back first: these pages may hold
+                    // what an earlier mapping read, and the file is what is
+                    // promised now.
+                    free_leaves(sp, addr, want, true);
+                    promise_file(sp, addr, want, off, prot, file)
+                });
+                if done {
+                    tlb_shootdown();
+                    return addr;
+                }
+            }
+        }
+    }
+
     let backing = if anon {
         None
     } else {
@@ -6111,8 +8240,15 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
                 let from = (off as usize).min(f.size);
                 let to = from.saturating_add(len as usize).min(f.size);
                 let mut v = alloc::vec![0u8; to - from];
-                let got = f.read_at(from, &mut v);
-                v.truncate(got);
+                // **A short read is an error here, not a short mapping.** It
+                // was truncated and the rest of the mapping left zero, so a
+                // failed read became a library whose dynamic section was all
+                // zeros, which `ld.so` found by dereferencing null -- far
+                // from anything that said a read had failed. Linux would
+                // raise SIGBUS on touching it; EIO says so at the call.
+                if f.read_at(from, &mut v) != v.len() {
+                    return EIO;
+                }
                 Some(v)
             }
             Some(super::fs::Fd::File(b)) => {
@@ -6206,16 +8342,22 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
                     arena_report(sp);
                     return None;
                 };
+                // **Promised, not allocated.** Each page is a leaf that says
+                // what it will be, and the first touch supplies a zeroed frame
+                // (`paging::populate`, from the fault handler or from
+                // `reachable`). Backing it all here is what made one GTK 4
+                // program's thread arenas -- 128 MiB reserved apiece, a few
+                // pages used -- run the heap dry. Zeroing is free this way
+                // too: a supplied page is zeroed when it is supplied.
+                let perm = crate::mem::paging::Perm {
+                    present: prot != 0,
+                    write: prot & PROT_WRITE != 0,
+                    exec: prot & PROT_EXEC != 0,
+                    user: true,
+                };
                 let mut off = 0u64;
                 while off < want {
-                    let ok = alloc_pages(4096).is_some_and(|p| {
-                        sp.tables.as_mut().is_some_and(|t| t.map_page(at + off, p, true, true))
-                            || {
-                                free_pages(p, 4096);
-                                false
-                            }
-                    });
-                    if !ok {
+                    if !sp.tables.as_mut().is_some_and(|t| t.promise_page(at + off, perm)) {
                         free_paged(sp, at, off);
                         arena_give(sp, at, want);
                         return None;
@@ -6226,15 +8368,6 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
             });
             match paged {
                 Some(at) => {
-                    // Fresh pages from the heap carry what the last owner left.
-                    unsafe { core::ptr::write_bytes(at as *mut u8, 0, want as usize) };
-                    let perm = crate::mem::paging::Perm {
-                        present: prot != 0,
-                        write: prot & PROT_WRITE != 0,
-                        exec: prot & PROT_EXEC != 0,
-                        user: true,
-                    };
-                    let _ = crate::mem::paging::protect(at, want as usize, perm);
                     if let Some(sp) = unsafe { guest_slot() }.as_mut() {
                         sp.maps.push(Mapping { at, len: want as usize, from: Source::Paged });
                     }
@@ -6480,6 +8613,9 @@ pub(super) fn sys_munmap(at: u64, len: u64) -> u64 {
     // mapping of an odd length -- every library a linker maps -- could never
     // be unmapped at all.
     let want = page_up(len as usize);
+    // A file read when touched holds its file open until its pages go.
+    let end = at.saturating_add(want as u64);
+    sp.lazy.retain(|l| !(l.at >= at && l.at + l.len <= end));
     match sp.maps.iter().position(|m| m.at == at && page_up(m.len) == want) {
         Some(i) => {
             let m = sp.maps.remove(i);
@@ -6504,6 +8640,9 @@ pub(super) fn sys_munmap(at: u64, len: u64) -> u64 {
             if m.from == Source::Paged {
                 free_paged(sp, m.at, page_up(m.len) as u64);
             } else {
+                if m.from == Source::Copied {
+                    free_leaves(sp, m.at, page_up(m.len) as u64, true);
+                }
                 give_back(m.at, m.len, Some(m.from));
             }
             // An arena address goes back on the free list once its pages have.
@@ -6628,34 +8767,171 @@ pub(super) fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
 
 /// Called from the stub. Not public API: the only caller is three lines of
 /// assembly above, and the `sysv64` pinning is why `rdi` is the frame.
+/// Whether an x86-64 call reads or writes a descriptor, or waits on some:
+/// after these the display server always takes its turn (`pump_after`).
+/// Whether a call can change something another task is waiting on, so the
+/// napping waiters should look again now rather than at the next tick.
+///
+/// **Every call used to wake every waiter**, and an idle LibreOffice showed
+/// what that costs: its threads each call `gettimeofday` and friends in their
+/// loops, each of those woke all the others, and each woken thread looked,
+/// found nothing and napped again -- 26,000 switches a second from a word
+/// processor with nobody typing, while the model decoding beside it ran at a
+/// quarter of its speed. A clock read, an `mmap`, a `poll` that found nothing
+/// change nothing anybody waits on.
+///
+/// A call left off this list is not a lost wake, only a slower one: every
+/// nap ends at the next tick regardless, so the cost of a miss is at most ten
+/// milliseconds. The list errs towards waking.
+/// Whether a read, write or close of `fd` can change what a waiter waits on.
+///
+/// **A file is nobody's to wait on**: a poll on a regular file is always
+/// ready, and a write to one, or closing it, moves no waiter. Those calls
+/// woke every napping thread all the same, and pacman extracting a package
+/// is a `write` and a `close` per file -- thousands a second, each waking
+/// every waiting thread of every guest to take the guest lock, look, and nap
+/// again. During one vim install the lock was found taken 179,463 times.
+/// Pipes, sockets, terminals, event and timer descriptors, devices: those
+/// still wake.
+pub(super) fn fd_wakes(fd: u64) -> bool {
+    use super::fs::Fd;
+    with_fds(|fds, _| {
+        !matches!(
+            fds.get(fd as usize),
+            Some(Some(Fd::File(_) | Fd::Disk(_) | Fd::Dir(_) | Fd::Stdin | Fd::Stdout | Fd::Stderr | Fd::Memfd(_)))
+        )
+    })
+    .unwrap_or(true)
+}
+
+fn may_wake(nr: u64) -> bool {
+    matches!(
+        nr,
+        0 | 1 | 3 | 16 | 17 | 18 | 19 | 20 | 33 | 40 | 42 | 43 | 44 | 45 | 46 | 47 | 48 | 50
+            | 56 | 57 | 58 | 59 | 60 | 62 | 82 | 87 | 129 | 200 | 202 | 231 | 234 | 263 | 264
+            | 275 | 276 | 286 | 288 | 292 | 295 | 296 | 299 | 307 | 316 | 434 | 435
+    )
+}
+
+fn touches_fd(nr: u64) -> bool {
+    // read write close poll readv writev select sendto recvfrom sendmsg
+    // recvmsg epoll_wait ppoll epoll_pwait
+    matches!(nr, 0 | 1 | 3 | 7 | 19 | 20 | 23 | 44 | 45 | 46 | 47 | 232 | 271 | 281)
+}
+
+/// Bytes into a guest's memory without the guest lock, for the calls that
+/// need nothing else (`fast_call`).
+///
+/// `reachable` reads the guest's list of regions, which `munmap` edits under
+/// the lock, so it cannot be asked from here. The page tables can: every page
+/// the write touches must be present, writable and the guest's own -- kernel
+/// memory never carries the user bit -- in the tables the processor is using
+/// now. Interrupts are off from `syscall` until `sysretq`, so a shootdown
+/// another core sends for an unmapping cannot finish between the check and
+/// the write.
+fn put_unlocked(at: u64, bytes: &[u8]) -> bool {
+    let Some(end) = at.checked_add(bytes.len() as u64) else { return false };
+    if bytes.is_empty() || end > 0x0000_8000_0000_0000 {
+        return false;
+    }
+    let mut page = at & !0xfff;
+    while page < end {
+        match crate::mem::paging::query(page) {
+            Some(p) if p.present && p.user && p.write => {}
+            _ => return false,
+        }
+        page += 0x1000;
+    }
+    for (i, b) in bytes.iter().enumerate() {
+        unsafe { core::ptr::write_volatile((at + i as u64) as *mut u8, *b) };
+    }
+    true
+}
+
+/// A clock answered from the TSC alone. `None` for the ones that are not --
+/// the real-time clock reads the CMOS through I/O ports, and two cores
+/// interleaving an index write and a data read there would answer from the
+/// wrong register.
+pub(super) fn tsc_clock(which: u64) -> Option<(u64, u64)> {
+    // The wall clocks join once their offset exists; the first ask takes
+    // the locked path, since reading the RTC is port I/O.
+    let wall_ready = WALL_OFFSET.load(Ordering::Relaxed) != 0;
+    (matches!(which, 1 | 2 | 3 | 4 | 6 | 7) || (wall_ready && matches!(which, 0 | 5)))
+        .then(|| clock_pair(which))
+        .flatten()
+}
+
+/// The calls that touch nothing shared, answered before the guest lock is
+/// taken. `Some` is the return value; `None` takes the ordinary path.
+///
+/// **Half the calls a game made were these, and every one queued for the
+/// lock.** A 32-bit game on Zink asked the time 44,742 times in twenty
+/// seconds and found the lock taken 60,163 times overall, for 22.8 s of
+/// waiting summed over its threads -- a clock read behind a thread holding the
+/// lock across a GPU ioctl. Not traced, deliberately: the trace is shared and
+/// recording into it is the lock this exists to avoid.
+pub(super) fn fast_clock(which: u64, at: u64, wide: bool) -> Option<u64> {
+    let (sec, nsec) = tsc_clock(which)?;
+    let mut b = [0u8; 16];
+    let n = if wide {
+        b[..8].copy_from_slice(&sec.to_le_bytes());
+        b[8..].copy_from_slice(&nsec.to_le_bytes());
+        16
+    } else {
+        b[..4].copy_from_slice(&(sec as u32).to_le_bytes());
+        b[4..8].copy_from_slice(&(nsec as u32).to_le_bytes());
+        8
+    };
+    Some(if put_unlocked(at, &b[..n]) { 0 } else { EFAULT })
+}
+
 #[no_mangle]
 pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
+    if f.rax == SYS_CLOCK_GETTIME {
+        let t0 = super::prof::start();
+        if let Some(r) = fast_clock(f.rdi, f.rsi, true) {
+            super::prof::bill(super::prof::row(f.rax, false), t0);
+            f.rax = r;
+            return;
+        }
+    }
     // A doomed guest asks for nothing more. Here and again on the way out,
     // which bounds how long a task outlives its doom by one syscall's work.
     big_lock();
     unsafe { die_if_doomed() };
     let nr = f.rax;
     let args = [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9];
+    // read, write, close, pread, pwrite, readv, writev: whether they wake
+    // anybody depends on what the descriptor is (`fd_wakes`), and close has
+    // to be asked before the descriptor is gone.
+    let by_fd = matches!(nr, 0 | 1 | 3 | 17 | 18 | 19 | 20);
+    let fd_matters = by_fd && fd_wakes(f.rdi);
     super::prof::enter(nr, &args);
     let t0 = super::prof::start();
 
     let (ret, served) = match nr {
         SYS_WRITE => (sys_write(f.rdi, f.rsi, f.rdx as usize), true),
         SYS_READ => (sys_read(f.rdi, f.rsi, f.rdx), true),
-        SYS_OPEN => (sys_openat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi, f.rdx), true),
-        SYS_OPENAT => (sys_openat(f.rdi, f.rsi, f.rdx, f.r10), true),
+        SYS_OPEN => (with_cloexec(sys_openat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi, f.rdx), f.rsi & 0o2000000 != 0), true),
+        SYS_OPENAT => (with_cloexec(sys_openat(f.rdi, f.rsi, f.rdx, f.r10), f.rdx & 0o2000000 != 0), true),
         SYS_CLOSE => (sys_close(f.rdi), true),
         SYS_LSEEK => (sys_lseek(f.rdi, f.rsi, f.rdx), true),
         SYS_FSTAT => (sys_fstat(f.rdi, f.rsi), true),
-        SYS_STAT | SYS_LSTAT => {
-            (sys_statat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi, 0), true)
-        }
+        SYS_STATFS => (sys_statfs(f.rdi, f.rsi), true),
+        SYS_FSTATFS => (sys_fstatfs(f.rdi, f.rsi), true),
+        SYS_STAT => (sys_statat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi, 0), true),
+        // `lstat` is `stat` that does not follow a link in the last component,
+        // which mattered for the first time once the root image had links.
+        SYS_LSTAT => (sys_statat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi, AT_SYMLINK_NOFOLLOW), true),
         SYS_NEWFSTATAT => (sys_statat(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_GETDENTS64 => (sys_getdents64(f.rdi, f.rsi, f.rdx), true),
         SYS_IOCTL => (sys_ioctl(f.rdi, f.rsi, f.rdx), true),
         SYS_PREAD64 => (sys_pread64(f.rdi, f.rsi, f.rdx, f.r10), true),
+        SYS_PWRITE64 => (sys_pwrite64(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_SET_ROBUST_LIST => (sys_set_robust_list(f.rdi, f.rsi), true),
         SYS_PRLIMIT64 => (sys_prlimit64(f.rdi, f.rsi, f.rdx, f.r10), true),
+        SYS_GETRLIMIT => (sys_prlimit64(0, f.rdi, 0, f.rsi), true),
+        SYS_SETRLIMIT => (sys_prlimit64(0, f.rdi, f.rsi, 0), true),
         SYS_GETRANDOM => (sys_getrandom(f.rdi, f.rsi, f.rdx), true),
         SYS_TIME => (sys_time(f.rdi), true),
         SYS_READLINK => {
@@ -6672,32 +8948,39 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         // in the trace go away.
         SYS_WRITEV => (sys_writev(f.rdi, f.rsi, f.rdx), true),
         SYS_READV => (sys_readv(f.rdi, f.rsi, f.rdx), true),
-        SYS_SOCKET => (sys_socket(f.rdi, f.rsi, f.rdx), true),
+        SYS_SOCKET => (with_cloexec(sys_socket(f.rdi, f.rsi, f.rdx), f.rsi & 0o2000000 != 0), true),
         SYS_CONNECT => (sys_connect(f.rdi, f.rsi, f.rdx), true),
         SYS_BIND => (sys_bind(f.rdi, f.rsi, f.rdx), true),
         SYS_SENDMSG => (sys_sendmsg(f.rdi, f.rsi, f.rdx), true),
         SYS_RECVMSG => (sys_recvmsg(f.rdi, f.rsi, f.rdx), true),
         SYS_LISTEN => (sys_listen(f.rdi), true),
         SYS_ACCEPT => (sys_accept4(f.rdi, f.rsi, f.rdx, 0), true),
-        SYS_ACCEPT4 => (sys_accept4(f.rdi, f.rsi, f.rdx, f.r10), true),
+        SYS_ACCEPT4 => (with_cloexec(sys_accept4(f.rdi, f.rsi, f.rdx, f.r10), f.r10 & 0o2000000 != 0), true),
         SYS_SOCKETPAIR => (sys_socketpair(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_SENDTO => (sys_send(f.rdi, f.rsi, f.rdx), true),
-        SYS_RECVFROM => (sys_recv(f.rdi, f.rsi, f.rdx), true),
+        SYS_RECVFROM => (sys_recvfrom(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_SHUTDOWN => (sys_shutdown(f.rdi, f.rsi), true),
         // Accepted and stored nowhere. Every option a program sets here is
         // about buffering, keepalive or timeouts, and this stack answers all
         // three its own way -- refusing would stop programs that set them as a
         // formality, which is most of them.
         SYS_SETSOCKOPT => (0, true),
-        SYS_GETSOCKOPT => (0, true),
+        SYS_GETSOCKOPT => (sys_getsockopt(f.rdi, f.rsi, f.rdx, f.r10, f.r8), true),
+        51 => (sys_sockname(f.rdi, f.rsi, f.rdx, false), true),
+        52 => (sys_sockname(f.rdi, f.rsi, f.rdx, true), true),
+        229 => (sys_clock_getres(f.rdi, f.rsi), true),
         SYS_ACCESS => (sys_access(f.rdi, f.rsi), true),
         SYS_FACCESSAT => (sys_access(f.rsi, f.rdx), true),
+        // `faccessat2` is `faccessat` with flags; the ones it has (effective
+        // ids, don't follow) change nothing where every guest is root and the
+        // last component is already followed.
+        439 => (sys_access(f.rsi, f.rdx), true),
         SYS_FTRUNCATE => (sys_ftruncate(f.rdi, f.rsi), true),
         285 => (sys_fallocate(f.rdi, f.rsi, f.rdx, f.r10), true),
         27 => (sys_mincore(f.rdi, f.rsi, f.rdx), true),
-        SYS_MEMFD_CREATE => (sys_memfd_create(f.rdi, f.rsi), true),
+        SYS_MEMFD_CREATE => (with_cloexec(sys_memfd_create(f.rdi, f.rsi), f.rsi & 1 != 0), true),
         SYS_EPOLL_CREATE => (sys_epoll_create(f.rdi), true),
-        SYS_EPOLL_CREATE1 => (sys_epoll_create1(f.rdi), true),
+        SYS_EPOLL_CREATE1 => (with_cloexec(sys_epoll_create1(f.rdi), f.rdi & 0o2000000 != 0), true),
         SYS_EPOLL_CTL => (sys_epoll_ctl(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_EPOLL_WAIT => (sys_epoll_wait(f.rdi, f.rsi, f.rdx, f.r10), true),
         // The signal mask cannot matter here, for the reason `ppoll` gives.
@@ -6714,6 +8997,84 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_MKDIR => (sys_name_op(f.rdi, b'm'), true),
         SYS_RMDIR => (sys_name_op(f.rdi, b'r'), true),
         SYS_UNLINK => (sys_name_op(f.rdi, b'u'), true),
+        SYS_MKDIRAT => (sys_name_op_at(f.rdi, f.rsi, b'm'), true),
+        SYS_FCHDIR => (sys_fchdir(f.rdi), true),
+        283 => (with_cloexec(sys_timerfd_create(f.rdi, f.rsi), f.rsi & 0o2000000 != 0), true),
+        // Sessions and process groups: one process group per process, named
+        // by its pid, which is what a shell's job control asks for and what
+        // a terminal's foreground group is set to.
+        109 => (0, true),                                  // setpgid
+        112 => (super::fork::current_pid(), true),        // setsid
+        121 | 124 => (if f.rdi == 0 { super::fork::current_pid() } else { f.rdi }, true), // getpgid, getsid
+        284 => (sys_eventfd(f.rdi, 0), true),
+        286 => (sys_timerfd_settime(f.rdi, f.rsi, f.rdx, f.r10), true),
+        287 => (sys_timerfd_gettime(f.rdi, f.rsi), true),
+        290 => (with_cloexec(sys_eventfd(f.rdi, f.rsi), f.rsi & 0o2000000 != 0), true),
+        SYS_UMASK => (sys_umask(f.rdi), true),
+        // One process group, led by the process asking.
+        SYS_GETPGRP => (super::fork::current_pid(), true),
+        SYS_GETRESUID | SYS_GETRESGID => (sys_getres(f.rdi, f.rsi, f.rdx), true),
+        SYS_PRCTL => (sys_prctl(f.rdi, f.rsi), true),
+        // Advice about access patterns: there is no page cache to advise.
+        SYS_FADVISE64 => (0, true),
+        SYS_STATX => (sys_statx(f.rdi, f.rsi, f.rdx, f.r8), true),
+        // Extended attributes: none, on any file. ENODATA for a named one and
+        // an empty list, which is what a filesystem without them answers and
+        // what `ls -l` probes for ACLs on every entry.
+        191..=193 => (ENODATA, true),
+        // sigaltstack: signal handlers here always run on the stack the
+        // guest was on, so there is no alternate one to install. The old
+        // stack reads back as disabled, which is the truth, and a new one is
+        // accepted and not used -- handlers that would have run on it run
+        // on the ordinary stack, which is where they run on any thread that
+        // never set one.
+        131 => {
+            const SS_DISABLE: u64 = 2;
+            if f.rsi != 0 {
+                if !reachable(f.rsi, 24, true) {
+                    (EFAULT, true)
+                } else {
+                    unsafe {
+                        core::ptr::write_unaligned(f.rsi as *mut u64, 0);
+                        core::ptr::write_unaligned((f.rsi + 8) as *mut u64, SS_DISABLE);
+                        core::ptr::write_unaligned((f.rsi + 16) as *mut u64, 0);
+                    }
+                    (0, true)
+                }
+            } else {
+                (0, true)
+            }
+        }
+        194..=196 => (0, true),
+        SYS_UNLINKAT => (sys_unlinkat(f.rdi, f.rsi, f.rdx), true),
+        SYS_SYMLINK => (sys_symlinkat(f.rdi, super::fs::AT_FDCWD as u64, f.rsi), true),
+        SYS_SYMLINKAT => (sys_symlinkat(f.rdi, f.rsi, f.rdx), true),
+        SYS_LINK => (sys_linkat(super::fs::AT_FDCWD as u64, f.rdi, super::fs::AT_FDCWD as u64, f.rsi, 0), true),
+        SYS_LINKAT => (sys_linkat(f.rdi, f.rsi, f.rdx, f.r10, f.r8), true),
+        SYS_UTIMENSAT => (sys_utimensat(f.rdi, f.rsi), true),
+        // What a program saving a file asks after writing it, and none of it
+        // has anything to do here. A write reaches the store at the last
+        // close whatever is synced; there are no permissions or owners to
+        // change, every file reporting one mode already; and there is one
+        // machine, so an advisory lock has nobody to exclude. Refused, they
+        // stopped LibreOffice saving anything: `impl_store ... Io General`
+        // on every document written into /tmp.
+        SYS_FSYNC | SYS_FDATASYNC | SYS_SYNC | SYS_SYNCFS | SYS_FLOCK => (0, true),
+        SYS_CHMOD => (sys_chmodat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi), true),
+        SYS_FCHMODAT => (sys_chmodat(f.rdi, f.rsi, f.rdx), true),
+        SYS_FCHMOD => (sys_fchmod(f.rdi, f.rsi), true),
+        // Every guest is root and owns everything, so a change of owner has
+        // nothing to record and is answered as done.
+        SYS_CHOWN | SYS_FCHOWN | SYS_LCHOWN | SYS_FCHOWNAT => (0, true),
+        // Not served, and said so in the answer glibc's `posix_fallocate`
+        // knows how to fall back from, which `ENOSYS` is not.
+        SYS_FALLOCATE => ((-95i64) as u64, true),
+        SYS_RENAME => {
+            let at = super::fs::AT_FDCWD as u64;
+            (sys_renameat(at, f.rdi, at, f.rsi, 0), true)
+        }
+        SYS_RENAMEAT => (sys_renameat(f.rdi, f.rsi, f.rdx, f.r10, 0), true),
+        SYS_RENAMEAT2 => (sys_renameat(f.rdi, f.rsi, f.rdx, f.r10, f.r8), true),
         SYS_NANOSLEEP => (sys_nanosleep(f.rdi), true),
         SYS_CLOCK_NANOSLEEP => (sys_clock_nanosleep(f.rdi, f.rsi, f.rdx), true),
         // **Accepted and never delivered, which is the honest shape.** A
@@ -6727,17 +9088,49 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         // terminal, and a fault ends the guest. `fork` is what made the first
         // clause false, and a child exiting is an event its parent is owed.
         SYS_RT_SIGACTION => (super::signal::sigaction(f.rdi, f.rsi, f.rdx, f.r10), true),
+        SYS_RT_SIGSUSPEND => (super::signal::sigsuspend(f.rdi, f.rsi), true),
+        SYS_PAUSE => (super::signal::pause(), true),
+        // Locking memory is a promise not to swap it out, and nothing here is
+        // ever swapped: every page a guest has is resident until it is
+        // freed. So the promise is already kept and success is the truth.
+        // gpg locks its key material and warned "using insecure memory".
+        SYS_MLOCK | SYS_MUNLOCK | SYS_MLOCKALL | SYS_MUNLOCKALL => (0, true),
+        SYS_GETPRIORITY => (sys_priority(f.rdi, f.rsi, None), true),
+        SYS_SETPRIORITY => (sys_priority(f.rdi, f.rsi, Some(f.rdx)), true),
+        SYS_IOPRIO_GET => (sys_ioprio(f.rdi, f.rsi, None), true),
+        SYS_IOPRIO_SET => (sys_ioprio(f.rdi, f.rsi, Some(f.rdx)), true),
+        // One scheduling policy, the ordinary one, and it is what anybody
+        // asking is told. Setting it to that is a no-op; setting it to a
+        // real-time policy is refused, since nothing here would honour it.
+        SYS_SCHED_GETSCHEDULER => (0, true),
+        SYS_SCHED_GETPARAM => {
+            if reachable(f.rsi, 4, true) {
+                unsafe { core::ptr::write(f.rsi as *mut i32, 0) };
+                (0, true)
+            } else {
+                (EFAULT, true)
+            }
+        }
+        SYS_SCHED_SETSCHEDULER => (if matches!(f.rsi as u32, 0 | 3 | 5) { 0 } else { EPERM }, true),
+        // Extended attributes: none of the filesystems a guest sees carries
+        // them, and EOPNOTSUPP is Linux's answer for exactly that -- the
+        // copy or archive asking carries on without them.
+        188..=199 => ((-95i64) as u64, true),
+        SYS_ALARM => (super::signal::alarm(f.rdi), true),
+        // `creat` is `open` with these flags and always was.
+        SYS_CREAT => (sys_openat(super::fs::AT_FDCWD as u64, f.rdi, O_CREAT | O_WRONLY | O_TRUNC, f.rsi), true),
+        SYS_CLOSE_RANGE => (sys_close_range(f.rdi, f.rsi, f.rdx), true),
         SYS_RT_SIGPROCMASK => {
             (super::signal::sigprocmask(f.rdi, f.rsi, f.rdx, f.r10), true)
         }
         SYS_RT_SIGRETURN => (super::signal::sigreturn(f), true),
-        SYS_KILL => (super::signal::kill(f.rdi as i64, f.rsi), true),
+        SYS_KILL => (super::signal::kill(f.rdi as u32 as i32 as i64, f.rsi), true),
         // To the thread group rather than the one thread: signals here are
         // pending per process. What `raise` and `abort` need is that the
         // signal arrives at all -- answering `ENOSYS` left glibc's `abort`
         // with nothing but its final `hlt`, a fault where a program should
         // have died of SIGABRT.
-        SYS_TGKILL => (super::signal::kill(f.rdi as i64, f.rdx), true),
+        SYS_TGKILL => (super::signal::kill(f.rdi as u32 as i32 as i64, f.rdx), true),
         // No parent, and no group but the one. `getppid` answering zero is
         // what a process reparented to nothing reports.
         SYS_GETPPID => (super::fork::parent_pid(), true),
@@ -6748,7 +9141,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_CLOCK_GETTIME => (sys_clock_gettime(f.rdi, f.rsi), true),
         SYS_DUP => (sys_dup(f.rdi, None), true),
         SYS_DUP2 => (sys_dup(f.rdi, Some(f.rsi)), true),
-        SYS_DUP3 => (sys_dup3(f.rdi, f.rsi, f.rdx), true),
+        SYS_DUP3 => (with_cloexec(sys_dup3(f.rdi, f.rsi, f.rdx), f.rdx & 0o2000000 != 0), true),
         // `rcx` is where `syscall` stashed the return address, which is where
         // the child resumes: a cloned thread does not start at an entry point,
         // it returns from `clone` on a different stack with `rax` zero.
@@ -6816,7 +9209,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
     // The display server's turn, on the guest's own task -- see `sky::server`
     // for why it runs here and nowhere else. A request just written is
     // answered before the client next looks.
-    crate::sky::server::pump();
+    crate::sky::server::pump_after(touches_fd(nr));
     f.rax = ret;
     // **On the way out, and this is the only place it can be.** The guest's
     // whole register state is in this frame, its stack pointer is parked in
@@ -6835,9 +9228,11 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
     if matches!(nr, SYS_MMAP | SYS_MUNMAP | SYS_MPROTECT | SYS_BRK | 25 /* mremap */) {
         tlb_shootdown();
     }
-    super::prof::leave();
-    wake_nappers();
+    if may_wake(nr) && (!by_fd || fd_matters) {
+        wake_nappers();
+    }
     big_unlock();
+    super::prof::leave();
     unsafe { die_if_doomed() };
 }
 
@@ -7051,15 +9446,59 @@ pub static MAP_NAMES: Racy<Vec<(u64, u64, u64, String)>> = Racy::new(Vec::new())
 
 /// Give back a `Paged` mapping's pages: each one looked up in the guest's
 /// tables, its rights restored and freed, then the translation removed.
+///
+/// Every frame under a `Paged` mapping is its own, supplied or not yet, so the
+/// leaf is read raw: a page the guest `mprotect`ed to `PROT_NONE` has no
+/// present bit and still has a frame, and `phys_of` -- which asks for present
+/// -- leaked it. A promise has no frame and only its leaf goes.
+/// Frames supplied on demand inside a guest's own regions -- the stack and the
+/// break are promised (`load`), and a fork shares what was touched -- given
+/// back. The rest of each region is backed by a block its `Guest` or `owned`
+/// frees, and this leaves those leaves alone.
+fn free_region_demand(sp: &mut Space) {
+    let mut r: alloc::vec::Vec<(u64, u64)> = alloc::vec![
+        (sp.image.at, page_up(sp.image.len) as u64),
+        (sp.stack.at, page_up(sp.stack.len) as u64),
+        (sp.brk_start, sp.brk_end.saturating_sub(sp.brk_start)),
+    ];
+    if let Some(i) = sp.interp {
+        r.push((i.at, page_up(i.len) as u64));
+    }
+    for (at, len) in r {
+        if len > 0 {
+            free_leaves(sp, at, len, true);
+        }
+    }
+}
+
 fn free_paged(sp: &mut Space, at: u64, len: u64) {
+    free_leaves(sp, at, len, false);
+}
+
+/// Give back the frames under `[at, at+len)` and clear their leaves: every
+/// frame when `demand_only` is false, only the ones supplied on demand when it
+/// is true. The second is for a forked child's `Copied` mappings, whose other
+/// pages came from one block in `owned` and go back with it -- while a page
+/// the child touched for the first time after the fork was supplied on its
+/// own and nothing else would free it.
+fn free_leaves(sp: &mut Space, at: u64, len: u64, demand_only: bool) {
     let Some(t) = sp.tables.as_mut() else { return };
     let mut off = 0;
     while off < len {
-        if let Some(phys) = t.phys_of(at + off) {
+        let e = if demand_only {
+            match t.leaf(at + off) {
+                Some(e) if e & crate::mem::paging::DEMAND != 0 => t.take_leaf(at + off),
+                _ => 0,
+            }
+        } else {
+            t.take_leaf(at + off)
+        };
+        let phys = e & crate::mem::paging::ADDR_MASK;
+        // A frame shared copy-on-write goes back only with its last leaf.
+        if phys != 0 && crate::mem::paging::cow_release(e) {
             crate::mem::paging::release_to_heap(phys, 4096);
             free_pages(phys, 4096);
         }
-        t.unmap_page(at + off);
         off += 4096;
     }
 }
@@ -7302,6 +9741,10 @@ pub fn take_task_fault(task: usize) -> Option<Fault> {
 /// The one place the flag is set, so the three doors cannot disagree about
 /// it. Cleared on the way back whichever way the guest left -- an exit, a
 /// kill, a fault -- because all of them return here through the longjmp.
+/// Whether guests leave core 0 to the kernel (`task::PIN_NOT_BSP`), or may
+/// run on it too (`linux cores any`).
+pub static SPARE_BSP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
 pub fn as_guest(enter: impl FnOnce() -> u64) -> u64 {
     let t = me();
     DOOM[t].store(0, Ordering::Release);
@@ -7311,7 +9754,8 @@ pub fn as_guest(enter: impl FnOnce() -> u64) -> u64 {
     // shell that ran a guest in the foreground is the shell on core 0 again.
     let pin = crate::task::pin_of(t);
     if SPREAD.load(Ordering::Relaxed) {
-        crate::task::set_pin(t, -1);
+        let pin = if SPARE_BSP.load(Ordering::Relaxed) { crate::task::PIN_NOT_BSP } else { -1 };
+        crate::task::set_pin(t, pin);
     }
     let code = enter();
     // Every way out of a guest lands here, the longjmps included, and one of
@@ -7319,6 +9763,16 @@ pub fn as_guest(enter: impl FnOnce() -> u64) -> u64 {
     super::prof::leave();
     big_unlock();
     crate::task::set_pin(t, pin);
+    // **And home now, not at the next switch.** The shell runs its guests on
+    // its own task, and with the pin back but no switch, it went on reading
+    // the next command on whichever core the guest had ended on -- beside the
+    // compositor on core 0 for the first time, sharing the terminal's state
+    // with it. Typed commands came out of that window mangled: `linux run`
+    // as `linuxx r ruunn`, a path doubled and swapped.
+    if pin >= 0 && pin as usize != crate::smp::this_cpu() as usize {
+        crate::dev::lapic::kick_others();
+        crate::task::yield_now();
+    }
     IN_GUEST[t].store(false, Ordering::Release);
     DOOM[t].store(0, Ordering::Release);
     code
@@ -7426,12 +9880,23 @@ pub fn adopt_fault(f: Fault) {
 /// process ends, as on Linux. The main thread is doomed with the code -- its
 /// end is what tears the session down and dooms every other thread -- and
 /// this thread then leaves the way any `exit` does.
+///
+/// **"The process" is the caller's, not the session's first.** This doomed
+/// `main_task()`, which is pid 1's, so a forked child calling `exit_group`
+/// from its own main thread ended its *parent* with the child's code -- and
+/// that is every `posix_spawn` whose `exec` fails, since the child then does
+/// `_exit(127)`. LibreOffice spawns `sh -c paperconf` at start-up, there is no
+/// `sh` here, and the whole office suite died of exit 127. Only pid 1 ending
+/// begins the session's teardown.
 pub(super) fn exit_group_from_thread(code: u64) {
-    if let Some(m) = main_task() {
+    let pid = super::fork::current_pid();
+    if let Some(m) = super::fork::task_of_pid(pid as i64) {
         if m != me() {
             doom(m, (code & 0xFF) | EXITED);
-            if let Some(s) = super::session::current() {
-                super::session::begin_exit(s);
+            if pid == 1 {
+                if let Some(s) = super::session::current() {
+                    super::session::begin_exit(s);
+                }
             }
         }
     }
@@ -7497,10 +9962,10 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64, bits32: bool) -> u64 {
         return 0;
     };
     // **And a syscall stack of its own.** The main thread's syscalls ran on
-    // one static 16 KiB stack, which is correct for exactly one session: a
+    // one static stack, which is correct for exactly one session: a
     // second main thread blocked in a syscall beside the first would be
     // pushing onto the frame the first is suspended in.
-    let sys_layout = core::alloc::Layout::from_size_align(16 * 1024, 16).unwrap();
+    let sys_layout = core::alloc::Layout::from_size_align(GUEST_SYSCALL_STACK, 16).unwrap();
     let sys_stack = unsafe { alloc::alloc::alloc(sys_layout) };
     if sys_stack.is_null() {
         super::session::release(sess);
@@ -7508,7 +9973,7 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64, bits32: bool) -> u64 {
     }
     arm();
     unsafe {
-        (*core_entry()).syscall_stack = sys_stack as u64 + 16 * 1024;
+        (*core_entry()).syscall_stack = sys_stack as u64 + GUEST_SYSCALL_STACK as u64;
     };
     // The guest is about to be allowed to write `FS`, and `FS` is a register
     // of this machine that the kernel goes on using afterwards. Parked here
@@ -7644,10 +10109,26 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64, bits32: bool) -> u64 {
             }
             (!out.is_empty()).then_some(out)
         });
+        // **A quiet job's report goes to the services log, not the terminal.**
+        // The session bus faulting at mount printed thirty lines over the
+        // operator's prompt every two seconds while it restarted; one line
+        // says it happened, and `services log` has the rest.
+        let quiet = crate::job::quiet_here();
+        let mut sink = String::new();
+        macro_rules! say {
+            ($($t:tt)*) => {
+                if quiet.is_some() {
+                    sink.push_str(&alloc::format!($($t)*));
+                    sink.push('\n');
+                } else {
+                    crate::kprintln!($($t)*);
+                }
+            };
+        }
         // Where, as well as the stack: a background job has no `linux run`
         // to print the fault afterwards, so it is said here, once.
         if let Some(f) = last_fault() {
-            crate::kprintln!(
+            say!(
                 "  fault {:#04x} at rip {:#x} ({}), reaching for {:#x} ({}), error {:#x}",
                 f.regs.vector, f.regs.rip,
                 name_code(f.regs.rip).unwrap_or_else(|| locate(f.regs.rip)),
@@ -7656,27 +10137,27 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64, bits32: bool) -> u64 {
         }
         if let (Some(sid), Some(_)) = (super::session::current(), last_fault()) {
             let tail = super::session::peek_tail(sid);
-            crate::kprintln!("  the session's last calls:");
+            say!("  the session's last calls:");
             for c in tail.iter().rev().take(25).rev() {
-                crate::kprintln!(
+                say!(
                     "    {:<16} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} -> {:#x}",
                     name_of(c.nr), c.args[0], c.args[1], c.args[2], c.args[3], c.args[4], c.args[5], c.ret
                 );
             }
         }
         if let Some(ws) = (*FAULT_STACK.get())[me()].as_ref() {
-            crate::kprintln!("  return addresses on the stack:");
+            say!("  return addresses on the stack:");
             for (at, v, n) in ws {
-                crate::kprintln!("    {:#010x}: {:#010x} {}", at, v, n);
+                say!("    {:#010x}: {:#010x} {}", at, v, n);
             }
         }
         let c = &mut *CRASH.get();
         if c.0 {
-            crate::kprintln!("  the first crash's stack, from {:#x}:", c.1);
+            say!("  the first crash's stack, from {:#x}:", c.1);
             let mut shown = 0;
             for i in 0..c.2 {
                 if let Some(n) = name_code(c.3[i] as u64) {
-                    crate::kprintln!("    +{:#06x}: {:#010x} {}", i * 4, c.3[i], n);
+                    say!("    +{:#06x}: {:#010x} {}", i * 4, c.3[i], n);
                     shown += 1;
                     if shown >= 64 {
                         break;
@@ -7684,6 +10165,18 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64, bits32: bool) -> u64 {
                 }
             }
             c.0 = false;
+        }
+        if let Some(title) = &quiet {
+            if !sink.is_empty() {
+                super::services::log(alloc::format!("{} faulted:\n{}", title, sink).as_bytes());
+                if let Some(f) = last_fault() {
+                    crate::kprintln!(
+                        "  [job] {} faulted at {} -- 'services log' has the report",
+                        title.split_whitespace().next().unwrap_or(title).rsplit('/').next().unwrap_or(title),
+                        name_code(f.regs.rip).unwrap_or_else(|| locate(f.regs.rip))
+                    );
+                }
+            }
         }
     }
     teardown();
@@ -8095,8 +10588,12 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // its reason, and what it cost is every `fts`-based program: `find`,
     // `rm -r`, `du` and `cp -r` all stop at the first subdirectory.
     //
-    // `/lib` is the directory used because it is seeded at every boot, so this
-    // needs no store mounted and no guest staged.
+    // A file of its own under `/tmp`, made here: `/tmp` is the one tree a
+    // guest sees the same way with or without a root image under it. This
+    // used `/lib`, seeded at every boot -- and under a root image a guest's
+    // `/lib` is the image's, so the claims failed the first time one was
+    // mounted at boot, about a fixture rather than about `openat`.
+    let _ = crate::sysbox::write_blob("/tmp/dfd/geom.txt", alloc::vec![b'x']);
     {
         let mut buf = [0u8; 512];
         let at = buf.as_mut_ptr() as u64;
@@ -8106,17 +10603,17 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         // Three disjoint slices of the one region: the paths have to live
         // inside what the guest owns, because `read_cstr` bounds-checks them
         // like any other guest pointer, and a `stat` writes 144 bytes.
-        let dir_p = at;            // "/lib"
-        let rel_p = at + 32;       // "geom.ai&xi"
-        let abs_p = at + 64;       // "/lib/geom.ai&xi"
+        let dir_p = at;            // "/tmp/dfd"
+        let rel_p = at + 32;       // "geom.txt"
+        let abs_p = at + 64;       // "/tmp/dfd/geom.txt"
         let sbuf = at + 256;
         let put = |off: usize, text: &str, b: &mut [u8; 512]| {
             b[off..off + text.len()].copy_from_slice(text.as_bytes());
             b[off + text.len()] = 0;
         };
-        put(0, "/lib", &mut buf);
-        put(32, "geom.ai&xi", &mut buf);
-        put(64, "/lib/geom.ai&xi", &mut buf);
+        put(0, "/tmp/dfd", &mut buf);
+        put(32, "geom.txt", &mut buf);
+        put(64, "/tmp/dfd/geom.txt", &mut buf);
 
         let fd = sys_openat(super::fs::AT_FDCWD as u64, dir_p, O_DIRECTORY, 0);
         out.push(("a directory opens, which is what a relative path is resolved against", (fd as i64) > 2));
@@ -8149,19 +10646,20 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         // path, which names its parent in its own text. The refusal cost a
         // real program its data directory: the Source engine resolves
         // `bin/../game` and reported its game as not installed.
-        put(32, "../lib/geom.ai&xi", &mut buf);
+        put(32, "../dfd/geom.txt", &mut buf);
         out.push((
             "a relative path may step back with .. , which drops a component",
             sys_statat(fd, rel_p, sbuf, 0) == 0,
         ));
         // And it cannot climb past the root, which is where Linux stops too.
-        put(32, "../../../../lib/geom.ai&xi", &mut buf);
+        put(32, "../../../../tmp/dfd/geom.txt", &mut buf);
         out.push((
             "and stepping back past the root stays at the root",
             sys_statat(fd, rel_p, sbuf, 0) == 0,
         ));
         teardown();
     }
+    let _ = crate::sysbox::detach("/tmp/dfd");
 
     // `nanosleep`, which was the one wait in this kernel that genuinely spun:
     // `while ticks() < until { spin_loop() }`, no yield in it at all. One
@@ -8551,7 +11049,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 
     // The handler's stack has to be aligned, because the stub's `sub rsp, 8`
     // assumes a 16-aligned top and corrects for exactly nine pushes.
-    let top = unsafe { core::ptr::addr_of!(SYSCALL_STACK.0) as u64 + (16 * 1024) };
+    let top = unsafe { core::ptr::addr_of!(SYSCALL_STACK.0) as u64 + GUEST_SYSCALL_STACK as u64 };
     out.push(("the handler's stack top is 16-byte aligned", top % 16 == 0));
     out.push((
         "nine pushes and the alignment slot leave rsp 16-aligned at the call",
@@ -8670,10 +11168,34 @@ pub fn set_env(entry: &str) {
     }
 }
 
+/// The environment an `execve` was handed, for the stack it is about to
+/// build on this task. Taken once.
+static EXEC_ENV: Racy<[Option<Vec<String>>; crate::task::MAX_TASKS]> = Racy::new([const { None }; crate::task::MAX_TASKS]);
+
+pub fn set_exec_env(env: Vec<String>) {
+    unsafe { (*EXEC_ENV.get())[me()] = Some(env) };
+}
+
+fn take_exec_env() -> Option<Vec<String>> {
+    unsafe { (*EXEC_ENV.get())[me()].take() }
+}
+
 /// What a guest will be given, the fixed five and the added ones.
+///
+/// **An added variable replaces a fixed one of the same name.** They were
+/// concatenated, so `HOME=/tmp` arrived *after* the fixed `HOME=/`, and
+/// `getenv` answers the first match: every program saw `/` whatever it was
+/// told. LibreOffice built its profile path from that and failed to start
+/// with "user installation could not be completed".
 pub fn environ() -> Vec<String> {
-    let mut out: Vec<String> = ENVIRON.iter().map(|e| String::from(*e)).collect();
-    out.extend(unsafe { EXTRA_ENV.get() }.iter().cloned());
+    let extra = unsafe { EXTRA_ENV.get() };
+    let name = |e: &str| String::from(e.split_once('=').map_or(e, |(n, _)| n));
+    let mut out: Vec<String> = ENVIRON
+        .iter()
+        .filter(|f| !extra.iter().any(|x| name(x) == name(f)))
+        .map(|e| String::from(*e))
+        .collect();
+    out.extend(extra.iter().cloned());
     out
 }
 
@@ -8746,7 +11268,7 @@ fn build_stack_w(
         }
         Some(seen(*top))
     };
-    let env = environ();
+    let env = take_exec_env().unwrap_or_else(environ);
     let mut envs = alloc::vec::Vec::with_capacity(env.len());
     for e in env.iter().rev() {
         envs.push(put(&mut top, e)?);
@@ -8858,12 +11380,17 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_CLOSE => "close",
         SYS_STAT => "stat",
         SYS_FSTAT => "fstat",
+        SYS_STATFS => "statfs",
+        SYS_FSTATFS => "fstatfs",
         SYS_LSTAT => "lstat",
         SYS_LSEEK => "lseek",
         SYS_IOCTL => "ioctl",
         SYS_PREAD64 => "pread64",
+        SYS_PWRITE64 => "pwrite64",
         SYS_SET_ROBUST_LIST => "set_robust_list",
         SYS_PRLIMIT64 => "prlimit64",
+        SYS_GETRLIMIT => "getrlimit",
+        SYS_SETRLIMIT => "setrlimit",
         SYS_GETRANDOM => "getrandom",
         SYS_TIME => "time",
         SYS_READLINK => "readlink",
@@ -8909,10 +11436,57 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_MKDIR => "mkdir",
         SYS_RMDIR => "rmdir",
         SYS_UNLINK => "unlink",
+        SYS_MKDIRAT => "mkdirat",
+        SYS_FCHDIR => "fchdir",
+        SYS_UMASK => "umask",
+        SYS_GETPGRP => "getpgrp",
+        SYS_GETRESUID => "getresuid",
+        SYS_GETRESGID => "getresgid",
+        SYS_PRCTL => "prctl",
+        SYS_FADVISE64 => "fadvise64",
+        SYS_STATX => "statx",
+        SYS_UNLINKAT => "unlinkat",
+        SYS_SYMLINK => "symlink",
+        SYS_SYMLINKAT => "symlinkat",
+        SYS_LINK => "link",
+        SYS_LINKAT => "linkat",
+        SYS_UTIMENSAT => "utimensat",
+        SYS_FSYNC => "fsync",
+        SYS_FDATASYNC => "fdatasync",
+        SYS_SYNC => "sync",
+        SYS_SYNCFS => "syncfs",
+        SYS_FLOCK => "flock",
+        SYS_CHMOD => "chmod",
+        SYS_FCHMOD => "fchmod",
+        SYS_FCHMODAT => "fchmodat",
+        SYS_CHOWN => "chown",
+        SYS_FCHOWN => "fchown",
+        SYS_LCHOWN => "lchown",
+        SYS_FCHOWNAT => "fchownat",
+        SYS_FALLOCATE => "fallocate",
+        SYS_RENAME => "rename",
+        SYS_RENAMEAT => "renameat",
+        SYS_RENAMEAT2 => "renameat2",
         SYS_NANOSLEEP => "nanosleep",
         SYS_CLOCK_NANOSLEEP => "clock_nanosleep",
         SYS_RT_SIGACTION => "rt_sigaction",
         SYS_RT_SIGPROCMASK => "rt_sigprocmask",
+        SYS_RT_SIGSUSPEND => "rt_sigsuspend",
+        SYS_PAUSE => "pause",
+        SYS_GETPRIORITY => "getpriority",
+        SYS_MLOCK => "mlock",
+        SYS_MUNLOCK => "munlock",
+        SYS_MLOCKALL => "mlockall",
+        SYS_MUNLOCKALL => "munlockall",
+        SYS_SETPRIORITY => "setpriority",
+        SYS_SCHED_GETPARAM => "sched_getparam",
+        SYS_SCHED_SETSCHEDULER => "sched_setscheduler",
+        SYS_SCHED_GETSCHEDULER => "sched_getscheduler",
+        SYS_IOPRIO_SET => "ioprio_set",
+        SYS_IOPRIO_GET => "ioprio_get",
+        SYS_ALARM => "alarm",
+        SYS_CREAT => "creat",
+        SYS_CLOSE_RANGE => "close_range",
         SYS_RT_SIGRETURN => "rt_sigreturn",
         SYS_KILL => "kill",
         SYS_GETPPID => "getppid",

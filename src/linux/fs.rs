@@ -58,7 +58,9 @@ pub const WRITE_ROOT: &str = "/tmp";
 /// relative path cannot climb out by being written differently. `resolve`
 /// refuses `..` outright, which is what makes one check enough.
 pub fn writable(path: &str) -> bool {
-    path == WRITE_ROOT || path.starts_with("/tmp/")
+    // `/tmp` alone until a root image gives a guest a layer of its own to
+    // write into; `ns::writable` holds the rule for both cases.
+    path == WRITE_ROOT || super::ns::writable(path)
 }
 
 /// `AT_FDCWD`, the descriptor that means "relative to the working directory".
@@ -95,6 +97,8 @@ pub struct File {
 /// already given to somebody else.
 pub struct Sock {
     pub conn: Option<crate::net::tcp::Handle>,
+    /// `O_NONBLOCK`, from `SOCK_NONBLOCK`, `fcntl` or `FIONBIO`.
+    pub nonblock: bool,
 }
 
 pub struct Dir {
@@ -105,6 +109,9 @@ pub struct Dir {
     /// could offer instead.
     pub entries: Vec<(String, bool, usize)>,
     pub at: usize,
+    /// Which entries are links, worked out on the first `getdents64` and kept
+    /// for the rest of the walk, like the entries themselves.
+    pub links: Option<alloc::collections::BTreeSet<String>>,
 }
 
 /// What a descriptor refers to.
@@ -148,7 +155,12 @@ pub enum Fd {
     /// `Sock::Stream` and its side are two facts with one lifetime, and
     /// `accept` produces a descriptor whose socket is brand new while
     /// `connect` mutates one that already existed.
-    Unix(Rc<RefCell<crate::linux::unix::Sock>>),
+    ///
+    /// **The flag beside it is `O_NONBLOCK`**, shared by every name for this
+    /// end as Linux shares it across `dup`. It was not kept at all, so a
+    /// program that set it and read until `EAGAIN` -- libdbus, GLib, every
+    /// event loop -- blocked on the read meant to find the buffer empty.
+    Unix(Rc<RefCell<crate::linux::unix::Sock>>, Rc<core::cell::Cell<bool>>),
     /// One end of a pipe.
     ///
     /// The transport underneath is a Unix socket's, with one direction taken
@@ -172,6 +184,12 @@ pub enum Fd {
     Dev(Rc<RefCell<DevFile>>),
     /// A file on a mounted FAT volume, read by range. See `linux::disk`.
     Disk(Rc<RefCell<crate::linux::disk::DiskFile>>),
+    /// A counter one thread writes and another polls (`eventfd`).
+    Event(Rc<RefCell<crate::linux::timer::EventFd>>),
+    /// A deadline a loop waits on beside its sockets (`timerfd`).
+    Timer(Rc<RefCell<crate::linux::timer::TimerFd>>),
+    /// One end of a pseudo-terminal (`/dev/ptmx`, `/dev/pts/N`).
+    Pty(Rc<RefCell<crate::linux::pty::End>>),
 }
 
 /// An open `/dev` node and where its cursor sits.
@@ -274,6 +292,11 @@ impl Drop for DevFile {
 }
 
 impl Fd {
+    /// A Unix socket descriptor, blocking or not.
+    pub fn unix(sock: crate::linux::unix::Sock, nonblock: bool) -> Fd {
+        Fd::Unix(Rc::new(RefCell::new(sock)), Rc::new(core::cell::Cell::new(nonblock)))
+    }
+
     pub fn is_dir(&self) -> bool {
         matches!(self, Fd::Dir(_))
     }
@@ -307,12 +330,15 @@ impl Fd {
             Fd::Socket(b) => Fd::Socket(b.clone()),
             // Another name for one end, which is what `dup` on a socket means
             // everywhere: two descriptors, one connection.
-            Fd::Unix(b) => Fd::Unix(b.clone()),
+            Fd::Unix(b, nb) => Fd::Unix(b.clone(), nb.clone()),
             Fd::Pipe(b) => Fd::Pipe(b.clone()),
             Fd::Epoll(b) => Fd::Epoll(b.clone()),
             Fd::Memfd(b) => Fd::Memfd(b.clone()),
             Fd::Dev(b) => Fd::Dev(b.clone()),
             Fd::Disk(b) => Fd::Disk(b.clone()),
+            Fd::Event(b) => Fd::Event(b.clone()),
+            Fd::Timer(b) => Fd::Timer(b.clone()),
+            Fd::Pty(b) => Fd::Pty(b.clone()),
         }
     }
 
@@ -343,7 +369,7 @@ impl Fd {
         // `EAGAIN` forever where it was owed a zero. Nothing had noticed
         // because every fixture so far closed both ends by exiting, and
         // teardown frees the whole table at once.
-        if let Fd::Unix(b) = self {
+        if let Fd::Unix(b, _) = self {
             if Rc::strong_count(b) > 1 {
                 return false;
             }
@@ -375,7 +401,7 @@ impl Fd {
         }
         f.dirty = false;
         let data = f.data.clone();
-        crate::sysbox::write_blob(&f.path, data)
+        super::ns::write_blob(&f.path, data)
     }
 }
 
@@ -417,7 +443,9 @@ pub fn resolve(cwd: &str, path: &str) -> Option<String> {
     }
     let mut out = String::from("/");
     out.push_str(&parts.join("/"));
-    Some(out)
+    // Every link on the way but the last component, which is the caller's to
+    // follow or not (see `link`).
+    super::link::walk(&out, false).ok()
 }
 
 /// `S_IFREG | 0644`.
@@ -437,6 +465,8 @@ pub const MODE_FIFO: u32 = 0o010_600;
 /// real system. Writable in the mode bits because they genuinely are, and this
 /// module has no owners to check it against anyway.
 pub const MODE_CHAR: u32 = 0o020_666;
+/// A symbolic link, which only the root image carries: the namespace has none.
+pub const MODE_LINK: u32 = 0o120_777;
 
 /// What kind of thing a `stat` is describing.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -452,6 +482,8 @@ pub enum Kind {
     /// program makes before touching `/dev/fb0`, and a driver reporting a
     /// regular file gets skipped.
     Char,
+    /// A symbolic link, as `lstat` reports one. Its size is the target's length.
+    Link,
 }
 
 impl Kind {
@@ -461,6 +493,7 @@ impl Kind {
             Kind::Dir => MODE_DIR,
             Kind::Fifo => MODE_FIFO,
             Kind::Char => MODE_CHAR,
+            Kind::Link => MODE_LINK,
         }
     }
 }
@@ -498,7 +531,7 @@ pub fn stat_bytes(kind: Kind, size: usize, ino: u64) -> [u8; 144] {
 /// walking the buffer adds `d_reclen` to its cursor. An unpadded record leaves
 /// the next one misaligned and the guest reads a name out of the middle of an
 /// inode.
-pub fn dirent(out: &mut Vec<u8>, room: usize, ino: u64, next: u64, is_dir: bool, name: &str) -> bool {
+pub fn dirent(out: &mut Vec<u8>, room: usize, ino: u64, next: u64, kind: u8, name: &str) -> bool {
     let len = (19 + name.len() + 1).next_multiple_of(8);
     if out.len() + len > room {
         return false;
@@ -513,7 +546,7 @@ pub fn dirent(out: &mut Vec<u8>, room: usize, ino: u64, next: u64, is_dir: bool,
     // two would disagree silently.
     out.extend_from_slice(&next.to_le_bytes());
     out.extend_from_slice(&(len as u16).to_le_bytes());
-    out.push(if is_dir { 4 } else { 8 }); // DT_DIR / DT_REG
+    out.push(kind);
     out.extend_from_slice(name.as_bytes());
     out.push(0);
     while out.len() < start + len {
@@ -595,9 +628,9 @@ pub fn checks() -> Vec<(&'static str, bool)> {
 
     // Directory entries, and the padding a guest's cursor depends on.
     let mut buf = Vec::new();
-    let ok1 = dirent(&mut buf, 4096, 1, 1, true, "ai");
+    let ok1 = dirent(&mut buf, 4096, 1, 1, 4, "ai");
     let first = buf.len();
-    let ok2 = dirent(&mut buf, 4096, 2, 2, false, "a-rather-longer-name.txt");
+    let ok2 = dirent(&mut buf, 4096, 2, 2, 8, "a-rather-longer-name.txt");
     out.push(("two entries fit and both are eight-byte multiples", ok1 && ok2 && first % 8 == 0 && buf.len() % 8 == 0));
     out.push((
         "the record length in the first entry steps exactly to the second",
@@ -614,13 +647,13 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     ));
     out.push((
         "an entry that will not fit is refused rather than truncated",
-        !dirent(&mut Vec::new(), 8, 1, 1, false, "toolong"),
+        !dirent(&mut Vec::new(), 8, 1, 1, 8, "toolong"),
     ));
     out.push((
         "and a room of zero refuses without touching the buffer",
         {
             let mut v = Vec::new();
-            !dirent(&mut v, 0, 1, 1, false, "x") && v.is_empty()
+            !dirent(&mut v, 0, 1, 1, 8, "x") && v.is_empty()
         },
     ));
 
@@ -634,9 +667,9 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         writable("/tmp")
             && writable("/tmp/x")
             && writable("/tmp/a/b")
-            && !writable("/")
-            && !writable("/ai/about")
-            && !writable("/tmpish"),
+            && !super::ns::reaches("/")
+            && !super::ns::reaches("/ai/about")
+            && !super::ns::reaches("/tmpish"),
     ));
     out.push((
         "two names for one body share a cursor, which is the whole of dup",

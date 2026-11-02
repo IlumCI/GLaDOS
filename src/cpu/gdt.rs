@@ -198,6 +198,21 @@ static DEFAULT_RSP0: [core::sync::atomic::AtomicU64; MAX_CPUS] =
 /// Called with interrupts off -- from inside `schedule`, or under the task
 /// table's lock -- so no interrupt can arrive between the store and the
 /// switch it belongs to.
+/// Where an interrupt taken at ring 3 on this core lands now, if that is a
+/// task's own stack rather than the core's shared default; 0 otherwise.
+pub fn task_rsp0() -> u64 {
+    let cpu = crate::smp::this_cpu() as usize;
+    if cpu >= MAX_CPUS {
+        return 0;
+    }
+    let tss = unsafe { LOADED.get()[cpu] };
+    if tss.is_null() {
+        return 0;
+    }
+    let v = unsafe { (*tss).rsp[0] };
+    if v == DEFAULT_RSP0[cpu].load(core::sync::atomic::Ordering::Relaxed) { 0 } else { v }
+}
+
 pub fn set_rsp0(top: u64) {
     let cpu = crate::smp::this_cpu() as usize;
     if cpu >= MAX_CPUS {

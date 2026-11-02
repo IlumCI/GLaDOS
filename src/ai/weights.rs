@@ -78,6 +78,93 @@ unsafe fn matvec_rows(ctx: usize, lo: usize, hi: usize) {
     }
 }
 
+/// A weight-stationary batch, for cores to split by rows.
+#[derive(Clone, Copy)]
+struct BatchJob {
+    data: *const i8,
+    scales: *const u8,
+    xs: *const f32,
+    out: *mut f32,
+    rows: usize,
+    cols: usize,
+    tc: usize,
+    avx: bool,
+}
+
+/// Rows `[lo, hi)` of a batch, against every input position.
+///
+/// **This is why prefill can use the other cores at all.** The comment on
+/// `matvec_batch` used to say a split would multiply memory traffic, and that
+/// is true of splitting by *position* -- every core would stream every
+/// weight. Split by *row*, each core streams only its own rows, once, and
+/// reuses each against all the positions while it is hot: the same bytes
+/// cross the bus as on one core, and the arithmetic is shared out. Each
+/// output element is computed by exactly the per-row loop `q8_matvec_batch_*`
+/// runs, in the same order, so the result is bit-identical to one core's.
+///
+/// What it bought: a 150-token chat prompt on one core was slower than
+/// feeding the tokens one at a time across all of them, which is the opposite
+/// of what prefill is for.
+///
+/// # Safety
+/// `ctx` must point at a live `BatchJob` whose buffers cover every row and
+/// position, and no other core may hold the same rows.
+unsafe fn batch_rows(ctx: usize, lo: usize, hi: usize) {
+    let job = unsafe { *(ctx as *const BatchJob) };
+    for r in lo..hi {
+        let row = unsafe { core::slice::from_raw_parts(job.data.add(r * job.cols), job.cols) };
+        let scale = f32::from_le_bytes(unsafe { *(job.scales.add(r * 4) as *const [u8; 4]) });
+        for t in 0..job.tc {
+            let x = unsafe { core::slice::from_raw_parts(job.xs.add(t * job.cols), job.cols) };
+            let v = if job.avx {
+                unsafe { q8_dot_avx2(row, x) }
+            } else {
+                let mut acc = 0.0f32;
+                for j in 0..job.cols {
+                    acc += row[j] as f32 * x[j];
+                }
+                acc
+            };
+            unsafe { *job.out.add(t * job.rows + r) = v * scale };
+        }
+    }
+}
+
+/// One row against one position, in exactly `q8_matvec_batch_avx2`'s lane
+/// order -- two accumulators over 16-wide chunks, a horizontal add, then the
+/// ragged tail -- so a split batch matches the unsplit one bit for bit.
+///
+/// # Safety
+/// Requires AVX2 and FMA.
+#[target_feature(enable = "avx2,fma")]
+unsafe fn q8_dot_avx2(row: &[i8], x: &[f32]) -> f32 {
+    use core::arch::x86_64::*;
+    let cols = row.len();
+    let chunks = cols / 16;
+    let mut acc0 = _mm256_setzero_ps();
+    let mut acc1 = _mm256_setzero_ps();
+    for c in 0..chunks {
+        let base = c * 16;
+        let packed = _mm_loadu_si128(row.as_ptr().add(base) as *const __m128i);
+        let lo = _mm256_cvtepi8_epi32(packed);
+        let hi = _mm256_cvtepi8_epi32(_mm_srli_si128(packed, 8));
+        let lof = _mm256_cvtepi32_ps(lo);
+        let hif = _mm256_cvtepi32_ps(hi);
+        let x0 = _mm256_loadu_ps(x.as_ptr().add(base));
+        let x1 = _mm256_loadu_ps(x.as_ptr().add(base + 8));
+        acc0 = _mm256_fmadd_ps(lof, x0, acc0);
+        acc1 = _mm256_fmadd_ps(hif, x1, acc1);
+    }
+    let sum = _mm256_add_ps(acc0, acc1);
+    let mut lanes = [0.0f32; 8];
+    _mm256_storeu_ps(lanes.as_mut_ptr(), sum);
+    let mut total = lanes.iter().sum::<f32>();
+    for j in chunks * 16..cols {
+        total += row[j] as f32 * x[j];
+    }
+    total
+}
+
 #[inline]
 pub fn f32_at(bytes: &[u8], i: usize) -> f32 {
     let o = i * 4;
@@ -206,9 +293,29 @@ impl Mat<'_> {
             }
             Mat::Q8 { data, scales, rows, cols } => {
                 let f = crate::cpu::detected();
+                let avx = f.avx_enabled && f.avx2 && f.fma;
+                // Across the cores by row when there is enough of it -- see
+                // `batch_rows` -- and on this one otherwise.
+                let job = BatchJob {
+                    data: data.as_ptr(),
+                    scales: scales.as_ptr(),
+                    xs: xs.as_ptr(),
+                    out: out.as_mut_ptr(),
+                    rows: *rows,
+                    cols: *cols,
+                    tc,
+                    avx,
+                };
+                if tc > 1
+                    && out.len() >= tc * *rows
+                    && xs.len() >= tc * *cols
+                    && crate::smp::parallel_split(&job as *const BatchJob as usize, batch_rows, *rows, *cols * tc)
+                {
+                    return;
+                }
                 // Same gate as `matvec`: AVX2 is not optional (see above), and
                 // `avx_enabled` means the OS actually enabled the state.
-                if f.avx_enabled && f.avx2 && f.fma {
+                if avx {
                     unsafe { q8_matvec_batch_avx2(out, xs, data, scales, *rows, *cols, tc) }
                 } else {
                     q8_matvec_batch_scalar(out, xs, data, scales, *rows, *cols, tc)

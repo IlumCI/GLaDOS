@@ -97,13 +97,37 @@ pub fn ready(fd: &Fd) -> u16 {
         // Always ready both ways, like a regular file: there is nothing to
         // wait for in memory that is already there.
         Fd::Memfd(_) => POLLIN | POLLOUT,
+        Fd::Event(e) => POLLOUT | if e.borrow().readable() { POLLIN } else { 0 },
+        Fd::Pty(e) => {
+            let e = e.borrow();
+            let p = e.pty.borrow();
+            if e.master {
+                POLLOUT | if p.master_readable() { POLLIN } else { 0 }
+            } else {
+                POLLOUT | if p.slave_readable() { POLLIN } else { 0 }
+            }
+        }
+        Fd::Timer(t) => {
+            if t.borrow_mut().readable(crate::linux::syscall::mono_now()) {
+                POLLIN
+            } else {
+                0
+            }
+        }
         Fd::Socket(s) => {
             let b = s.borrow();
             match b.conn {
                 Some(h) => {
                     let mut m = POLLOUT;
-                    if crate::net::tcp::pending(h) > 0 {
+                    // Readable when there is data, and also at end of file:
+                    // a reader polling for the rest of a body learns that
+                    // there is no rest by reading zero, and a poll that
+                    // never said readable kept it waiting out its timeout.
+                    if crate::net::tcp::pending(h) > 0 || crate::net::tcp::peer_done(h) {
                         m |= POLLIN;
+                    }
+                    if !crate::net::tcp::alive(h) {
+                        m |= POLLIN | POLLHUP;
                     }
                     m
                 }
@@ -113,7 +137,7 @@ pub fn ready(fd: &Fd) -> u16 {
                 None => 0,
             }
         }
-        Fd::Unix(s) => {
+        Fd::Unix(s, _) => {
             let b = s.borrow();
             match &*b {
                 // A listening socket is *readable* when somebody is waiting,
@@ -325,19 +349,19 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     }));
     out.push((
         "a fresh socket pair can be written and has nothing to read",
-        ready(&Fd::Unix(sa.clone())) == POLLOUT,
+        ready(&Fd::Unix(sa.clone(), alloc::rc::Rc::new(core::cell::Cell::new(false)))) == POLLOUT,
     ));
     unix::write(&a, Side::A, b"hello").ok();
     out.push((
         "and the far end reads ready once bytes are in it",
-        ready(&Fd::Unix(sb.clone())) & POLLIN != 0,
+        ready(&Fd::Unix(sb.clone(), alloc::rc::Rc::new(core::cell::Cell::new(false)))) & POLLIN != 0,
     ));
     out.push((
         "while the sending end still has nothing of its own to read",
-        ready(&Fd::Unix(sa.clone())) & POLLIN == 0,
+        ready(&Fd::Unix(sa.clone(), alloc::rc::Rc::new(core::cell::Cell::new(false)))) & POLLIN == 0,
     ));
     unix::close(&a, Side::A);
-    let hung = ready(&Fd::Unix(sb.clone()));
+    let hung = ready(&Fd::Unix(sb.clone(), alloc::rc::Rc::new(core::cell::Cell::new(false))));
     out.push((
         "a departed peer shows as a hangup, so a program learns of it without attempting a read",
         hung & POLLHUP != 0,
@@ -395,14 +419,14 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     }));
     out.push((
         "a listening socket with nobody waiting is not ready",
-        ready(&Fd::Unix(listener.clone())) == 0,
+        ready(&Fd::Unix(listener.clone(), alloc::rc::Rc::new(core::cell::Cell::new(false)))) == 0,
     ));
     if let unix::Sock::Listening { waiting, .. } = &mut *listener.borrow_mut() {
         waiting.push_back(unix::pair().0);
     }
     out.push((
         "and reads ready once a connection is queued, which is the signal accept is written against",
-        ready(&Fd::Unix(listener.clone())) == POLLIN,
+        ready(&Fd::Unix(listener.clone(), alloc::rc::Rc::new(core::cell::Cell::new(false)))) == POLLIN,
     ));
 
     // ---- what an entry is told ----

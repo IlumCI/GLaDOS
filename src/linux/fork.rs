@@ -38,7 +38,7 @@ pub const MAX_CHILDREN: usize = 4;
 /// while its parent sits inside one would otherwise overwrite where the
 /// parent's `rsp` went -- which `syscall::run` already records as the reason
 /// the main thread carries entry state at all.
-const CHILD_STACK: usize = 16 * 1024;
+const CHILD_STACK: usize = super::syscall::GUEST_SYSCALL_STACK;
 
 #[derive(Clone, Copy)]
 struct Slot {
@@ -257,7 +257,9 @@ pub fn task_of_pid(pid: i64) -> Option<usize> {
 /// this possible without reaching into the loader for the backing `Exec`s: the
 /// kernel is already looking at the guest's memory the way the guest sees it.
 ///
-/// A page the parent does not have present is skipped rather than copied. A
+/// Demand-paged memory is the exception, and is copied page by page as what it
+/// is -- see inside. Otherwise, a page the parent does not have present is
+/// skipped rather than copied. A
 /// linker reserves a span with `PROT_NONE` and lays libraries over part of it,
 /// so reading the rest would take a `#PF` at ring 0 inside `fork` -- and this
 /// kernel has no handler that could survive it. The child gets a hole where
@@ -270,35 +272,72 @@ fn dup_range(
     len: usize,
     owned: &mut Vec<(u64, usize)>,
 ) -> bool {
+    use crate::mem::paging::{is_promise, ADDR_MASK, DEMAND};
     let n = syscall::page_up(len);
     if n == 0 {
         return true;
     }
-    let Some(phys) = syscall::alloc_pages(n) else { return false };
+    // The block for ordinary pages, taken the first time one is met: a range
+    // that is all demand-paged (a thread arena, a stack) needs none of it.
+    let mut block: Option<u64> = None;
     let mut off = 0u64;
     while off < n as u64 {
-        let there = crate::mem::paging::query(at + off).is_some_and(|p| p.present);
+        let a = at + off;
+        let raw = crate::mem::paging::leaf(a).unwrap_or(0);
+        // **Demand-paged memory is copied as what it is.** A promise stays a
+        // promise in the child -- skipping it, as a not-present page is
+        // skipped below, would leave a hole where the parent has memory it
+        // simply has not touched yet, and the child would die on its first
+        // write to a malloc arena. A supplied page gets a frame of its own,
+        // marked the same way so the child's teardown frees it: copied from
+        // the *frame*, which the identity map reaches whatever the guest's
+        // rights on it, so a page `mprotect`ed to `PROT_NONE` survives too.
+        if is_promise(raw) {
+            COPIED[0].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if !tables.put_leaf(a, raw) {
+                return false;
+            }
+            off += 4096;
+            continue;
+        }
+        if raw & DEMAND != 0 && raw & ADDR_MASK != 0 {
+            // **Shared, not copied** (`paging::COW`): both leaves name the
+            // frame read-only, and whoever writes first takes a copy then.
+            COPIED[1].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let Some(leaf) = crate::mem::paging::cow_share(a) else { return false };
+            if !tables.put_leaf(a, leaf) {
+                // The parent's side is shared already; giving the count back
+                // leaves its one leaf the frame's owner again.
+                let _ = crate::mem::paging::cow_release(leaf);
+                return false;
+            }
+            off += 4096;
+            continue;
+        }
+        let there = crate::mem::paging::query(a).is_some_and(|p| p.present);
         if there {
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    (at + off) as *const u8,
-                    (phys + off) as *mut u8,
-                    4096,
-                )
+            let phys = match block {
+                Some(b) => b,
+                None => {
+                    let Some(b) = syscall::alloc_pages(n) else { return false };
+                    owned.push((b, n));
+                    block = Some(b);
+                    b
+                }
             };
-            let ok = if at + off >= crate::mem::space::WINDOW {
-                tables.map_page(at + off, phys + off, true, true)
+            COPIED[2].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            unsafe { core::ptr::copy_nonoverlapping(a as *const u8, (phys + off) as *mut u8, 4096) };
+            let ok = if a >= crate::mem::space::WINDOW {
+                tables.map_page(a, phys + off, true, true)
             } else {
-                tables.map_low(at + off, phys + off, true, true).is_ok()
+                tables.map_low(a, phys + off, true, true).is_ok()
             };
             if !ok {
-                syscall::free_pages(phys, n);
                 return false;
             }
         }
         off += 4096;
     }
-    owned.push((phys, n));
     true
 }
 
@@ -308,6 +347,17 @@ fn dup_range(
 pub fn fork(f: &Frame) -> u64 {
     fork_with(f, None, None)
 }
+
+/// What forks have copied, in pages: promises carried over, demand-supplied
+/// pages duplicated, ordinary pages duplicated; then forks and their cycles.
+/// When each slot's child was forked, picked up and finished, and the sums of
+/// the three gaps -- fork to start, start to finish, finish to reaped -- with
+/// how many were reaped (`linux fills`).
+pub static PHASE: [[core::sync::atomic::AtomicU64; 3]; 64] = [const { [const { core::sync::atomic::AtomicU64::new(0) }; 3] }; 64];
+pub static PHASES: [core::sync::atomic::AtomicU64; 4] = [const { core::sync::atomic::AtomicU64::new(0) }; 4];
+/// For a reaping `wait4`: cycles from entry to return, and rounds of its loop.
+pub static WAITS: [core::sync::atomic::AtomicU64; 2] = [const { core::sync::atomic::AtomicU64::new(0) }; 2];
+pub static COPIED: [core::sync::atomic::AtomicU64; 5] = [const { core::sync::atomic::AtomicU64::new(0) }; 5];
 
 const SIGCHLD: u64 = 17;
 const CLONE_VFORK: u64 = 0x0000_4000;
@@ -358,6 +408,14 @@ pub fn clone_process(f: &Frame) -> u64 {
 /// `fork`, running the child on `stack` if given, and writing its pid at
 /// `settid` in the child's memory if given.
 fn fork_with(f: &Frame, stack: Option<u64>, settid: Option<u64>) -> u64 {
+    let t0 = crate::time::rdtsc();
+    let r = fork_inner(f, stack, settid);
+    COPIED[3].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    COPIED[4].fetch_add(crate::time::rdtsc() - t0, core::sync::atomic::Ordering::Relaxed);
+    r
+}
+
+fn fork_inner(f: &Frame, stack: Option<u64>, settid: Option<u64>) -> u64 {
     const EAGAIN: u64 = (-11i64) as u64;
     const ENOMEM: u64 = (-12i64) as u64;
     const ENOSYS: u64 = (-38i64) as u64;
@@ -413,6 +471,10 @@ fn fork_with(f: &Frame, stack: Option<u64>, settid: Option<u64>) -> u64 {
             break;
         }
     }
+    // The parent's pages that just became shared were writable a moment ago,
+    // and a thread of the parent on another core may still hold that in its
+    // TLB -- a write through it would land in the child's memory too.
+    syscall::tlb_shootdown();
     if let (Some(a), Some(v)) = (settid, saved) {
         unsafe { core::ptr::write_volatile(a as *mut u32, v) };
     }
@@ -473,6 +535,7 @@ fn fork_with(f: &Frame, stack: Option<u64>, settid: Option<u64>) -> u64 {
     if !syscall::clone_guest(parent, child, tables, owned) {
         return ENOMEM;
     }
+    syscall::cloexec_copy(parent, child);
 
     {
         let s = unsafe { SLOTS.get() };
@@ -484,10 +547,15 @@ fn fork_with(f: &Frame, stack: Option<u64>, settid: Option<u64>) -> u64 {
         s[idx].status = None;
         s[idx].session = here();
     }
+    if idx < 64 {
+        PHASE[idx][0].store(crate::time::rdtsc(), Ordering::Relaxed);
+    }
     LIVE.fetch_add(1, Ordering::Release);
 
     let have = unsafe { (*SLOTS.get())[idx].task };
-    if have.is_none() {
+    if let Some(t) = have {
+        crate::task::wake(t);
+    } else {
         let Some(t) = crate::task::spawn("guest child", body) else {
             let s = unsafe { SLOTS.get() };
             s[idx].work = None;
@@ -525,17 +593,22 @@ fn body() {
         };
         crate::linux::syscall::big_unlock();
         let Some(i) = found else {
-            // `hlt` rather than a spin, so an idle pool costs one wake per
-            // timer tick instead of one per scheduler round -- `thread`'s
-            // pool makes the same trade.
-            crate::port::idle();
-            crate::task::yield_now();
+            // Asleep until `fork` fills a slot for this task, for the reason
+            // `thread`'s pool gives: a parked task kept in `hlt` and a yield
+            // is a running task, and it keeps the core's idle task -- a matrix
+            // helper -- from ever being scheduled.
+            crate::task::sleep_until_or(crate::dev::lapic::ticks() + crate::TIMER_HZ as u64, || {
+                unsafe { SLOTS.get() }.iter().any(|x| x.task == Some(me) && x.work.is_some())
+            });
             continue;
         };
         let (work, stack, guest, sess) = {
             let s = unsafe { SLOTS.get() };
             (s[i].work.take().unwrap(), s[i].stack, s[i].guest, s[i].session)
         };
+        if i < 64 {
+            PHASE[i][1].store(crate::time::rdtsc(), Ordering::Relaxed);
+        }
 
         // Flags around the run, for the reason `run_thread` records: `syscall`
         // clears IF through FMASK and a guest that exits leaves through a
@@ -588,13 +661,23 @@ fn body() {
         // every fork leaked a whole process and a shell running commands in a
         // loop would have run the heap dry. The root is off by now, which is
         // the order `Space` needs: tables are freed only once nothing walks
-        // them.
+        // them -- this task's, and also every thread the child made, which is
+        // why they are ended and waited for first: a thread of the child still
+        // running would be scheduled onto tables `release_guest` just freed.
+        // `execve` had the identical hole and `thread::doom_guest` says what it
+        // cost.
+        while super::thread::doom_guest(guest, code) > 0 {
+            syscall::wait_turn();
+        }
         syscall::release_guest(guest);
 
         let parent = {
             let s = unsafe { SLOTS.get() };
             s[i].status = Some(syscall::wait_status(code));
             s[i].live = false;
+            if i < 64 {
+                PHASE[i][2].store(crate::time::rdtsc(), Ordering::Relaxed);
+            }
             s[i].parent
         };
         // **A child finishing is the first signal this machine can honestly
@@ -602,6 +685,13 @@ fn body() {
         // installs a handler is not killed by its own children finishing.
         super::signal::raise_at(parent, super::signal::SIGCHLD);
         LIVE.fetch_sub(1, Ordering::Release);
+        // **And the parent is told now.** A child leaves through a longjmp
+        // out of `exit_group`, never through the end of a syscall, which is
+        // where a napping waiter is woken -- so a parent in `wait4` slept out
+        // its nap every time: 300 runs of `true` from bash spent 4.6 ms a
+        // `wait4`, three quarters of a 10 ms iteration whose syscalls cost
+        // 1.3.
+        syscall::wake_nappers();
         if flags & (1 << 9) != 0 {
             crate::cpu::enable_interrupts();
         }
@@ -674,25 +764,53 @@ pub fn wait(pid: i64, status: u64, options: u64) -> u64 {
     const ECHILD: u64 = (-10i64) as u64;
     const EINVAL: u64 = (-22i64) as u64;
 
-    // Refused rather than ignored. A caller that asked to be told about a
-    // stopped child and is simply never told has been given a wait that looks
-    // like it works and silently never fires -- the shape this tree keeps
-    // recording as the worst kind of wrong.
-    if options & !WNOHANG != 0 {
+    // `WUNTRACED` and `WCONTINUED` ask to hear about a child stopping or
+    // resuming, and none ever does here -- there is no job-control stop -- so
+    // accepting them reports exactly what Linux would: nothing extra. They
+    // were refused with EINVAL, and bash passes both on every wait. `__WALL`
+    // and `__WNOTHREAD` choose among kinds of child this kernel does not
+    // have. Anything else is still refused rather than ignored.
+    const WUNTRACED: u64 = 2;
+    const WCONTINUED: u64 = 8;
+    const WNOTHREAD: u64 = 0x2000_0000;
+    const WALL: u64 = 0x4000_0000;
+    if options & !(WNOHANG | WUNTRACED | WCONTINUED | WNOTHREAD | WALL) != 0 {
         return EINVAL;
     }
+    // A `pid_t`, so only the low 32 bits: `waitpid(-1)` can arrive as
+    // `0xffffffff`, which read as a large positive pid matched no child and
+    // answered ECHILD.
+    let pid = pid as u32 as i32 as i64;
 
+    // **Only this process's own children.** Matched by session and pid
+    // alone, a shell's `waitpid(-1)` reaped its grandchildren too -- the
+    // `sleep` under `timeout`, the `gzip` under `tar` -- and they then waited
+    // on a child already collected and answered "No child processes".
+    let me = syscall::current_guest();
+    let entered = crate::time::rdtsc();
+    let mut rounds = 0u64;
     loop {
+        rounds += 1;
         let sess = here();
         let found = {
             let s = unsafe { SLOTS.get() };
             s.iter()
                 .position(|x| x.pid != 0 && !x.live && x.status.is_some() && x.session == sess
-                    && !x.quarantined && (pid <= 0 || x.pid == pid as u64))
+                    && x.parent == me && !x.quarantined && (pid <= 0 || x.pid == pid as u64))
         };
         if let Some(i) = found {
             let s = unsafe { SLOTS.get() };
             let code = s[i].status.take().unwrap_or(0);
+            if i < 64 {
+                let now = crate::time::rdtsc();
+                let p = |k: usize| PHASE[i][k].load(Ordering::Relaxed);
+                PHASES[0].fetch_add(p(1).saturating_sub(p(0)), Ordering::Relaxed);
+                PHASES[1].fetch_add(p(2).saturating_sub(p(1)), Ordering::Relaxed);
+                PHASES[2].fetch_add(now.saturating_sub(p(2)), Ordering::Relaxed);
+                PHASES[3].fetch_add(1, Ordering::Relaxed);
+                WAITS[0].fetch_add(now - entered, Ordering::Relaxed);
+                WAITS[1].fetch_add(rounds, Ordering::Relaxed);
+            }
             let got = s[i].pid;
             s[i].pid = 0;
             if status != 0 && syscall::owns(status, 4) {
@@ -706,7 +824,7 @@ pub fn wait(pid: i64, status: u64, options: u64) -> u64 {
         }
         let any = {
             let s = unsafe { SLOTS.get() };
-            s.iter().any(|x| x.pid != 0 && !x.quarantined && x.session == sess
+            s.iter().any(|x| x.pid != 0 && !x.quarantined && x.session == sess && x.parent == me
                 && (pid <= 0 || x.pid == pid as u64))
         };
         if !any {

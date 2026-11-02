@@ -78,7 +78,11 @@ pub struct Ev {
     pub us: u64,
 }
 
-const CAP: usize = 256;
+/// A thousand events is about two hundred typed characters: a reader that
+/// looks only when its program next enters the kernel can fall that far
+/// behind the typist (`dev::typist`) without losing a key. At 256 it lost
+/// whole rows of a spreadsheet.
+const CAP: usize = 1024;
 
 /// One device's events.
 ///
@@ -146,6 +150,45 @@ fn now_us() -> u64 {
 /// a possessed machine rather than a bug in this file.
 pub fn now_at(d: Dev) -> u64 {
     ring(d).head.load(Ordering::Acquire)
+}
+
+/// Where the keyboard ring stood when the desktop last moved the focus.
+///
+/// A Wayland client only learns it has the focus the next time it enters the
+/// kernel, and it starts reading keys from that moment, so that keys typed
+/// for some other window are not delivered to it. Measured from "the next
+/// time it looked", that discarded everything typed between the focus moving
+/// and the client noticing -- which for the typist, raising a window and
+/// typing into it at once, was everything. Measured from the move itself it
+/// discards exactly what it meant to.
+static FOCUS_MARK: AtomicU64 = AtomicU64::new(0);
+
+/// How far the focused window's reader has taken keys from the ring, and
+/// when it last did: what the typist paces itself against (`unread`).
+static READ_AT: AtomicU64 = AtomicU64::new(0);
+static READ_TICK: AtomicU64 = AtomicU64::new(0);
+
+/// A display server's reader has taken the keyboard ring up to `cursor`.
+pub fn note_read(cursor: u64) {
+    READ_AT.store(cursor, Ordering::Release);
+    READ_TICK.store(crate::dev::lapic::ticks(), Ordering::Release);
+}
+
+/// Keyboard events nobody has taken yet, and the tick somebody last took
+/// any. A reader only looks when its program enters the kernel, so a program
+/// busy at ring 3 can fall a ring's length behind and lose the oldest keys --
+/// which is what this lets a producer see coming.
+pub fn unread() -> (u64, u64) {
+    let head = KEYS.head.load(Ordering::Acquire);
+    (head.saturating_sub(READ_AT.load(Ordering::Acquire)), READ_TICK.load(Ordering::Acquire))
+}
+
+pub fn mark_focus() {
+    FOCUS_MARK.store(KEYS.head.load(Ordering::Acquire), Ordering::Release);
+}
+
+pub fn focus_mark() -> u64 {
+    FOCUS_MARK.load(Ordering::Acquire)
 }
 
 pub fn pending(d: Dev, cursor: u64) -> bool {

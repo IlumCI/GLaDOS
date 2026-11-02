@@ -410,7 +410,23 @@ glados_fault_common:
     cld
     mov rdi, rsp
     call glados_fault_entry
-    ud2
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    add rsp, 16
+    iretq
 "#
 );
 
@@ -435,10 +451,184 @@ pub fn stub_base() -> u64 {
 /// Called only from `glados_fault_common`, with `rdi` holding the stack
 /// pointer at which that stub finished pushing.
 #[no_mangle]
-pub unsafe extern "sysv64" fn glados_fault_entry(f: *const Frame) -> ! {
+pub unsafe extern "sysv64" fn glados_fault_entry(f: *const Frame) {
+    // **One fault is not a fault: a page promised and not yet supplied.**
+    // Demand-paged guest memory (`paging::DEMAND`) is a leaf that is not
+    // present and says what it will be, and touching it lands here -- from
+    // ring 3 when the guest touches it, from ring 0 when the kernel writes a
+    // syscall's answer into it. The page is supplied and this returns, which
+    // is the only path that does: the stub restores every register, drops the
+    // vector and error code and `iretq`s to the instruction that faulted.
+    //
+    // Error code bit 0 clear is "not present", which a promise always is; bit
+    // 1 is a write. Anything else -- a protection violation, a promise of a
+    // `PROT_NONE` page, a write to a read-only one, or no memory left to keep
+    // the promise with -- falls through to the report, or to the guest's own
+    // death, exactly as before.
+    let fr = unsafe { &*f };
+    //
+    // **The vector and floating-point state are saved around it**, because
+    // the stub saves only the general-purpose registers, and keeping a promise
+    // can now mean reading a file: a disk read is Rust code that uses SSE
+    // registers freely. Whatever faulted -- a guest at ring 3, or a kernel
+    // `memcpy` at ring 0 with half a copy in `xmm0` -- would come back with
+    // those registers changed under it. The first run showed both: dbus died
+    // at ring 3 and the kernel returned to address zero from a copy that
+    // resumed with garbage. `fxsave` covers x87, SSE and `MXCSR`; the upper
+    // halves of `ymm` are not carried, the same residual gap the syscall
+    // stub names.
+    //
+    // **A page whose bytes come from a file is not filled here at all.** This
+    // handler runs on the core's page-fault IST stack, and reading the file
+    // may wait for the guest lock or the disk -- which switches tasks, and the
+    // next page fault on this core then lands on the same IST bytes and
+    // overwrites the frame the first one is suspended in. Measured: a jump to
+    // address zero from `schedule`, on the first `pacman -Sy`. So the frame
+    // is copied onto a stack the faulting task owns and the `iretq` goes to
+    // `glados_fill_trampoline` on it, which fills the page where waiting is
+    // safe and `iretq`s back to the instruction that faulted. At ring 3 that
+    // stack is the task's own entry stack, empty because nothing is
+    // mid-syscall; at ring 0 it is the stack that was interrupted, below
+    // where it stood -- this target's ABI has no red zone.
+    // **A fault somebody else already resolved.** Two threads touching a new
+    // page at once both fault; the first fills it, and the second's handler
+    // runs to find a present page and no promise -- and took that for a real
+    // fault and killed the guest. A thread curl had just started died of it
+    // inside libcurl's own code, the page sitting there filled. Not present
+    // when raised and present now is a retry, not a crash. Only a
+    // not-present fault: a protection fault on a present page is real.
+    if fr.vector == 14 && fr.err & 1 == 0 && crate::mem::paging::resolved(read_cr2(), fr.err) {
+        return;
+    }
+    // A write to a page shared copy-on-write: a copy, or the frame back if
+    // nobody else holds it, and the instruction runs again. Present and a
+    // write is what the error code says; anything else about it is a real
+    // fault and falls through.
+    if fr.vector == 14 && fr.err & 1 != 0 && fr.err & 2 != 0 {
+        #[repr(C, align(16))]
+        struct Fx(core::mem::MaybeUninit<[u8; 512]>);
+        let mut fx = Fx(core::mem::MaybeUninit::uninit());
+        unsafe { core::arch::asm!("fxsave64 [{}]", in(reg) fx.0.as_mut_ptr(), options(nostack)) };
+        let cr2 = read_cr2();
+        let ok = crate::mem::paging::cow_writable(cr2) && crate::mem::paging::cow_break(cr2);
+        if ok {
+            // This thread's siblings on other cores may still read the old
+            // frame through their TLBs; a write would fault and correct
+            // itself, a read would not. Only cores on this root are asked.
+            crate::dev::lapic::shootdown(crate::cpu::read_cr3() & crate::mem::paging::ADDR_MASK);
+        }
+        unsafe { core::arch::asm!("fxrstor64 [{}]", in(reg) fx.0.as_ptr(), options(nostack)) };
+        if ok {
+            return;
+        }
+    }
+    if fr.vector == 14 && fr.err & 1 == 0 && crate::mem::paging::file_promised(read_cr2(), fr.err & 2 != 0) {
+        let user = fr.cs & 3 == 3;
+        let top = if user { gdt::task_rsp0() } else { fr.rsp.saturating_sub(64) };
+        if top == 0 {
+            FILE_FAULTS[1].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        } else {
+            FILE_FAULTS[0].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+        if top != 0 {
+            let dst = ((top - size_of::<Frame>() as u64) & !0xF) as *mut Frame;
+            let f = f as *mut Frame;
+            unsafe {
+                *dst = *f;
+                (*f).rip = glados_fill_trampoline as *const () as u64;
+                (*f).cs = gdt::KERNEL_CS as u64;
+                (*f).ss = gdt::KERNEL_DS as u64;
+                (*f).rsp = dst as u64;
+                // Interrupts stay off on the way in, as on a syscall's; the
+                // fill turns them on where it waits.
+                (*f).rflags = 0x2;
+            }
+            return;
+        }
+    }
+    if fr.vector == 14 && fr.err & 1 == 0 {
+        #[repr(C, align(16))]
+        struct Fx(core::mem::MaybeUninit<[u8; 512]>);
+        let mut fx = Fx(core::mem::MaybeUninit::uninit());
+        unsafe { core::arch::asm!("fxsave64 [{}]", in(reg) fx.0.as_mut_ptr(), options(nostack)) };
+        let cr2 = read_cr2();
+        let kept = crate::mem::paging::promised(cr2, fr.err & 2 != 0)
+            && crate::mem::paging::populate(cr2 & !0xFFF, fr.err & 2 != 0);
+        unsafe { core::arch::asm!("fxrstor64 [{}]", in(reg) fx.0.as_ptr(), options(nostack)) };
+        if kept {
+            return;
+        }
+    }
     // The pointer is the stub's own stack pointer, so what it names outlives
-    // every use below: nothing here returns.
-    fault(unsafe { &*f })
+    // every use below: nothing past this point returns.
+    if fr.vector == 14 && fr.cs & 3 == 3 {
+        let cr2 = read_cr2();
+        crate::serial_println!(
+            "[pf] ring 3 at {:#x} (rip {:#x}, err {:#x}): leaf {:#x}",
+            cr2, fr.rip, fr.err, crate::mem::paging::leaf(cr2 & !0xFFF).unwrap_or(u64::MAX)
+        );
+    }
+    fault(fr)
+}
+
+// The far side of the redirect above: `rsp` points at a copy of the fault
+// frame on the faulting task's own stack, sixteen-aligned, so the call is
+// aligned as the ABI wants. The tail is `glados_fault_common`'s.
+core::arch::global_asm!(
+    r#"
+.globl glados_fill_trampoline
+glados_fill_trampoline:
+    cld
+    mov rdi, rsp
+    call glados_fill_fault
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    add rsp, 16
+    iretq
+"#
+);
+
+extern "sysv64" {
+    fn glados_fill_trampoline();
+}
+
+/// File faults by route: through the trampoline, kept on the IST stack for
+/// want of a task stack, and refused once they got there (`linux fills`).
+pub static FILE_FAULTS: [core::sync::atomic::AtomicU64; 3] = [const { core::sync::atomic::AtomicU64::new(0) }; 3];
+
+/// Keep a file promise, on a stack where waiting is allowed; a promise that
+/// cannot be kept is the fault it always was.
+#[no_mangle]
+unsafe extern "sysv64" fn glados_fill_fault(f: *mut Frame) {
+    #[repr(C, align(16))]
+    struct Fx(core::mem::MaybeUninit<[u8; 512]>);
+    let mut fx = Fx(core::mem::MaybeUninit::uninit());
+    unsafe { core::arch::asm!("fxsave64 [{}]", in(reg) fx.0.as_mut_ptr(), options(nostack)) };
+    let fr = unsafe { &*f };
+    let cr2 = read_cr2();
+    let kept = crate::mem::paging::populate(cr2 & !0xFFF, fr.err & 2 != 0);
+    unsafe { core::arch::asm!("fxrstor64 [{}]", in(reg) fx.0.as_ptr(), options(nostack)) };
+    if !kept {
+        FILE_FAULTS[2].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::serial_println!(
+            "[fill] refused at {:#x} (rip {:#x}, err {:#x}), leaf {:#x}",
+            cr2, fr.rip, fr.err, crate::mem::paging::leaf(cr2 & !0xFFF).unwrap_or(0)
+        );
+        fault(fr)
+    }
 }
 
 /// The console #GP itself is a real bug and is not fixed here. It is older

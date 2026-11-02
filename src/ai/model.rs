@@ -485,6 +485,160 @@ struct KvLayer {
     blocks: usize,
 }
 
+/// Causal attention over a block of queries, one (head, query) pair a row.
+///
+/// It was a scalar loop on the calling core, in both the single-token pass
+/// and the prefill, while every projection around it was split across every
+/// core. That is cheap at a short context and quadratic in a long prompt: a
+/// 1,840-token spreadsheet prompt is about two hundred billion
+/// multiply-adds of attention, all on core 0, and `office bench` sat on that
+/// one task for half an hour with five cores spinning beside it.
+///
+/// A row's scores, its softmax and its weighted sum are computed exactly as
+/// before -- keys ascending, head dimensions ascending, one accumulator -- so
+/// splitting changes which core does a row and nothing about its arithmetic.
+/// Rows write disjoint parts of `out`, and each chunk keeps its own score
+/// scratch, so no two cores share a byte they write.
+struct AttnJob<'a> {
+    q: *const f32,
+    out: *mut f32,
+    krot: *const f32,
+    vc: &'a KvLayer,
+    win: &'a Window,
+    nq: usize,
+    base_j: usize,
+    q_dim: usize,
+    head_size: usize,
+    kv_dim: usize,
+    kv_mul: usize,
+    scale: f32,
+    /// Decided by the caller and carried: a helper core reads no kernel state.
+    avx: bool,
+}
+
+impl AttnJob<'_> {
+    fn run(&self, n_heads: usize) {
+        let rows = n_heads * self.nq;
+        let keys = self.base_j + self.nq;
+        let ctx = self as *const Self as usize;
+        if !crate::smp::parallel_split(ctx, attend_rows, rows, keys * self.head_size * 2) {
+            unsafe { attend_rows(ctx, 0, rows) };
+        }
+    }
+}
+
+/// # Safety
+/// `ctx` is an `AttnJob` that outlives the call, `lo..hi` rows of it.
+unsafe fn attend_rows(ctx: usize, lo: usize, hi: usize) {
+    let j = unsafe { &*(ctx as *const AttnJob) };
+    let hs = j.head_size;
+    let mut att = vec![0.0f32; j.base_j + j.nq];
+    for r in lo..hi {
+        let hh = r / j.nq;
+        let t = r % j.nq;
+        let qi = j.base_j + t;
+        let qo = t * j.q_dim + hh * hs;
+        let hoff = (hh / j.kv_mul) * hs;
+        let q = unsafe { core::slice::from_raw_parts(j.q.add(qo), hs) };
+        let mut k0 = 0;
+        if j.avx {
+            // Eight keys at a time, one lane each, so every key's sum still
+            // runs over the head dimension in order with a separate multiply
+            // and add -- the scalar loop's arithmetic exactly, lane by lane.
+            k0 = (qi + 1) / 8 * 8;
+            unsafe { scores8(q.as_ptr(), j.krot.add(hoff), j.kv_dim, hs, k0, j.scale, att.as_mut_ptr()) };
+        }
+        for k in k0..=qi {
+            let kr = unsafe { core::slice::from_raw_parts(j.krot.add(k * j.kv_dim + hoff), hs) };
+            let mut score = 0.0f32;
+            for i in 0..hs {
+                score += q[i] * kr[i];
+            }
+            att[k] = score * j.scale;
+        }
+        tensor::softmax(&mut att[..qi + 1]);
+        let out = unsafe { core::slice::from_raw_parts_mut(j.out.add(qo), hs) };
+        for o in out.iter_mut() {
+            *o = 0.0;
+        }
+        let quantised = j.vc.raw.is_none();
+        for k in 0..=qi {
+            let vslot = j.win.slot_of(k);
+            let a = att[k];
+            if j.avx && quantised && hs % 8 == 0 && hoff % KV_BLOCK == 0 {
+                let vc = j.vc;
+                unsafe {
+                    axpy_q8(
+                        out.as_mut_ptr(),
+                        a,
+                        vc.data.as_ptr().add(vslot * vc.kv_dim + hoff),
+                        vc.scales.as_ptr().add(vslot * vc.blocks + hoff / KV_BLOCK),
+                        hs,
+                    )
+                };
+            } else {
+                for i in 0..hs {
+                    out[i] += a * j.vc.at(vslot, hoff + i);
+                }
+            }
+        }
+    }
+}
+
+fn attn_avx() -> bool {
+    let f = crate::cpu::detected();
+    f.avx_enabled && f.avx2 && f.fma
+}
+
+/// Scores for keys `0..n` (a multiple of eight), a lane per key.
+///
+/// # Safety
+/// AVX2 present; `q` holds `hs` floats; key `k`'s row starts at
+/// `krot + k * stride` and holds `hs` floats; `att` holds `n`.
+#[target_feature(enable = "avx2")]
+unsafe fn scores8(q: *const f32, krot: *const f32, stride: usize, hs: usize, n: usize, scale: f32, att: *mut f32) {
+    use core::arch::x86_64::*;
+    unsafe {
+        let st = stride as i32;
+        let idx = _mm256_setr_epi32(0, st, 2 * st, 3 * st, 4 * st, 5 * st, 6 * st, 7 * st);
+        let sc = _mm256_set1_ps(scale);
+        let mut k = 0;
+        while k < n {
+            let base = krot.add(k * stride);
+            let mut acc = _mm256_setzero_ps();
+            for i in 0..hs {
+                let kv = _mm256_i32gather_ps::<4>(base.add(i), idx);
+                // Multiply then add, never fused: the scalar loop rounds twice.
+                acc = _mm256_add_ps(acc, _mm256_mul_ps(_mm256_set1_ps(*q.add(i)), kv));
+            }
+            _mm256_storeu_ps(att.add(k), _mm256_mul_ps(acc, sc));
+            k += 8;
+        }
+    }
+}
+
+/// `out[i] += a * (data[i] * scale[i / KV_BLOCK])` for `i < n`, eight at a time,
+/// in the scalar loop's order of operations.
+///
+/// # Safety
+/// AVX2 present; `n` a multiple of eight; `data` starts on a block boundary.
+#[target_feature(enable = "avx2")]
+unsafe fn axpy_q8(out: *mut f32, a: f32, data: *const i8, scales: *const f32, n: usize) {
+    use core::arch::x86_64::*;
+    unsafe {
+        let av = _mm256_set1_ps(a);
+        let mut i = 0;
+        while i < n {
+            let packed = _mm_loadl_epi64(data.add(i) as *const __m128i);
+            let d = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(packed));
+            let v = _mm256_mul_ps(d, _mm256_set1_ps(*scales.add(i / KV_BLOCK)));
+            let o = _mm256_loadu_ps(out.add(i));
+            _mm256_storeu_ps(out.add(i), _mm256_add_ps(o, _mm256_mul_ps(av, v)));
+            i += 8;
+        }
+    }
+}
+
 impl KvLayer {
     fn new(cap: usize, kv_dim: usize, exact: bool) -> Self {
         let blocks = kv_dim.div_ceil(KV_BLOCK);
@@ -3058,35 +3212,23 @@ impl Model {
                 }
 
                 // Causal attention: query t sees live keys 0..=base_j+t and
-                // nothing later. Scores ascend over j, head dims accumulate
-                // ascending -- the same order `attend` established.
-                for hh in 0..c.n_heads {
-                    let qo = hh * head_size;
-                    let hoff = (hh / kv_mul) * head_size;
-                    for t in 0..n {
-                        let qi = base_j + t;
-                        for j in 0..=qi {
-                            let ko = j * kvd + hoff;
-                            let mut score = 0.0f32;
-                            for i in 0..head_size {
-                                score += qb[t * qd + qo + i] * s.krot[ko + i];
-                            }
-                            s.att[hh * cap + j] = score * inv_scale;
-                        }
-                        tensor::softmax(&mut s.att[hh * cap..hh * cap + qi + 1]);
-                        for i in 0..head_size {
-                            ao[t * qd + qo + i] = 0.0;
-                        }
-                        let vc = &s.value_cache[l];
-                        for j in 0..=qi {
-                            let vslot = wend.slot_of(j);
-                            let a = s.att[hh * cap + j];
-                            for i in 0..head_size {
-                                ao[t * qd + qo + i] += a * vc.at(vslot, hoff + i);
-                            }
-                        }
-                    }
-                }
+                // nothing later, across every core -- see `attend_rows`.
+                let job = AttnJob {
+                    q: qb.as_ptr(),
+                    out: ao.as_mut_ptr(),
+                    krot: s.krot.as_ptr(),
+                    vc: &s.value_cache[l],
+                    win: &wend,
+                    nq: n,
+                    base_j,
+                    q_dim: qd,
+                    head_size,
+                    kv_dim: kvd,
+                    kv_mul,
+                    scale: inv_scale,
+                    avx: attn_avx(),
+                };
+                job.run(c.n_heads);
 
                 self.wo(l).matvec_batch(&mut xo, &ao, n);
                 for t in 0..n {
@@ -3231,34 +3373,22 @@ impl Model {
     fn attend(&self, s: &mut State, w: &Window, cache: usize, kv_dim: usize, kv_mul: usize) {
         let c = &self.cfg;
         let head_size = c.head_size();
-        let cap = s.cap;
-        let scale = 1.0 / tensor::sqrtf(head_size as f32);
-        for h in 0..c.n_heads {
-            let qo = h * head_size;
-            let ao = h * cap;
-            let hoff = (h / kv_mul) * head_size;
-            for t in 0..w.live {
-                let ko = t * kv_dim + hoff;
-                let mut score = 0.0f32;
-                for i in 0..head_size {
-                    score += s.q[qo + i] * s.krot[ko + i];
-                }
-                s.att[ao + t] = score * scale;
-            }
-            tensor::softmax(&mut s.att[ao..ao + w.live]);
-
-            for i in 0..head_size {
-                s.xb[qo + i] = 0.0;
-            }
-            let vc = &s.value_cache[cache];
-            for t in 0..w.live {
-                let vslot = w.slot_of(t);
-                let a = s.att[ao + t];
-                for i in 0..head_size {
-                    s.xb[qo + i] += a * vc.at(vslot, hoff + i);
-                }
-            }
-        }
+        let job = AttnJob {
+            q: s.q.as_ptr(),
+            out: s.xb.as_mut_ptr(),
+            krot: s.krot.as_ptr(),
+            vc: &s.value_cache[cache],
+            win: w,
+            nq: 1,
+            base_j: w.live - 1,
+            q_dim: c.q_dim(),
+            head_size,
+            kv_dim,
+            kv_mul,
+            scale: 1.0 / tensor::sqrtf(head_size as f32),
+            avx: attn_avx(),
+        };
+        job.run(c.n_heads);
     }
 
     /// One decode step through a Qwen3.5 hybrid.

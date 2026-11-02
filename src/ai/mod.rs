@@ -1476,7 +1476,20 @@ pub fn echo_end() -> Option<alloc::string::String> {
     unsafe { (*ECHO.get()).take() }
 }
 
+/// Where the clean text goes besides the screen, while somebody wants it:
+/// `office` sets the typist here, so the model's draft is typed into a
+/// document as it is generated. A plain `fn`, so nothing borrowed can outlive
+/// the call that set it; cleared by the same caller when the generation ends.
+static TAP: Racy<Option<fn(&str)>> = Racy::new(None);
+
+pub fn set_tap(f: Option<fn(&str)>) {
+    unsafe { *TAP.get() = f };
+}
+
 fn echo(s: &str) {
+    if let Some(f) = unsafe { *TAP.get() } {
+        f(s);
+    }
     if let Some(buf) = unsafe { (*ECHO.get()).as_mut() } {
         if buf.len() + s.len() <= ECHO_CAP {
             buf.push_str(s);
@@ -1830,10 +1843,36 @@ pub fn generate(prompt: &str, opts: &GenOpts) {
         let t0 = crate::time::rdtsc();
         console::set_color(LTCYAN);
 
+        // **The prompt in one pass, when nothing needs it echoed.** Fed a
+        // token at a time, every prompt token cost a full stream of the
+        // weights, and a chat prompt is mostly prompt: `office write` spent
+        // longer on its 120-token instructions than on the 63-token letter it
+        // wrote, and a document to summarise would have been minutes before
+        // the first word. `prefill` streams each matrix once per chunk and is
+        // bit-identical to the loop, so the logits it leaves are exactly the
+        // ones the last forward below would have left -- which is why the
+        // first iteration samples from them rather than running a forward.
+        //
+        // `gen` echoes its prompt as it is fed, and keeps the loop for that.
+        let mut primed = false;
+        let mut prefill_cycles = 0u64;
+        if !opts.echo_prompt && prompt_tokens.len() > 1 {
+            let p0 = crate::time::rdtsc();
+            pos = e.model.prefill(&mut e.state, &prompt_tokens, pos);
+            prefill_cycles = crate::time::rdtsc() - p0;
+            fed = prompt_tokens.len();
+            token = prompt_tokens[prompt_tokens.len() - 1];
+            primed = true;
+        }
+
         while pos < cap && generated < opts.steps {
-            e.model.forward(&mut e.state, token, pos);
-            pos += 1;
-            fed += 1;
+            if primed {
+                primed = false;
+            } else {
+                e.model.forward(&mut e.state, token, pos);
+                pos += 1;
+                fed += 1;
+            }
 
             // While the prompt lasts we already know the next token; the
             // forward pass still had to happen, because it is what fills the
@@ -1910,7 +1949,10 @@ pub fn generate(prompt: &str, opts: &GenOpts) {
         emit(&mut pending);
         // A marker held for the next token that never came is text.
         show(plain_text("", true));
-        let elapsed = crate::time::rdtsc() - t0;
+        // The prompt is reported apart from the answer: divided into one
+        // figure, a 1,500-token prompt read as a model taking six seconds a
+        // token to write six tokens, when the decode was its usual speed.
+        let elapsed = crate::time::rdtsc() - t0 - prefill_cycles;
         console::set_color(LTGRAY);
         kprintln!();
 
@@ -1924,6 +1966,15 @@ pub fn generate(prompt: &str, opts: &GenOpts) {
                 // under emulation -- the number was least informative where it
                 // mattered most.
                 let per = us / generated.max(1) as u64;
+                if prefill_cycles > 0 {
+                    let pus = prefill_cycles / mhz;
+                    kprintln!(
+                        "  prompt {} tokens in {}.{:03} s",
+                        prompt_tokens.len(),
+                        pus / 1_000_000,
+                        (pus % 1_000_000) / 1000
+                    );
+                }
                 kprintln!(
                     "  {} tokens in {}.{:03} s  ({} ms/token)",
                     generated,
@@ -2285,6 +2336,131 @@ pub fn spawn_agent() -> bool {
 /// produces fluent-looking nonsense rather than an error. Feeding fixed ids and
 /// diffing the logits against the same arithmetic done in numpy turns all of
 /// that into one comparison, with no tokenizer in the way to muddy it.
+/// Several answers to one prompt, for paying the prompt once.
+///
+/// `generate` prefills and decodes one answer; asking it `k` times would
+/// prefill `k` times, and on a 2,000-token spreadsheet prompt the prefill is
+/// most of a minute. Here the prompt is prefilled once, the logits it leaves
+/// are kept, and every draw starts from them at the same position -- each
+/// draw's tokens overwrite the cache slots after the prompt, and attention
+/// reads only the live range, so no draw sees another's.
+///
+/// The first draw is greedy, so the set always contains what `generate` at
+/// temperature zero would have answered. Answers are raw text, stopped at
+/// end of turn or after `steps` tokens; `None` with no model or a busy engine.
+pub fn samples(prompt: &str, k: usize, steps: usize, temperature: f32, topp: f32) -> Option<Vec<alloc::string::String>> {
+    with_engine(|e| {
+        let ids = e.tok.encode(prompt, false, false);
+        if ids.len() < 2 || ids.len() + steps >= e.model.cfg.seq_len {
+            return Vec::new();
+        }
+        let start = e.model.prefill(&mut e.state, &ids, 0);
+        let primed = e.state.logits.clone();
+        let mut out = Vec::with_capacity(k);
+        for draw in 0..k {
+            e.state.logits.copy_from_slice(&primed);
+            let mut pos = start;
+            let mut prev = ids[ids.len() - 1];
+            let mut bytes: Vec<u8> = Vec::new();
+            for _ in 0..steps {
+                let temp = if draw == 0 { 0.0 } else { temperature };
+                let t = sample::sample(&mut e.state.logits, temp, topp, &mut e.rng);
+                if t == e.tok.eos() || t == e.tok.bos() {
+                    break;
+                }
+                e.tok.append_piece(prev, t, &mut bytes);
+                prev = t;
+                if pos >= e.model.cfg.seq_len {
+                    break;
+                }
+                e.model.forward(&mut e.state, t, pos);
+                pos += 1;
+            }
+            out.push(alloc::string::String::from_utf8_lossy(&bytes).into_owned());
+        }
+        e.pos = 0;
+        out
+    })
+}
+
+/// `logits check <n> [seed]`: one sequence two ways, `prefill` against the
+/// token-by-token forward, and every logit compared.
+///
+/// `prefill` promises results bit-identical to feeding the tokens one at a
+/// time, and `logits` could only check that on a prompt short enough to type
+/// over serial -- a long one arrives mangled. The bench prompts are 1,000 to
+/// 2,700 tokens, which is where a fault in the chunked path would live and
+/// where nothing had looked. The ids are made here, from a seed, so the
+/// sequence is as long as asked and the same every time.
+pub fn prefill_check(n: usize, seed: u64) {
+    kprintln!("[logits check]");
+    let done = with_engine(|e| {
+        let cap = e.model.cfg.seq_len;
+        let n = n.min(cap).max(2);
+        // Ordinary vocabulary: below the special tokens at the end.
+        let span = (e.tok.vocab_size() as u64).min(30_000).max(256) - 200;
+        let mut x = seed | 1;
+        let ids: Vec<usize> = (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (200 + x % span) as usize
+            })
+            .collect();
+        let mhz = crate::time::tsc_mhz().max(1);
+        let t0 = crate::time::rdtsc();
+        e.model.prefill(&mut e.state, &ids, 0);
+        let t_pre = (crate::time::rdtsc() - t0) / mhz;
+        let a = e.state.logits.clone();
+        let t1 = crate::time::rdtsc();
+        for (p, &t) in ids.iter().enumerate() {
+            e.model.forward(&mut e.state, t, p);
+        }
+        let t_fwd = (crate::time::rdtsc() - t1) / mhz;
+        let b = &e.state.logits;
+        let mut differ = 0usize;
+        let mut worst = 0.0f32;
+        for (u, v) in a.iter().zip(b.iter()) {
+            if u.to_bits() != v.to_bits() {
+                differ += 1;
+                let d = if u > v { u - v } else { v - u };
+                if d > worst {
+                    worst = d;
+                }
+            }
+        }
+        let arg = |l: &[f32]| {
+            let mut best = 0;
+            for i in 0..l.len() {
+                if l[i] > l[best] {
+                    best = i;
+                }
+            }
+            best
+        };
+        e.pos = n;
+        (n, a.len(), differ, worst, arg(&a), arg(b), t_pre, t_fwd)
+    });
+    let Some((n, total, differ, worst, ta, tb, t_pre, t_fwd)) = done else {
+        kprintln!("  {}", engine_refusal());
+        return;
+    };
+    kprintln!("  {} tokens: prefill {} ms, one at a time {} ms", n, t_pre / 1000, t_fwd / 1000);
+    kprintln!("  top token {} by prefill, {} one at a time", ta, tb);
+    if differ == 0 {
+        kprintln!("  ok   all {} logits bit-identical", total);
+    } else {
+        // Printed as micro-units: there is no float formatting in kprintln.
+        kprintln!(
+            "  FAIL {} of {} logits differ, the worst by {} millionths",
+            differ,
+            total,
+            (worst * 1_000_000.0) as u64
+        );
+    }
+}
+
 pub fn logits_for(ids: &[usize]) {
     console::set_color(YELLOW);
     kprintln!("[logits]");

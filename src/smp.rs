@@ -282,6 +282,15 @@ extern "C" fn glados_ap_main() -> ! {
         } else {
             core::hint::spin_loop();
         }
+        // **Whatever woke this core, the scheduler is asked.** A kick is an
+        // interrupt sent precisely so a core picks up a task made runnable
+        // for it, and its handler only acknowledges it -- so the core went
+        // back to `mwait` with the task still waiting, and it ran at the next
+        // timer tick instead: a child's parent waited 7.8 ms to reap it, on
+        // every fork. Nothing ready is one look at the table.
+        if adopted {
+            crate::task::yield_now();
+        }
     }
 }
 
@@ -365,6 +374,13 @@ static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 /// What a worker runs: `(ctx, lo, hi)` over a half-open row range.
 pub type ChunkFn = unsafe fn(usize, usize, usize);
 
+/// Interrupts are deliberately *not* masked here. Masking them while a helper
+/// ran its chunks was tried, to keep a helper from being preempted holding a
+/// chunk the caller spins on: it measured nothing (16 s against 17 for one
+/// bench task), and beside a running LibreOffice it left TLB shootdowns
+/// unanswered -- a helper with IF clear cannot take the IPI -- and stalled the
+/// compositor for two seconds. The preemption it guarded against was really
+/// pool tasks that never slept, fixed where they park.
 fn claim_and_run() {
     ACTIVE.fetch_add(1, Ordering::AcqRel);
     claim_inner();

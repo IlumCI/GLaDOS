@@ -54,6 +54,9 @@ struct Job {
     started: u64,
     ended: u64,
     state: State,
+    /// Ends without a notice at the next prompt: a job something else
+    /// started and waits on, whose "done" is that caller's to report.
+    quiet: bool,
 }
 
 static JOBS: Spin<Vec<Job>> = Spin::new(Vec::new());
@@ -63,8 +66,24 @@ static NEXT_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::n
 /// thousands of short jobs does not grow the table forever.
 const KEEP_DONE: usize = 16;
 
+/// The title of the quiet job the current task is running, if it is one:
+/// something started in the background whose output is not the terminal's.
+pub fn quiet_here() -> Option<String> {
+    let me = crate::task::current();
+    JOBS.lock_irq().iter().find(|j| j.task == Some(me) && j.quiet).map(|j| j.title.clone())
+}
+
 /// Start `work` on a task of its own. Answers the job's number.
 pub fn start(runtime: &'static Runtime, title: String, work: Work) -> Result<u32, &'static str> {
+    start_as(runtime, title, work, false)
+}
+
+/// `start`, with no notice when it ends.
+pub fn start_quiet(runtime: &'static Runtime, title: String, work: Work) -> Result<u32, &'static str> {
+    start_as(runtime, title, work, true)
+}
+
+fn start_as(runtime: &'static Runtime, title: String, work: Work, quiet: bool) -> Result<u32, &'static str> {
     let id = NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     {
         let mut jobs = JOBS.lock_irq();
@@ -81,6 +100,7 @@ pub fn start(runtime: &'static Runtime, title: String, work: Work) -> Result<u32
             started: crate::dev::lapic::ticks(),
             ended: 0,
             state: State::Starting(work),
+            quiet,
         });
     }
     if crate::task::spawn("job", entry).is_none() {
@@ -109,11 +129,11 @@ fn entry() {
     let summary = work();
     let title = {
         let mut jobs = JOBS.lock_irq();
-        jobs.iter_mut().find(|j| j.id == id).map(|j| {
+        jobs.iter_mut().find(|j| j.id == id).and_then(|j| {
             j.ended = crate::dev::lapic::ticks();
             j.state = State::Done(summary.clone());
             j.task = None;
-            j.title.clone()
+            (!j.quiet).then(|| j.title.clone())
         })
     };
     // **Held for the shell's next prompt rather than printed now**, which is

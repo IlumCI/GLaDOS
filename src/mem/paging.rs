@@ -29,6 +29,207 @@ pub(crate) const HUGE: u64 = 1 << 7;
 pub(crate) const USER: u64 = 1 << 2;
 /// Bit 63. Means no-execute, but only once `EFER.NXE` is on.
 const NX: u64 = 1 << 63;
+/// Software bit 9: this leaf belongs to demand-paged memory. **Not present
+/// with a frame of zero**, it is a promise -- a page that will be supplied,
+/// zeroed, the first time anything touches it, with the rights the other bits
+/// of the entry already carry. **Present**, it says the frame was supplied that
+/// way, so whoever unmaps the range owns it and frees it.
+///
+/// Why this exists: every anonymous mapping a guest asked for used to be
+/// backed in full at `mmap` time. glibc reserves 128 MiB per thread arena and
+/// touches a few pages of it, every thread stack is 8 MiB of which a program
+/// uses kilobytes, and Mesa and Qt reserve the same way -- so one GTK 4
+/// program with a dozen threads asked for gigabytes, and three programs ran a
+/// 4 GiB heap dry. Linux supplies a page when it is first touched, and so
+/// does this now. Bits 9 to 11 are the processor's to ignore at every level.
+pub(crate) const DEMAND: u64 = 1 << 9;
+/// Software bit 10, meaningful only on a promised (not yet supplied) leaf:
+/// the mapping is accessible at all. `PROT_NONE` clears it, which is the
+/// promised-page equivalent of clearing `PRESENT` on a supplied one -- the
+/// present bit cannot carry it, since present is what a promise is not.
+const ACCESS: u64 = 1 << 10;
+
+/// Software bit 11, on a demand-paged leaf: the page's bytes come from a file
+/// rather than being zero. Kept when the promise is supplied, which costs
+/// nothing (the processor ignores bit 11) and keeps the leaf saying what it is.
+///
+/// Why this exists: a file mapping was a copy of the whole range at `mmap`
+/// time, and `ldconfig` maps every library in `/usr/lib` whole to read a few
+/// hundred bytes of each -- 88 s after every pacman transaction, nearly all of
+/// it reading libLLVM and friends off the disk. A promise that knows it is a
+/// file reads one page when one page is touched.
+///
+/// **The bit is what says to ask the filler, not the filler's own records.**
+/// An anonymous promise never consults them, so a stale record left over a
+/// range that has since become ordinary memory cannot put a file's bytes where
+/// a program was promised zeros.
+pub(crate) const FILE: u64 = 1 << 11;
+
+/// Software bits 52 and 53 of a present leaf: the frame is shared copy-on-write
+/// with another process, and the page is writable as far as the guest knows.
+///
+/// **`fork` copied every page a process had touched**, and pacman is large:
+/// 47 forks during one install copied 420,621 pages, 1.7 GB, at 25 ms a fork,
+/// for children that mostly `exec` at once. Now parent and child share each
+/// demand-supplied frame read-only, and the first write on either side takes
+/// a copy (`cow_break`) -- or, if it is the last sharer left, simply takes the
+/// frame back. `WANT_W` is what makes the difference between a write that
+/// owed a copy and a write to a page that really is read-only.
+pub(crate) const COW: u64 = 1 << 52;
+pub(crate) const WANT_W: u64 = 1 << 53;
+
+/// How many leaves name each shared frame. A frame absent here belongs to
+/// whichever one leaf names it.
+static SHARED: crate::sync::Spin<alloc::collections::BTreeMap<u64, u32>> =
+    crate::sync::Spin::new(alloc::collections::BTreeMap::new());
+
+/// Share the demand-supplied page at `addr`, under the current root, with a
+/// child: the leaf becomes read-only and copy-on-write, and the answer is the
+/// leaf the child is to have. `None` when the page is not one this can share.
+pub fn cow_share(addr: u64) -> Option<u64> {
+    let mut shared = SHARED.lock_irq();
+    let slot = unsafe { entry_for(addr, false) }?;
+    let e = *slot;
+    if e & PRESENT == 0 || e & DEMAND == 0 || e & ADDR_MASK == 0 {
+        return None;
+    }
+    let writable = e & WRITABLE != 0 || e & WANT_W != 0;
+    let new = (e & !WRITABLE) | COW | if writable { WANT_W } else { 0 };
+    if e != new {
+        *slot = new;
+        unsafe { core::arch::asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags)) };
+    }
+    let n = shared.entry(e & ADDR_MASK).or_insert(1);
+    *n += 1;
+    Some(new)
+}
+
+/// A leaf naming `phys` is being dropped: whether the frame is now nobody's
+/// and may go back to the heap.
+pub fn cow_release(leaf: u64) -> bool {
+    if leaf & COW == 0 {
+        return true;
+    }
+    let mut shared = SHARED.lock_irq();
+    let phys = leaf & ADDR_MASK;
+    match shared.get_mut(&phys) {
+        Some(n) if *n > 1 => {
+            *n -= 1;
+            if *n == 1 {
+                // One sharer left; it still carries the bit, and its next
+                // write finds no entry and takes the frame back.
+                shared.remove(&phys);
+            }
+            false
+        }
+        _ => {
+            shared.remove(&phys);
+            true
+        }
+    }
+}
+
+/// A write to a copy-on-write page at `addr`, under the current root: give
+/// this leaf a frame of its own, or the shared one if nobody else is left.
+/// Answers whether the page is now writable; false for a page that is not
+/// copy-on-write or not writable at all, which is a real fault.
+///
+/// Nothing here waits, so it is safe from the page-fault handler on its own
+/// stack; the copy is made before the leaf changes, so no thread of this
+/// process sees a half-copied page.
+pub fn cow_break(addr: u64) -> bool {
+    let page = addr & !0xFFF;
+    let mut shared = SHARED.lock_irq();
+    let Some(slot) = (unsafe { entry_for(page, false) }) else { return false };
+    let e = *slot;
+    if e & PRESENT == 0 {
+        return false;
+    }
+    if e & COW == 0 {
+        // Another thread of this process got here first.
+        return e & WRITABLE != 0;
+    }
+    if e & WANT_W == 0 {
+        return false;
+    }
+    let phys = e & ADDR_MASK;
+    let others = shared.get(&phys).copied().unwrap_or(1);
+    let frame = if others <= 1 {
+        shared.remove(&phys);
+        phys
+    } else {
+        let Ok(layout) = alloc::alloc::Layout::from_size_align(4096, 4096) else { return false };
+        let f = unsafe { alloc::alloc::alloc(layout) };
+        if f.is_null() {
+            return false;
+        }
+        unsafe { core::ptr::copy_nonoverlapping(phys as *const u8, f, 4096) };
+        let n = shared.get_mut(&phys).unwrap();
+        *n -= 1;
+        if *n == 1 {
+            shared.remove(&phys);
+        }
+        f as u64
+    };
+    *slot = (frame & ADDR_MASK) | (e & !ADDR_MASK & !(COW | WANT_W)) | WRITABLE;
+    unsafe { core::arch::asm!("invlpg [{}]", in(reg) page, options(nostack, preserves_flags)) };
+    true
+}
+
+/// Whether the access a page fault describes would now succeed: the leaf for
+/// `addr` is present and allows a user access, a write, a fetch, as the error
+/// code asks. True means the fault was resolved by somebody else between the
+/// processor raising it and the handler looking -- another thread filling the
+/// same page -- and the instruction only has to run again.
+pub fn resolved(addr: u64, err: u64) -> bool {
+    let Some(e) = (unsafe { entry_for(addr & !0xFFF, false) }).map(|e| *e) else { return false };
+    if e & PRESENT == 0 {
+        return false;
+    }
+    let user = err & 4 != 0;
+    let write = err & 2 != 0;
+    let fetch = err & 16 != 0;
+    (!user || e & USER != 0)
+        && (!write || e & WRITABLE != 0)
+        && (!fetch || e & NX == 0 || !crate::cpu::nx_on())
+}
+
+/// Whether `addr` under the current root is a copy-on-write page the guest may
+/// write -- a write the kernel must break the share for before making it.
+pub fn cow_writable(addr: u64) -> bool {
+    unsafe { entry_for(addr & !0xFFF, false) }.is_some_and(|e| *e & PRESENT != 0 && *e & COW != 0 && *e & WANT_W != 0)
+}
+
+/// What supplies a file promise's bytes: given the page's address and a zeroed
+/// frame, fill the frame and answer whether it could. Registered by
+/// `linux::syscall`, which is where the mappings that know their files live.
+static FILLER: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+pub fn set_filler(f: fn(u64, *mut u8) -> bool) {
+    FILLER.store(f as usize, core::sync::atomic::Ordering::Release);
+}
+
+/// A promise whose page will be read from a file (see `FILE`).
+pub(crate) fn promise_file(perm: Perm) -> u64 {
+    promise(perm) | FILE
+}
+
+/// Whether an entry is a promise: demand-paged, and not yet given a page.
+/// Frame zero is the tell, which is safe because the heap never hands out
+/// physical page 0 -- the identity map's first page is the null guard.
+pub(crate) fn is_promise(e: u64) -> bool {
+    e & DEMAND != 0 && e & PRESENT == 0 && e & ADDR_MASK == 0
+}
+
+/// The leaf a promised page gets: no frame, no present bit, the rights kept
+/// for when it is supplied.
+pub(crate) fn promise(perm: Perm) -> u64 {
+    let mut e = DEMAND | (perm.bits() & !PRESENT);
+    if perm.present {
+        e |= ACCESS;
+    }
+    e
+}
 /// The physical address field of a 2 MiB entry is bits 51:21, not 51:12.
 const ADDR_MASK_2M: u64 = 0x000F_FFFF_FFE0_0000;
 /// And of a 1 GiB entry, bits 51:30.
@@ -593,6 +794,17 @@ pub fn release_to_heap(at: u64, len: usize) -> bool {
 /// the hardware about a page somebody else changed.
 pub fn query(addr: u64) -> Option<Perm> {
     let e = *unsafe { entry_for(addr, false) }?;
+    // A promise answers with the rights it will have, except that it is not
+    // present: anything about to read through the address has to `populate`
+    // it first, or take the fault that does.
+    if is_promise(e) {
+        return Some(Perm {
+            user: e & USER != 0,
+            present: false,
+            write: e & WRITABLE != 0,
+            exec: e & NX == 0 || !crate::cpu::nx_on(),
+        });
+    }
     Some(Perm {
         user: e & USER != 0,
         present: e & PRESENT != 0,
@@ -603,6 +815,95 @@ pub fn query(addr: u64) -> Option<Perm> {
         // comfortable lie.
         exec: e & NX == 0 || !crate::cpu::nx_on(),
     })
+}
+
+/// The raw leaf entry for `addr` under the current CR3, present or not.
+pub fn leaf(addr: u64) -> Option<u64> {
+    unsafe { entry_for(addr, false) }.map(|e| *e)
+}
+
+/// Whether `addr`, under the current CR3, is a page promised and not yet
+/// supplied, and whether the access would be allowed once it is.
+pub fn promised(addr: u64, write: bool) -> bool {
+    let Some(e) = (unsafe { entry_for(addr, false) }) else { return false };
+    let e = *e;
+    is_promise(e) && e & ACCESS != 0 && (!write || e & WRITABLE != 0)
+}
+
+/// `promised`, for a page whose bytes come from a file: keeping it reads a
+/// disk, which may wait and so may switch tasks, and the page-fault handler
+/// must not do that on the stack it arrives on (see `idt::glados_fault_entry`).
+pub fn file_promised(addr: u64, write: bool) -> bool {
+    promised(addr, write) && unsafe { entry_for(addr, false) }.is_some_and(|e| *e & FILE != 0)
+}
+
+/// Keep a promise: give the page at `addr` a zeroed frame, if the current
+/// root promises it one and the access is allowed. Answers whether the page
+/// is now there for that access -- true as well when another thread got
+/// there first.
+///
+/// Called from the page-fault handler, at either privilege level, and from
+/// `linux::syscall::reachable` before the kernel touches guest memory on the
+/// guest's behalf. Nothing here prints, takes a lock but the heap's, or
+/// touches the faulting address, because the fault path is all of those
+/// callers' worst place to do any of it.
+///
+/// **A compare-and-swap installs it**, because the leaf may be shared: every
+/// thread of a process walks the same tables, so two threads on two cores can
+/// fault the same page in the same instant. The loser frees its frame and
+/// finds the winner's. No flush is needed on the way in, since a
+/// translation that was not present is not cached.
+pub fn populate(addr: u64, write: bool) -> bool {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    let Some(slot) = (unsafe { entry_for(addr, false) }) else { return false };
+    let cell = unsafe { &*(slot as *mut u64 as *const AtomicU64) };
+    let e = cell.load(Ordering::Acquire);
+    if !is_promise(e) {
+        // Somebody already kept it, or it never was a promise.
+        return e & PRESENT != 0 && e & DEMAND != 0 && (!write || e & WRITABLE != 0);
+    }
+    if e & ACCESS == 0 || (write && e & WRITABLE == 0) {
+        return false;
+    }
+    let Ok(layout) = alloc::alloc::Layout::from_size_align(4096, 4096) else { return false };
+    let frame = unsafe { alloc::alloc::alloc_zeroed(layout) };
+    if frame.is_null() {
+        return false;
+    }
+    // A file's page is filled before it is installed, so no thread of the
+    // guest can see it half-read. A filler that cannot read it answers false
+    // and the access faults, which is Linux's SIGBUS in the only form a guest
+    // here can get it.
+    if e & FILE != 0 {
+        let f = FILLER.load(core::sync::atomic::Ordering::Acquire);
+        if f != 0 {
+            let fill: fn(u64, *mut u8) -> bool = unsafe { core::mem::transmute(f) };
+            if !fill(addr & !0xFFF, frame) {
+                unsafe { alloc::alloc::dealloc(frame, layout) };
+                return false;
+            }
+        }
+    }
+    let mut e = e;
+    loop {
+        let new = (frame as u64 & ADDR_MASK) | (e & !ACCESS) | PRESENT;
+        match cell.compare_exchange(e, new, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return true,
+            // **Still a promise, with new rights**: an `mprotect` landed while
+            // the page was being filled. What was filled is still this page's,
+            // so it goes in under the rights the leaf has now -- refusing it
+            // was a fault the guest had not earned.
+            Err(now) if is_promise(now) && now & ACCESS != 0 && (!write || now & WRITABLE != 0)
+                && now & FILE == e & FILE =>
+            {
+                e = now;
+            }
+            Err(now) => {
+                unsafe { alloc::alloc::dealloc(frame, layout) };
+                return now & PRESENT != 0 && (!write || now & WRITABLE != 0);
+            }
+        }
+    }
 }
 
 /// The PAT slot the leaf entry for `addr` selects, under the current CR3.
@@ -734,7 +1035,23 @@ pub fn protect(at: u64, len: usize, perm: Perm) -> bool {
     let mut addr = start;
     while addr < end {
         let Some(e) = (unsafe { entry_for_user(addr, true, perm.user) }) else { return false };
-        *e = (*e & keep) | perm.bits();
+        // A promise stays a promise and only its rights change. Written as an
+        // ordinary entry it would get the present bit over a frame of zero --
+        // physical page 0, mapped into a guest -- which is what `mprotect` on
+        // a reservation nobody has touched yet would otherwise do.
+        if is_promise(*e) {
+            *e = promise(perm) | (*e & FILE);
+            addr += PAGE_SIZE;
+            continue;
+        }
+        // A shared frame stays read-only whatever is asked: the right to
+        // write is recorded, and the first write takes a copy (`cow_break`).
+        if *e & COW != 0 {
+            let b = perm.bits();
+            *e = (*e & keep & !WANT_W) | (b & !WRITABLE) | if perm.write { WANT_W } else { 0 };
+        } else {
+            *e = (*e & keep) | perm.bits();
+        }
         // Per page rather than a CR3 reload, because a reload flushes every
         // translation in the machine and this can be called with a guest's
         // whole heap. Skipping it entirely is the failure that matters: the
@@ -967,4 +1284,5 @@ fn map_one_large(pml4_phys: u64, addr: u64, uncached: bool) -> bool {
 /// `pml4_phys` must point at a complete, correct PML4.
 pub unsafe fn activate(pml4_phys: u64) {
     unsafe { crate::cpu::write_cr3(pml4_phys & ADDR_MASK) };
+    crate::dev::lapic::note_root(pml4_phys & ADDR_MASK);
 }

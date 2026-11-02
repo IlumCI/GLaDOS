@@ -101,6 +101,34 @@ pub static FEAT_NETCTL: core::sync::atomic::AtomicBool = core::sync::atomic::Ato
 pub static FEAT_IDLE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 pub static FEAT_DESK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
+/// The pump on the way out of a syscall: always after one that touched a
+/// descriptor, otherwise at most every `AFTER_US`.
+///
+/// **It ran after every syscall, and under the guest lock.** A 32-bit game on
+/// Zink made 127,870 of them in twenty seconds -- clocks, futexes, ioctls --
+/// and each turn of the server cost 19 us with every other thread of the game
+/// queued behind it for the lock: 2.4 s of the lock held to serve a client
+/// that had nothing new to say. A request a client just wrote still meets its
+/// answer before the client next looks, because writing it and looking for
+/// the reply are both calls on a descriptor, which pump unconditionally; and
+/// every wait pumps on its own, so a client blocked on the server is served at
+/// the same pace as before.
+pub fn pump_after(touched_fd: bool) {
+    const AFTER_US: u64 = 250;
+    if !touched_fd {
+        let now = crate::time::rdtsc();
+        let gap = AFTER_US * crate::time::tsc_mhz().max(1);
+        let last = LAST_PUMP.load(core::sync::atomic::Ordering::Relaxed);
+        if now.wrapping_sub(last) < gap {
+            return;
+        }
+    }
+    LAST_PUMP.store(crate::time::rdtsc(), core::sync::atomic::Ordering::Relaxed);
+    pump();
+}
+
+static LAST_PUMP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 pub fn pump() {
     // Venus rings the host fell asleep on; see `drm::watch`.
     crate::linux::drm::watch();
@@ -115,8 +143,12 @@ pub fn pump() {
         client.publish(surface::WL_COMPOSITOR, 4);
         client.publish(surface::WL_SHM, 1);
         client.publish(surface::XDG_WM_BASE, 1);
+        client.publish(surface::WL_SUBCOMPOSITOR, 1);
         client.publish(super::seat::WL_OUTPUT, 3);
         client.publish(super::seat::WL_SEAT, 5);
+        client.publish(super::seat::DATA_MANAGER, 3);
+        client.publish(super::seat::KDE_DECORATION_MANAGER, 1);
+        client.publish(super::seat::XDG_DECORATION_MANAGER, 1);
         // Names the GPU, so Mesa's EGL renders on it; see `dmabuf`.
         if super::dmabuf::offered() {
             client.publish(super::dmabuf::DMABUF, 4);
@@ -265,8 +297,11 @@ fn turn(s: &mut Session, now: u64, changed: &mut bool) -> bool {
         }
         s.focused = focused;
         // Keys pressed while somebody else had the focus are not this
-        // window's.
-        s.kbd = crate::linux::input::now_at(crate::linux::input::Dev::Keyboard);
+        // window's -- counted from when the focus moved, not from now, or the
+        // keys typed between the two are thrown away (see `mark_focus`).
+        let now = crate::linux::input::now_at(crate::linux::input::Dev::Keyboard);
+        let mark = crate::linux::input::focus_mark();
+        s.kbd = if focused.is_some() && mark > s.kbd && mark <= now { mark } else { now };
     }
     // The pointer lock: while it holds, the desktop routes buttons to this
     // window wherever the cursor is, and motion arrives as relative counts
@@ -289,6 +324,7 @@ fn turn(s: &mut Session, now: u64, changed: &mut bool) -> bool {
                 s.client.input(surf, super::seat::Input::Key { code: e.code as u32, down: e.value == 1 });
             }
         }
+        crate::linux::input::note_read(s.kbd);
     }
 
     // Answers, as far as the socket has room -- and any descriptors the events
@@ -382,6 +418,8 @@ impl Window {
         let at = (x - client.x as i32, y - client.y as i32);
         self.last = at;
         INPUT.lock_irq().push((self.key, super::seat::Input::Pointer { x: at.0, y: at.1, button }));
+        // Handed over when the client next looks -- so it looks now. See `key`.
+        crate::linux::syscall::wake_nappers();
         true
     }
 }
@@ -439,6 +477,11 @@ impl crate::gfx::DeskApp for Window {
     /// Taken and dropped: a client's keys are the evdev events, delivered as
     /// such, and handing it the decoded character too would type twice.
     fn key(&mut self, _k: u8) -> bool {
+        // The key itself travels by the evdev ring, which the client drains
+        // when it next enters the kernel; this makes that now. A client
+        // asleep in `poll` naps up to `NAP_MAX` when nothing it watches can
+        // change by a syscall, and a keystroke is not a syscall.
+        crate::linux::syscall::wake_nappers();
         true
     }
 
@@ -468,6 +511,11 @@ impl crate::gfx::DeskApp for Window {
             self.point(client, x, y, None);
         }
         false
+    }
+
+    fn wheel(&mut self, notches: i32) -> bool {
+        INPUT.lock_irq().push((self.key, super::seat::Input::Wheel(notches)));
+        true
     }
 
     fn release(&mut self) -> bool {

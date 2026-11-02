@@ -43,6 +43,7 @@
 //! `MAP_FIXED` and file-backed mappings, which is how it lays out everything
 //! it loads afterwards. Refused today, and the next rung.
 
+use alloc::string::String;
 use super::{elf, syscall};
 use crate::cpu::code::Exec;
 use alloc::vec::Vec;
@@ -81,6 +82,11 @@ const GUEST_STACK: usize = 1024 * 1024;
 /// to. 256 KiB is enough for any allocator's first few arenas and small
 /// enough that a guest which runs away hits the ceiling instead of the heap.
 const GUEST_BRK: usize = 256 * 1024;
+
+/// How much of the top of a guest's stack is backed at load rather than
+/// promised: room for the arguments, the environment and the aux vector,
+/// which are written there before the guest runs.
+const STACK_BACKED: usize = 128 * 1024;
 
 /// Where a guest's own memory lives when it has a space, and why it is here.
 ///
@@ -392,6 +398,16 @@ fn place(bytes: &[u8], arena: Option<u64>) -> Result<Placed, &'static str> {
     Ok(Placed { img, hold, base, lo, span })
 }
 
+/// A region the guest owns ends on a page boundary, because rights are applied
+/// and pages mapped a page at a time, so the tail of the last page past
+/// `memsz` is the guest's as much as the rest of it. glibc's loader depends on
+/// that: its start-up allocator carves out the remainder of the page after its
+/// own `.bss` first, and keeps the `LD_PRELOAD` path and every error message's
+/// pieces there -- so an exact span answered `EFAULT` to both.
+fn whole_pages(n: usize) -> usize {
+    (n + 4095) & !4095
+}
+
 /// The interpreter paths the world actually uses, and which libc each is.
 ///
 /// **Not a list of what is supported.** Nothing in this loader is
@@ -536,23 +552,40 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
         _ => None,
     };
 
-    let brk = Exec::new(GUEST_BRK).ok_or("no room for a break region")?;
-    let stack = Exec::new(GUEST_STACK).ok_or("no room for a stack")?;
+    // **With a space, the stack and the break are promised, not allocated.**
+    // Every page of both was backed and mapped at load, so every `fork`
+    // copied all of them -- 320 pages of a 1 MiB stack and a 256 KiB break,
+    // nearly none ever touched -- and every `exec` allocated them again.
+    // Promised, a page is supplied zeroed when first touched and a fork
+    // shares what has been (`paging::COW`). Only the top of the stack is
+    // backed now, because the arguments, environment and aux vector are
+    // written there before the guest has tables to fault through.
+    let brk = Exec::new(if virt { 4096 } else { GUEST_BRK }).ok_or("no room for a break region")?;
+    let stack_backed = if virt { STACK_BACKED } else { GUEST_STACK };
+    let stack = Exec::new(stack_backed).ok_or("no room for a stack")?;
 
     // Where the guest will see them, which is where the kernel put them only
     // when there is no space to map them into.
     let (stack_at, brk_at) = match space.as_mut() {
         Some(sp) => {
-            for (backing, at, len) in
-                [(stack.addr(), lay.stack, GUEST_STACK), (brk.addr(), lay.brk, GUEST_BRK)]
-            {
+            let rw = crate::mem::paging::Perm { present: true, write: true, exec: true, user: true };
+            let promised = GUEST_STACK - stack_backed;
+            for (at, len) in [(lay.stack, promised), (lay.brk, GUEST_BRK)] {
                 let mut off = 0u64;
                 while off < len as u64 {
-                    if !sp.map_page(at + off, backing + off, true, true) {
+                    if !sp.promise_page(at + off, rw) {
                         return Err("the guest's stack or break could not be mapped");
                     }
                     off += 4096;
                 }
+            }
+            let top = lay.stack + promised as u64;
+            let mut off = 0u64;
+            while off < stack_backed as u64 {
+                if !sp.map_page(top + off, stack.addr() + off, true, true) {
+                    return Err("the guest's stack or break could not be mapped");
+                }
+                off += 4096;
             }
             (lay.stack, lay.brk)
         }
@@ -579,10 +612,12 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
             .map(|s| base + (s.vaddr - lo) + (img.phoff - s.offset) as u64)
     });
     let build = if bits32 { syscall::build_stack32 } else { syscall::build_stack };
+    // The backed part is the top of the region, so that is what is built in:
+    // the same top address, a smaller span below it.
     let stack_top = build(
         stack.addr() as *mut u8,
-        stack_at,
-        GUEST_STACK,
+        stack_at + (GUEST_STACK - stack_backed) as u64,
+        stack_backed,
         args,
         syscall::Aux {
             phdr: phdr.unwrap_or(0),
@@ -609,14 +644,14 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Guest, &'static str> {
         Some((path, p)) => (
             Some((path, p.base, p.base + (p.img.entry - p.lo))),
             Some(p.hold),
-            Some(syscall::Region { at: p.base, len: p.span }),
+            Some(syscall::Region { at: p.base, len: whole_pages(p.span) }),
         ),
     };
 
     Ok(Guest {
         argv: args.iter().map(|a| alloc::string::String::from(*a)).collect(),
         regions: syscall::Regions {
-            image: syscall::Region { at: base, len: span },
+            image: syscall::Region { at: base, len: whole_pages(span) },
             stack: syscall::Region { at: stack_at, len: GUEST_STACK },
             brk: syscall::Region { at: brk_at, len: GUEST_BRK },
             interp: interp_region,
@@ -803,6 +838,28 @@ fn read_vec(at: u64) -> Result<Vec<alloc::string::String>, u64> {
     }
 }
 
+/// The interpreter and its one optional argument, from a `#!` line.
+///
+/// Linux reads the first line only, and only so far (`BINPRM_BUF_SIZE`, 256
+/// bytes); everything after the interpreter's name, spaces trimmed, is one
+/// argument however many words it has, which is why `#!/usr/bin/env -S`
+/// exists.
+pub fn shebang(bytes: &[u8]) -> Option<(String, Option<String>)> {
+    let line = bytes.get(2..)?;
+    let line = &line[..line.len().min(254)];
+    let end = line.iter().position(|&b| b == b'\n').unwrap_or(line.len());
+    let line = core::str::from_utf8(&line[..end]).ok()?.trim_matches(|c| c == ' ' || c == '\t' || c == '\r');
+    if line.is_empty() {
+        return None;
+    }
+    let (interp, rest) = match line.find([' ', '\t']) {
+        Some(i) => (&line[..i], line[i..].trim_matches(|c| c == ' ' || c == '\t')),
+        None => (line, ""),
+    };
+    let arg = if rest.is_empty() { None } else { Some(String::from(rest)) };
+    Some((String::from(interp), arg))
+}
+
 /// `execve`: become a different program, without returning.
 ///
 /// **It returns like any other syscall and that is the trick.** The stub ends
@@ -840,38 +897,98 @@ pub fn exec(f: &mut syscall::Frame) -> u64 {
         Ok(v) => v,
         Err(e) => return e,
     };
-    // The environment is read and then **not used**, which is a deviation
-    // worth stating rather than hiding: this machine's environment is
-    // `syscall::environ`, five variables each a fact about it, and a guest
-    // handing over its own would replace facts with whatever it inherited.
-    // Read anyway so an unreachable pointer is still `EFAULT`, which is what
-    // a caller checking its own arguments expects.
-    if f.rdx != 0 && read_vec(f.rdx).is_err() {
-        return EFAULT;
-    }
-
-    let Some(bytes) = crate::sysbox::read_blob(&path) else { return ENOENT };
-    let args: Vec<&str> = if argv.is_empty() {
-        alloc::vec![path.as_str()]
+    // **The new program gets the environment it was handed**, as on Linux.
+    // This read it and used the machine's own instead, on the argument that
+    // the machine's five variables are facts and an inherited copy might not
+    // be -- but a terminal sets TERM for its shell and a shell exports what
+    // its user exported, and every one of those vanished at the first exec.
+    // A null environment is the machine's, which is what Linux gives an
+    // `execve` passed nothing.
+    let envp = if f.rdx != 0 {
+        match read_vec(f.rdx) {
+            Ok(v) => Some(v),
+            Err(_) => return EFAULT,
+        }
     } else {
-        argv.iter().map(|a| a.as_str()).collect()
+        None
     };
+
+    // The program a link names is the one that runs -- `/usr/bin/vi` is often
+    // a link to another editor, and `/bin` is `usr/bin` in an Arch root --
+    // while argv[0] stays the name the caller used, which is what a program
+    // that dispatches on its own name reads.
+    let real = super::fs::resolve("/", &path).map(super::link::follow).unwrap_or_else(|| path.clone());
+    let Some(mut bytes) = super::disk::program_bytes(&real) else { return ENOENT };
+    let mut owned: Vec<String> = if argv.is_empty() { alloc::vec![path.clone()] } else { argv.clone() };
+    // **A script names its interpreter, and that is the kernel's job to
+    // read.** `#!/bin/bash` was `ENOEXEC` here, which a shell hides -- bash
+    // runs a file it cannot exec as a script itself -- and nothing else does:
+    // pacman's hooks are scripts started with `execv`, and every one failed
+    // with "Exec format error". Linux's rule exactly: the rest of the first
+    // line is the interpreter and at most one argument, the script's path
+    // takes argv[0]'s place after them, and interpreters may chain four deep.
+    let mut depth = 0;
+    let mut script = path.clone();
+    while bytes.starts_with(b"#!") {
+        depth += 1;
+        if depth > 4 {
+            return (-40i64) as u64; // ELOOP
+        }
+        let Some((interp, arg)) = shebang(&bytes) else { return ENOEXEC };
+        let mut next = alloc::vec![interp.clone()];
+        next.extend(arg);
+        next.push(script.clone());
+        next.extend(owned.into_iter().skip(1));
+        owned = next;
+        let ireal = super::fs::resolve("/", &interp).map(super::link::follow).unwrap_or_else(|| interp.clone());
+        let Some(b) = super::disk::program_bytes(&ireal) else { return ENOENT };
+        bytes = b;
+        script = interp;
+    }
+    let args: Vec<&str> = owned.iter().map(|a| a.as_str()).collect();
     // Everything that can fail happens before anything is destroyed. A failed
     // `execve` returns to a caller that is still whole, which is the one thing
     // every program using it relies on -- it is how a shell reports "command
     // not found" from the child rather than losing it.
+    if let Some(e) = envp {
+        syscall::set_exec_env(e);
+    }
     let mut g = match load(&bytes, &args) {
         Ok(g) => g,
         Err(_) => return ENOEXEC,
     };
 
+    // Every other thread of this process ends before its memory does, as
+    // Linux's `execve` ends them. They are doomed, which lands at each one's
+    // next safe point, and waited for: until the last has left, one of them
+    // may be scheduled onto the old tables, and those are freed below. A
+    // thread that will not stop in five seconds fails the call rather than
+    // the machine -- the caller is still whole, which is what `execve`
+    // promises on every failure.
+    let guest = syscall::current_guest();
+    let since = crate::dev::lapic::ticks();
+    while super::thread::doom_guest(guest, 0) > 0 {
+        if crate::dev::lapic::ticks().wrapping_sub(since) > 5 * crate::TIMER_HZ as u64 {
+            return syscall::EAGAIN;
+        }
+        syscall::wait_turn();
+    }
+
+    // The point of no return: the new image is loaded, so the descriptors
+    // marked close-on-exec go now, as Linux closes them.
+    syscall::close_on_exec();
     let regions = g.regions;
+    // Off the old root first, for the reason `run` clears its root before its
+    // space drops: `replace_guest` frees those tables, and this task's record
+    // still naming them means a preemption before the new root is set below
+    // resumes it onto freed memory.
+    let me = crate::task::current();
+    crate::task::set_root(me, 0);
     if !syscall::replace_guest(regions, g.space.take()) {
         return ENOMEM;
     }
     syscall::name_guest(&args, &path, g.interp.as_ref().map(|(p, _, _)| p.as_str()));
 
-    let me = crate::task::current();
     let root = syscall::guest_root();
     if root != 0 {
         crate::task::set_root(me, root);
@@ -928,6 +1045,14 @@ pub fn exec(f: &mut syscall::Frame) -> u64 {
 /// it does not happen.
 pub fn checks() -> Vec<(&'static str, bool)> {
     let mut out = Vec::new();
+    let sb = |t: &str| shebang(t.as_bytes());
+    out.push(("a #! line names its interpreter", sb("#!/bin/bash\nwhile") == Some((String::from("/bin/bash"), None))));
+    out.push((
+        "and the rest of the line is one argument, however many words",
+        sb("#!/usr/bin/env -S python3 -u\n") == Some((String::from("/usr/bin/env"), Some(String::from("-S python3 -u")))),
+    ));
+    out.push(("spaces around the interpreter and a CR are not part of it", sb("#! /bin/sh \r\n") == Some((String::from("/bin/sh"), None))));
+    out.push(("and a #! with nothing after it names nothing", sb("#!\n") == None && sb("#!   ") == None));
     let img = |kind: u16, interp: bool, segs: usize| elf::Image {
         entry: 0,
         kind,

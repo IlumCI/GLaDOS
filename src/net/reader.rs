@@ -418,7 +418,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     // be handed.
     out.push((
         "a guest cannot write the site table",
-        !crate::linux::fs::writable(SITES),
+        !crate::linux::ns::reaches(SITES),
     ));
 
     forget();
