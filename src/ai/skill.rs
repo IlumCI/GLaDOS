@@ -181,7 +181,7 @@ pub fn bench(h: &[u8; 32]) -> Verdict {
     let Some(src) = source(h) else { return v };
 
     // --- J1: is it a program? -------------------------------------------
-    match crate::aiksi::lex::lex(&src).and_then(crate::aiksi::parse::parse) {
+    match crate::aiksi::parse_source(&src) {
         Err(_) => {
             v.j1_why = "it does not parse";
             return v;

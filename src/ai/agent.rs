@@ -185,6 +185,12 @@ enum Job {
         goal: String,
         budget: usize,
     },
+    /// Write a real program from a sentence (`maker`).
+    Make {
+        target: super::maker::Target,
+        name: String,
+        desc: String,
+    },
 }
 
 impl Job {
@@ -195,6 +201,7 @@ impl Job {
         match self {
             Job::Episode { .. } => "running an episode",
             Job::Author { .. } => "writing an application",
+            Job::Make { .. } => "writing a program",
         }
     }
 }
@@ -280,6 +287,14 @@ pub fn queue_episode(goal: &str, trust: Trust, steps: usize) -> bool {
 /// The operator's `author` and the machine's own nightly run go through the
 /// same door, differing only in `autonomous` -- which decides nothing but
 /// which console the output lands on.
+/// A program written from a sentence, by `maker`, on this task.
+pub fn queue_make(target: super::maker::Target, name: &str, desc: &str) -> bool {
+    queue(
+        Job::Make { target, name: String::from(name), desc: String::from(desc) },
+        false,
+    )
+}
+
 pub fn queue_author(name: &str, goal: &str, budget: usize, autonomous: bool) -> bool {
     queue(
         Job::Author {
@@ -333,6 +348,7 @@ pub fn queued() -> Vec<String> {
             .map(|r| match &r.job {
                 Job::Episode { goal, steps, .. } => alloc::format!("episode ({} steps): {}", steps, goal),
                 Job::Author { name, .. } => alloc::format!("write '{}'", name),
+                Job::Make { name, target, .. } => alloc::format!("write the {} program '{}'", target.name(), name),
             })
             .collect()
     })
@@ -386,6 +402,16 @@ pub fn agent_task() {
                     if req.autonomous { "unattended" } else { "operator" },
                 );
                 elog(alloc::format!("wrote {} -- {}", name, super::author::describe(&report)));
+            }
+            Job::Make { target, name, desc } => {
+                let o = super::maker::make(target, &name, &desc);
+                crate::kprintln!();
+                crate::kprintln!("  [maker] {}: {}", name, o.summary);
+                crate::kprintln!("  [maker] {}", o.path);
+                if o.ok {
+                    crate::kprintln!("  [maker] {}", super::maker::how_to_run(target, &name));
+                }
+                elog(alloc::format!("wrote {} -- {}", name, o.summary));
             }
         }
         AUTONOMOUS.store(false, Ordering::Release);

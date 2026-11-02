@@ -1,0 +1,22 @@
+# QuickJS-ng, a small JavaScript engine: what `maker` compiles a web page's
+# scripts with, and a JavaScript runtime for anything else in a guest. Arch
+# carries it only in the AUR, so the [glados] repository carries upstream's
+# own static release binary -- unmodified, pinned by digest.
+pkgname=quickjs-ng
+pkgver=0.17.0
+pkgrel=1
+pkgdesc="A small, embeddable JavaScript engine (static qjs binary)"
+arch=('x86_64')
+url="https://github.com/quickjs-ng/quickjs"
+license=('MIT')
+provides=('quickjs')
+options=('!strip' '!debug')
+source=("qjs-$pkgver::https://github.com/quickjs-ng/quickjs/releases/download/v$pkgver/qjs-linux-x86_64"
+        "LICENSE-$pkgver::https://raw.githubusercontent.com/quickjs-ng/quickjs/v$pkgver/LICENSE")
+sha256sums=('0bfc02511a9f549c28b53880d988fc7cd5d361e90c5e8afdfcd7dc6774ceace5'
+            '96f73f9d2a16c21a36b418f06073be26e7d6d5e7c1bc99756b21a4f2c74ef171')
+
+package() {
+    install -Dm755 "$srcdir/qjs-$pkgver" "$pkgdir/usr/bin/qjs"
+    install -Dm644 "$srcdir/LICENSE-$pkgver" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

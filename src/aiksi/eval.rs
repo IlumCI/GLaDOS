@@ -1059,6 +1059,14 @@ pub const BUILTINS: &[(&str, Touch, usize, usize)] = &[
     ("int", Touch::Pure, 1, 1),
     ("hex", Touch::Pure, 1, 1),
     ("list", Touch::Pure, 0, usize::MAX),
+    ("nil", Touch::Pure, 0, 0),
+    ("all", Touch::Pure, 1, 1),
+    ("any", Touch::Pure, 1, 1),
+    ("str", Touch::Pure, 1, 1),
+    ("sum", Touch::Pure, 1, 1),
+    ("count", Touch::Pure, 2, 2),
+    ("__iter", Touch::Pure, 1, 1),
+    ("fail", Touch::Pure, 1, 1),
     ("len", Touch::Pure, 1, 1),
     ("get", Touch::Pure, 2, 2),
     ("push", Touch::Pure, 2, 2),
@@ -1180,7 +1188,7 @@ pub const BUILTINS: &[(&str, Touch, usize, usize)] = &[
     ("slice", Touch::Pure, 3, 3),
     ("index", Touch::Pure, 2, 2),
     ("remove", Touch::Pure, 2, 2),
-    ("range", Touch::Pure, 2, 2),
+    ("range", Touch::Pure, 1, 2),
 
     // --- crate::dev::rtc, crate::time, crate::dev::lapic --------------------
     ("rtc_now", Touch::Read, 0, 0),
@@ -1305,6 +1313,8 @@ pub struct Interp {
     /// signature, which for a tree-walker this size is the same thing with
     /// less to read.
     returning: Option<Value>,
+    /// A `break` (1) or `continue` (2) on its way out to the innermost loop.
+    looping: u8,
     depth: usize,
     steps: u64,
     budget: u64,
@@ -1366,6 +1376,7 @@ impl Interp {
             scopes: alloc::vec![BTreeMap::new()],
             funcs: BTreeMap::new(),
             returning: None,
+            looping: 0,
             depth: 0,
             steps: 0,
             budget: STEP_BUDGET,
@@ -1568,7 +1579,7 @@ impl Interp {
     fn body(&mut self, stmts: &[Stmt]) -> Result<(), String> {
         for st in stmts {
             self.stmt(st)?;
-            if self.returning.is_some() {
+            if self.returning.is_some() || self.looping != 0 {
                 break;
             }
         }
@@ -1612,6 +1623,8 @@ impl Interp {
         r?;
         // A function that falls off its end yields nothing, which is what a
         // procedure called for its effect should say.
+        // A `break` with no loop round it ends at the function's edge.
+        self.looping = 0;
         let out = self.returning.take().unwrap_or(Value::Nil);
         if !out.fits(&f.ret) {
             return Err(format!(
@@ -1684,8 +1697,7 @@ impl Interp {
         // ring 0 with no guard page is a triple fault, not an error message.
         self.imported.insert(full.clone());
         let src = String::from_utf8_lossy(&bytes).into_owned();
-        let toks = super::lex::lex(&src).map_err(|e| format!("{}: {}", full, e))?;
-        let prog = super::parse::parse(toks).map_err(|e| format!("{}: {}", full, e))?;
+        let prog = super::parse_source(&src).map_err(|e| format!("{}: {}", full, e))?;
         // Through `stmt` rather than `run`, because `run` resets the step
         // counter -- an import would otherwise be a way to buy an unbounded
         // budget one file at a time.
@@ -1757,6 +1769,7 @@ impl Interp {
         // here so it cannot sit armed and silently truncate the next block
         // that runs.
         self.returning = None;
+        self.looping = 0;
         let mut out = Ok(Value::Nil);
         for s in prog {
             out = self.stmt(s);
@@ -1851,6 +1864,14 @@ impl Interp {
                 self.import(path)?;
                 Ok(Value::Nil)
             }
+            Stmt::Break => {
+                self.looping = 1;
+                Ok(Value::Nil)
+            }
+            Stmt::Continue => {
+                self.looping = 2;
+                Ok(Value::Nil)
+            }
             Stmt::Return(e) => {
                 let v = match e {
                     Some(x) => self.expr(x)?,
@@ -1881,6 +1902,10 @@ impl Interp {
                     if self.returning.is_some() {
                         break;
                     }
+                    let l = core::mem::replace(&mut self.looping, 0);
+                    if l == 1 {
+                        break;
+                    }
                 }
                 Ok(Value::Nil)
             }
@@ -1900,6 +1925,47 @@ impl Interp {
                 let v = self.expr(rhs)?;
                 self.assign(name, v.clone());
                 Ok(v)
+            }
+            Expr::Comp(item, var, src, cond) => {
+                let items = match self.expr(src)? {
+                    Value::List(v) => v,
+                    Value::Str(s) => s.chars().map(|c| Value::Str(String::from(c))).collect(),
+                    other => return Err(format!("cannot loop over {}; loop over a list, a string or range(n)", other.type_name())),
+                };
+                let saved = self.lookup(var).cloned();
+                let mut out = Vec::new();
+                let mut r = Ok(());
+                for x in items {
+                    // One per element, as a `while` iteration is charged:
+                    // a comprehension is a loop and the budget must see it.
+                    if let Err(e) = self.tick() {
+                        r = Err(e);
+                        break;
+                    }
+                    self.assign(var, x);
+                    if let Some(c) = cond {
+                        match self.expr(c) {
+                            Ok(v) if !v.truthy() => continue,
+                            Ok(_) => {}
+                            Err(e) => {
+                                r = Err(e);
+                                break;
+                            }
+                        }
+                    }
+                    match self.expr(item) {
+                        Ok(v) => out.push(v),
+                        Err(e) => {
+                            r = Err(e);
+                            break;
+                        }
+                    }
+                }
+                if let Some(v) = saved {
+                    self.assign(var, v);
+                }
+                r?;
+                Ok(Value::List(out))
             }
             Expr::Unary(op, inner) => {
                 let v = self.expr(inner)?;
@@ -2063,7 +2129,15 @@ impl Interp {
         let a = self.expr(l)?;
         let b = self.expr(r)?;
 
-        // String concatenation is the one non-numeric case.
+        // Two lists joined, as `+` joins them in Python.
+        if op == BinOp::Add {
+            if let (Value::List(x), Value::List(y)) = (&a, &b) {
+                let mut v = x.clone();
+                v.extend(y.iter().cloned());
+                return Ok(Value::List(v));
+            }
+        }
+        // String concatenation is the other non-numeric case.
         if op == BinOp::Add {
             if let (Value::Str(x), y) = (&a, &b) {
                 return Ok(Value::Str(format!("{}{}", x, y.render())));
@@ -2379,6 +2453,49 @@ impl Interp {
                 Ok(Value::Int(if any && neg { -n } else if any { n } else { 0 }))
             }
             "list" => Ok(Value::List(args.to_vec())),
+            "nil" => Ok(Value::Nil),
+            "all" | "any" => match &args[0] {
+                Value::List(v) => {
+                    let all = name == "all";
+                    Ok(Value::Int(if all { v.iter().all(|x| x.truthy()) } else { v.iter().any(|x| x.truthy()) } as i64))
+                }
+                other => Err(format!("{} wants a list, got {}", name, other.type_name())),
+            },
+            // A value as the text `println` would show for it.
+            "str" => Ok(Value::Str(args[0].render())),
+            "sum" => match &args[0] {
+                Value::List(v) => {
+                    let mut t: i64 = 0;
+                    for x in v {
+                        let Value::Int(n) = x else {
+                            return Err(format!("sum adds whole numbers, and the list holds a {}", x.type_name()));
+                        };
+                        t = t.checked_add(*n).ok_or("sum overflowed")?;
+                    }
+                    Ok(Value::Int(t))
+                }
+                other => Err(format!("sum wants a list, got {}", other.type_name())),
+            },
+            // How many times an item is in a list, or a piece in a string.
+            "count" => match &args[0] {
+                Value::List(v) => {
+                    let want = args[1].render();
+                    Ok(Value::Int(v.iter().filter(|x| x.render() == want).count() as i64))
+                }
+                other => {
+                    let (hay, needle) = (other.render(), args[1].render());
+                    Ok(Value::Int(if needle.is_empty() { 0 } else { hay.matches(needle.as_str()).count() as i64 }))
+                }
+            },
+            // What `for` walks: a list as itself, a string by character.
+            "__iter" => match args.first() {
+                Some(Value::List(v)) => Ok(Value::List(v.clone())),
+                Some(Value::Str(s)) => Ok(Value::List(s.chars().map(|c| Value::Str(String::from(c))).collect())),
+                Some(other) => Err(format!("cannot loop over {}; loop over a list, a string or range(n)", other.type_name())),
+                None => Err("nothing to loop over".to_string()),
+            },
+            // `assert`'s way out, and a program's own way to stop with a reason.
+            "fail" => Err(args.first().map(|v| v.render()).unwrap_or_default()),
             "len" => match args.first() {
                 Some(Value::List(v)) => Ok(Value::Int(v.len() as i64)),
                 Some(Value::Str(t)) => Ok(Value::Int(t.chars().count() as i64)),

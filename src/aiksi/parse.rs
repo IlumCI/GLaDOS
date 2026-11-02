@@ -63,6 +63,10 @@ pub enum Expr {
     /// same bargain `push` already makes for lists, and it is why neither
     /// needs anything said about aliasing.
     SetField(Box<Expr>, String, Box<Expr>),
+    /// `[item for var in source if cond]`: a list built by walking `source`.
+    /// The loop variable is put back as it was afterwards, as Python's is not
+    /// visible outside the comprehension.
+    Comp(Box<Expr>, String, Box<Expr>, Option<Box<Expr>>),
 }
 
 /// What a value is allowed to be, where somebody has said.
@@ -143,6 +147,9 @@ pub enum Stmt {
     /// then explained. What it is instead is textual inclusion that happens
     /// once -- see `Interp::import`.
     Use(String),
+    /// `break` and `continue`, which leave or restart the innermost `while`.
+    Break,
+    Continue,
 }
 
 pub struct Parser {
@@ -179,6 +186,18 @@ pub struct Parser {
 /// this is its parse-time sibling, and it has to exist because a program that
 /// will not run is small comfort if merely reading it reboots the machine.
 const MAX_PARSE_DEPTH: usize = 64;
+
+/// One expression and nothing after it, for `py.rs`, which reads statements
+/// itself and hands this parser the expressions inside them -- so the
+/// two syntaxes share one expression grammar and cannot drift.
+pub fn parse_expr(toks: Vec<Tok>) -> Result<Expr, String> {
+    let mut p = Parser { toks, pos: 0, depth: 0, height: 0 };
+    let e = p.expression()?;
+    if !p.at(&Tok::Eof) {
+        return Err(format!("unexpected {:?} after the expression", p.peek()));
+    }
+    Ok(e)
+}
 
 pub fn parse(toks: Vec<Tok>) -> Result<Vec<Stmt>, String> {
     let mut p = Parser { toks, pos: 0, depth: 0, height: 0 };
@@ -353,6 +372,13 @@ impl Parser {
             return Ok(Stmt::Return(Some(e)));
         }
 
+        if self.keyword("break") || self.keyword("continue") {
+            let b = self.keyword("break");
+            self.bump();
+            let _ = self.eat(&Tok::Semi);
+            return Ok(if b { Stmt::Break } else { Stmt::Continue });
+        }
+
         if self.keyword("while") {
             self.bump();
             self.expect(&Tok::LParen, "'(' after while")?;
@@ -391,6 +417,33 @@ impl Parser {
         }
         self.expect(&Tok::RBrace, "'}'")?;
         Ok(out)
+    }
+
+    /// After `item`, at `for`: `for var in source [if cond]`.
+    fn comprehension(&mut self, item: Expr) -> Result<Expr, String> {
+        self.bump(); // for
+        let var = match self.bump() {
+            Tok::Ident(v) => v,
+            _ => return Err("a name after 'for' in a comprehension".to_string()),
+        };
+        if self.at(&Tok::Comma) {
+            return Err("a comprehension names one variable; use enumerate in a for loop for two".to_string());
+        }
+        if !(self.eat(&Tok::In) || (self.keyword("in") && { self.bump(); true })) {
+            return Err("'in' after the comprehension's variable".to_string());
+        }
+        // `or` is the loosest thing a source can be without swallowing the
+        // `if` that may follow it.
+        let src = self.log_or()?;
+        let h = self.height;
+        let cond = if self.keyword("if") {
+            self.bump();
+            Some(Box::new(self.log_or()?))
+        } else {
+            None
+        };
+        self.grew(h.max(self.height) + 1)?;
+        Ok(Expr::Comp(Box::new(item), var, Box::new(src), cond))
     }
 
     // --- expressions ---
@@ -465,6 +518,13 @@ impl Parser {
             self.grew(lh.max(self.height))?;
             return match lhs {
                 Expr::Var(name) => Ok(Expr::Assign(name, Box::new(rhs))),
+                // `xs[i] = v` -- lists are values, so this is `xs = set(xs, i, v)`.
+                Expr::Call(f, mut a) if f == "get" && a.len() == 2 && matches!(a[0], Expr::Var(_)) => {
+                    let i = a.pop().unwrap();
+                    let target = a.pop().unwrap();
+                    let Expr::Var(name) = target.clone() else { unreachable!() };
+                    Ok(Expr::Assign(name, Box::new(Expr::Call(String::from("set"), alloc::vec![target, i, rhs]))))
+                }
                 Expr::Field(target, field) => Ok(Expr::SetField(target, field, Box::new(rhs))),
                 _ => Err("left of '=' must be a variable or a field".to_string()),
             };
@@ -570,6 +630,15 @@ impl Parser {
                 BinOp::Gt
             } else if self.eat(&Tok::Ge) {
                 BinOp::Ge
+            } else if self.at(&Tok::In) || self.at(&Tok::NotIn) {
+                let negate = self.bump() == Tok::NotIn;
+                let rhs = self.shift()?;
+                lh = lh.max(self.height);
+                self.grew(lh + 1)?;
+                lh = self.height;
+                let c = Expr::Call(String::from("contains"), alloc::vec![rhs, lhs]);
+                lhs = if negate { Expr::Unary(UnOp::Not, Box::new(c)) } else { c };
+                continue;
             } else {
                 break;
             };
@@ -679,12 +748,48 @@ impl Parser {
     /// field and `h.port + 1` adds to it.
     fn postfix(&mut self) -> Result<Expr, String> {
         let mut e = self.primary()?;
-        while self.eat(&Tok::Dot) {
+        loop {
+            if self.eat(&Tok::LBracket) {
+                // `xs[i]` is `get(xs, i)`; a slice is refused by name rather
+                // than misread as something else.
+                let h = self.height;
+                let i = self.expression()?;
+                if self.at(&Tok::Colon) {
+                    return Err("slices like a[1:3] are not supported; use slice(a, from, to)".to_string());
+                }
+                self.expect(&Tok::RBracket, "']'")?;
+                self.grew(h.max(self.height))?;
+                e = Expr::Call(String::from("get"), alloc::vec![e, i]);
+                continue;
+            }
+            if !self.eat(&Tok::Dot) {
+                break;
+            }
             match self.peek().clone() {
                 Tok::Ident(field) => {
                     self.bump();
-                    self.grew(self.height)?;
-                    e = Expr::Field(Box::new(e), field);
+                    if self.at(&Tok::LParen) {
+                        // A method call: `x.m(a)` is `m(x, a)`, with the
+                        // handful of Python spellings that differ here.
+                        self.bump();
+                        let mut args = Vec::new();
+                        let mut tallest = self.height;
+                        if !self.at(&Tok::RParen) {
+                            loop {
+                                args.push(self.expression()?);
+                                tallest = tallest.max(self.height);
+                                if !self.eat(&Tok::Comma) {
+                                    break;
+                                }
+                            }
+                        }
+                        self.expect(&Tok::RParen, "')' after arguments")?;
+                        self.grew(tallest)?;
+                        e = method(e, &field, args);
+                    } else {
+                        self.grew(self.height)?;
+                        e = Expr::Field(Box::new(e), field);
+                    }
                 }
                 _ => return Err("a field name after '.'".to_string()),
             }
@@ -702,6 +807,29 @@ impl Parser {
                 self.height = 1;
                 Ok(Expr::Str(s))
             }
+            Tok::LBracket => {
+                // `[a, b]` is `list(a, b)`.
+                let mut items = Vec::new();
+                let mut tallest = 0;
+                if !self.at(&Tok::RBracket) {
+                    loop {
+                        items.push(self.expression()?);
+                        tallest = tallest.max(self.height);
+                        if items.len() == 1 && self.keyword("for") {
+                            let item = items.pop().unwrap();
+                            let c = self.comprehension(item)?;
+                            self.expect(&Tok::RBracket, "']' after the comprehension")?;
+                            return Ok(c);
+                        }
+                        if !self.eat(&Tok::Comma) || self.at(&Tok::RBracket) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(&Tok::RBracket, "']' after the list")?;
+                self.grew(tallest)?;
+                Ok(Expr::Call(String::from("list"), items))
+            }
             Tok::LParen => {
                 // A paren is not a node, so the height is whatever was inside
                 // it and `expression` has already set it. The parse-depth
@@ -718,10 +846,23 @@ impl Parser {
                         loop {
                             args.push(self.expression()?);
                             tallest = tallest.max(self.height);
+                            // `all(x > 0 for x in xs)`: a generator as the one
+                            // argument is the list it would produce.
+                            if args.len() == 1 && self.keyword("for") {
+                                let item = args.pop().unwrap();
+                                args.push(self.comprehension(item)?);
+                                tallest = tallest.max(self.height);
+                                break;
+                            }
                             if !self.eat(&Tok::Comma) {
                                 break;
                             }
                         }
+                    }
+                    // `f(key=len)` parses as an assignment in an argument,
+                    // which nobody means: it is a keyword argument.
+                    if args.iter().any(|a| matches!(a, Expr::Assign(..))) {
+                        return Err(format!("keyword arguments are not supported; pass {}'s arguments in order", name));
                     }
                     self.expect(&Tok::RParen, "')' after arguments")?;
                     // A call is one taller than its tallest argument, so a
@@ -735,5 +876,37 @@ impl Parser {
             }
             other => Err(format!("unexpected {:?}", other)),
         }
+    }
+}
+
+
+/// `x.m(args)` as a call. Most methods are the builtin of the same name with
+/// the receiver first; these are the ones Python spells differently.
+fn method(recv: Expr, name: &str, mut args: Vec<Expr>) -> Expr {
+    let call = |f: &str, a: Vec<Expr>| Expr::Call(String::from(f), a);
+    let with_recv = |f: &str, mut a: Vec<Expr>| {
+        a.insert(0, recv.clone());
+        call(f, a)
+    };
+    match name {
+        // Lists are values: appending to a named list writes it back, which
+        // is what `xs.append(v)` means to anybody who wrote it.
+        "append" if args.len() == 1 => {
+            let pushed = with_recv("push", args);
+            match recv {
+                Expr::Var(n) => Expr::Assign(n, Box::new(pushed)),
+                _ => pushed,
+            }
+        }
+        // `", ".join(xs)` is `join(xs, ", ")`.
+        "join" if args.len() == 1 => {
+            let xs = args.pop().unwrap();
+            call("join", alloc::vec![xs, recv])
+        }
+        "strip" if args.is_empty() => with_recv("trim", args),
+        "startswith" => with_recv("starts", args),
+        "endswith" => with_recv("ends", args),
+        "split" if args.is_empty() => with_recv("split", alloc::vec![Expr::Str(String::from(" "))]),
+        _ => with_recv(name, args),
     }
 }

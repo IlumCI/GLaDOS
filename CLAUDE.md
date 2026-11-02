@@ -4557,6 +4557,111 @@ numeric tower (below), lists
 network status, sockets (dns_resolve/tcp_*/http_get/https_get/udp_send/ping),
 the model (`ask`), the framebuffer, and raw memory and I/O ports.
 
+### Aiksi written like Python
+
+`src/aiksi/py.rs` is a second surface for the same language: `def`, a colon
+and an indented block, `elif`, `for x in xs`, `for i, x in enumerate(xs)`,
+`break`/`continue`, `True`/`False`/`None`, `and`/`or`/`not`, `in`/`not in`,
+`is`, `xs[i]`, `xs[i] = v`, `x += 1`, `a, b = b, a`, `xs.append(v)`,
+`", ".join(xs)`, `f"{x} items"`, `assert`, `#` comments. Every model that
+will write a program here has read millions of lines of Python and none of
+the brace syntax, so the model writes the one it already knows.
+
+**It is a front end, not a second language.** It reads statements and hands
+every expression to the brace parser's own `parse_expr`, and what it builds
+is the same `Stmt` tree -- so the interpreter, the capability gate, the step
+budget and its tick rule, `differ` and the code generator needed nothing. A
+`for` is lowered to a counted `while` whose element is taken *before* the
+body, so `continue` cannot skip the step. `aiksi::parse_source` picks the
+surface (a header line ending in `:` is the tell, which braces never write)
+and every door that loads a whole program goes through it: `eval_line`,
+`use`, `app::check`, skills and `maker`.
+
+Some of it went into the shared core and both surfaces have it: list
+literals `[a, b]`, comprehensions `[e for x in xs if c]` (and a generator
+as a call's one argument, `all(x > 0 for x in xs)`, which is the list it
+would produce), indexing, method calls (`x.m(a)` is `m(x, a)`, with
+`append`, `join`, `strip`, `startswith`, `endswith` spelled Python's way),
+`break` and `continue`, `nil()`, one-argument `range`, `str`, `sum`,
+`count`, `all`, `any`, and `+` joining two lists. A comprehension ticks once
+per element, as a `while` iteration does, so the budget sees it as the loop
+it is; its variable is put back afterwards.
+
+**What does not exist is refused by name**, with what to write instead --
+classes, dictionaries, `try`, slices, default and keyword arguments,
+`lambda`, `**`.
+The reader of those errors is often a model in `maker`'s repair loop, and an
+error it can act on is one it fixes on the next round. `import` lines are
+accepted and ignore: everything a program would import is a builtin already.
+Numbers are still whole: `/` and `//` both divide and round down.
+
+`diag py` holds twelve programs with what **Python itself** prints for each,
+so the claim is "means what Python means" rather than "means what this
+parser thinks".
+
+### `maker`: a real program from a sentence
+
+`src/ai/maker.rs`, and `author <target> ...` reaches it too. `author.rs` was
+the prototype -- the model chose among skeletons and widgets, every operand
+an index into a list -- which could not write a line of logic and so could
+not write a program. This keeps its rule and drops its ceiling: **the model
+writes free text, a whole file, and what decides whether it worked is the
+real toolchain**, never the model's opinion of its own work.
+
+```
+maker <web|python|c|aiksi> <name> <what it should do>
+maker list | show <name> | code <name> | run <name> | stop
+maker cloud [on|off|url <u>|model <m>|key <k>]
+```
+
+| target | file | checked by |
+|---|---|---|
+| `web` | `index.html` | a body; every script compiled by `qjs` (`new Function`, so the missing DOM is not an error); every id a script looks up exists |
+| `python` | `main.py` | `ast.parse`, then run for six seconds with no input |
+| `c` | `main.c` | `gcc -Wall` (a warning sends it back), then run |
+| `aiksi` | `main.ai&xi` | the interpreter, sandboxed, under a step budget; written in the Python surface |
+
+Write, check, hand the model the tool's own words with the line they name
+quoted, rewrite, up to five rounds; a rewrite that comes back a quarter the
+size of the draft is refused and the draft kept.
+
+**A loop that cannot notice it is stuck is not a loop.** The second driven
+run sent `primes` back five times and got the same 216 bytes five times: at
+temperature 0.2 the same prompt is the same file. A rewrite identical to the
+draft is now not checked again; the next round says "that was the same file"
+and samples at 0.7. A program that read standard input and printed nothing
+is told exactly that, because "printed nothing" alone did not move it. Projects live in `/projects/<name>` (guest path,
+`/tmp/projects` with no root image) with `log.txt` holding every round.
+
+**The contract is what makes a pass mean anything**, and the first driven run
+is why: `primes` printed one per line when asked for ten to a line, and
+`wordfreq` printed its heading and no words -- both ran cleanly and both
+"passed". So before any code exists the model is asked what the output must
+contain (`- 97`), and a run is held to that and to having printed anything.
+A program that waits for input is excused, since what it prints depends on
+what it is given. That is `author.rs`'s plan clauses, applied to programs.
+
+**The local model writes by default; the cloud is opt-in and never
+substituted.** `Brain::Cloud` is an OpenAI-compatible endpoint reached by a
+short Python program in the guest -- urllib has TLS with POST and the CA
+bundle, and the kernel's own client is GET-only by design -- with the key in
+`/etc/maker/cloud.key`, passed through a file and never on a command line.
+A cloud that fails is reported, not quietly replaced by the local model:
+which model wrote a program is part of the result.
+
+Generation is quiet (`ai::echo_begin_quiet`) and captures up to 64 KB, where
+a conversation's capture is 4 KB -- a program cut off at 4 KB is a syntax
+error the model did not make. Temperature 0.2 and no repetition penalty:
+code repeats tokens on purpose, every closing brace. A program needs
+context, so drive it with `out/qwen3-0.6b-8k.bin`; at 512 the prompt alone
+fills the window and `maker` says so.
+
+The checkers run in the guest (`maker::guest`, a bash script run to its end
+with its output in `/tmp/maker/out`), so a root image must be mounted.
+Python 3.14 is in the image; `qjs` is the [glados] package `quickjs-ng`
+(upstream's static release binary, pinned) and gcc is `orange install gcc`.
+A checker that is missing says what to install rather than passing.
+
 ### Numbers, in four rungs
 
 This said "no floats -- adding them for one builtin changes every arithmetic

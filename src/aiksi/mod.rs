@@ -13,6 +13,7 @@ pub mod jit;
 pub mod kernel;
 pub mod lex;
 pub mod parse;
+pub mod py;
 
 pub use eval::{Interp, Value};
 
@@ -85,9 +86,19 @@ pub fn declared_names(src: &str) -> alloc::vec::Vec<&str> {
 
 /// Lex, parse and evaluate one line, returning the value of its last expression.
 pub fn eval_line(interp: &mut Interp, src: &str) -> Result<Value, String> {
-    let toks = lex::lex(src)?;
-    let ast = parse::parse(toks)?;
+    let ast = parse_source(src)?;
     interp.run(&ast)
+}
+
+/// A program in either surface: Python-shaped (`py.rs`) when it reads that
+/// way, braces otherwise. Every place that runs a whole program comes here,
+/// so a program cannot be accepted by one door and refused by another.
+pub fn parse_source(src: &str) -> Result<alloc::vec::Vec<parse::Stmt>, alloc::string::String> {
+    if py::looks_python(src) {
+        py::parse(src)
+    } else {
+        parse::parse(lex::lex(src)?)
+    }
 }
 
 /// What a step actually costs, which nobody has ever measured.

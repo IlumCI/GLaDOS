@@ -131,6 +131,7 @@ pub fn size(e: &Expr) -> usize {
         Expr::Assign(_, v) => 1 + size(v),
         Expr::Field(a, _) => 1 + size(a),
         Expr::SetField(a, _, v) => 1 + size(a) + size(v),
+        Expr::Comp(i, _, s, c) => 1 + size(i) + size(s) + c.as_ref().map(|c| size(c)).unwrap_or(0),
     }
 }
 
@@ -204,6 +205,19 @@ fn canon(e: &Expr, out: &mut String, holes: &mut Vec<(String, bool)>) {
             out.push_str(" = ");
             canon(v, out, holes);
         }
+        Expr::Comp(i, v, s, c) => {
+            out.push('[');
+            canon(i, out, holes);
+            out.push_str(" for ");
+            out.push_str(v);
+            out.push_str(" in ");
+            canon(s, out, holes);
+            if let Some(c) = c {
+                out.push_str(" if ");
+                canon(c, out, holes);
+            }
+            out.push(']');
+        }
     }
 }
 
@@ -226,7 +240,7 @@ fn exprs_of(stmts: &[Stmt], out: &mut Vec<Expr>) {
                 exprs_of(body, out);
             }
             Stmt::Fn(_, _, _, body) => exprs_of(body, out),
-            Stmt::Rec(..) | Stmt::Use(_) => {}
+            Stmt::Rec(..) | Stmt::Use(_) | Stmt::Break | Stmt::Continue => {}
         }
     }
 }
@@ -244,6 +258,13 @@ fn subtrees(e: &Expr, out: &mut Vec<Expr>) {
         Expr::Call(_, args) => {
             for a in args {
                 subtrees(a, out);
+            }
+        }
+        Expr::Comp(i, _, s, c) => {
+            subtrees(i, out);
+            subtrees(s, out);
+            if let Some(c) = c {
+                subtrees(c, out);
             }
         }
     }

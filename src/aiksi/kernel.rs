@@ -492,7 +492,8 @@ pub fn call(it: &mut Interp, name: &str, args: &[Value]) -> Result<Value, String
             _ => Err("remove wants a list".to_string()),
         },
         "range" => {
-            let (from, to) = (int(args, 0)?, int(args, 1)?);
+            // `range(n)` counts from zero, as Python's does.
+            let (from, to) = if args.len() == 1 { (0, int(args, 0)?) } else { (int(args, 0)?, int(args, 1)?) };
             // Bounded for the reason `repeat` is: this is the easiest way for
             // a generated program to ask for a billion-element list.
             let n = (to - from).clamp(0, 65_536);
