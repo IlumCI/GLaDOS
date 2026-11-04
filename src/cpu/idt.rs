@@ -559,6 +559,44 @@ pub unsafe extern "sysv64" fn glados_fault_entry(f: *const Frame) {
             return;
         }
     }
+    // **A fault the page table no longer agrees with is a stale TLB entry,
+    // and retrying is the whole of the fix.** Making a page *more* permissive
+    // -- copy-on-write resolved, a read-only page made writable -- leaves
+    // other cores holding the old, stricter translation until a shootdown
+    // reaches them, and one can go unanswered (a core with interrupts off
+    // past the 5 ms wait). The access then faults on a page whose entry now
+    // allows it: err 0x7 on a leaf reading writable and user. That was fatal,
+    // and it killed a makepkg run mid-build. Linux does not even send a
+    // shootdown for an upgrade; it relies on exactly this: flush the one
+    // entry and let the instruction run again.
+    //
+    // Only the leaf is checked, so an intermediate level denying the access
+    // would refault forever -- hence the bound, after which the fault is
+    // treated as real.
+    if fr.vector == 14 && fr.err & 1 != 0 {
+        let cr2 = read_cr2();
+        let write = fr.err & 2 != 0;
+        let user = fr.err & 4 != 0;
+        let fetch = fr.err & 16 != 0;
+        if let Some(e) = crate::mem::paging::leaf(cr2 & !0xFFF) {
+            let allows = e & 1 != 0
+                && (!write || e & 2 != 0)
+                && (!user || e & 4 != 0)
+                && (!fetch || e & (1 << 63) == 0);
+            let c = crate::cpu::percpu::armed().then(|| crate::smp::this_cpu() as usize & 63).unwrap_or(0);
+            let now = unsafe { core::arch::x86_64::_rdtsc() };
+            let last = SPURIOUS_AT[c].swap(cr2, core::sync::atomic::Ordering::Relaxed);
+            let then = SPURIOUS_TSC[c].swap(now, core::sync::atomic::Ordering::Relaxed);
+            // The same address again within a millisecond is the retry
+            // failing, not a second stale entry.
+            let looping = last == cr2 && now.wrapping_sub(then) < 1_000 * crate::time::tsc_mhz().max(1);
+            if allows && !looping {
+                unsafe { core::arch::asm!("invlpg [{}]", in(reg) cr2, options(nostack, preserves_flags)) };
+                SPURIOUS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+        }
+    }
     // The pointer is the stub's own stack pointer, so what it names outlives
     // every use below: nothing past this point returns.
     if fr.vector == 14 && fr.cs & 3 == 3 {
@@ -604,6 +642,14 @@ glados_fill_trampoline:
 extern "sysv64" {
     fn glados_fill_trampoline();
 }
+
+/// Page faults retried because the table already allowed the access: stale
+/// translations, each one a shootdown that did not land in time.
+pub static SPURIOUS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Per core, the last address retried and when, so a fault the leaf cannot
+/// explain is retried once and then treated as real rather than looping.
+static SPURIOUS_AT: [core::sync::atomic::AtomicU64; 64] = [const { core::sync::atomic::AtomicU64::new(0) }; 64];
+static SPURIOUS_TSC: [core::sync::atomic::AtomicU64; 64] = [const { core::sync::atomic::AtomicU64::new(0) }; 64];
 
 /// File faults by route: through the trampoline, kept on the IST stack for
 /// want of a task stack, and refused once they got there (`linux fills`).

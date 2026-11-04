@@ -9171,7 +9171,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             console::set_color(LTCYAN);
             kprintln!("  glados {}", crate::VERSION);
             console::set_color(LTGRAY);
-            kprintln!("  a ring-0 kernel for MSI MS-16R8, one address space, no syscalls");
+            // It said "for MSI MS-16R8, one address space, no syscalls", and
+            // all three stopped being true: it is an OS rather than one
+            // laptop's, guests get their own roots, and those guests trap.
+            kprintln!("  a ring-0 kernel written from scratch in Rust, with a language model inside it");
+            kprintln!("  Linux programs run as guests at ring 3; every syscall they make is answered here");
             // The formats an update has to stay compatible with. Each is
             // refused rather than guessed at when its version does not match,
             // so this is the map of what a new image may not silently change.

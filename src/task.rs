@@ -1658,6 +1658,11 @@ fn schedule() {
         // as `Running` also sees which core owns it.
         CURRENT[me].store(next, Ordering::Release);
         PENDING[me].store(cur, Ordering::Release);
+        // The idle loop's "waiting" mark belongs to the idle task: anything
+        // else switched onto this core is working, whatever the mark said.
+        if !t[next].idle {
+            crate::dev::lapic::mark_idle(me as usize, false);
+        }
         // So the allocator knows who to bill without asking the interrupt
         // controller which core it is on.
         crate::cpu::percpu::set_task(next as u64);

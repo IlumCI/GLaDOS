@@ -265,9 +265,15 @@ extern "C" fn glados_ap_main() -> ! {
         let g = GEN.load(Ordering::Acquire);
         if g != seen {
             seen = g;
+            crate::dev::lapic::mark_idle(cpu as usize, false);
             claim_and_run();
             continue;
         }
+        // Up for the whole pass round this loop, the `yield_now` that finds
+        // nothing included: the wait itself is one `pause`, and a mark held
+        // only across that saw about one tick in sixty. The scheduler takes it
+        // down when a real task is switched in.
+        crate::dev::lapic::mark_idle(cpu as usize, true);
         if sleeper {
             unsafe {
                 // Arm on the generation counter, then check it *again* before
