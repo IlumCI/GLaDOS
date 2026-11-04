@@ -107,6 +107,7 @@ pub const SYS_FCHOWN: u64 = 93;
 pub const SYS_LCHOWN: u64 = 94;
 pub const SYS_FCHOWNAT: u64 = 260;
 pub const SYS_FCHMODAT: u64 = 268;
+pub const SYS_FCHMODAT2: u64 = 452;
 pub const SYS_FALLOCATE: u64 = 285;
 pub const SYS_RENAMEAT: u64 = 264;
 pub const SYS_RENAMEAT2: u64 = 316;
@@ -3186,6 +3187,43 @@ pub(super) fn sys_chmodat(dirfd: u64, path_at: u64, mode: u64) -> u64 {
     chmod_path(&path, mode)
 }
 
+/// `fchmodat2`: `fchmodat` with the flags argument the old call never had.
+///
+/// **A symlink has no mode, and Linux says so with `EOPNOTSUPP`.** glibc's
+/// `lchmod` tries this first, and without it falls back to an `O_PATH |
+/// O_NOFOLLOW` open, which here answers `ELOOP` on a link -- so libarchive
+/// reported "Too many levels of symbolic links" for every symlink in an
+/// archive and failed the whole extraction. With this, it gets the answer it
+/// expects and moves on.
+pub(super) fn sys_fchmodat2(dirfd: u64, path_at: u64, mode: u64, flags: u64) -> u64 {
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    const EOPNOTSUPP: u64 = (-95i64) as u64;
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return EINVAL;
+    }
+    let raw = match read_cstr(path_at) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if raw.is_empty() {
+        return if flags & AT_EMPTY_PATH != 0 { sys_fchmod(dirfd, mode) } else { ENOENT };
+    }
+    let path = match at_path(dirfd, &raw) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        let link = super::link::own(&path).is_some()
+            || (matches!(super::disk::link_target(&path), Some(Some(_))) && !super::ns::whited_out(&path));
+        if link {
+            return EOPNOTSUPP;
+        }
+        return chmod_path(&path, mode);
+    }
+    chmod_path(&super::link::follow(path), mode)
+}
+
 pub(super) fn sys_fchmod(fd: u64, mode: u64) -> u64 {
     let path = with_fds(|fds, _| match fds.get(fd as usize) {
         Some(Some(super::fs::Fd::File(b))) => Some(b.borrow().path.clone()),
@@ -3306,7 +3344,8 @@ pub(super) fn sys_linkat(olddir: u64, old_at: u64, newdir: u64, new_at: u64, fla
 /// reports the epoch -- so this answers whether the file is there and stores
 /// nothing, which is what `touch` needs to finish. A null path with a
 /// descriptor is `futimens`.
-pub(super) fn sys_utimensat(dirfd: u64, path_at: u64) -> u64 {
+pub(super) fn sys_utimensat(dirfd: u64, path_at: u64, flags: u64) -> u64 {
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
     if path_at == 0 {
         return with_fds(|fds, _| if matches!(fds.get(dirfd as usize), Some(Some(_))) { 0 } else { EBADF }).unwrap_or(EBADF);
     }
@@ -3318,7 +3357,17 @@ pub(super) fn sys_utimensat(dirfd: u64, path_at: u64) -> u64 {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let there = matches!(super::disk::lookup(&path), Some(Some(_)))
+    // **A symlink is there even when what it names is not.** With
+    // AT_SYMLINK_NOFOLLOW the call is about the link itself, and an archive
+    // extracting a link to a file it has not reached yet -- or to an absolute
+    // path on another system, as a .deb's do -- sets the link's times next.
+    // Answering ENOENT made bsdtar fail the whole extraction on every symlink
+    // whose target was not already there.
+    let link = flags & AT_SYMLINK_NOFOLLOW != 0
+        && (super::link::own(&path).is_some()
+            || (matches!(super::disk::link_target(&path), Some(Some(_))) && !super::ns::whited_out(&path)));
+    let there = link
+        || matches!(super::disk::lookup(&path), Some(Some(_)))
         || super::ns::blob_len(&path).is_some()
         || super::ns::is_dir(&path)
         || super::dev::node(&path).is_some();
@@ -9488,7 +9537,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_SYMLINKAT => (sys_symlinkat(f.rdi, f.rsi, f.rdx), true),
         SYS_LINK => (sys_linkat(super::fs::AT_FDCWD as u64, f.rdi, super::fs::AT_FDCWD as u64, f.rsi, 0), true),
         SYS_LINKAT => (sys_linkat(f.rdi, f.rsi, f.rdx, f.r10, f.r8), true),
-        SYS_UTIMENSAT => (sys_utimensat(f.rdi, f.rsi), true),
+        SYS_UTIMENSAT => (sys_utimensat(f.rdi, f.rsi, f.r10), true),
         // What a program saving a file asks after writing it, and none of it
         // has anything to do here. A write reaches the store at the last
         // close whatever is synced; there are no permissions or owners to
@@ -9499,6 +9548,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_FSYNC | SYS_FDATASYNC | SYS_SYNC | SYS_SYNCFS | SYS_FLOCK => (0, true),
         SYS_CHMOD => (sys_chmodat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi), true),
         SYS_FCHMODAT => (sys_chmodat(f.rdi, f.rsi, f.rdx), true),
+        SYS_FCHMODAT2 => (sys_fchmodat2(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_FCHMOD => (sys_fchmod(f.rdi, f.rsi), true),
         // Every guest is root and owns everything, so a change of owner has
         // nothing to record and is answered as done.
@@ -11909,6 +11959,7 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_CHMOD => "chmod",
         SYS_FCHMOD => "fchmod",
         SYS_FCHMODAT => "fchmodat",
+        SYS_FCHMODAT2 => "fchmodat2",
         SYS_CHOWN => "chown",
         SYS_FCHOWN => "fchown",
         SYS_LCHOWN => "lchown",
