@@ -79,6 +79,17 @@ pub const SYS_UMASK: u64 = 95;
 pub const SYS_GETPGRP: u64 = 111;
 pub const SYS_GETRESUID: u64 = 118;
 pub const SYS_GETRESGID: u64 = 120;
+pub const SYS_SETUID: u64 = 105;
+pub const SYS_CAPGET: u64 = 125;
+pub const SYS_CAPSET: u64 = 126;
+pub const SYS_SETGID: u64 = 106;
+pub const SYS_SETREUID: u64 = 113;
+pub const SYS_SETREGID: u64 = 114;
+pub const SYS_SETGROUPS: u64 = 116;
+pub const SYS_SETRESUID: u64 = 117;
+pub const SYS_SETRESGID: u64 = 119;
+pub const SYS_SETFSUID: u64 = 122;
+pub const SYS_SETFSGID: u64 = 123;
 pub const SYS_PRCTL: u64 = 157;
 pub const SYS_FADVISE64: u64 = 221;
 pub const SYS_STATX: u64 = 332;
@@ -537,14 +548,14 @@ glados_enter_guest_regs:
     mov r13, [rdi + 56]
     mov r14, [rdi + 64]
     mov r15, [rdi + 72]
-    xor ecx, ecx
-    xor edx, edx
-    xor esi, esi
-    xor r8d, r8d
-    xor r9d, r9d
-    xor r10d, r10d
-    xor r11d, r11d
-    xor edi, edi
+    mov rdx, [rdi + 80]
+    mov rsi, [rdi + 88]
+    mov r8, [rdi + 96]
+    mov r9, [rdi + 104]
+    mov r10, [rdi + 112]
+    mov rcx, [rdi + 0]
+    mov r11, [rdi + 16]
+    mov rdi, [rdi + 120]
     iretq
 
     .globl glados_leave_guest
@@ -591,6 +602,19 @@ pub struct Resume {
     pub r13: u64,
     pub r14: u64,
     pub r15: u64,
+    /// The argument registers, which a forked child keeps as Linux keeps
+    /// them: a `syscall` clobbers `rax`, `rcx` and `r11` and nothing else, in
+    /// the parent and the child alike. They were zeroed, and glibc's `vfork`
+    /// is why that mattered -- it pops its own return address into `rdi`
+    /// before the call, because a vfork child shares the stack, and pushes it
+    /// back after. A child whose `rdi` came back zero returned to address 0,
+    /// which is every Python `subprocess` that captures output.
+    pub rdx: u64,
+    pub rsi: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub rdi: u64,
     /// The thread-local base, `IA32_FS_BASE`. **Last, and read by Rust, not by
     /// the assembly** that loads the fields above at fixed offsets. A forked
     /// child was entered with whatever FS its pool task had -- zero -- and the
@@ -1045,6 +1069,8 @@ pub struct Space {
     /// Kept and answered, and not acted on: this scheduler has no priorities
     /// for it to change.
     pub nice: i32,
+    /// Who this process says it is. See `Cred`.
+    pub cred: Cred,
     /// The I/O priority `ioprio_set` set, as its packed class and level; the
     /// same bargain as `nice`, with no I/O scheduler underneath.
     pub ioprio: u32,
@@ -1090,6 +1116,231 @@ pub struct Space {
     /// thread-local storage and the register is the *machine's*, not the
     /// guest's, so it is put back on the way out.
     pub saved_fs: u64,
+}
+
+/// A process's user and group ids: real, effective and saved.
+///
+/// **A label, not a permission.** Nothing in this kernel checks an id against
+/// a file -- every file reports uid 0 and every open is decided by the jail --
+/// so dropping to 1000 takes no power away from anything. What it changes is
+/// what a program is *told*, and that is the whole reason it exists: makepkg
+/// refuses outright to run as root (`EUID == 0`), so building an AUR package
+/// needs a process that says it is somebody else, and `setpriv`/`runuser`
+/// make it say so through exactly these calls. A kernel that answered 0 to
+/// every `getuid` could not run the one tool every Arch user builds with.
+///
+/// The rules for changing them are Linux's: root may set anything, and
+/// anyone else may only move between the three it already holds. Enforced
+/// even though nothing depends on it, because a program that drops root and
+/// then finds it can take it back has been told something false.
+///
+/// **Capabilities are one bit, `caps`, and they are what permission means.**
+/// Linux decides "may this set an id" by `CAP_SETUID`, not by `euid == 0`,
+/// and the difference is load-bearing: `setpriv --reuid` drops the user id
+/// first with `PR_SET_KEEPCAPS` on, keeping its capabilities, and only then
+/// sets the group -- which is refused if dropping the uid also dropped the
+/// power to change gid. All or none, because there are no permissions here
+/// for an individual capability to grant.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Cred {
+    pub ruid: u32,
+    pub euid: u32,
+    pub suid: u32,
+    pub rgid: u32,
+    pub egid: u32,
+    pub sgid: u32,
+    pub caps: bool,
+    /// `PR_SET_KEEPCAPS`: a uid change away from root keeps `caps`.
+    pub keep_caps: bool,
+}
+
+impl Default for Cred {
+    fn default() -> Cred {
+        Cred { ruid: 0, euid: 0, suid: 0, rgid: 0, egid: 0, sgid: 0, caps: true, keep_caps: false }
+    }
+}
+
+/// `-1` as a 32-bit id: "leave this one".
+const KEEP: u32 = u32::MAX;
+
+impl Cred {
+    fn root(&self) -> bool {
+        self.caps
+    }
+
+    /// Linux's rule after any uid change: having no 0 among the three ids
+    /// clears the capabilities unless keep-caps is set, and an effective id
+    /// of 0 raises them again from whatever is still permitted.
+    fn settle(&mut self, had_root_id: bool) {
+        let any_root = self.ruid == 0 || self.euid == 0 || self.suid == 0;
+        if had_root_id && !any_root && !self.keep_caps {
+            self.caps = false;
+        }
+    }
+
+    /// What `execve` leaves: keep-caps does not survive it, and a program
+    /// with no root id among its three loses whatever it kept.
+    pub fn after_exec(&mut self) {
+        self.keep_caps = false;
+        if self.ruid != 0 && self.euid != 0 && self.suid != 0 {
+            self.caps = false;
+        }
+    }
+
+    /// `setresuid`: each of the three to a new value, or `KEEP`.
+    pub fn set_res_uid(&mut self, r: u32, e: u32, s: u32) -> Result<(), ()> {
+        let held = [self.ruid, self.euid, self.suid];
+        if !self.root() && [r, e, s].iter().any(|v| *v != KEEP && !held.contains(v)) {
+            return Err(());
+        }
+        let had = self.ruid == 0 || self.euid == 0 || self.suid == 0;
+        if r != KEEP {
+            self.ruid = r;
+        }
+        if e != KEEP {
+            self.euid = e;
+        }
+        if s != KEEP {
+            self.suid = s;
+        }
+        self.settle(had);
+        Ok(())
+    }
+
+    pub fn set_res_gid(&mut self, r: u32, e: u32, s: u32) -> Result<(), ()> {
+        let held = [self.rgid, self.egid, self.sgid];
+        if !self.root() && [r, e, s].iter().any(|v| *v != KEEP && !held.contains(v)) {
+            return Err(());
+        }
+        if r != KEEP {
+            self.rgid = r;
+        }
+        if e != KEEP {
+            self.egid = e;
+        }
+        if s != KEEP {
+            self.sgid = s;
+        }
+        Ok(())
+    }
+
+    /// `setuid`: root sets all three; anyone else only the effective one, and
+    /// only to an id it holds.
+    pub fn set_uid(&mut self, u: u32) -> Result<(), ()> {
+        if self.root() {
+            let had = self.ruid == 0 || self.euid == 0 || self.suid == 0;
+            self.ruid = u;
+            self.euid = u;
+            self.suid = u;
+            self.settle(had);
+            Ok(())
+        } else if u == self.ruid || u == self.suid {
+            self.euid = u;
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    pub fn set_gid(&mut self, g: u32) -> Result<(), ()> {
+        if self.root() {
+            self.rgid = g;
+            self.egid = g;
+            self.sgid = g;
+            Ok(())
+        } else if g == self.rgid || g == self.sgid {
+            self.egid = g;
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    /// `setreuid`: Linux saves the new effective id when the real one is set
+    /// or the effective one moves away from the real one.
+    pub fn set_re_uid(&mut self, r: u32, e: u32) -> Result<(), ()> {
+        let old_r = self.ruid;
+        let s = if r != KEEP || (e != KEEP && e != old_r) { if e != KEEP { e } else { self.euid } } else { KEEP };
+        self.set_res_uid(r, e, s)
+    }
+
+    pub fn set_re_gid(&mut self, r: u32, e: u32) -> Result<(), ()> {
+        let old_r = self.rgid;
+        let s = if r != KEEP || (e != KEEP && e != old_r) { if e != KEEP { e } else { self.egid } } else { KEEP };
+        self.set_res_gid(r, e, s)
+    }
+}
+
+/// The id rules, with no guest: what `setpriv --reuid 1000` and makepkg's
+/// root check depend on.
+pub fn cred_checks() -> Vec<(&'static str, bool)> {
+    let mut v = Vec::new();
+    v.push(("/dev/fd/63 names descriptor 63", fd_path("/dev/fd/63") == Some(63)));
+    v.push(("and so do /proc/self/fd/3 and /dev/stderr", fd_path("/proc/self/fd/3") == Some(3) && fd_path("/dev/stderr") == Some(2)));
+    v.push(("but /dev/fd itself and /dev/fd/x are not descriptors", fd_path("/dev/fd/").is_none() && fd_path("/dev/fd/x").is_none()));
+    let mut c = Cred::default();
+    v.push(("a new process is root", c.euid == 0 && c.ruid == 0));
+    v.push(("root may drop every user id at once", c.set_res_uid(1000, 1000, 1000).is_ok() && (c.ruid, c.euid, c.suid) == (1000, 1000, 1000)));
+    v.push(("dropping every root id drops the capabilities", !c.caps));
+    v.push(("and having dropped them cannot take root back", c.set_uid(0).is_err() && c.set_res_uid(0, 0, 0).is_err() && c.euid == 1000));
+    v.push(("having dropped the user it cannot set groups either", c.set_res_gid(5, 5, 5).is_err()));
+    let mut d = Cred::default();
+    v.push(("setuid as root sets all three", d.set_uid(42).is_ok() && d.ruid == 42 && d.suid == 42));
+    let mut e = Cred::default();
+    v.push(("-1 leaves an id as it was", e.set_res_uid(KEEP, 7, KEEP).is_ok() && e.ruid == 0 && e.euid == 7 && e.suid == 0));
+    v.push(("an effective id may move back to one still held", e.set_res_uid(KEEP, 0, KEEP).is_ok() && e.euid == 0));
+    let mut g = Cred::default();
+    let mut k = Cred::default();
+    k.keep_caps = true;
+    v.push(("with keep-caps a dropped uid can still set its group, the order setpriv uses", k.set_res_uid(1000, 1000, 1000).is_ok() && k.caps && k.set_res_gid(1000, 1000, 1000).is_ok()));
+    k.after_exec();
+    v.push(("and an exec takes the kept capabilities away", !k.caps && !k.keep_caps));
+    v.push(("groups drop before users, the order setpriv uses", g.set_res_gid(1000, 1000, 1000).is_ok() && g.set_res_uid(1000, 1000, 1000).is_ok() && g.egid == 1000 && g.euid == 1000));
+    v
+}
+
+/// `capget`, version 3: two 32-bit words per set. Root holds every
+/// capability Linux defines (41 of them), anyone else none -- what the
+/// sets are after a uid change on Linux with no keep-caps, which is the only
+/// way a process here changes them. A header asking for another version is
+/// told the one this answers, as Linux tells it.
+fn sys_capget(hdr: u64, data: u64) -> u64 {
+    const V3: u32 = 0x2008_0522;
+    if !reachable(hdr, 8, true) {
+        return EFAULT;
+    }
+    let version = unsafe { core::ptr::read_unaligned(hdr as *const u32) };
+    if version != V3 {
+        unsafe { core::ptr::write_unaligned(hdr as *mut u32, V3) };
+        return if data == 0 { 0 } else { EINVAL };
+    }
+    if data == 0 {
+        return 0;
+    }
+    if !reachable(data, 24, true) {
+        return EFAULT;
+    }
+    let (lo, hi) = if cred().caps { (u32::MAX, 0x1ff) } else { (0, 0) };
+    // Each word: effective, permitted, inheritable.
+    let words = [lo, lo, 0, hi, hi, 0];
+    for (i, w) in words.iter().enumerate() {
+        unsafe { core::ptr::write_unaligned((data + 4 * i as u64) as *mut u32, *w) };
+    }
+    0
+}
+
+fn cred() -> Cred {
+    unsafe { guest_slot() }.as_ref().map(|s| s.cred).unwrap_or_default()
+}
+
+fn with_cred(f: impl FnOnce(&mut Cred) -> Result<(), ()>) -> u64 {
+    match unsafe { guest_slot() }.as_mut() {
+        Some(s) => match f(&mut s.cred) {
+            Ok(()) => 0,
+            Err(()) => EPERM,
+        },
+        None => EPERM,
+    }
 }
 
 impl Space {
@@ -1250,6 +1501,10 @@ pub fn replace_guest(
     let fds = core::mem::take(&mut old.fds);
     let cwd = core::mem::take(&mut old.cwd);
     let saved_fs = old.saved_fs;
+    // Ids survive an exec, as on Linux: a build that dropped to an ordinary
+    // user and then ran `makepkg` must still be that user inside it.
+    let mut cred = old.cred;
+    cred.after_exec();
     // **The old program's mappings go back too**, by the same rule teardown
     // uses, while its tables still exist to find their frames through. They
     // were dropped with the old entry and never freed: every frame a mapping
@@ -1290,6 +1545,7 @@ pub fn replace_guest(
         tables,
         signals: super::signal::State::default(),
         nice: 0,
+        cred,
         ioprio: 0,
         rlimits: Vec::new(),
         lazy: Vec::new(),
@@ -1390,6 +1646,7 @@ pub fn clone_guest(
             ..p.signals
         },
         nice: p.nice,
+        cred: p.cred,
         ioprio: p.ioprio,
         rlimits: p.rlimits.clone(),
         lazy: p.lazy.clone(),
@@ -1603,6 +1860,7 @@ pub fn install(r: Regions, tables: Option<crate::mem::space::Space>) {
             tables,
             signals: super::signal::State::default(),
             nice: 0,
+            cred: Cred::default(),
             ioprio: 0,
             rlimits: Vec::new(),
             lazy: Vec::new(),
@@ -2100,22 +2358,35 @@ pub(super) fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
     }
     // A pipe, which is the same transport with one end refused.
     if let Some(end) = pipe_end(fd) {
-        let (pipe, writing) = {
+        let (pipe, writing, nonblock) = {
             let e = end.borrow();
-            (e.pipe.clone(), e.writing)
+            (e.pipe.clone(), e.writing, e.nonblock)
         };
         if !writing {
             // Writing the read end, the mirror of the refusal in `sys_read`.
             return EBADF;
         }
-        if !reachable(buf, len, false) {
-            return EFAULT;
+        // **A full pipe waits, unless the writer asked not to.** It answered
+        // EAGAIN to everybody, which is the non-blocking answer: Python, whose
+        // stdout is blocking, raised `BlockingIOError` writing thirty
+        // megabytes into `| wc -c`, and a program that does not check simply
+        // loses the bytes. The wait is the read side's, mirrored.
+        loop {
+            if !reachable(buf, len, false) {
+                return EFAULT;
+            }
+            let data = unsafe { core::slice::from_raw_parts(buf as *const u8, len) };
+            match super::unix::write(&pipe, super::fs::Fd::pipe_side(true), data) {
+                Ok(n) => return n as u64,
+                Err(-11) if !nonblock => {}
+                Err(e) => return e as u64,
+            }
+            if overran(crate::dev::lapic::ticks()) {
+                unsafe { kill_blocked() }
+            }
+            crate::sky::server::pump();
+            wait_turn();
         }
-        let data = unsafe { core::slice::from_raw_parts(buf as *const u8, len) };
-        return match super::unix::write(&pipe, super::fs::Fd::pipe_side(true), data) {
-            Ok(n) => n as u64,
-            Err(e) => e as u64,
-        };
     }
     let sink = with_fds(|fds, _| {
         matches!(
@@ -2391,6 +2662,20 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, mode: u64) -> u64
     if raw.is_empty() {
         return ENOENT;
     }
+    // `/dev/fd/N`, `/proc/self/fd/N` and `/dev/std*` name a descriptor this
+    // process already holds, and opening one is duplicating it. Bash's process
+    // substitution, `<(cmd)`, hands the command exactly such a path -- makepkg
+    // uses it to read its own configuration -- and it answered ENOENT, so the
+    // read came back empty and makepkg failed with `$BUILDDIR ()`. A dup
+    // shares the cursor where Linux would open a fresh one on a file; on the
+    // pipe a substitution gives, there is no cursor, so the two agree.
+    if let Some(n) = fd_path(&raw) {
+        let r = sys_dup(n, None);
+        if (r as i64) >= 0 && flags & 0o2_000_000 != 0 {
+            cloexec_set(r, true);
+        }
+        return r;
+    }
     let cwd_relative = !raw.starts_with('/');
     // A file this open creates takes the mode it was created with, less the
     // usual umask: a compiler's output and a package's `install -m 755` are
@@ -2562,7 +2847,7 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, mode: u64) -> u64
                 super::fs::Fd::File(alloc::rc::Rc::new(core::cell::RefCell::new(
                     super::fs::File {
                         path: path.clone(),
-                        data,
+                        data: alloc::rc::Rc::new(data),
                         at: 0,
                         writable: false,
                         dirty: false,
@@ -2596,6 +2881,9 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, mode: u64) -> u64
                 links: None,
             })))
         } else {
+            // A writer of this path that has not committed yet commits now,
+            // so this open sees what was written -- see `fs::settle`.
+            super::fs::settle(&path);
             // Asked before the copy is made, not after: the point is to not
             // allocate the file, so a check that reads it first and then
             // measures has already lost.
@@ -2606,24 +2894,39 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, mode: u64) -> u64
             if size.is_some() && flags & (O_CREAT | O_EXCL) == (O_CREAT | O_EXCL) {
                 return EEXIST;
             }
-            let held: usize = fds
-                .iter()
-                .filter_map(|f| match f {
-                    Some(super::fs::Fd::File(b)) => Some(b.borrow().data.len()),
-                    _ => None,
-                })
-                .sum();
-            if held.saturating_add(size.unwrap_or(0)) > OPEN_MAX_BYTES {
+            // A reader of a file already open shares its contents.
+            let reading = flags & O_TRUNC == 0 && size.is_some();
+            let shared = if reading { super::fs::shared_contents(&path) } else { None };
+            // Each buffer counted once, however many descriptors share it.
+            let mut seen: alloc::vec::Vec<*const alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
+            let mut held = 0usize;
+            for f in fds.iter() {
+                if let Some(super::fs::Fd::File(b)) = f {
+                    let b = b.borrow();
+                    let ptr = alloc::rc::Rc::as_ptr(&b.data);
+                    if !seen.contains(&ptr) {
+                        seen.push(ptr);
+                        held += b.data.len();
+                    }
+                }
+            }
+            let adds = match &shared {
+                Some(d) if seen.contains(&alloc::rc::Rc::as_ptr(d)) => 0,
+                _ => size.unwrap_or(0),
+            };
+            if held.saturating_add(adds) > OPEN_MAX_BYTES {
                 return ENOMEM;
             }
             // A truncating or brand-new open does not read what is there, which
             // is the whole point of `O_TRUNC` and is also the only way to
             // rewrite a file larger than the open-bytes budget.
-            let data = if flags & O_TRUNC != 0 || size.is_none() {
-                alloc::vec::Vec::new()
+            let data = if !reading {
+                alloc::rc::Rc::new(alloc::vec::Vec::new())
+            } else if let Some(d) = shared {
+                d
             } else {
                 match super::ns::read_blob(&path) {
-                    Some(d) => d,
+                    Some(d) => alloc::rc::Rc::new(d),
                     None => return ENOENT,
                 }
             };
@@ -2631,13 +2934,17 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, mode: u64) -> u64
             // A file created but never written still has to exist, since a
             // program doing `open(O_CREAT); close()` means `touch`.
             let fresh = size.is_none() || flags & O_TRUNC != 0;
-            super::fs::Fd::File(alloc::rc::Rc::new(core::cell::RefCell::new(super::fs::File {
+            let body = alloc::rc::Rc::new(core::cell::RefCell::new(super::fs::File {
                 path: path.clone(),
                 data,
                 at,
                 writable: wants_write,
                 dirty: wants_write && fresh,
-            })))
+            }));
+            // Every description is noted, read-only ones too, so a later open
+            // of the same path can share what it holds.
+            super::fs::note_writer(&body);
+            super::fs::Fd::File(body)
         };
         // Lowest free descriptor, which is what POSIX promises and what any
         // program doing `close(0); open(...)` to redirect depends on.
@@ -3601,15 +3908,15 @@ pub(super) fn sys_umask(mask: u64) -> u64 {
 
 /// `getresuid` and `getresgid`: real, effective and saved, all root -- the
 /// same answer `getuid` and friends give.
-fn sys_getres(r: u64, e: u64, sv: u64) -> u64 {
+fn sys_getres(r: u64, e: u64, sv: u64, ids: [u32; 3]) -> u64 {
     for p in [r, e, sv] {
         if p != 0 && !reachable(p, 4, true) {
             return EFAULT;
         }
     }
-    for p in [r, e, sv] {
+    for (p, v) in [r, e, sv].into_iter().zip(ids) {
         if p != 0 {
-            unsafe { core::ptr::write_unaligned(p as *mut u32, 0) };
+            unsafe { core::ptr::write_unaligned(p as *mut u32, v) };
         }
     }
     0
@@ -3622,8 +3929,44 @@ fn sys_getres(r: u64, e: u64, sv: u64) -> u64 {
 fn sys_prctl(op: u64, arg: u64) -> u64 {
     const PR_SET_NAME: u64 = 15;
     const PR_GET_NAME: u64 = 16;
+    const PR_SET_PDEATHSIG: u64 = 1;
+    const PR_GET_PDEATHSIG: u64 = 2;
+    const PR_GET_KEEPCAPS: u64 = 7;
+    const PR_SET_KEEPCAPS: u64 = 8;
+    const PR_SET_NO_NEW_PRIVS: u64 = 38;
+    const PR_GET_NO_NEW_PRIVS: u64 = 39;
     match op {
         PR_SET_NAME => 0,
+        // Capabilities across a uid change, `no_new_privs` and the
+        // parent-death signal: `setpriv` and `runuser` set them on the way to
+        // dropping root, and there are no capabilities or privileges here for
+        // any of them to keep or forbid -- `Cred` is a label. Accepted, so the
+        // tools that drop root can, and answered as their defaults when read.
+        PR_SET_KEEPCAPS => {
+            if arg > 1 {
+                return EINVAL;
+            }
+            with_cred(|c| {
+                c.keep_caps = arg == 1;
+                Ok(())
+            })
+        }
+        PR_GET_KEEPCAPS => cred().keep_caps as u64,
+        PR_SET_NO_NEW_PRIVS | PR_SET_PDEATHSIG => {
+            if op == PR_SET_NO_NEW_PRIVS && arg > 1 {
+                EINVAL
+            } else {
+                0
+            }
+        }
+        PR_GET_NO_NEW_PRIVS => 0,
+        PR_GET_PDEATHSIG => {
+            if !reachable(arg, 4, true) {
+                return EFAULT;
+            }
+            unsafe { core::ptr::write_unaligned(arg as *mut u32, 0) };
+            0
+        }
         PR_GET_NAME => {
             if !reachable(arg, 16, true) {
                 return EFAULT;
@@ -4135,15 +4478,18 @@ fn write_file(fd: u64, buf: u64, len: usize) -> u64 {
         let at = f.at;
         // A write past the end zero-fills the gap, which is what a sparse file
         // reads back as and what `lseek` past the end plus a write means.
-        if f.data.len() < at {
-            f.data.resize(at, 0);
+        // The first write to contents other descriptions share copies them,
+        // so those keep what they opened (`File::data`).
+        let data = alloc::rc::Rc::make_mut(&mut f.data);
+        if data.len() < at {
+            data.resize(at, 0);
         }
         let src = unsafe { core::slice::from_raw_parts(buf as *const u8, len) };
         let end = at + len;
-        if f.data.len() < end {
-            f.data.resize(end, 0);
+        if data.len() < end {
+            data.resize(end, 0);
         }
-        f.data[at..end].copy_from_slice(src);
+        data[at..end].copy_from_slice(src);
         f.at = end;
         f.dirty = true;
         len as u64
@@ -4673,7 +5019,7 @@ pub(super) fn sys_ftruncate(fd: u64, len: u64) -> u64 {
                 // errno branches on which.
                 return EINVAL;
             }
-            f.data.resize(len as usize, 0);
+            alloc::rc::Rc::make_mut(&mut f.data).resize(len as usize, 0);
             f.dirty = true;
             0
         }
@@ -5147,7 +5493,7 @@ fn sys_getsockopt(fd: u64, level: u64, name: u64, val: u64, lenp: u64) -> u64 {
 /// bound name when this end has one. Abstract and unnamed ends answer the
 /// family alone, which is what Linux answers for an unnamed socket.
 fn sys_sockname(fd: u64, addr: u64, lenp: u64, peer: bool) -> u64 {
-    let Some(sock) = unix_sock(fd) else { return if peer { ENOTCONN } else { 0 } };
+    let Some(sock) = unix_sock(fd) else { return tcp_sockname(fd, addr, lenp, peer) };
     if !reachable(lenp, 4, true) {
         return EFAULT;
     }
@@ -5170,6 +5516,45 @@ fn sys_sockname(fd: u64, addr: u64, lenp: u64, peer: bool) -> u64 {
     unsafe {
         core::ptr::copy_nonoverlapping(b.as_ptr(), addr as *mut u8, n);
         core::ptr::write_unaligned(lenp as *mut u32, b.len() as u32);
+    }
+    0
+}
+
+/// The TCP half of `getsockname` and `getpeername`. It answered "not
+/// connected" to every peer question and wrote nothing for its own name,
+/// and Python's `socket.create_connection` asks for the peer right after a
+/// connect it believes succeeded -- so every `urllib` fetch from a guest
+/// died with ENOTCONN on a connection that was up.
+fn tcp_sockname(fd: u64, addr: u64, lenp: u64, peer: bool) -> u64 {
+    let sock = match sock_of(fd) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let conn = sock.borrow().conn;
+    let ends = conn.and_then(crate::net::tcp::endpoints);
+    let (ip, port) = match (ends, peer) {
+        (Some((ours, _)), false) => ours,
+        (Some((_, theirs)), true) => theirs,
+        // Unconnected: no peer, and our own name is the wildcard.
+        (None, true) => return ENOTCONN,
+        (None, false) => ([0, 0, 0, 0], 0),
+    };
+    if !reachable(lenp, 4, true) {
+        return EFAULT;
+    }
+    let room = unsafe { core::ptr::read_unaligned(lenp as *const u32) } as usize;
+    // struct sockaddr_in: family, port (network order), address, eight zeros.
+    let mut b = [0u8; 16];
+    b[0..2].copy_from_slice(&2u16.to_le_bytes());
+    b[2..4].copy_from_slice(&port.to_be_bytes());
+    b[4..8].copy_from_slice(&ip);
+    let n = b.len().min(room);
+    if n > 0 && !reachable(addr, n, true) {
+        return EFAULT;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(b.as_ptr(), addr as *mut u8, n);
+        core::ptr::write_unaligned(lenp as *mut u32, 16);
     }
     0
 }
@@ -5641,10 +6026,11 @@ pub(super) fn sys_sendfile(out: u64, into: u64, off_at: u64, count: u64) -> u64 
         }
         let at = f.at;
         let end = at + chunk.len();
-        if f.data.len() < end {
-            f.data.resize(end, 0);
+        let data = alloc::rc::Rc::make_mut(&mut f.data);
+        if data.len() < end {
+            data.resize(end, 0);
         }
-        f.data[at..end].copy_from_slice(&chunk);
+        data[at..end].copy_from_slice(&chunk);
         f.at = end;
         f.dirty = true;
         chunk.len() as u64
@@ -6386,6 +6772,18 @@ pub fn run_thread(w: super::thread::Work, stack: u64) {
     if flags & (1 << 9) != 0 {
         crate::cpu::enable_interrupts();
     }
+}
+
+/// The descriptor a `/dev/fd/N`-style path names, if it is one.
+pub(super) fn fd_path(p: &str) -> Option<u64> {
+    match p {
+        "/dev/stdin" => return Some(0),
+        "/dev/stdout" => return Some(1),
+        "/dev/stderr" => return Some(2),
+        _ => {}
+    }
+    let n = p.strip_prefix("/dev/fd/").or_else(|| p.strip_prefix("/proc/self/fd/"))?;
+    (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())).then(|| n.parse().ok()).flatten()
 }
 
 pub(super) fn sys_dup3(from: u64, to: u64, flags: u64) -> u64 {
@@ -9013,7 +9411,31 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_UMASK => (sys_umask(f.rdi), true),
         // One process group, led by the process asking.
         SYS_GETPGRP => (super::fork::current_pid(), true),
-        SYS_GETRESUID | SYS_GETRESGID => (sys_getres(f.rdi, f.rsi, f.rdx), true),
+        SYS_GETRESUID => {
+            let c = cred();
+            (sys_getres(f.rdi, f.rsi, f.rdx, [c.ruid, c.euid, c.suid]), true)
+        }
+        SYS_GETRESGID => {
+            let c = cred();
+            (sys_getres(f.rdi, f.rsi, f.rdx, [c.rgid, c.egid, c.sgid]), true)
+        }
+        SYS_CAPGET => (sys_capget(f.rdi, f.rsi), true),
+        // Accepted and not recorded: what a capability set says is derived
+        // from `Cred` when `capget` asks, which is Linux's own rule for what a
+        // uid change leaves behind (root holds them all, anyone else none).
+        SYS_CAPSET => (0, true),
+        SYS_SETUID => (with_cred(|c| c.set_uid(f.rdi as u32)), true),
+        SYS_SETGID => (with_cred(|c| c.set_gid(f.rdi as u32)), true),
+        SYS_SETREUID => (with_cred(|c| c.set_re_uid(f.rdi as u32, f.rsi as u32)), true),
+        SYS_SETREGID => (with_cred(|c| c.set_re_gid(f.rdi as u32, f.rsi as u32)), true),
+        SYS_SETRESUID => (with_cred(|c| c.set_res_uid(f.rdi as u32, f.rsi as u32, f.rdx as u32)), true),
+        SYS_SETRESGID => (with_cred(|c| c.set_res_gid(f.rdi as u32, f.rsi as u32, f.rdx as u32)), true),
+        // Supplementary groups: root may set them, and there are none to keep.
+        SYS_SETGROUPS => (if cred().caps { 0 } else { EPERM }, true),
+        // `setfsuid` answers the previous filesystem id and never fails; with
+        // no permission checks it is the effective id.
+        SYS_SETFSUID => (cred().euid as u64, true),
+        SYS_SETFSGID => (cred().egid as u64, true),
         SYS_PRCTL => (sys_prctl(f.rdi, f.rsi), true),
         // Advice about access patterns: there is no page cache to advise.
         SYS_FADVISE64 => (0, true),
@@ -9176,11 +9598,13 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         // stops a runtime deciding it failed to start.
         SYS_GETPID => (super::fork::current_pid(), true),
         SYS_SET_TID_ADDRESS => (super::thread::current_tid(), true),
-        // Root, and every id the same. There is no privilege boundary above a
-        // guest here to be anything else, which is the same fact `AT_SECURE`
-        // reports as zero and `stat` reports as uid 0 -- said once per place
-        // that asks rather than three different ways.
-        SYS_GETUID | SYS_GETGID | SYS_GETEUID | SYS_GETEGID => (0, true),
+        // Root until the process says otherwise (`Cred`): a label a program
+        // reads, with no permission behind it, which is why `stat` still
+        // reports every file as uid 0.
+        SYS_GETUID => (cred().ruid as u64, true),
+        SYS_GETEUID => (cred().euid as u64, true),
+        SYS_GETGID => (cred().rgid as u64, true),
+        SYS_GETEGID => (cred().egid as u64, true),
         SYS_BRK => (sys_brk(f.rdi), true),
         SYS_MMAP => (sys_mmap(f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9), true),
         SYS_MPROTECT => (sys_mprotect(f.rdi, f.rsi, f.rdx), true),
@@ -11442,6 +11866,17 @@ pub fn name_of(nr: u64) -> &'static str {
         SYS_GETPGRP => "getpgrp",
         SYS_GETRESUID => "getresuid",
         SYS_GETRESGID => "getresgid",
+        SYS_SETUID => "setuid",
+        SYS_CAPGET => "capget",
+        SYS_CAPSET => "capset",
+        SYS_SETGID => "setgid",
+        SYS_SETREUID => "setreuid",
+        SYS_SETREGID => "setregid",
+        SYS_SETGROUPS => "setgroups",
+        SYS_SETRESUID => "setresuid",
+        SYS_SETRESGID => "setresgid",
+        SYS_SETFSUID => "setfsuid",
+        SYS_SETFSGID => "setfsgid",
         SYS_PRCTL => "prctl",
         SYS_FADVISE64 => "fadvise64",
         SYS_STATX => "statx",

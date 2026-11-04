@@ -25,11 +25,15 @@ use crate::sync::Racy;
 
 /// How many children may be live at once.
 ///
-/// A bound rather than a `Vec` because each one costs a kernel task, and
-/// `task::MAX_TASKS` is 24 with no way to reclaim a finished task's slot --
-/// the same constraint `thread`'s pool records. Four is what a shell needs to
-/// run a pipeline.
-pub const MAX_CHILDREN: usize = 4;
+/// A bound rather than a `Vec` because each one costs a kernel task, kept
+/// parked for the next fork, and a 64 KiB syscall stack. It was four, chosen
+/// when `task::MAX_TASKS` was 24 and a finished task could not be reclaimed,
+/// and four is what a shell needs for a pipeline -- but not what makepkg
+/// needs: an AUR build is python, then makepkg, then its subshells, then the
+/// pipelines inside those, and the fifth live process got `EAGAIN` and bash
+/// printed "fork: retry" until it gave up. Twenty-four of `MAX_TASKS`' 96
+/// leaves the kernel's own tasks and the thread pool their room.
+pub const MAX_CHILDREN: usize = 24;
 
 /// The syscall stack a child's ring-3 entry runs on.
 ///
@@ -506,9 +510,10 @@ fn fork_inner(f: &Frame, stack: Option<u64>, settid: Option<u64>) -> u64 {
         i
     };
 
-    // The child's entry state: the parent's, with `rax` zero. That zero is the
-    // whole of how a program tells the two apart, and `rcx` and `r11` are
-    // where `syscall` left the return address and flags -- so the child
+    // The child's entry state: the parent's, every register of it, with `rax`
+    // zero. That zero is the whole of how a program tells the two apart, and
+    // `rcx` and `r11` are where `syscall` left the return address and flags --
+    // set from `rip` and `rflags` on entry, as `sysret` would -- so the child
     // resumes at the instruction after the parent's trap, which is what makes
     // one call return twice.
     let resume = Resume {
@@ -524,6 +529,12 @@ fn fork_inner(f: &Frame, stack: Option<u64>, settid: Option<u64>) -> u64 {
         r13: f.r13,
         r14: f.r14,
         r15: f.r15,
+        rdx: f.rdx,
+        rsi: f.rsi,
+        r8: f.r8,
+        r9: f.r9,
+        r10: f.r10,
+        rdi: f.rdi,
         // The parent's TLS, which a child's copy of memory needs pointed at.
         fs: syscall::guest_fs(),
     };

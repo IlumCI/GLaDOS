@@ -58,6 +58,7 @@ pub mod services;
 pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     let mut out = elf::checks();
     out.extend(fs::checks());
+    out.extend(syscall::cred_checks());
     out.extend(dev::checks());
     out.extend(input::checks());
     out.extend(thread::checks());
