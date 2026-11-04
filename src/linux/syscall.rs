@@ -6040,12 +6040,27 @@ pub(super) fn sys_sendfile(out: u64, into: u64, off_at: u64, count: u64) -> u64 
 
 /// `struct utsname`: six fields of 65 bytes, NUL-padded.
 ///
-/// **It says GLaDOS, and a program that gates on "Linux" will now find out.**
-/// Reporting the kernel this is not would buy compatibility with anything
-/// checking the string, and this tree does not do that anywhere else -- the
-/// wireless driver refuses to pretend it can associate, and the battery code
-/// refuses to invent a reading. The release is the real build version, so a
-/// bug report carries something true.
+/// **The system name is "Linux", because that is the ABI being served.** It
+/// said GLaDOS, on the argument that this tree does not pretend, and the
+/// first AUR build answered it: `uname -s` is how `config.guess` and every
+/// autotools build decides what it is compiling for, and anything else stops
+/// at "unable to guess system type" -- neofetch built and installed and then
+/// refused to run, "Unknown OS detected: 'GLaDOS'". The question a guest asks
+/// with this call is which syscall interface it is talking to, and that
+/// answer is true; WSL1 and FreeBSD's Linux layer answer the same for the
+/// same reason. Who is really underneath goes in the release, `1.4.3-glados`,
+/// so a bug report still carries the real build and the OS name stays where
+/// os-release puts it.
+///
+/// The release is still GLaDOS's own version, not a Linux one, so a program
+/// gating a feature on "kernel 5.x or later" reads 1.4 and declines. Nothing
+/// has been seen doing that; it is the next suspect if something does.
+/// What `uname -r` and `/proc/version` give as the release: the build's
+/// version, marked as GLaDOS's.
+pub fn release() -> alloc::string::String {
+    alloc::format!("{}-glados", crate::VERSION)
+}
+
 pub(super) fn sys_uname(buf: u64) -> u64 {
     const N: usize = 65;
     if !reachable(buf, N * 6, true) {
@@ -6056,9 +6071,9 @@ pub(super) fn sys_uname(buf: u64) -> u64 {
         let n = v.len().min(N - 1);
         b[i * N..i * N + n].copy_from_slice(&v.as_bytes()[..n]);
     };
-    put(0, "GLaDOS");
+    put(0, "Linux");
     put(1, "glados");
-    put(2, crate::VERSION);
+    put(2, &release());
     // **This said "one address space, no processes" until `fork` landed**, and
     // by then it was the one string on the machine still claiming it. The same
     // sentence was on two wiki pages for the same reason: it was true when

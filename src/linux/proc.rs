@@ -184,7 +184,7 @@ pub fn read(path: &str) -> Option<Vec<u8>> {
         // `/proc` is not mounted, and stops -- but every field is one `uname`
         // already gives, so nothing in it is invented to satisfy a check.
         "/proc/version" => Some(
-            format!("Linux version {} (glados) #1 SMP {}\n", crate::VERSION, "ring 0, with guests at ring 3").into_bytes(),
+            format!("Linux version {} (glados) #1 SMP {}\n", syscall::release(), "ring 0, with guests at ring 3").into_bytes(),
         ),
         // **Every field here is one this machine knows**, which is what
         // admits the file under the rule above: total and free are the
