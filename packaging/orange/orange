@@ -16,24 +16,52 @@
 #   orange files <pkg>         orange -Ql <pkg>
 #   orange owns <path>         orange -Qo <path>
 #   orange clean               orange -Sc
+#   orange aur <command>       the AUR, unreviewed: search info show install upgrade list
 #
 # Anything starting with '-' goes to pacman as it is.
 
 usage() {
-    sed -n '9,20p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '9,21p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 pac() {
     exec /usr/bin/pacman "$@"
 }
 
+AUR=/usr/lib/orange/aur.py
+
+# Names no repository has go to the AUR -- but only as far as saying so.
+# Building from the AUR runs code nobody reviewed, so it takes its own
+# command: `orange install` never builds anything.
+install() {
+    local aur_only repo=() a
+    aur_only=" $(/usr/bin/python3 "$AUR" split "$@") "
+    for a in "$@"; do
+        case "$aur_only" in *" $a "*) ;; *) repo+=("$a") ;; esac
+    done
+    local named=0
+    for a in "${repo[@]}"; do case "$a" in -*) ;; *) named=1 ;; esac; done
+    local rc=0
+    if [ $named -eq 1 ]; then
+        /usr/bin/pacman -S "${repo[@]}" || rc=$?
+    fi
+    if [ -n "${aur_only// /}" ]; then
+        /usr/bin/python3 "$AUR" offer $aur_only || rc=1
+    fi
+    exit $rc
+}
+
 verb=$1
 [ $# -gt 0 ] && shift
 case "$verb" in
-    install|add|get)      pac -S "$@" ;;
+    install|add|get)      install "$@" ;;
     remove|uninstall|rm)  pac -Rs "$@" ;;
     update|refresh)       pac -Sy "$@" ;;
-    upgrade)              pac -Syu "$@" ;;
+    upgrade)
+        /usr/bin/pacman -Syu "$@"; rc=$?
+        /usr/bin/python3 "$AUR" pending 2>/dev/null
+        exit $rc ;;
+    aur)                  exec /usr/bin/python3 "$AUR" "$@" ;;
     search|find)          pac -Ss "$@" ;;
     info|show)
         if /usr/bin/pacman -Q "$@" >/dev/null 2>&1; then pac -Qi "$@"; else pac -Si "$@"; fi ;;

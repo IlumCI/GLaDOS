@@ -1,15 +1,18 @@
 # The front end of GLaDOS's package manager: apt-style verbs over pacman.
 pkgname=orange
-pkgver=1.0
+pkgver=1.1
 pkgrel=1
 pkgdesc="The package manager of GLaDOS: apt-style verbs and pacman flags over pacman"
 arch=('any')
 url="https://github.com/IlumCI/GLaDOS"
 license=('custom')  # the project has no licence file yet
-depends=('pacman' 'bash')
-source=('orange')
-sha256sums=('SKIP')
+depends=('pacman' 'bash' 'python' 'util-linux')
+source=('orange' 'aur.py' 'fakeroot')
+sha256sums=('SKIP' 'SKIP' 'SKIP')
 
 package() {
     install -Dm755 "$srcdir/orange" "$pkgdir/usr/bin/orange"
+    install -Dm755 "$srcdir/aur.py" "$pkgdir/usr/lib/orange/aur.py"
+    # Outside PATH on purpose: put in front of it only for orange's builds.
+    install -Dm755 "$srcdir/fakeroot" "$pkgdir/usr/lib/orange/shim/fakeroot"
 }

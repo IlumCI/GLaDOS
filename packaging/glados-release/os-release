@@ -1,0 +1,10 @@
+NAME="GLaDOS"
+PRETTY_NAME="GLaDOS"
+ID=glados
+ID_LIKE=arch
+BUILD_ID=rolling
+ANSI_COLOR="38;2;242;140;30"
+HOME_URL="https://github.com/IlumCI/GLaDOS"
+DOCUMENTATION_URL="https://github.com/IlumCI/GLaDOS/wiki"
+BUG_REPORT_URL="https://github.com/IlumCI/GLaDOS/issues"
+LOGO=glados

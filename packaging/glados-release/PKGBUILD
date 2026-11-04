@@ -1,0 +1,24 @@
+# What GLaDOS says it is: /etc/os-release, which every tool that names the
+# system reads first, and the mark fastfetch draws beside it.
+#
+# ID_LIKE=arch is load-bearing rather than modest. The userland is Arch's,
+# packaged by pacman from Arch's repositories, and tools that branch on the
+# distribution (installers, AUR helpers, scripts) read ID_LIKE to find out
+# which family's rules apply. Arch's own file stays at /usr/lib/os-release,
+# owned by its `filesystem` package; /etc/os-release is read first.
+pkgname=glados-release
+pkgver=1
+pkgrel=1
+pkgdesc="GLaDOS's os-release and its mark for fastfetch"
+arch=('any')
+url="https://github.com/IlumCI/GLaDOS"
+license=('custom')  # the project has no licence file yet
+backup=('etc/xdg/fastfetch/config.jsonc')
+source=('os-release' 'logo.txt' 'fastfetch.jsonc')
+sha256sums=('SKIP' 'SKIP' 'SKIP')
+
+package() {
+    install -Dm644 "$srcdir/os-release" "$pkgdir/etc/os-release"
+    install -Dm644 "$srcdir/logo.txt" "$pkgdir/usr/share/glados/logo.txt"
+    install -Dm644 "$srcdir/fastfetch.jsonc" "$pkgdir/etc/xdg/fastfetch/config.jsonc"
+}
