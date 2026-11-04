@@ -191,6 +191,11 @@ enum Job {
         name: String,
         desc: String,
     },
+    /// Change a program `maker` wrote.
+    Change {
+        name: String,
+        request: String,
+    },
 }
 
 impl Job {
@@ -202,6 +207,7 @@ impl Job {
             Job::Episode { .. } => "running an episode",
             Job::Author { .. } => "writing an application",
             Job::Make { .. } => "writing a program",
+            Job::Change { .. } => "changing a program",
         }
     }
 }
@@ -295,6 +301,10 @@ pub fn queue_make(target: super::maker::Target, name: &str, desc: &str) -> bool 
     )
 }
 
+pub fn queue_change(name: &str, request: &str) -> bool {
+    queue(Job::Change { name: String::from(name), request: String::from(request) }, false)
+}
+
 pub fn queue_author(name: &str, goal: &str, budget: usize, autonomous: bool) -> bool {
     queue(
         Job::Author {
@@ -349,6 +359,7 @@ pub fn queued() -> Vec<String> {
                 Job::Episode { goal, steps, .. } => alloc::format!("episode ({} steps): {}", steps, goal),
                 Job::Author { name, .. } => alloc::format!("write '{}'", name),
                 Job::Make { name, target, .. } => alloc::format!("write the {} program '{}'", target.name(), name),
+                Job::Change { name, .. } => alloc::format!("change '{}'", name),
             })
             .collect()
     })
@@ -412,6 +423,12 @@ pub fn agent_task() {
                     crate::kprintln!("  [maker] {}", super::maker::how_to_run(target, &name));
                 }
                 elog(alloc::format!("wrote {} -- {}", name, o.summary));
+            }
+            Job::Change { name, request } => {
+                let o = super::maker::change(&name, &request);
+                crate::kprintln!();
+                crate::kprintln!("  [maker] {}: {}", name, o.summary);
+                elog(alloc::format!("changed {} -- {}", name, o.summary));
             }
         }
         AUTONOMOUS.store(false, Ordering::Release);

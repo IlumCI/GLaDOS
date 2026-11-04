@@ -57,10 +57,13 @@ pub enum Target {
     Python,
     C,
     Aiksi,
+    /// A window on this desktop: an Aiksi program with `draw()` and its
+    /// handlers, hosted by `gfx::aiksiapp`.
+    App,
 }
 
 impl Target {
-    pub const ALL: [Target; 4] = [Target::Web, Target::Python, Target::C, Target::Aiksi];
+    pub const ALL: [Target; 5] = [Target::App, Target::Web, Target::Python, Target::C, Target::Aiksi];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -68,6 +71,7 @@ impl Target {
             Target::Python => "python",
             Target::C => "c",
             Target::Aiksi => "aiksi",
+            Target::App => "app",
         }
     }
 
@@ -76,7 +80,8 @@ impl Target {
             "web" | "html" | "site" | "page" => Some(Target::Web),
             "python" | "py" => Some(Target::Python),
             "c" => Some(Target::C),
-            "aiksi" | "native" | "glados" => Some(Target::Aiksi),
+            "aiksi" | "script" => Some(Target::Aiksi),
+            "app" | "window" | "native" | "glados" => Some(Target::App),
             _ => None,
         }
     }
@@ -87,6 +92,7 @@ impl Target {
             Target::Python => "main.py",
             Target::C => "main.c",
             Target::Aiksi => "main.ai&xi",
+            Target::App => "app.ai&xi",
         }
     }
 
@@ -98,7 +104,7 @@ impl Target {
             Target::C => "c",
             // The model writes the Python-shaped surface, so it fences it as
             // the language it already knows.
-            Target::Aiksi => "python",
+            Target::Aiksi | Target::App => "python",
         }
     }
 
@@ -108,6 +114,7 @@ impl Target {
             Target::Python => "a Python 3 program",
             Target::C => "a C program",
             Target::Aiksi => "an Aiksi program (Aiksi is written exactly like simple Python)",
+            Target::App => "a desktop app for GLaDOS: one window, written in Aiksi (which is written exactly like simple Python)",
         }
     }
 
@@ -122,20 +129,48 @@ impl Target {
                  - It must look finished: a heading, sensible spacing, readable colours."
             }
             Target::Python => {
-                "- Python 3 standard library only; nothing that needs pip.\n\
+                "- It is checked by running it with no input and no arguments, so it must do its job that way: any text or data it works on goes inside the program; never read stdin. If it takes command-line arguments, with none it shows its results or its usage.\n\
+                 - Python 3 standard library only; nothing that needs pip.\n\
                  - No GUI toolkit: a command-line program that prints its results.\n\
                  - Put the program in functions and run it from `if __name__ == \"__main__\":`.\n\
                  - If it reads input, handle the end of input without crashing."
             }
             Target::C => {
-                "- One file, standard C (C11) and the C standard library only.\n\
+                "- It is run with no input and no arguments. Any data it works on goes inside the program.\n\
+                 - One file, standard C (C11) and the C standard library only.\n\
                  - A complete program with `int main(void)` that returns 0.\n\
                  - No warnings with -Wall."
             }
             Target::Aiksi => AIKSI_RULES,
+            Target::App => APP_RULES,
         }
     }
 }
+
+/// A window's program: the handlers the host calls and the drawing calls it
+/// offers, said once and exactly, with a whole small example -- a model that
+/// has never seen this API copies an example far better than it follows a
+/// description.
+const APP_RULES: &str = "- The window is event-driven. You do NOT write a main loop and you never call draw() \
+yourself. The window calls your functions: draw() whenever it repaints; click(x, y) on a click; \
+key(k) on a key (k is a letter, or \"up\", \"down\", \"left\", \"right\", \"enter\", \"space\", \"backspace\", \"escape\"); \
+tick() ten times a second, for anything that moves. Only draw() is required.\n\
+- Every def is at the top level of the file, never inside another function. The program's state is \
+variables at the top of the file, and your functions change them directly.\n\
+- Drawing, only inside draw(): rect(x, y, w, h, colour), circle(x, y, r, colour), \
+text(x, y, string, colour, size). width() and height() are the window's size. (0, 0) is the top left. \
+Colours are \"#rrggbb\" or names like \"white\", \"black\", \"orange\".\n\
+- Aiksi is written like Python: if/elif/else, while, for, lists, f-strings, True/False. \
+Whole numbers only. No classes, dictionaries, try, imports or slices.\n\
+- The shape of the file, to fill in with this app's own state and logic:\n\
+# state: one variable per thing that changes\n\
+def draw():\n\
+    rect(0, 0, width(), height(), \"#1e2430\")\n\
+    # draw everything from the state\n\
+def click(x, y):\n\
+    # change the state\n\
+def tick():\n\
+    # move things, if anything moves";
 
 /// Aiksi is not in any model's training data, so the model is told the
 /// language rather than its name. Short, and only what a program needs.
@@ -145,6 +180,7 @@ True/False/None, and/or/not, `in`.\n\
 - Numbers are whole numbers only: no floats; `/` divides and rounds down.\n\
 - Not available: classes, dictionaries, try/except, slices, default arguments, lambda, imports. \
 Use lists, and functions that take what they need.\n\
+- It is run with no input: any text or data it works on goes inside the program.\n\
 - Put the work in functions and finish with `main()` on the last line.";
 
 /// Who writes the code.
@@ -391,6 +427,7 @@ pub fn check(t: Target, dir: &str, code: &str) -> Verdict {
         Target::Python => check_python(dir),
         Target::C => check_c(dir),
         Target::Aiksi => check_aiksi(code),
+        Target::App => check_app(code),
     }
 }
 
@@ -477,6 +514,17 @@ fn check_aiksi(code: &str) -> Verdict {
     let out = crate::gfx::console::end_capture().unwrap_or_default();
     match r {
         Ok(_) => Verdict::pass(out, Vec::new()),
+        Err(e) => Verdict::fail(alloc::vec![e]),
+    }
+}
+
+/// A windowed program, run the way its window would run it: the top level,
+/// then `draw()` into an off-screen window -- which must end up showing
+/// something -- then a click, keys and ticks, each followed by a draw.
+fn check_app(code: &str) -> Verdict {
+    let app = crate::gfx::aiksiapp::ProgApp::new(code, "/tmp/maker");
+    match app.exercise(480, 360) {
+        Ok(()) => Verdict::pass(String::new(), alloc::vec![format!("handles {}", app.handlers().join(", "))]),
         Err(e) => Verdict::fail(alloc::vec![e]),
     }
 }
@@ -717,6 +765,18 @@ fn ask(brain: &Brain, user: &str) -> Result<String, String> {
     ask_at(brain, user, 0.2)
 }
 
+/// Asked for a contract, a model told to answer in one code block answers in
+/// one code block: the third driven run got `print("- 2")` back. So the
+/// contract has a system turn of its own.
+const CONTRACT_SYSTEM: &str = "You are a careful tester. You answer with a short list and no code.";
+
+fn ask_with(brain: &Brain, system: &str, user: &str, temperature: f32) -> Result<String, String> {
+    match brain {
+        Brain::Local => ask_local_with(system, user, temperature),
+        Brain::Cloud { url, model } => ask_cloud_with(url, model, system, user),
+    }
+}
+
 /// `temperature` is raised when the model is stuck: at 0.2 the same prompt
 /// gives back the same file, and the first driven run sent one file back five
 /// times and got it five times, byte for byte.
@@ -728,7 +788,11 @@ fn ask_at(brain: &Brain, user: &str, temperature: f32) -> Result<String, String>
 }
 
 fn ask_local(user: &str, temperature: f32) -> Result<String, String> {
-    let prompt = chat(SYSTEM, user);
+    ask_local_with(SYSTEM, user, temperature)
+}
+
+fn ask_local_with(system: &str, user: &str, temperature: f32) -> Result<String, String> {
+    let prompt = chat(system, user);
     let room = crate::ai::with_engine(|e| {
         let used = e.tok.encode(&prompt, false, false).len();
         e.model.cfg.seq_len.saturating_sub(used + 8)
@@ -790,6 +854,10 @@ open(outf, "w").write(reply)
 "#;
 
 fn ask_cloud(url: &str, model: &str, user: &str) -> Result<String, String> {
+    ask_cloud_with(url, model, SYSTEM, user)
+}
+
+fn ask_cloud_with(url: &str, model: &str, system: &str, user: &str) -> Result<String, String> {
     let key = read(CLOUD_KEY).unwrap_or_default();
     if key.trim().is_empty() {
         return Err(String::from("the cloud brain has no key -- 'maker cloud key <key>'"));
@@ -798,7 +866,7 @@ fn ask_cloud(url: &str, model: &str, user: &str) -> Result<String, String> {
     // trace would print.
     write("/tmp/maker/key", &key);
     write("/tmp/maker/cloud.py", CLOUD_PY);
-    write("/tmp/maker/system.txt", SYSTEM);
+    write("/tmp/maker/system.txt", system);
     write("/tmp/maker/user.txt", user);
     let _ = crate::linux::ns::detach("/tmp/maker/reply.txt");
     let r = guest(
@@ -859,6 +927,13 @@ pub fn parse_contract(reply: &str) -> Vec<String> {
     out
 }
 
+/// Marks a problem that is a missed promise rather than a failure the tools
+/// found. A promise is the model's own guess at what correct output contains,
+/// and on Qwen3-0.6B the guess for "primes below 100" was "-25" -- so a
+/// promise gets the program sent back once and never vetoes it. The checks
+/// that are facts (it crashed, it printed nothing) stay hard.
+const PROMISE: &str = "[promise]";
+
 /// What a run that passed the tools still owes: something printed, and every
 /// promise in it. A program that asked for input is excused -- what it prints
 /// depends on what it is given.
@@ -879,11 +954,16 @@ fn held_to(v: &Verdict, promises: &[String]) -> Vec<String> {
         missing.push(String::from("the program ran and printed nothing; it must print its results"));
         return missing;
     }
-    let shown = clip_head(out, 400);
-    for s in promises {
-        if !out.contains(s.as_str()) {
-            missing.push(format!("the output should contain {:?} but does not. It printed:\n{}", s, shown));
-        }
+    let absent: Vec<&String> = promises.iter().filter(|s| !out.contains(s.as_str())).collect();
+    if !absent.is_empty() {
+        let list: Vec<String> = absent.iter().map(|s| format!("{:?}", s)).collect();
+        missing.push(format!(
+            "{} {}: the output should contain {} but does not. It printed:\n{}",
+            PROMISE,
+            absent.len(),
+            list.join(", "),
+            clip_head(out, 400)
+        ));
     }
     missing
 }
@@ -931,6 +1011,40 @@ pub struct Outcome {
 /// of every round in `log.txt`, because a failed attempt is also what somebody
 /// reads to see what the model misunderstood.
 pub fn make(t: Target, name: &str, desc: &str) -> Outcome {
+    build(t, name, desc, None)
+}
+
+/// Change a program that exists: the request and the program go to the
+/// model, and what comes back goes through the same checks and the same
+/// rounds as a new one. A participant grows a program this way a step at a
+/// time, which a small model does far better than writing it all at once.
+pub fn change(name: &str, request: &str) -> Outcome {
+    let dir = project_dir(name);
+    let Some(t) = Target::ALL.into_iter().find(|t| crate::linux::ns::blob_len(&format!("{}/{}", dir, t.file())).is_some()) else {
+        return Outcome { ok: false, rounds: 0, path: dir, summary: format!("there is no program called '{}'", name) };
+    };
+    let code = read(&format!("{}/{}", dir, t.file())).unwrap_or_default();
+    let desc = read(&format!("{}/what.txt", dir)).unwrap_or_else(|| String::from(name));
+    build(t, name, desc.trim(), Some((code, String::from(request))))
+}
+
+fn change_prompt(t: Target, name: &str, desc: &str, code: &str, request: &str) -> String {
+    format!(
+        "This is {lang} called \"{name}\". What it does: {desc}\n\n```{fence}\n{code}```\n\n\
+         Change it: {request}\n\nKeep everything else it does working.\nRules:\n{rules}\n\n\
+         Reply with the whole new file `{file}` in one ```{fence} code block.",
+        lang = t.language(),
+        name = name,
+        desc = desc,
+        fence = t.fence(),
+        code = code,
+        request = request,
+        rules = t.rules(),
+        file = t.file(),
+    )
+}
+
+fn build(t: Target, name: &str, desc: &str, start: Option<(String, String)>) -> Outcome {
     let dir = project_dir(name);
     let path = format!("{}/{}", dir, t.file());
     let brain = brain();
@@ -945,20 +1059,34 @@ pub fn make(t: Target, name: &str, desc: &str) -> Outcome {
         ok: false,
     };
     mkdirs(&dir);
+    // What the program is for grows with every change, so the next change
+    // and the next repair are asked against all of it.
+    let desc = match &start {
+        Some((_, req)) => format!("{}; then: {}", desc, req),
+        None => String::from(desc),
+    };
+    let desc = desc.as_str();
+    write(&format!("{}/what.txt", dir), desc);
     write(&format!("{}/README.md", dir), &format!("# {}\n\n{}\n\nWritten by {} as {}.\n", name, desc, brain.describe(), t.language()));
-    let mut log = format!("{} -- {} -- {}\n{}\n", name, t.name(), brain.describe(), desc);
-    let mut code = String::new();
+    let mut log = read(&format!("{}/log.txt", dir)).filter(|_| start.is_some()).unwrap_or_default();
+    log.push_str(&format!("{} -- {} -- {}\n{}\n", name, t.name(), brain.describe(), desc));
+    let mut code = start.as_ref().map(|s| s.0.clone()).unwrap_or_default();
     let mut problems: Vec<String> = Vec::new();
     let mut verdict: Option<Verdict> = None;
     // The contract: what the output must contain if the program does what
     // was asked, decided *before* any code exists. Without it every check here
     // is satisfied by a program that runs and prints a heading -- which is
     // exactly what the first driven runs produced and called a pass.
-    let promises = if t == Target::Web {
+    // Only for a cloud model. Measured on Qwen3-0.6B, four runs: its promise
+    // for "primes below 100" was "-25" twice, for FizzBuzz "1 - Fizz", and
+    // sending FizzBuzz back on that made the rewrite drop every plain number.
+    // A small model's contract is as likely wrong as its program, so on the
+    // local model only the checks that are facts apply.
+    let promises = if t == Target::Web || t == Target::App || brain == Brain::Local {
         Vec::new()
     } else {
         say(&mut p, String::from("deciding what it must print"));
-        match ask(&brain, &contract_prompt(t, name, desc)) {
+        match ask_with(&brain, CONTRACT_SYSTEM, &contract_prompt(t, name, desc), 0.2) {
             Ok(r) => {
                 let got = parse_contract(&r);
                 if got.is_empty() {
@@ -982,6 +1110,7 @@ pub fn make(t: Target, name: &str, desc: &str) -> Outcome {
         }
     }
     let mut stuck = false;
+    let mut promised_once = false;
     for round in 1..=MAX_ROUNDS {
         if crate::ai::agent::aborted() {
             log.push_str("stopped\n");
@@ -989,11 +1118,22 @@ pub fn make(t: Target, name: &str, desc: &str) -> Outcome {
         }
         p.round = round;
         say(&mut p, if round == 1 { String::from("writing") } else { format!("rewriting, round {}", round) });
-        let mut prompt = if round == 1 { first_prompt(t, name, desc) } else { repair_prompt(t, name, desc, &code, &problems) };
+        // Stuck -- the model gave back the very file it was asked to fix --
+        // is answered by starting over rather than by asking again. Asking
+        // again was measured: four identical files in a row, at 0.7.
+        let mut prompt = match (&start, round, stuck) {
+            (Some((_, req)), 1, _) => change_prompt(t, name, desc, &code, req),
+            (None, 1, _) => first_prompt(t, name, desc),
+            (None, _, true) => first_prompt(t, name, desc),
+            _ => repair_prompt(t, name, desc, &code, &problems),
+        };
         if stuck {
-            prompt.push_str("\n\nYour last answer was exactly the same file, with the same problem. Do not repeat it: change the line the problem names, or write that part a different way.");
+            prompt.push_str(&format!(
+                "\n\nAn earlier attempt failed like this, so do it differently:\n- {}",
+                problems.first().map(|p| clip_head(p, 300)).unwrap_or_default()
+            ));
         }
-        let reply = match ask_at(&brain, &prompt, if stuck { 0.7 } else { 0.2 }) {
+        let reply = match ask_at(&brain, &prompt, if stuck { 0.8 } else { 0.2 }) {
             Ok(r) => r,
             Err(e) => {
                 log.push_str(&format!("round {}: {}\n", round, e));
@@ -1004,12 +1144,24 @@ pub fn make(t: Target, name: &str, desc: &str) -> Outcome {
         let next = extract(&reply);
         // A rewrite that came back empty or cut to a stub is worse than the
         // draft it replaces; keep the draft and say what happened.
-        if round > 1 && next.trim().len() < code.trim().len() / 4 {
+        if !code.is_empty() && next.trim().len() < code.trim().len() / 4 {
             log.push_str(&format!("round {}: the rewrite came back {} bytes against {}; kept the draft\n", round, next.len(), code.len()));
             continue;
         }
-        if round > 1 && next.trim() == code.trim() {
-            log.push_str(&format!("round {}: the same file again\n", round));
+        if !code.is_empty() && next.trim() == code.trim() {
+            log.push_str(&format!("round {}: the same file again{}\n", round, if stuck { ", even written from scratch" } else { "" }));
+            // Sent back only for a promise, and the model stands by its
+            // file: that is the promise's one chance spent, not a failure.
+            if promised_once && !problems.is_empty() && problems.iter().all(|m| m.starts_with(PROMISE)) {
+                if let Some(v) = verdict.as_mut() {
+                    for m in &problems {
+                        v.notes.push(format!("its output may not match what was asked -- {}", m.trim_start_matches(PROMISE).trim().lines().next().unwrap_or("")));
+                    }
+                    v.problems.clear();
+                    v.ok = true;
+                }
+                break;
+            }
             stuck = true;
             continue;
         }
@@ -1018,8 +1170,18 @@ pub fn make(t: Target, name: &str, desc: &str) -> Outcome {
         write(&path, &code);
         say(&mut p, String::from("checking"));
         let mut v = check(t, &dir, &code);
-        if v.ok && t != Target::Web {
+        if v.ok && t != Target::Web && t != Target::App {
             let mut missing = held_to(&v, &promises);
+            // A promise has had its one chance once a rewrite answered it.
+            if promised_once && missing.iter().all(|m| m.starts_with(PROMISE)) {
+                for m in &missing {
+                    v.notes.push(format!("its output may not match what was asked -- {}", m.trim_start_matches(PROMISE).trim().lines().next().unwrap_or("")));
+                }
+                missing.clear();
+            }
+            if missing.iter().any(|m| m.starts_with(PROMISE)) {
+                promised_once = true;
+            }
             // The commonest reason a program prints nothing here: it waited
             // on input that a run with none never gives it.
             if missing.iter().any(|m| m.contains("printed nothing") || m.contains("only the heading"))
@@ -1100,6 +1262,7 @@ pub fn how_to_run(t: Target, name: &str) -> String {
         Target::Python => format!("linux run /usr/bin/python3 {}/main.py", d),
         Target::C => format!("maker run {} (compiles and runs it)", name),
         Target::Aiksi => format!("run {}/main.ai&xi", d),
+        Target::App => format!("maker run {} (opens it in a window)", name),
     }
 }
 
@@ -1133,7 +1296,7 @@ pub fn selftest() -> bool {
     claim("a numbered contract is read too", parse_contract("1. 97\n2) 2 3 5 7") == alloc::vec![String::from("97"), String::from("2 3 5 7")]);
     claim("a heading with nothing under it is sent back", !held_to(&Verdict::pass(String::from("Top 5 words:\n"), Vec::new()), &[]).is_empty());
     claim("a run that printed nothing owes its results", !held_to(&Verdict::pass(String::new(), Vec::new()), &[]).is_empty());
-    claim("and one missing a promise is sent back naming it", held_to(&Verdict::pass(String::from("Top words:\n"), Vec::new()), &[String::from("the: 3")]).iter().any(|m| m.contains("the: 3")));
+    claim("and one missing a promise is sent back naming it, once", held_to(&Verdict::pass(String::from("Top words:\nfox: 2\n"), Vec::new()), &[String::from("the: 3")]).iter().any(|m| m.contains("the: 3")));
     claim("the line a tool names is found", line_named("main.c:12:5: error: x") == Some(12) && line_named("File \"main.py\", line 7, in f") == Some(7) && line_named("line 3: expected ')'") == Some(3));
     claim("names that reach a shell line are refused", !valid_name("a b") && !valid_name("x;rm") && !valid_name("-x") && valid_name("todo-app_2"));
     claim("every target has a file and a fence the prompt names", Target::ALL.iter().all(|t| first_prompt(*t, "n", "d").contains(t.file())));
@@ -1141,5 +1304,9 @@ pub fn selftest() -> bool {
     claim("an Aiksi program that runs is accepted", check_aiksi("fn main() { println(1 + 1) }\nmain()").ok);
     claim("and so is one written like Python", check_aiksi("def main():\n    xs = []\n    for i in range(3):\n        xs.append(i * 2)\n    print(f\"{len(xs)} items\")\n\nmain()\n").ok);
     claim("and one that does not parse is sent back", !check_aiksi("fn main( {").ok);
+    claim("a windowed program that draws and counts clicks is accepted", check_app("count = 0\ndef draw():\n    rect(0, 0, width(), height(), \"#1e2430\")\n    text(20, 20, f\"{count} clicks\", \"white\", 24)\ndef click(x, y):\n    count += 1\n").ok);
+    claim("an app written as a loop is told the window calls draw()", check_app("def app():\n    def draw():\n        rect(0, 0, 9, 9, \"red\")\n    while True:\n        draw()\napp()\n").problems.iter().any(|p| p.contains("do not write a loop") || p.contains("top level")));
+    claim("one that draws nothing is sent back", !check_app("def draw():\n    pass\n").ok);
+    claim("and one whose click handler fails says so", check_app("def draw():\n    rect(0, 0, 10, 10, \"red\")\ndef click(x, y):\n    return missing + 1\n").problems.iter().any(|p| p.contains("click")));
     ok
 }

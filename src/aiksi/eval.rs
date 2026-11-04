@@ -1106,7 +1106,8 @@ pub const BUILTINS: &[(&str, Touch, usize, usize)] = &[
     // --- drawing ----------------------------------------------------------
     ("pixel", Touch::Draw, 3, 3),
     ("rect", Touch::Draw, 5, 5),
-    ("text", Touch::Draw, 4, 4),
+    ("text", Touch::Draw, 4, 5),
+    ("circle", Touch::Draw, 4, 4),
 
     // --- text -------------------------------------------------------------
     //
@@ -1315,6 +1316,12 @@ pub struct Interp {
     returning: Option<Value>,
     /// A `break` (1) or `continue` (2) on its way out to the innermost loop.
     looping: u8,
+    /// The window this program draws into, while one of its event handlers
+    /// runs (`gfx::aiksiapp`). With it set, `rect`, `text`, `pixel` and
+    /// `circle` paint the window rather than the screen, and a sandboxed
+    /// program may call them: painting its own window is not "drawing
+    /// outside any window", which is the whole of why `Draw` is gated.
+    canvas: Option<(crate::gfx::Framebuffer, u32, u32)>,
     depth: usize,
     steps: u64,
     budget: u64,
@@ -1377,6 +1384,7 @@ impl Interp {
             funcs: BTreeMap::new(),
             returning: None,
             looping: 0,
+            canvas: None,
             depth: 0,
             steps: 0,
             budget: STEP_BUDGET,
@@ -1449,6 +1457,18 @@ impl Interp {
         // held across it.
         self.returning = None;
         self.call_user(name, &f, args)
+    }
+
+    /// Draw into this surface until it is taken away. See `canvas`.
+    pub fn set_canvas(&mut self, fb: Option<(crate::gfx::Framebuffer, u32, u32)>) {
+        self.canvas = fb;
+    }
+
+    /// Start a fresh step budget. A window's program lives for as long as the
+    /// window and runs once per event; the budget is per event, or a program
+    /// that had answered a few thousand clicks would stop answering.
+    pub fn reset_steps(&mut self) {
+        self.steps = 0;
     }
 
     /// Whether a function of this name is defined.
@@ -2351,7 +2371,7 @@ impl Interp {
             });
         }
         if self.caps == Caps::Sandbox {
-            if !touch.sandboxable() {
+            if !touch.sandboxable() && !(touch == Touch::Draw && self.canvas.is_some()) {
                 // Name the command that actually applies. The jail root says
                 // what kind of program this is: apps live under /app and are
                 // approved with `app trust`, skills live under /ai/tools and
@@ -2667,6 +2687,51 @@ impl Interp {
             }
 
             // --- graphics ---
+            "width" if self.canvas.is_some() => Ok(Value::Int(self.canvas.map(|c| c.1).unwrap_or(0) as i64)),
+            "height" if self.canvas.is_some() => Ok(Value::Int(self.canvas.map(|c| c.2).unwrap_or(0) as i64)),
+            "pixel" | "rect" | "text" | "circle" if self.canvas.is_some() => {
+                let fb = self.canvas.unwrap().0;
+                let c = |v: &Value| canvas_colour(v);
+                let at = |i: usize| -> Result<i32, String> {
+                    match args.get(i) {
+                        Some(Value::Int(n)) => Ok((*n).clamp(-1_000_000, 1_000_000) as i32),
+                        Some(other) => Err(format!("{} wants whole numbers for its position and size, got {}", name, other.type_name())),
+                        None => Err(format!("{} is missing an argument", name)),
+                    }
+                };
+                match name {
+                    "pixel" => {
+                        let (x, y) = (at(0)?, at(1)?);
+                        if x >= 0 && y >= 0 {
+                            fb.rect(x as u32, y as u32, 1, 1, c(&args[2])?);
+                        }
+                    }
+                    "rect" => {
+                        let (x, y, w, h) = (at(0)?, at(1)?, at(2)?, at(3)?);
+                        if w > 0 && h > 0 {
+                            let raw = crate::gfx::blend::opaque(fb.encode(c(&args[4])?));
+                            crate::gfx::shape::rrect(&fb, crate::gfx::shape::Box::new(x, y, w as u32, h as u32), 0, raw);
+                        }
+                    }
+                    "circle" => {
+                        let (x, y, r) = (at(0)?, at(1)?, at(2)?);
+                        let raw = crate::gfx::blend::opaque(fb.encode(c(&args[3])?));
+                        crate::gfx::shape::circle(&fb, x as f32, y as f32, r.max(0) as f32, raw);
+                    }
+                    _ => {
+                        // text(x, y, what, colour[, size]): `y` is the top of
+                        // the line, as it is for a rectangle.
+                        let (x, y) = (at(0)?, at(1)?);
+                        let px = match args.get(4) {
+                            Some(Value::Int(n)) => (*n).clamp(6, 200) as f32,
+                            _ => crate::gfx::theme::ui_size(),
+                        };
+                        let base = y + (px * 1.05) as i32;
+                        crate::gfx::text::draw(&fb, x as f32, base, crate::gfx::text::Face::Ui, px, &args[2].render(), c(&args[3])?);
+                    }
+                }
+                Ok(Value::Nil)
+            }
             "width" => Ok(Value::Int(gfx::primary().map(|f| f.width()).unwrap_or(0) as i64)),
             "height" => Ok(Value::Int(gfx::primary().map(|f| f.height()).unwrap_or(0) as i64)),
             "pixel" => {
@@ -2784,3 +2849,48 @@ impl Interp {
 // hand-kept beside the match. It is gone: `BUILTINS` above is the one list,
 // and `words` reads it. A name that appears in one place cannot disagree with
 // itself.
+
+
+/// A colour as a windowed program writes one: `"#f28c1e"`, `0xF28C1E`, a
+/// name, or 0 to 15 for the old palette that the full-screen builtins use.
+fn canvas_colour(v: &Value) -> Result<crate::gfx::Color, String> {
+    use crate::gfx::Color;
+    match v {
+        Value::Int(n) if (0..16).contains(n) => Ok(PALETTE[*n as usize]),
+        Value::Int(n) => {
+            let n = *n as u32;
+            Ok(Color::new((n >> 16) as u8, (n >> 8) as u8, n as u8))
+        }
+        Value::Str(s) => {
+            let t = s.trim().to_ascii_lowercase();
+            if let Some(h) = t.strip_prefix('#') {
+                let h: String = if h.len() == 3 { h.chars().flat_map(|c| [c, c]).collect() } else { String::from(h) };
+                if let Ok(n) = u32::from_str_radix(&h, 16) {
+                    if h.len() == 6 {
+                        return Ok(Color::new((n >> 16) as u8, (n >> 8) as u8, n as u8));
+                    }
+                }
+                return Err(format!("{:?} is not a colour; write \"#rrggbb\"", s));
+            }
+            let named = match t.as_str() {
+                "black" => (0, 0, 0),
+                "white" => (255, 255, 255),
+                "red" => (220, 50, 47),
+                "green" => (60, 170, 80),
+                "blue" => (40, 110, 220),
+                "yellow" => (240, 200, 40),
+                "orange" => (242, 140, 30),
+                "purple" => (140, 80, 200),
+                "pink" => (235, 110, 170),
+                "gray" | "grey" => (128, 128, 128),
+                "lightgray" | "lightgrey" => (220, 224, 228),
+                "darkgray" | "darkgrey" => (60, 64, 70),
+                "cyan" => (40, 190, 210),
+                "brown" => (140, 90, 50),
+                _ => return Err(format!("{:?} is not a colour I know; write \"#rrggbb\"", s)),
+            };
+            Ok(Color::new(named.0, named.1, named.2))
+        }
+        other => Err(format!("a colour is \"#rrggbb\" or a name, got {}", other.type_name())),
+    }
+}

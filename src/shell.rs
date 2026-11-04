@@ -11146,17 +11146,45 @@ fn maker_cmd(rest: &str) {
     match verb {
         "" | "help" => {
             let b = maker::brain();
-            kprintln!("  maker <web|python|c|aiksi> <name> <what it should do>");
+            kprintln!("  maker <app|web|python|c|aiksi> <name> <what it should do>");
+            kprintln!("      app is a window on this desktop; aiksi a script; web one HTML file");
             kprintln!("      writes it, checks it with the real tools, and rewrites it until they accept it");
             kprintln!("  maker list               what has been written, in {}", maker::projects_dir());
             kprintln!("  maker show <name>        its log: every round, and what the checks said");
             kprintln!("  maker code <name>        the program itself");
+            kprintln!("  maker change <name> <what to change>   grow it a step, checked the same way");
+            kprintln!("  maker edit <name>        open it in the editor");
             kprintln!("  maker run <name>         run it here");
             kprintln!("  maker stop               stop the run at its next step");
             kprintln!("  maker cloud [on|off|url <u>|model <m>|key <k>]   an optional cloud brain");
             kprintln!("  written by: {}", b.describe());
         }
         "stop" => kprintln!("  {}", crate::ai::agent::request_abort()),
+        "change" => {
+            let (name, req) = tail.split_once(' ').map(|(a, b)| (a, b.trim())).unwrap_or((tail, ""));
+            if req.is_empty() || !maker::list().iter().any(|(n, t)| n == name && t.is_some()) {
+                kprintln!("  maker change <name> <what to change> -- 'maker list' says what exists");
+                return;
+            }
+            if crate::ai::agent::queue_change(name, req) {
+                kprintln!("  queued -- the change is checked like a new program; 'maker show {}' follows it", name);
+            } else {
+                kprintln!("  something is already pending or running -- 'agent stop' cancels it");
+            }
+        }
+        "edit" => {
+            let Some((_, Some(t))) = maker::list().into_iter().find(|(n, _)| n == tail) else {
+                kprintln!("  no project called '{}' -- 'maker list'", tail);
+                return;
+            };
+            // The editor works on the kernel's namespace; with a root image
+            // mounted a guest path lives under the guest's own layer.
+            let guest = alloc::format!("{}/{}", maker::project_dir(tail), t.file());
+            let ns = if crate::linux::disk::root_mounted() { alloc::format!("{}{}", crate::linux::ns::UPPER, guest) } else { guest };
+            // Queued as the command a person would type, so the editor opens
+            // the way it always does.
+            crate::gfx::desk::queue_command(&alloc::format!("edit {}", ns));
+        }
         "list" => {
             let all = maker::list();
             if all.is_empty() {
@@ -11218,6 +11246,16 @@ fn maker_cmd(rest: &str) {
                         Err(e) => kprintln!("  {}", e),
                     }
                 }
+                Target::App => {
+                    let p = alloc::format!("{}/{}", d, t.file());
+                    match crate::linux::ns::read_blob(&p) {
+                        Some(b) => {
+                            let src = alloc::string::String::from_utf8_lossy(&b).into_owned();
+                            crate::gfx::aiksiapp::open(tail, &src, &alloc::format!("/tmp/maker/{}", tail));
+                        }
+                        None => kprintln!("  {} is missing", p),
+                    }
+                }
                 other => kprintln!("  {}", maker::how_to_run(other, tail)),
             }
         }
@@ -11247,7 +11285,7 @@ fn maker_cmd(rest: &str) {
         }
         _ => {
             let Some(t) = Target::parse(verb) else {
-                kprintln!("  '{}' is not a kind of program -- web, python, c or aiksi", verb);
+                kprintln!("  '{}' is not a kind of program -- app, web, python, c or aiksi", verb);
                 return;
             };
             let (name, desc) = tail.split_once(' ').map(|(a, b)| (a, b.trim())).unwrap_or((tail, ""));

@@ -23,6 +23,7 @@ pub mod settings;
 pub mod prefs;
 pub mod setapp;
 pub mod quick;
+pub mod aiksiapp;
 pub mod flip;
 pub mod tile;
 pub mod icons;
