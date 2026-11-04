@@ -17,11 +17,13 @@
 #   orange owns <path>         orange -Qo <path>
 #   orange clean               orange -Sc
 #   orange aur <command>       the AUR, unreviewed: search info show install upgrade list
+#   orange install ./x.deb     a Debian package, converted to a pacman one
+#   orange deb <command>       show <file.deb>, list
 #
 # Anything starting with '-' goes to pacman as it is.
 
 usage() {
-    sed -n '9,21p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '9,23p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 pac() {
@@ -29,12 +31,29 @@ pac() {
 }
 
 AUR=/usr/lib/orange/aur.py
+DEB=/usr/lib/orange/deb.py
 
 # Names no repository has go to the AUR -- but only as far as saying so.
 # Building from the AUR runs code nobody reviewed, so it takes its own
 # command: `orange install` never builds anything.
 install() {
-    local aur_only repo=() a
+    # A path to a .deb is not a name: it is converted, never looked up.
+    local debs=() names=() flags=() a
+    for a in "$@"; do
+        case "$a" in
+            *.deb) [ -f "$a" ] && { debs+=("$a"); continue; } ;;
+            --force) flags+=("$a"); continue ;;
+        esac
+        names+=("$a")
+    done
+    if [ ${#debs[@]} -gt 0 ]; then
+        /usr/bin/python3 "$DEB" install "${flags[@]}" "${debs[@]}" || exit $?
+        local left=()
+        for a in "${names[@]}"; do case "$a" in -*) ;; *) left+=("$a") ;; esac; done
+        [ ${#left[@]} -eq 0 ] && exit 0
+        set -- "${names[@]}"
+    fi
+    local aur_only repo=()
     aur_only=" $(/usr/bin/python3 "$AUR" split "$@") "
     for a in "$@"; do
         case "$aur_only" in *" $a "*) ;; *) repo+=("$a") ;; esac
@@ -62,6 +81,7 @@ case "$verb" in
         /usr/bin/python3 "$AUR" pending 2>/dev/null
         exit $rc ;;
     aur)                  exec /usr/bin/python3 "$AUR" "$@" ;;
+    deb)                  exec /usr/bin/python3 "$DEB" "$@" ;;
     search|find)          pac -Ss "$@" ;;
     info|show)
         if /usr/bin/pacman -Q "$@" >/dev/null 2>&1; then pac -Qi "$@"; else pac -Si "$@"; fi ;;
