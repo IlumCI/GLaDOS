@@ -1,0 +1,11 @@
+# repo.aperture.institute: a page about the [glados] package repository, and a
+# short Server URL for pacman. Packages stay where repo.yml uploads them (the
+# repo-x86_64 GitHub release); /x86_64/<file> redirects there.
+name = "glados-repo"
+main = "src/worker.js"
+compatibility_date = "2026-10-01"
+routes = [{ pattern = "repo.aperture.institute", custom_domain = true }]
+
+[assets]
+directory = "public"
+binding = "ASSETS"
