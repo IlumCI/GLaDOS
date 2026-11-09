@@ -9,7 +9,7 @@
 #   orange install <pkg>...    orange -S <pkg>...
 #   orange remove <pkg>...     orange -Rs <pkg>...
 #   orange update              orange -Sy
-#   orange upgrade             orange -Syu      (orange -Syyu forces a refresh)
+#   orange upgrade             orange -Syu, and the full desktop if missing
 #   orange search <words>      orange -Ss <words>
 #   orange info <pkg>          installed: -Qi, otherwise -Si
 #   orange list                orange -Q
@@ -78,6 +78,12 @@ case "$verb" in
     update|refresh)       pac -Sy "$@" ;;
     upgrade)
         /usr/bin/pacman -Syu "$@"; rc=$?
+        # The ISO carries a slim root; the rest of the desktop is one package
+        # away, and an upgrade is when to bring it in.
+        if [ $rc -eq 0 ] && ! /usr/bin/pacman -Q glados-desktop >/dev/null 2>&1; then
+            echo "orange: installing the full GLaDOS desktop (glados-desktop)"
+            /usr/bin/pacman -S --needed "$@" glados-desktop; rc=$?
+        fi
         /usr/bin/python3 "$AUR" pending 2>/dev/null
         exit $rc ;;
     aur)                  exec /usr/bin/python3 "$AUR" "$@" ;;

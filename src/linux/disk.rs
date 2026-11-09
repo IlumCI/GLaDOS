@@ -158,9 +158,23 @@ pub fn auto_root() -> Option<u32> {
     if root_mounted() {
         return Some(0);
     }
-    let layout = crate::store::block::scan().ok()?;
-    let indices: Vec<u32> = layout.partitions.iter().map(|p| p.index).collect();
-    indices.into_iter().find(|&i| mount("/", i).is_ok())
+    // A root on the disk first: an installed system's. Then the one the ISO
+    // carried into memory, answered as partition 0.
+    let on_disk = crate::store::block::scan().ok().and_then(|layout| {
+        let indices: Vec<u32> = layout.partitions.iter().map(|p| p.index).collect();
+        indices.into_iter().find(|&i| mount("/", i).is_ok())
+    });
+    on_disk.or_else(|| mount_ram().ok().map(|_| 0))
+}
+
+/// Mount the in-memory root (`erofs::set_ram`) at `/`.
+fn mount_ram() -> Result<(), &'static str> {
+    let img = erofs::Image::mount(erofs::RAM_BASE).map_err(|_| "no root image in memory")?;
+    let _g = big();
+    let m = unsafe { MOUNTS.get() };
+    let id = NEXT_MOUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    m.push(Mount { prefix: String::new(), vol: Vol::Erofs(img), id });
+    Ok(())
 }
 
 /// Mount point, kind, and block or cluster size, for the shell.

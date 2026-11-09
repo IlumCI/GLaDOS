@@ -84,6 +84,21 @@ PACKAGES = [
     "libreoffice-fresh",
 ]
 
+# The root the ISO carries: a shell, the userland, a terminal, and `orange`.
+# Everything else in PACKAGES arrives with `orange upgrade`, which installs the
+# [glados] package glados-desktop (packaging/glados-desktop) -- the full root is
+# larger than one release file may be, and a slim one fits beside the model.
+SLIM = [
+    "filesystem", "glibc", "bash", "coreutils", "fontconfig", "ttf-dejavu", "dbus",
+    "grep", "sed", "gawk", "findutils", "diffutils", "which", "less", "nano",
+    "tar", "gzip", "xz", "file", "procps-ng", "util-linux", "fish", "git",
+    "pacman", "pacman-mirrorlist", "archlinux-keyring", "ca-certificates",
+    "foot", "xkeyboard-config",
+    # Pinned (PINS), and held there by IgnorePkg, so the toolkits
+    # glados-desktop brings in decode images in-process.
+    "gdk-pixbuf2",
+]
+
 # Packages replaced by an older build, and why. gdk-pixbuf 2.43 and later
 # decode every image format in a glycin helper process inside a bwrap
 # sandbox, spoken to over D-Bus; 2.42 decodes in-process and keeps the soname.
@@ -242,7 +257,9 @@ def glados_packages(names):
     the image is refused without them rather than built with a package manager
     that cannot update itself."""
     repo = ROOT / "out/repo/x86_64"
-    pkgs = sorted(repo.glob("*.pkg.tar.zst"))
+    # glados-desktop is the set the slim root leaves out; recorded as
+    # installed, pacman would believe the whole desktop was already there.
+    pkgs = sorted(p for p in repo.glob("*.pkg.tar.zst") if PACKAGES is not SLIM or not p.name.startswith("glados-desktop-"))
     if not pkgs:
         sys.exit("rootfs: no [glados] packages -- run tools/pkgrepo.py build first")
     for p in pkgs:
@@ -597,7 +614,13 @@ def main():
     a.add_argument("cmd", nargs="?", choices=["resolve", "build"])
     a.add_argument("--selftest", action="store_true")
     a.add_argument("--reuse", action="store_true", help="image the tree already unpacked")
+    a.add_argument("--slim", action="store_true", help="the ISO's root (SLIM) into .qemu/root-slim.erofs")
     args = a.parse_args()
+    if args.slim:
+        global PACKAGES, IMAGE, TREE
+        PACKAGES = SLIM
+        IMAGE = ROOT / ".qemu" / "root-slim.erofs"
+        TREE = OUT / "root-slim"
     if args.selftest:
         selftest()
     elif args.cmd == "resolve":

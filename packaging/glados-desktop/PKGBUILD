@@ -1,0 +1,14 @@
+# Everything the ISO's slim root leaves out: what `orange upgrade` brings in.
+# A package of nothing but dependencies, so pacman resolves, installs and
+# upgrades the set like any other, and `orange remove glados-desktop` with
+# `-s` takes it back out.
+pkgname=glados-desktop
+pkgver=1
+pkgrel=1
+pkgdesc="The full GLaDOS desktop userland: office suite, toolkits, media"
+arch=('any')
+url="https://github.com/IlumCI/GLaDOS"
+license=('custom')  # the project has no licence file yet
+depends=('gtk3' 'adwaita-icon-theme' 'adwaita-icon-theme-legacy' 'hicolor-icon-theme'
+         'shared-mime-info' 'gsettings-desktop-schemas' 'ttf-liberation'
+         'gtk4-demos' 'qt6-wayland' 'featherpad' 'imv' 'mpv' 'libreoffice-fresh')

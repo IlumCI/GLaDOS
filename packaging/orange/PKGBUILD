@@ -1,6 +1,6 @@
 # The front end of GLaDOS's package manager: apt-style verbs over pacman.
 pkgname=orange
-pkgver=1.2
+pkgver=1.3
 pkgrel=1
 pkgdesc="The package manager of GLaDOS: apt-style verbs and pacman flags over pacman"
 arch=('any')
