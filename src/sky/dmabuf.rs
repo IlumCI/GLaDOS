@@ -70,7 +70,7 @@ impl Client {
         let Some(at) = crate::linux::syscall::alloc_pages(t.len()) else { return };
         unsafe { core::ptr::copy_nonoverlapping(t.as_ptr(), at as *mut u8, t.len()) };
         let fd = crate::linux::fs::Fd::Memfd(alloc::rc::Rc::new(core::cell::RefCell::new(
-            crate::linux::fs::Memfd { name: alloc::string::String::from("dmabuf-formats"), at, len: t.len(), cursor: 0, maps: 0 },
+            crate::linux::fs::Memfd { name: alloc::string::String::from("dmabuf-formats"), at, len: t.len(), cursor: 0, maps: 0, seals: 1 },
         )));
         self.out_fds.push(fd);
         let mut w = Writer::new(id, 1); // format_table(fd, size)

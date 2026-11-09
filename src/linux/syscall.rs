@@ -49,6 +49,7 @@ const EFER_SCE: u64 = 1;
 /// The segment-base MSRs. `FS` is the guest's to set; `GS` is emphatically
 /// not -- see `sys_arch_prctl`.
 const IA32_FS_BASE: u32 = 0xC000_0100;
+const IA32_GS_BASE: u32 = 0xC000_0101;
 
 const ARCH_SET_GS: u64 = 0x1001;
 const ARCH_SET_FS: u64 = 0x1002;
@@ -296,7 +297,19 @@ const O_EXCL: u64 = 0x80;
 /// The answer is `ENOMEM`, which Linux's `open` genuinely can return. It would
 /// not return it for *this* reason, and that is the deviation: on Linux the
 /// cost of an open descriptor does not scale with the file.
+///
+/// **The floor, not the limit.** A flat 64 MiB refused Discord's 94 MB
+/// app archive on a machine with more than a gigabyte of heap free, which
+/// is guarding against a loop of `open` by refusing one ordinary file. The
+/// budget is half of what the heap has free right now, and never less than
+/// this: the guard is still there -- no guest can take the heap through
+/// opens -- and it is sized by the machine rather than by a guess.
 const OPEN_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+fn open_budget() -> usize {
+    let (used, total) = crate::mem::heap::HEAP.stats();
+    (total.saturating_sub(used) / 2).max(OPEN_MAX_BYTES)
+}
 
 /// The most `getdents64` will build in one call, whatever the guest offers.
 ///
@@ -324,6 +337,19 @@ const PATH_MAX: usize = 4096;
 /// a real program maps -- Mesa's 32-bit `libLLVM` is 177 MB, and the old
 /// 64 MiB cap answered `ENOMEM` for it and left the program with no OpenGL.
 const MAP_MAX: u64 = 1024 * 1024 * 1024;
+
+/// The largest `PROT_NONE` reservation, which costs address space and nothing
+/// else (see `sys_mmap`). Chromium's V8 reserves a 4 GiB pointer cage and a
+/// 32 GiB sandbox before it runs a line of JavaScript, and refused both it
+/// crashes itself on purpose; Discord was the first program here to do so.
+/// A quarter of the 64-bit arena, so one reservation cannot take all of it.
+const RESERVE_MAX: u64 = 128 * 1024 * 1024 * 1024;
+
+/// No leaf at all for this page, as opposed to a promise or a supplied one:
+/// what a `PROT_NONE` reservation is made of.
+fn vacant(t: &crate::mem::space::Space, at: u64) -> bool {
+    t.leaf(at).map_or(true, |e| e == 0)
+}
 
 /// What the guest had in its registers when it trapped.
 ///
@@ -622,6 +648,8 @@ pub struct Resume {
     /// first thing glibc does is read its stack canary at `%fs:0x28`, so every
     /// glibc child faulted reading address 0x28.
     pub fs: u64,
+    /// `IA32_GS_BASE`, for the same reason and read the same way.
+    pub gs_base: u64,
 }
 
 /// The ring-3 entry state, one block per core.
@@ -719,6 +747,7 @@ pub fn ring3_now() -> crate::task::Ring3 {
             syscall_stack: (*core_entry()).syscall_stack,
             host_rsp: (*core_entry()).host_rsp,
             fs_base: crate::cpu::rdmsr(IA32_FS_BASE),
+            gs_base: crate::cpu::rdmsr(IA32_GS_BASE),
         }
     }
 }
@@ -739,6 +768,7 @@ pub fn ring3_load(r: Option<crate::task::Ring3>) {
             (*core_entry()).syscall_stack = r.syscall_stack;
             (*core_entry()).host_rsp = r.host_rsp;
             crate::cpu::wrmsr(IA32_FS_BASE, r.fs_base);
+            crate::cpu::wrmsr(IA32_GS_BASE, r.gs_base);
             // This task's own landing for an interrupt taken at ring 3. See
             // `gdt::set_rsp0` for what sharing one cost.
             crate::cpu::gdt::set_rsp0(r.syscall_stack);
@@ -1393,7 +1423,7 @@ impl Space {
 ///
 /// Named here rather than in `load` because this is what hands addresses out
 /// of it. The slots below are the loader's business and this one is not.
-pub const GUEST_MMAP_AT: u64 = crate::mem::space::WINDOW + 0x5000_0000;
+pub const GUEST_MMAP_AT: u64 = crate::mem::space::WINDOW + 0x8000_0000;
 
 static TABLE: Racy<Vec<Option<Space>>> = Racy::new(Vec::new());
 
@@ -1502,6 +1532,8 @@ pub fn replace_guest(
     let fds = core::mem::take(&mut old.fds);
     let cwd = core::mem::take(&mut old.cwd);
     let saved_fs = old.saved_fs;
+    // The new program starts with no `GS`; the old one's is not its business.
+    unsafe { crate::cpu::wrmsr(IA32_GS_BASE, 0) };
     // Ids survive an exec, as on Linux: a build that dropped to an ordinary
     // user and then ran `makepkg` must still be that user inside it.
     let mut cred = old.cred;
@@ -1570,6 +1602,7 @@ pub unsafe fn set_syscall_stack(stack: u64) {
 pub unsafe fn enter_resumed(r: &Resume) -> u64 {
     unsafe {
         crate::cpu::wrmsr(IA32_FS_BASE, r.fs);
+        crate::cpu::wrmsr(IA32_GS_BASE, r.gs_base);
         glados_enter_guest_regs(r as *const Resume)
     }
 }
@@ -1578,6 +1611,11 @@ pub unsafe fn enter_resumed(r: &Resume) -> u64 {
 /// the same one.
 pub fn guest_fs() -> u64 {
     unsafe { crate::cpu::rdmsr(IA32_FS_BASE) }
+}
+
+/// The same for `GS`, which `fork` and `clone` hand on as Linux does.
+pub fn guest_gs() -> u64 {
+    unsafe { crate::cpu::rdmsr(IA32_GS_BASE) }
 }
 
 /// Where the running guest's stack pointer went, for a `fork` that has to give
@@ -2347,6 +2385,9 @@ pub(super) fn sys_write(fd: u64, buf: u64, len: usize) -> u64 {
             return EFAULT;
         }
         let mut f = m.borrow_mut();
+        if f.seals & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE) != 0 {
+            return EPERM;
+        }
         let at = f.cursor.min(f.len);
         let n = (f.len - at).min(len);
         if n > 0 {
@@ -2915,7 +2956,7 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, mode: u64) -> u64
                 Some(d) if seen.contains(&alloc::rc::Rc::as_ptr(d)) => 0,
                 _ => size.unwrap_or(0),
             };
-            if held.saturating_add(adds) > OPEN_MAX_BYTES {
+            if held.saturating_add(adds) > open_budget() {
                 return ENOMEM;
             }
             // A truncating or brand-new open does not read what is there, which
@@ -3457,6 +3498,11 @@ pub(super) fn sys_renameat(olddir: u64, old_at: u64, newdir: u64, new_at: u64, f
     }
     if dst_dir && from != to && !super::ns::listing(&to).is_empty() {
         return ENOTEMPTY;
+    }
+    // Open descriptors follow the file, and what they hold so far has to be
+    // in the namespace before it is moved (fs::renamed says why).
+    if from != to {
+        super::fs::renamed(&from, &to);
     }
     if !super::ns::rename(&from, &to) {
         return EINVAL;
@@ -4240,7 +4286,9 @@ pub fn wake_nappers() {
     }
     let me = crate::task::current();
     let mut any = false;
-    for t in 0..crate::task::MAX_TASKS {
+    // As far as any task has ever been, not the whole table: this runs at the
+    // end of a syscall, and the table is far larger than a machine usually uses.
+    for t in 0..crate::task::count().min(crate::task::MAX_TASKS) {
         if t != me && NAPPING[t].load(Ordering::Acquire) {
             any |= crate::task::wake(t);
         }
@@ -4938,6 +4986,13 @@ pub(super) fn sys_epoll_wait(epfd: u64, evs: u64, maxevents: u64, timeout: u64) 
 
 pub(super) const EBUSY: u64 = (-16i64) as u64;
 
+const F_SEAL_SEAL: u32 = 1;
+const F_SEAL_SHRINK: u32 = 2;
+const F_SEAL_GROW: u32 = 4;
+const F_SEAL_WRITE: u32 = 8;
+const F_SEAL_FUTURE_WRITE: u32 = 0x10;
+const F_SEAL_EXEC: u32 = 0x20;
+
 /// The anonymous file a descriptor names, if it is one.
 fn memfd(fd: u64) -> Option<alloc::rc::Rc<core::cell::RefCell<super::fs::Memfd>>> {
     with_fds(|fds, _| match fds.get(fd as usize) {
@@ -4949,10 +5004,8 @@ fn memfd(fd: u64) -> Option<alloc::rc::Rc<core::cell::RefCell<super::fs::Memfd>>
 
 /// `memfd_create`, which is how a Wayland client makes a buffer.
 ///
-/// `MFD_ALLOW_SEALING` is accepted and seals themselves are not implemented,
-/// which is stated rather than hidden: the flag only permits sealing later, so
-/// accepting it costs nothing, and `fcntl(F_ADD_SEALS)` fails the way it does
-/// on a kernel built without the feature. A compositor that required its
+/// Without `MFD_ALLOW_SEALING` a memfd starts with `F_SEAL_SEAL`, so it can
+/// never be sealed, as on Linux; with it, `fcntl(F_ADD_SEALS)` works. A compositor that required its
 /// clients to have sealed would be one written here, and it is not.
 pub(super) fn sys_memfd_create(name: u64, flags: u64) -> u64 {
     const MFD_CLOEXEC: u64 = 1;
@@ -4971,7 +5024,7 @@ pub(super) fn sys_memfd_create(name: u64, flags: u64) -> u64 {
         Err(e) => return e,
     };
     install_fd(super::fs::Fd::Memfd(alloc::rc::Rc::new(core::cell::RefCell::new(
-        super::fs::Memfd { name, at: 0, len: 0, cursor: 0, maps: 0 },
+        super::fs::Memfd { name, at: 0, len: 0, cursor: 0, maps: 0, seals: if flags & MFD_NOEXEC_SEAL != 0 { F_SEAL_EXEC } else if flags & MFD_ALLOW_SEALING != 0 { 0 } else { F_SEAL_SEAL } },
     ))))
 }
 
@@ -5012,6 +5065,9 @@ pub(super) fn sys_ftruncate(fd: u64, len: u64) -> u64 {
     }
     if let Some(m) = memfd(fd) {
         let mut f = m.borrow_mut();
+        if (len < f.len as u64 && f.seals & F_SEAL_SHRINK != 0) || (len > f.len as u64 && f.seals & F_SEAL_GROW != 0) {
+            return EPERM;
+        }
         if f.maps > 0 {
             return EBUSY;
         }
@@ -5180,13 +5236,18 @@ pub(super) fn sys_socketpair(domain: u64, kind: u64, _proto: u64, sv: u64) -> u6
     if domain != 1 {
         return EAFNOSUPPORT;
     }
-    if kind & 0xFF != 1 {
-        return EPROTONOSUPPORT;
-    }
+    // SOCK_STREAM, and SOCK_SEQPACKET, which is Chromium's IPC: one message
+    // per write, never two in one read. SOCK_DGRAM would want the same
+    // boundaries and is refused until something asks for it.
+    let packets = match kind & 0xFF {
+        1 => false,
+        5 => true,
+        _ => return EPROTONOSUPPORT,
+    };
     if !reachable(sv, 8, true) {
         return EFAULT;
     }
-    let (a, b) = super::unix::pair();
+    let (a, b) = if packets { super::unix::pair_packets() } else { super::unix::pair() };
     let nonblock = kind & 0o4000 != 0;
     let mk = |pipe, side| super::fs::Fd::unix(super::unix::Sock::Stream { pipe, side }, nonblock);
     let fa = install_fd(mk(a, super::unix::Side::A));
@@ -5916,7 +5977,15 @@ pub(super) fn sys_recvfrom(fd: u64, buf: u64, len: u64, flags: u64) -> u64 {
     n as u64
 }
 
-pub(super) fn sys_shutdown(fd: u64, _how: u64) -> u64 {
+pub(super) fn sys_shutdown(fd: u64, how: u64) -> u64 {
+    if how > 2 {
+        return EINVAL;
+    }
+    // A Unix socket, which Chromium shuts one way to make a pair one-way.
+    if let Some((pipe, side)) = unix_stream(fd) {
+        super::unix::shutdown(&pipe, side, how);
+        return 0;
+    }
     let sock = match sock_of(fd) {
         Ok(v) => v,
         Err(e) => return e,
@@ -6350,11 +6419,24 @@ pub(super) fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
         // it writes here, so there is nobody to lock against.
         5 | 6 | 7 | 12 | 13 | 14 => 0,
         1030 => with_cloexec(sys_dup(fd, None).max_free_from(arg), true), // F_DUPFD_CLOEXEC
-        // File seals on a memfd: accepted and not enforced. A client seals
-        // its buffer so the compositor can trust its size, and the compositor
-        // here copies a commit out under its own bounds check anyway.
-        1033 => 0,                                 // F_ADD_SEALS
-        1034 => 0,                                 // F_GET_SEALS: none
+        // File seals: a memfd's own, and EINVAL for any other file, which is
+        // how a program tells "unsealed" from "cannot be sealed".
+        1033 => match memfd(fd) {
+            Some(m) => {
+                let mut f = m.borrow_mut();
+                let known = F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_FUTURE_WRITE | F_SEAL_EXEC;
+                if arg as u32 & !known != 0 {
+                    return EINVAL;
+                }
+                if f.seals & F_SEAL_SEAL != 0 {
+                    return EPERM;
+                }
+                f.seals |= arg as u32;
+                0
+            }
+            None => EINVAL,
+        },
+        1034 => memfd(fd).map_or(EINVAL, |m| m.borrow().seals as u64),
         _ => EINVAL,
     }
 }
@@ -6790,6 +6872,7 @@ pub fn run_thread(w: super::thread::Work, stack: u64) {
     unsafe {
         (*core_entry()).syscall_stack = stack;
         crate::cpu::wrmsr(IA32_FS_BASE, w.fs);
+        crate::cpu::wrmsr(IA32_GS_BASE, w.gs_base);
     }
     // A 32-bit thread carries its TLS and its `%gs` in from the clone; they
     // go into this core's GDT and the segment register before the way in.
@@ -7993,6 +8076,13 @@ pub(super) fn sys_fstat(fd: u64, buf: u64) -> u64 {
             let d = b.borrow();
             Some((super::fs::Kind::Dir, 0, super::fs::ino_of(&d.path), 0))
         }
+        // A regular file of its real size, which is what it is on Linux. It
+        // fell through to the arm below and called itself an empty FIFO, and
+        // Firefox, which checks a buffer another process hands it is as long
+        // as it says, refused every one: "not safe to map".
+        Some(Some(super::fs::Fd::Memfd(m))) => {
+            Some((super::fs::Kind::File, m.borrow().len, alloc::rc::Rc::as_ptr(m) as *const u8 as u64 | 1, 0))
+        }
         Some(Some(super::fs::Fd::Dev(b))) => {
             let d = b.borrow();
             Some((super::fs::Kind::Char, super::dev::size(d.node), super::fs::ino_of(&d.path), super::dev::rdev(d.node)))
@@ -8275,8 +8365,56 @@ pub(super) fn sys_ioctl(fd: u64, req: u64, arg: u64) -> u64 {
     if !known {
         return EBADF;
     }
+    // FIONCLEX and FIOCLEX: close-on-exec, which is a property of the
+    // descriptor and so means the same on every kind of file.
+    //
+    // FIONBIO is the same kind of thing: the blocking mode belongs to the
+    // descriptor, so it is F_SETFL's O_NONBLOCK by another door, for every
+    // kind. Rust's std reaches it this way to read a child's stdout and
+    // stderr together, and answering ENOTTY on a pipe made
+    // `Command::output()` panic inside std -- Discord's updater runs
+    // `lsb_release -a` that way to learn what OS it is on.
+    match req {
+        0x5450 => return { cloexec_set(fd, false); 0 },
+        0x5451 => return { cloexec_set(fd, true); 0 },
+        0x5421 => {
+            if !reachable(arg, 4, false) {
+                return EFAULT;
+            }
+            let on = unsafe { core::ptr::read_unaligned(arg as *const u32) } != 0;
+            let fl = sys_fcntl(fd, 3, 0) & !O_NONBLOCK;
+            return sys_fcntl(fd, 4, fl | if on { O_NONBLOCK } else { 0 });
+        }
+        _ => {}
+    }
     if let Some(r) = pty_ioctl(fd, req, arg) {
         return r;
+    }
+    // FIONREAD on what is not a TCP socket. It was answered for TCP alone, so
+    // anything asking it of a Unix socket got ENOTTY and read that as a broken
+    // connection: Firefox's Wayland proxy gave up on its first message with
+    // "broken source socket", and then "we don't have any display".
+    if req == 0x541B {
+        let n = with_fds(|fds, _| match fds.get(fd as usize) {
+            Some(Some(super::fs::Fd::Pipe(p))) => {
+                let e = p.borrow();
+                Some(super::unix::next_read(&e.pipe, super::fs::Fd::pipe_side(e.writing)))
+            }
+            Some(Some(super::fs::Fd::File(f))) => {
+                let f = f.borrow();
+                Some(f.data.len().saturating_sub(f.at))
+            }
+            _ => None,
+        })
+        .flatten()
+        .or_else(|| unix_stream(fd).map(|(pipe, side)| super::unix::next_read(&pipe, side)));
+        if let Some(n) = n {
+            if !reachable(arg, 4, true) {
+                return EFAULT;
+            }
+            unsafe { core::ptr::write_unaligned(arg as *mut u32, n.min(u32::MAX as usize) as u32) };
+            return 0;
+        }
     }
     // FIONBIO and FIONREAD on a TCP socket: the blocking mode, and how much
     // is waiting to be read without waiting for any.
@@ -8418,10 +8556,13 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
     if len == 0 {
         return EINVAL;
     }
-    if len > MAP_MAX {
+    let anon = flags & MAP_ANONYMOUS != 0;
+    // A reservation may be far larger than any mapping, because it is
+    // nothing but address space until part of it is made accessible.
+    let reserve = anon && prot == 0 && flags & MAP_FIXED == 0;
+    if len > MAP_MAX && !(reserve && len <= RESERVE_MAX) {
         return ENOMEM;
     }
-    let anon = flags & MAP_ANONYMOUS != 0;
 
     // **A file mapping is a copy, and that is a real deviation.** Linux maps
     // the page cache, so two processes mapping one file share pages and a
@@ -8548,6 +8689,9 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
     if !anon {
         if let Some(m) = memfd(fd) {
             const MAP_SHARED: u64 = 0x01;
+            if flags & MAP_SHARED != 0 && prot & PROT_WRITE != 0 && m.borrow().seals & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE) != 0 {
+                return EPERM;
+            }
             if flags & MAP_SHARED == 0 && prot & PROT_WRITE != 0 {
                 // A private writable mapping of a memfd is a copy-on-write
                 // view, which is legal and which nothing has asked for.
@@ -8667,7 +8811,7 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
             if addr != 0 && addr % PAGE == 0 && owns(addr, want as usize) {
                 let done = unsafe { guest_slot() }.as_mut().is_some_and(|sp| {
                     let all_demand = sp.tables.as_ref().is_some_and(|t| {
-                        (0..want / 4096).all(|i| t.leaf(addr + i * 4096).is_some_and(|e| e & crate::mem::paging::DEMAND != 0))
+                        (0..want / 4096).all(|i| vacant(t, addr + i * 4096) || t.leaf(addr + i * 4096).is_some_and(|e| e & crate::mem::paging::DEMAND != 0))
                     });
                     if !all_demand {
                         return false;
@@ -8758,6 +8902,37 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
             // itself too.
             if anon {
                 let n = page_up(len as usize);
+                // Over a reservation: pages with no leaf are promised, which
+                // is already "zero on first touch", so a range entirely of
+                // those needs nothing more -- and must not be zeroed by hand,
+                // which would allocate every page of it.
+                let perm = crate::mem::paging::Perm {
+                    present: prot != 0, write: prot & PROT_WRITE != 0, exec: prot & PROT_EXEC != 0, user: true,
+                };
+                let opened = unsafe { guest_slot() }.as_mut().and_then(|sp| {
+                    let t = sp.tables.as_mut()?;
+                    let pages = n as u64 / 4096;
+                    let empty: alloc::vec::Vec<u64> = (0..pages).map(|i| addr + i * 4096).filter(|p| vacant(t, *p)).collect();
+                    if empty.is_empty() {
+                        return Some(false);
+                    }
+                    let all = empty.len() as u64 == pages;
+                    let rw = crate::mem::paging::Perm { present: true, write: true, exec: false, user: true };
+                    for p in &empty {
+                        if all && prot == 0 {
+                            continue; // still a reservation: nothing to write
+                        }
+                        if !t.promise_page(*p, if all { perm } else { rw }) {
+                            return None;
+                        }
+                    }
+                    Some(all)
+                });
+                match opened {
+                    None if unsafe { guest_slot() }.as_ref().is_some_and(|sp| sp.tables.is_some()) => return ENOMEM,
+                    Some(true) => return addr,
+                    _ => {}
+                }
                 let rw = crate::mem::paging::Perm { present: true, write: true, exec: false, user: true };
                 if !crate::mem::paging::protect(addr, n, rw) {
                     return ENOMEM;
@@ -8817,7 +8992,14 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
                     exec: prot & PROT_EXEC != 0,
                     user: true,
                 };
-                let mut off = 0u64;
+                // **A `PROT_NONE` range gets no leaves at all.** It is a
+                // reservation: touching it must fault, which an absent leaf
+                // does, and it is made usable a piece at a time by `mprotect`
+                // or a `MAP_FIXED` over it, both of which promise the pages
+                // they open. A promise per page for 32 GiB would be eight
+                // million entries and 64 MiB of page tables for space nobody
+                // touches.
+                let mut off = if prot == 0 { want } else { 0 };
                 while off < want {
                     if !sp.tables.as_mut().is_some_and(|t| t.promise_page(at + off, perm)) {
                         free_paged(sp, at, off);
@@ -9178,6 +9360,45 @@ pub(super) fn sys_mprotect(at: u64, len: u64, prot: u64) -> u64 {
         // guest while leaving it visible to the kernel, which is backwards.
         user: true,
     };
+    // Part of a reservation has no leaves to change. Opening it promises
+    // those pages; closing it leaves them as they are, absent already. The
+    // pages that do have leaves are protected in runs, as before.
+    let runs = unsafe { guest_slot() }.as_mut().and_then(|sp| {
+        let t = sp.tables.as_mut()?;
+        let pages = page_up(len as usize) as u64 / 4096;
+        let mut runs = alloc::vec::Vec::new();
+        let mut i = 0;
+        let mut sparse = false;
+        while i < pages {
+            let p = at + i * 4096;
+            if vacant(t, p) {
+                sparse = true;
+                if prot != 0 && !t.promise_page(p, perm) {
+                    return Some(None);
+                }
+                i += 1;
+                continue;
+            }
+            let s = i;
+            while i < pages && !vacant(t, at + i * 4096) {
+                i += 1;
+            }
+            runs.push((at + s * 4096, ((i - s) * 4096) as usize));
+        }
+        sparse.then_some(Some(runs))
+    });
+    match runs {
+        Some(None) => return ENOMEM,
+        Some(Some(runs)) => {
+            for (a, l) in runs {
+                if !crate::mem::paging::protect(a, l, perm) {
+                    return ENOMEM;
+                }
+            }
+            return 0;
+        }
+        None => {}
+    }
     if crate::mem::paging::protect(at, len as usize, perm) {
         0
     } else {
@@ -9192,21 +9413,42 @@ pub(super) fn sys_mprotect(at: u64, len: u64, prot: u64) -> u64 {
 /// the kernel's own value is restored at teardown, because the register
 /// belongs to the machine rather than to the guest.
 ///
-/// **`ARCH_SET_GS` is refused, and that is the most specific thing stage 0 has
-/// found so far.** `GS` is not free here: `cpu::percpu` points it at each
-/// core's own block, `gs:[0]` is how the allocator discovers which core it is
-/// billing, and there is no privilege boundary to stop a guest overwriting it.
-/// A guest setting `GS` would leave the next kernel allocation reading its
-/// thread-local storage as a per-core structure -- so this is the first place
-/// where "the guest and the kernel share everything" stops being an
-/// architectural note and becomes a specific call that has to say no.
+/// **`ARCH_SET_GS` is honoured wherever the kernel does not need GS**, which
+/// is everywhere with `rdpid` or `rdtscp`: `cpu::percpu` finds its block that
+/// way and the syscall stubs only `swapgs` in pairs with interrupts off, so the
+/// register is the guest's. It was refused for a long time, on the grounds that
+/// `gs:[0]` was how the allocator found its core, and that stopped being true
+/// when 32-bit guests needed `%gs`. Firefox's sandboxed WebAssembly keeps its
+/// linear memory behind GS, and aborted on the `EPERM`. A machine still on
+/// `BY_GS` refuses, for the original reason. It is per task like `FS`.
 ///
-/// Reading `GS` is refused for the smaller reason that it hands out a kernel
-/// pointer to code that has no business with one.
+/// **Both reject a non-canonical address before it reaches the register.**
+/// `wrmsr` raises `#GP` on one, at ring 0, which halts the machine, so one call
+/// from any guest could do that. `EPERM` is what Linux answers.
 pub(super) fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
+    const USER_TOP: u64 = 1 << 47;
     match code {
         ARCH_SET_FS => {
+            if addr >= USER_TOP {
+                return EPERM;
+            }
             unsafe { crate::cpu::wrmsr(IA32_FS_BASE, addr) };
+            0
+        }
+        ARCH_SET_GS | ARCH_GET_GS if !crate::cpu::percpu::owns_gs_freely() => EPERM,
+        ARCH_SET_GS => {
+            if addr >= USER_TOP {
+                return EPERM;
+            }
+            unsafe { crate::cpu::wrmsr(IA32_GS_BASE, addr) };
+            0
+        }
+        ARCH_GET_GS => {
+            if !reachable(addr, 8, true) {
+                return EFAULT;
+            }
+            let base = unsafe { crate::cpu::rdmsr(IA32_GS_BASE) };
+            unsafe { (addr as *mut u64).write(base) };
             0
         }
         ARCH_GET_FS => {
@@ -9222,7 +9464,6 @@ pub(super) fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
             unsafe { (addr as *mut u64).write(base) };
             0
         }
-        ARCH_SET_GS | ARCH_GET_GS => EPERM,
         _ => EINVAL,
     }
 }
@@ -9974,6 +10215,12 @@ fn free_leaves(sp: &mut Space, at: u64, len: u64, demand_only: bool) {
     let Some(t) = sp.tables.as_mut() else { return };
     let mut off = 0;
     while off < len {
+        // No page table this far down: the rest of this 2 MiB has nothing to
+        // give back, which is most of a large reservation.
+        if t.leaf(at + off).is_none() {
+            off = ((at + off) | 0x1F_FFFF) + 1 - at;
+            continue;
+        }
         let e = if demand_only {
             match t.leaf(at + off) {
                 Some(e) if e & crate::mem::paging::DEMAND != 0 => t.take_leaf(at + off),
@@ -10472,6 +10719,10 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64, bits32: bool) -> u64 {
         if let Some(sp) = guest_slot().as_mut() {
             sp.saved_fs = crate::cpu::rdmsr(IA32_FS_BASE);
         }
+        // A new program starts with no `GS` of its own, and this register
+        // still holds what the last guest on this core left in it. A 32-bit
+        // guest loads its selector after this, which sets the base again.
+        crate::cpu::wrmsr(IA32_GS_BASE, 0);
     }
     // `syscall` clears IF through FMASK and `exit_group` leaves through a
     // longjmp rather than through the stub's tail, so nothing on that path
@@ -10623,6 +10874,9 @@ pub unsafe fn run(entry: u64, stack_top: u64, want: u64, bits32: bool) -> u64 {
                 name_code(f.regs.rip).unwrap_or_else(|| locate(f.regs.rip)),
                 f.cr2, locate(f.cr2), f.regs.err
             );
+            // The argument registers: a program that crashes itself on
+            // purpose usually has its message and line in them.
+            say!("  rdi {:#x} rsi {:#x} rdx {:#x} rcx {:#x} rax {:#x}", f.regs.rdi, f.regs.rsi, f.regs.rdx, f.regs.rcx, f.regs.rax);
         }
         if let (Some(sid), Some(_)) = (super::session::current(), last_fault()) {
             let tail = super::session::peek_tail(sid);
@@ -11288,10 +11542,26 @@ pub fn checks() -> Vec<(&'static str, bool)> {
             "a guest may set FS for its thread-local storage, and read it back",
             set == 0 && got == 0 && slot == 0xDEAD_0000,
         ));
+        // Reinstalled for the GS half, the entry having been cleared above.
+        install(Regions { arena_extra: [(0, 0); 7], image: owned, stack: owned, brk: owned, interp: None, image_mapped: false, interp_mapped: false, stack_mapped: false, brk_mapped: false, bits32: false, mmap_at: GUEST_MMAP_AT, mmap_end: u64::MAX }, None);
+        let was_gs = unsafe { crate::cpu::rdmsr(IA32_GS_BASE) };
+        slot = 0;
+        let (set_gs, got_gs) = (sys_arch_prctl(ARCH_SET_GS, 0xBEEF_0000), sys_arch_prctl(ARCH_GET_GS, at));
+        let (wild_fs, wild_gs) = (sys_arch_prctl(ARCH_SET_FS, 1 << 63), sys_arch_prctl(ARCH_SET_GS, 1 << 63));
+        let wild_kept = unsafe { crate::cpu::rdmsr(IA32_GS_BASE) } != 1 << 63;
+        unsafe { crate::cpu::wrmsr(IA32_GS_BASE, was_gs) };
+        unsafe { *guest_slot() = None };
         out.push((
-            "a guest may not touch GS, which is where this kernel keeps its per-core block",
-            sys_arch_prctl(ARCH_SET_GS, 0x1000) == EPERM
-                && sys_arch_prctl(ARCH_GET_GS, 0) == EPERM,
+            "a guest may set GS and read it back, unless this kernel is keeping its core there",
+            if crate::cpu::percpu::owns_gs_freely() {
+                set_gs == 0 && got_gs == 0 && slot == 0xBEEF_0000
+            } else {
+                set_gs == EPERM && got_gs == EPERM
+            },
+        ));
+        out.push((
+            "an address wrmsr would fault on is refused rather than halting the machine",
+            wild_fs == EPERM && wild_gs == EPERM && wild_kept,
         ));
         out.push((
             "an arch_prctl nobody implements is EINVAL and not a silent success",

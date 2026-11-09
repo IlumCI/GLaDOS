@@ -284,10 +284,24 @@ fn dup_range(
     // The block for ordinary pages, taken the first time one is met: a range
     // that is all demand-paged (a thread arena, a stack) needs none of it.
     let mut block: Option<u64> = None;
+    // No contiguous block to be had: each page gets its own. The child maps
+    // page by page either way, so contiguity was only ever a convenience --
+    // and it is not to be had for a 218 MB image (Discord's), which made
+    // every fork of an Electron app ENOMEM.
+    let mut single = false;
     let mut off = 0u64;
     while off < n as u64 {
         let a = at + off;
-        let raw = crate::mem::paging::leaf(a).unwrap_or(0);
+        // No page table this far down: a reservation, nothing to copy in the
+        // rest of this 2 MiB.
+        // Inside the guest window only: below it a huge identity page also
+        // answers `None` here, and `query` further down is what finds it.
+        let leaf = crate::mem::paging::leaf(a);
+        if leaf.is_none() && a >= crate::mem::space::WINDOW {
+            off = ((a | 0x1F_FFFF) + 1) - at;
+            continue;
+        }
+        let raw = leaf.unwrap_or(0);
         // **Demand-paged memory is copied as what it is.** A promise stays a
         // promise in the child -- skipping it, as a not-present page is
         // skipped below, would leave a hole where the parent has memory it
@@ -299,6 +313,7 @@ fn dup_range(
         if is_promise(raw) {
             COPIED[0].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if !tables.put_leaf(a, raw) {
+                crate::kprintln!("  [fork] promise at {:#x} would not copy", a);
                 return false;
             }
             off += 4096;
@@ -308,7 +323,19 @@ fn dup_range(
             // **Shared, not copied** (`paging::COW`): both leaves name the
             // frame read-only, and whoever writes first takes a copy then.
             COPIED[1].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            let Some(leaf) = crate::mem::paging::cow_share(a) else { return false };
+            if raw & crate::mem::paging::PRESENT == 0 {
+                let Some(leaf) = crate::mem::paging::copy_hidden(a) else { return false };
+                if !tables.put_leaf(a, leaf) {
+                    crate::kprintln!("  [fork] no table for {:#x}", a);
+                    return false;
+                }
+                off += 4096;
+                continue;
+            }
+            let Some(leaf) = crate::mem::paging::cow_share(a) else {
+                crate::kprintln!("  [fork] {:#x} would not share, leaf {:#x}", a, raw);
+                return false;
+            };
             if !tables.put_leaf(a, leaf) {
                 // The parent's side is shared already; giving the count back
                 // leaves its one leaf the frame's owner again.
@@ -320,23 +347,32 @@ fn dup_range(
         }
         let there = crate::mem::paging::query(a).is_some_and(|p| p.present);
         if there {
-            let phys = match block {
-                Some(b) => b,
+            if block.is_none() && !single {
+                match syscall::alloc_pages(n) {
+                    Some(b) => {
+                        owned.push((b, n));
+                        block = Some(b);
+                    }
+                    None => single = true,
+                }
+            }
+            let frame = match block {
+                Some(b) => b + off,
                 None => {
-                    let Some(b) = syscall::alloc_pages(n) else { return false };
-                    owned.push((b, n));
-                    block = Some(b);
-                    b
+                    let Some(p) = syscall::alloc_pages(4096) else { return false };
+                    owned.push((p, 4096));
+                    p
                 }
             };
             COPIED[2].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            unsafe { core::ptr::copy_nonoverlapping(a as *const u8, (phys + off) as *mut u8, 4096) };
+            unsafe { core::ptr::copy_nonoverlapping(a as *const u8, frame as *mut u8, 4096) };
             let ok = if a >= crate::mem::space::WINDOW {
-                tables.map_page(a, phys + off, true, true)
+                tables.map_page(a, frame, true, true)
             } else {
-                tables.map_low(a, phys + off, true, true).is_ok()
+                tables.map_low(a, frame, true, true).is_ok()
             };
             if !ok {
+                crate::kprintln!("  [fork] {:#x} would not map", a);
                 return false;
             }
         }
@@ -483,6 +519,15 @@ fn fork_inner(f: &Frame, stack: Option<u64>, settid: Option<u64>) -> u64 {
         unsafe { core::ptr::write_volatile(a as *mut u32, v) };
     }
     if failed {
+        // Said, because ENOMEM from fork names nothing: which range gave out,
+        // and against what the heap had left. Taken before the copy is given
+        // back, so the figures are the ones it failed against.
+        let (used, total) = crate::mem::heap::HEAP.stats();
+        let copied: usize = owned.iter().map(|(_, n)| *n).sum();
+        crate::kprintln!(
+            "  [fork] out of memory after copying {} MiB of {} region(s): heap {} of {} MiB used",
+            copied >> 20, regions.len() + maps.len(), used >> 20, total >> 20
+        );
         for (p, n) in owned {
             syscall::free_pages(p, n);
         }
@@ -537,6 +582,7 @@ fn fork_inner(f: &Frame, stack: Option<u64>, settid: Option<u64>) -> u64 {
         rdi: f.rdi,
         // The parent's TLS, which a child's copy of memory needs pointed at.
         fs: syscall::guest_fs(),
+        gs_base: syscall::guest_gs(),
     };
 
     // The child's guest entry, cloned from the parent's and given the tables
@@ -664,6 +710,18 @@ fn body() {
                     pid, f.regs.vector, f.regs.rip, f.cr2
                 ),
                 None => crate::kprintln!("  [linux] child {} killed by a fault, its parent carries on", pid),
+            }
+            // And what it was doing: a child's calls are its own task's
+            // trace, which nothing else prints, and the parent's tail -- what
+            // the session report shows -- says nothing about why a child died.
+            // A child that crashes on purpose (a failed check) usually does
+            // so right after the call that answered it wrongly.
+            let t = syscall::trace();
+            for c in t.iter().rev().take(14).rev() {
+                crate::kprintln!(
+                    "      {:<16} {:#x} {:#x} {:#x} {:#x} -> {:#x}",
+                    syscall::name_of(c.nr), c.args[0], c.args[1], c.args[2], c.args[3], c.ret
+                );
             }
         }
 

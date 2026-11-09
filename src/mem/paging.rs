@@ -104,6 +104,29 @@ pub fn cow_share(addr: u64) -> Option<u64> {
     Some(new)
 }
 
+/// A supplied page the guest has hidden (`PROT_NONE`), for a forked child: a
+/// frame of its own holding the same bytes, and the leaf that names it.
+///
+/// Copied rather than shared, because sharing is enforced by a write fault on
+/// a present read-only leaf, and this leaf is not present. `mprotect` later
+/// sets its rights directly, with nothing to tell it the frame has a second
+/// owner, so a shared frame would be written by both. Refusing the page was
+/// worse: it failed the whole fork with ENOMEM, on any program that hides
+/// memory it has used, which is what allocators and JavaScript engines do.
+pub fn copy_hidden(addr: u64) -> Option<u64> {
+    let e = *unsafe { entry_for(addr, false) }?;
+    if e & PRESENT != 0 || e & DEMAND == 0 || e & ADDR_MASK == 0 {
+        return None;
+    }
+    let layout = alloc::alloc::Layout::from_size_align(4096, 4096).ok()?;
+    let f = unsafe { alloc::alloc::alloc(layout) };
+    if f.is_null() {
+        return None;
+    }
+    unsafe { core::ptr::copy_nonoverlapping((e & ADDR_MASK) as *const u8, f, 4096) };
+    Some((f as u64 & ADDR_MASK) | (e & !ADDR_MASK & !(COW | WANT_W)))
+}
+
 /// A leaf naming `phys` is being dropped: whether the frame is now nobody's
 /// and may go back to the heap.
 pub fn cow_release(leaf: u64) -> bool {

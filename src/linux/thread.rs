@@ -56,13 +56,16 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// How many guest threads may exist at once.
 ///
-/// Forty-eight. It was eight, and a GL program on four cores needs that many
-/// before it has started one of its own: llvmpipe runs a rasterizer per core.
+/// 256, because a browser's process wants dozens and more. It was eight, and a
+/// GL program on four cores needs that many before it has started one of its
+/// own: llvmpipe runs a rasterizer per core. Then forty-eight, which Firefox
+/// ran out of. A slot costs nothing until it is used: its stacks are taken on
+/// first use and the scheduler scans only as far as the high-water mark.
 /// See `task::MAX_TASKS` for what that cost. Past the limit `clone` is
 /// `EAGAIN`, which is what Linux answers when it is out of task structures --
 /// and which a library that waits for its new thread to report in does not
 /// always handle, so the limit has to be one a real program does not reach.
-pub const MAX_THREADS: usize = 48;
+pub const MAX_THREADS: usize = 256;
 
 /// The same as the main guest's, and for the same reason: the
 /// dispatcher is ordinary Rust that formats and prints, so a stack sized for
@@ -97,6 +100,8 @@ pub struct Work {
     pub rip: u64,
     pub rsp: u64,
     pub fs: u64,
+    /// `IA32_GS_BASE`, which a new thread inherits as on Linux.
+    pub gs_base: u64,
     pub tid: u64,
     /// Where to write a zero and then wake, when this thread ends.
     ///
@@ -278,6 +283,7 @@ pub fn spawn(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64, rip: u64) -
         rip,
         rsp: stack,
         fs: if flags & CLONE_SETTLS != 0 { tls } else { 0 },
+        gs_base: super::syscall::guest_gs(),
         tid,
         ctid: if flags & CLONE_CHILD_CLEARTID != 0 { ctid } else { 0 },
         guest: super::syscall::current_guest(),
@@ -296,6 +302,7 @@ pub fn spawn32(flags: u64, ptid: u64, ctid: u64, regs: Regs32, tls32: [u64; 3], 
         rip: regs.eip,
         rsp: regs.esp,
         fs: 0,
+        gs_base: 0,
         tid,
         ctid: if flags & CLONE_CHILD_CLEARTID != 0 { ctid } else { 0 },
         guest: super::syscall::current_guest(),
@@ -315,6 +322,9 @@ fn start(work: Work, flags: u64, ptid: u64) -> Result<u64, u64> {
     let idx = {
         let s = unsafe { &mut *SLOTS.get() };
         let Some(i) = s.iter().position(|x| !x.live && x.work.is_none()) else {
+            // Said, because the program's own report of this is an assertion
+            // about something else entirely, if it says anything at all.
+            crate::kprintln!("  [thread] all {} guest threads are in use", MAX_THREADS);
             return Err(EAGAIN);
         };
         s[i].work = Some(work);

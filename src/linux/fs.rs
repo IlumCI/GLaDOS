@@ -161,6 +161,42 @@ pub fn settle(path: &str) {
     }
 }
 
+/// A rename moves the file, and on Linux an open descriptor moves with it:
+/// what is written through it afterwards lands under the new name. Here a
+/// description commits by its *path* at its last close, so a file renamed
+/// while open had its bytes committed to the name it no longer has. That is
+/// exactly how a downloader works -- write to `incoming/.tmpXXXX`, rename to
+/// the content's hash, close -- and Discord's updater fetched 147 MB of
+/// correct bytes and then read six empty files back, failing with "Invalid
+/// Data". So the move commits what is pending first, then points every open
+/// description of the old path (or of anything under it, for a directory) at
+/// the new one. Called before the namespace moves anything.
+pub fn renamed(from: &str, to: &str) {
+    let w = unsafe { WRITERS.get() };
+    w.retain(|(_, f)| f.strong_count() > 0);
+    let under = alloc::format!("{}/", from);
+    for (p, f) in w.iter_mut() {
+        let moved = if p == from {
+            String::from(to)
+        } else if let Some(rest) = p.strip_prefix(under.as_str()) {
+            alloc::format!("{}/{}", to, rest)
+        } else {
+            continue;
+        };
+        if let Some(f) = f.upgrade() {
+            if let Ok(mut f) = f.try_borrow_mut() {
+                if f.dirty && f.writable {
+                    f.dirty = false;
+                    let data = (*f.data).clone();
+                    super::ns::write_blob(&f.path, data);
+                }
+                f.path = moved.clone();
+            }
+        }
+        *p = moved;
+    }
+}
+
 /// What a socket descriptor holds.
 ///
 /// The connection is an `Option` because `socket` and `connect` are two calls:
@@ -297,6 +333,12 @@ pub struct Memfd {
     pub cursor: usize,
     /// How many live mappings there are. A resize while any exists is refused.
     pub maps: usize,
+    /// `F_SEAL_*`. They were accepted and forgotten, and `F_GET_SEALS` said
+    /// "none": Firefox checks a buffer another process hands it is sealed
+    /// against shrinking before mapping it, since a shrink under a mapping
+    /// would crash the receiver, and it refused every one -- "Shared memory
+    /// PlatformHandle is not safe to map". Kept, reported and enforced.
+    pub seals: u32,
 }
 
 impl Memfd {

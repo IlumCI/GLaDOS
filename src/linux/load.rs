@@ -105,9 +105,12 @@ const STACK_BACKED: usize = 128 * 1024;
 ///
 /// Far apart rather than adjacent so a region that overruns lands on nothing
 /// instead of on its neighbour, which is a fault rather than a corruption.
-/// A slot is 256 MiB against a `MAX_SPAN` of 64 MiB, so four times the largest
-/// image this loader will place -- chosen so the spacing does not have to be
-/// revisited the first time somebody raises that cap.
+/// The image's slot is 1 GiB against a `MAX_SPAN` of 768 MiB, so an image at
+/// the cap still has a quarter of a gigabyte of nothing before the
+/// interpreter. It was 256 MiB against 64 "so the spacing does not have to be
+/// revisited the first time somebody raises that cap" -- and the first
+/// program to need it raised was Discord, whose Electron binary is 218 MB and
+/// would not have fitted the slot either.
 const GUEST_IMAGE_AT: u64 = crate::mem::space::WINDOW + 0x1000_0000;
 
 /// Where each of a guest's regions goes. Fixed per ABI rather than chosen, for
@@ -186,9 +189,9 @@ fn layout32() -> Result<Layout, &'static str> {
         },
     })
 }
-const GUEST_INTERP_AT: u64 = crate::mem::space::WINDOW + 0x2000_0000;
-const GUEST_BRK_AT: u64 = crate::mem::space::WINDOW + 0x3000_0000;
-const GUEST_STACK_AT: u64 = crate::mem::space::WINDOW + 0x4000_0000;
+const GUEST_INTERP_AT: u64 = crate::mem::space::WINDOW + 0x5000_0000;
+const GUEST_BRK_AT: u64 = crate::mem::space::WINDOW + 0x6000_0000;
+const GUEST_STACK_AT: u64 = crate::mem::space::WINDOW + 0x7000_0000;
 
 /// The tag a guest's pages are registered under, so `cpu::code::locate` can
 /// name them in a fault report. Reads as `LNX` in a hex dump, which is the
@@ -201,7 +204,11 @@ const TAG_GUEST: u64 = 0x4C4E_5800;
 /// span between them is what the allocation is sized from. `Exec::new` would
 /// fail on it anyway, but failing with "no room for the image" describes the
 /// machine when the truth is about the file.
-const MAX_SPAN: usize = 64 * 1024 * 1024;
+///
+/// 768 MiB: an Electron app's binary is a whole Chromium, Discord's 218 MB,
+/// and the cap answered "Exec format error" for it. What the cap guards is a
+/// file claiming an absurd span, and that is still refused.
+const MAX_SPAN: usize = 768 * 1024 * 1024;
 
 /// Where a guest's image came from, because the two are freed differently.
 ///
@@ -731,7 +738,7 @@ pub unsafe fn run(g: &mut Guest, limit: u64) -> u64 {
     // this asked the `Image` enum whether the image was mapped and then wrote
     // `false` for the stack and the break, which was true right up until they
     // moved into the guest arena -- and then `protect` was called on
-    // `WINDOW + 0x2000_0000` against the *kernel's* root, where nothing is
+    // the interpreter's slot against the *kernel's* root, where nothing is
     // mapped at all. It failed, `run` returned 0, and the guest never started:
     // "returned without exiting -- 0 syscall(s)", with no fault and nothing
     // naming the region. Two facts about one thing in two places, and the copy
