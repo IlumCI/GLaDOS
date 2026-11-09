@@ -50,6 +50,7 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ("round", "0..16", "how round a window's head is"),
     ("blur", "on|off", "whether glass shows the blurred wallpaper"),
     ("tile", "on|off", "whether a new window tiles or floats"),
+    ("mood", "on|off", "whether the mind's mood moves the wallpaper's sun and colour"),
     ("quality", "<floor> <ceiling>", "what the governor may shed, 0 everything .. 4 no motion"),
     ("pointer", "25..400", "how fast the pointer moves, in per cent; fast motion is accelerated"),
 ];
@@ -73,6 +74,7 @@ pub fn get(key: &str) -> Option<String> {
             format!("{} {}", f, c)
         }
         "tile" => String::from(if super::desk::tile_new() { "on" } else { "off" }),
+        "mood" => String::from(if super::desk::mood_wall() { "on" } else { "off" }),
         "pointer" => format!("{}", crate::dev::mouse::speed()),
         _ => return None,
     })
@@ -118,6 +120,7 @@ fn apply(key: &str, val: &str) -> Result<(), &'static str> {
         "round" => super::theme::set_round(num(val, 0, 16)?),
         "blur" => super::glass::set_blur(onoff(val)?),
         "tile" => super::desk::set_tile_new(onoff(val)?),
+        "mood" => super::desk::set_mood_wall(onoff(val)?),
         "quality" => {
             let mut it = val.split_whitespace();
             let f = num(it.next().unwrap_or(""), 0, 4)?;
@@ -210,6 +213,7 @@ pub fn rows() -> Vec<(String, Vec<(String, String)>)> {
         (format!("Corners  {}", round), step("round", round, 2, 0, 16)),
         (format!("Blur  {}", get("blur").unwrap_or_default()), pick("blur", &["on", "off"])),
         (format!("New windows  {}", if super::desk::tile_new() { "tile" } else { "float" }), pick("tile", &["on", "off"])),
+        (format!("Mood on the wallpaper  {}", get("mood").unwrap_or_default()), pick("mood", &["on", "off"])),
         {
             let (f, c) = super::quality::range();
             let what = match (f, c) {

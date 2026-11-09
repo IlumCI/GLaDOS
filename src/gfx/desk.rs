@@ -5821,6 +5821,20 @@ static DECAYED: Racy<Option<(i32, Vec<u32>)>> = Racy::new(None);
 static CLINIC_BASE: Racy<Option<Vec<u32>>> = Racy::new(None);
 static SUN_TABLES: Racy<Option<super::wall::Tables>> = Racy::new(None);
 
+/// Whether the mood moves the wallpaper at all (`desk mood on|off`). Off,
+/// the wall settles to its resting picture once and is never repainted for
+/// the mood again: every step of the mood repaints the wallpaper and retakes
+/// the glass blur, and on a machine already busy that shows as a stall.
+static MOOD_WALL: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+pub fn set_mood_wall(on: bool) {
+    MOOD_WALL.store(on, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn mood_wall() -> bool {
+    MOOD_WALL.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 const MOOD_STEP: i32 = 250;
 const MOOD_SLACK: i32 = 50;
 const MOOD_CHECK_US: u64 = 1_000_000;
@@ -5861,9 +5875,16 @@ fn mood_sun(w: u32, h: u32, now: u64) -> super::wall::Sun {
         return m.shown;
     }
     m.checked_us = now;
-    let a = crate::brain::now();
-    let b = (mood_bucket(a.valence, m.bucket.0), mood_bucket(a.arousal, m.bucket.1), a.asleep);
-    if b != m.bucket && (m.started_us == 0 || now.saturating_sub(m.started_us) >= MOOD_GAP_US) {
+    // Off: back to rest, once, without the gap a mood change waits for --
+    // the setting was asked for now -- and then nothing moves again.
+    let b = if mood_wall() {
+        let a = crate::brain::now();
+        (mood_bucket(a.valence, m.bucket.0), mood_bucket(a.arousal, m.bucket.1), a.asleep)
+    } else {
+        (0, 0, false)
+    };
+    let due = !mood_wall() || m.started_us == 0 || now.saturating_sub(m.started_us) >= MOOD_GAP_US;
+    if b != m.bucket && due {
         m.bucket = b;
         m.from = m.shown;
         m.to = Sun::for_mood(w, h, b.0 * MOOD_STEP, b.1 * MOOD_STEP, b.2);
