@@ -276,13 +276,6 @@ def masthead_html(p):
     already implies: the institute is the publisher, GLaDOS is the thing
     published.
 
-    Drawn on a light band because the artwork is black on transparent and was
-    made for a light ground. Recolouring somebody's mark to fit a band we
-    chose is the wrong way round; the band moves instead. In dark mode the
-    stylesheet inverts the file rather than loading a second one, which for
-    black on transparent is exactly a white version of the same artwork and
-    cannot drift from it.
-
     The orange did not go anywhere when the site took the desktop's palette:
     it is every section bar, every heading rule and every link. What changed
     is what surrounds it -- the tab strip and the footer are the deep water
@@ -290,12 +283,20 @@ def masthead_html(p):
     machine speaks through and keeps the room around them cool.
     """
     home = p or "./"
+    # Since the Longhorn reskin the masthead is a window's title bar and
+    # address well rather than a band with artwork on it: the mark is the
+    # site's own logo.svg beside the organisation's name, and the tagline sits
+    # where an Explorer window shows its path. The window controls are
+    # decoration and are hidden from assistive technology.
     return "\n".join([
         '<div id="masthead">',
-        '  <a class="mark" href="%s"><img src="%simg/wordmark.png" '
-        'alt="Aperture Institute" width="666" height="169"></a>' % (home, p),
-        '  <span class="sub">GLaDOS: an operating system in Rust, '
-        'with a language model in the kernel</span>',
+        '  <div class="titlebar"><a class="mark" href="%s"><img src="%simg/logo.svg" '
+        'alt="" width="24" height="24"><span>Aperture Institute</span></a>'
+        '<span class="ctl" aria-hidden="true"><i></i><i></i><i class="x"></i></span></div>'
+        % (home, p),
+        '  <div class="addr"><span class="orb" aria-hidden="true"></span>'
+        '<span class="sub">GLaDOS: an operating system in Rust, '
+        'with a language model in the kernel</span></div>',
         '</div>',
     ])
 
@@ -467,6 +468,8 @@ def footer_html(p, rel):
     updated = date_of(rel) if rel else ""
     return "\n".join([
         '<div id="footer">',
+        '  <a class="start" href="%s" aria-hidden="true" tabindex="-1">'
+        '<img src="%simg/logo.svg" alt="" width="30" height="30"></a>' % (p or "./", p),
         '  <p>GLaDOS, Aperture Science and Portal are properties of Valve '
         'Corporation. This project is independent and is not affiliated with, '
         'endorsed by, or connected to Valve in any way.</p>',
