@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The [glados] package repository</title>
+<meta name="description" content="The signed package repository behind orange, GLaDOS's package manager. What is in it, how to install from it, and how to add it to any Arch Linux system.">
+<link rel="canonical" href="https://repo.aperture.institute/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLaDOS">
+<meta property="og:title" content="The [glados] package repository">
+<meta property="og:description" content="The signed package repository behind orange, GLaDOS's package manager.">
+<meta property="og:url" content="https://repo.aperture.institute/">
+<meta property="og:image" content="https://glados.aperture.institute/img/og.png">
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" type="image/svg+xml" href="/img/logo.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/icon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/img/icon-180.png">
+<style>
+pre{overflow-x:auto}
+#pkgs td.size{white-space:nowrap}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div id="page">
+
+<div id="masthead">
+  <a class="mark" href="https://glados.aperture.institute/"><img src="/img/wordmark.png" alt="Aperture Institute" width="666" height="169"></a>
+  <span class="sub">GLaDOS: an operating system in Rust, with a language model in the kernel</span>
+</div>
+
+<div id="tabs"><ul><li><a href="https://glados.aperture.institute/">Summary</a></li><li><a href="https://glados.aperture.institute/download/">Download</a></li><li><a href="https://glados.aperture.institute/news/">News</a></li><li><a href="https://glados.aperture.institute/wiki/">Wiki</a></li><li class="on"><a href="/">Repository</a></li><li><a href="https://glados.aperture.institute/token/">Token</a></li><li><a href="https://github.com/IlumCI/GLaDOS" rel="noopener">Source code</a></li></ul></div>
+
+<div id="body">
+<div id="sidebar">
+<div class="box"><div class="t">Repository</div><div class="bd"><table class="facts"><tr><td>Name</td><td>[glados]</td></tr><tr><td>Architecture</td><td>x86_64</td></tr><tr><td>Packages</td><td id="count">…</td></tr><tr><td>Updated</td><td id="updated">…</td></tr><tr><td>Signed</td><td>packages and database</td></tr></table><ul><li><a href="https://github.com/IlumCI/GLaDOS/releases/tag/repo-x86_64">Browse the files</a></li><li><a href="/glados.gpg">Signing key</a></li><li><a href="https://github.com/IlumCI/GLaDOS/tree/main/packaging">PKGBUILDs</a></li></ul></div></div>
+<div class="box"><div class="t">Signing key</div><div class="bd"><p style="word-break:break-all;font-family:monospace;font-size:12px">83E7 5C5B 98F2 5798 92AF<br>3019 AB32 E962 9000 D4EC</p></div></div>
+</div>
+
+<div id="content">
+<div class="crumbs"><a href="https://glados.aperture.institute/">GLaDOS</a> / Repository</div>
+<div id="main">
+<h1>The [glados] package repository</h1>
+
+<p>GLaDOS runs an unmodified Arch Linux userland beside its kernel, and <strong>orange</strong> is how software gets into it. Orange is pacman with the verbs people expect: <code>install</code>, <code>remove</code>, <code>update</code>, <code>upgrade</code>, <code>search</code>. It reads all of Arch's repositories, and one of its own, which is this one.</p>
+
+<p>[glados] carries what makes the userland GLaDOS: orange itself, the release files that make every program report it is running on GLaDOS, the key everything here is signed with, and the full desktop.</p>
+
+<h2 class="sect">On GLaDOS</h2>
+<div class="panel">
+<p>The ISO boots with a slim Linux system and orange already installed. Connect to the network and bring in the rest:</p>
+<pre><code>orange upgrade</code></pre>
+<p>That updates everything and installs <code>glados-desktop</code>: LibreOffice, GTK and Qt applications, a text editor, an image viewer and a media player, all opening in their own windows on the GLaDOS desktop. After that, anything else in Arch is one command away:</p>
+<pre><code>orange search editor
+orange install fastfetch
+orange info gimp</code></pre>
+</div>
+
+<h2 class="sect">On any Arch Linux system</h2>
+<div class="panel">
+<p>The repository is an ordinary signed pacman repository. Trust the key, then add it to <code>/etc/pacman.conf</code>:</p>
+<pre><code>curl -O https://repo.aperture.institute/glados.gpg
+sudo pacman-key --add glados.gpg
+sudo pacman-key --lsign-key 83E75C5B98F2579892AF3019AB32E9629000D4EC</code></pre>
+<pre><code>[glados]
+SigLevel = Required DatabaseRequired
+Server = https://repo.aperture.institute/$arch</code></pre>
+<p>Then <code>sudo pacman -Sy orange</code>, and the same verbs work there too.</p>
+<div class="note"><strong>Every package and the database itself are signed</strong>, and pacman is told to require both. A package signed by any other key is refused, even inside a correctly signed database.</div>
+</div>
+
+<h2 class="sect">Packages</h2>
+<div class="panel">
+<div class="scroll">
+<table class="dl" id="pkgs"><thead><tr><th>Package</th><th>Version</th><th>Size</th><th>Built</th></tr></thead><tbody><tr><td colspan="4">Loading…</td></tr></tbody></table>
+</div>
+<p>Rebuilt and re-signed automatically whenever a package changes, straight from <a href="https://github.com/IlumCI/GLaDOS/tree/main/packaging">the PKGBUILDs in the source tree</a>.</p>
+</div>
+
+</div>
+</div>
+</div>
+
+<div id="footer">
+  <p>GLaDOS, Aperture Science and Portal are properties of Valve Corporation. This project is independent and is not affiliated with, endorsed by, or connected to Valve in any way.</p>
+  <p>Copyright 2026. All rights reserved.</p>
+  <p>No cookies, no analytics, no telemetry of any kind.</p>
+</div>
+
+</div>
+<script>
+(async () => {
+  const body = document.querySelector('#pkgs tbody');
+  const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const size = n => n > 1048576 ? (n/1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n/1024)) + ' KB';
+  try {
+    const r = await fetch('https://api.github.com/repos/IlumCI/GLaDOS/releases/tags/repo-x86_64');
+    const rel = await r.json();
+    const latest = {};
+    let newest = '';
+    for (const a of rel.assets || []) {
+      const m = a.name.match(/^(.+)-([^-]+-[^-]+)-(x86_64|any)\.pkg\.tar\.zst$/);
+      if (!m) continue;
+      if (a.updated_at > newest) newest = a.updated_at;
+      if (!latest[m[1]] || a.updated_at > latest[m[1]].a.updated_at) latest[m[1]] = {a, m};
+    }
+    const rows = [];
+    for (const {a, m} of Object.values(latest)) {
+      rows.push(`<tr><td><a href="${esc(a.browser_download_url)}">${esc(m[1])}</a></td><td>${esc(m[2])}</td><td class="size">${size(a.size)}</td><td>${a.updated_at.slice(0,10)}</td></tr>`);
+    }
+    rows.sort();
+    body.innerHTML = rows.join('') || '<tr><td colspan="4">No packages found.</td></tr>';
+    document.getElementById('count').textContent = rows.length;
+    document.getElementById('updated').textContent = newest.slice(0,10) || '-';
+  } catch (e) {
+    body.innerHTML = '<tr><td colspan="4"><a href="https://github.com/IlumCI/GLaDOS/releases/tag/repo-x86_64">See the release page</a>.</td></tr>';
+  }
+})();
+</script>
+</body>
+</html>

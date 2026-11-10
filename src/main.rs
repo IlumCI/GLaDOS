@@ -105,6 +105,8 @@ pub struct BootInfo {
     /// A GLADOSV1 voice model (`tools/kokoro.py`). `None` is normal: the
     /// formant voice is compiled in and this one replaces it.
     pub voice: Option<Blob>,
+    /// The ISO's Linux root (`ROOT_PATH`). `None` is normal.
+    pub linux_root: Option<Blob>,
 }
 
 /// Where the weights live on the boot volume. Backslashes: this is a UEFI path
@@ -116,6 +118,9 @@ pub const TOKENIZER_PATH: &str = "\\GLADOS\\tokenizer.bin";
 pub const BRAIN_PATH: &str = "\\GLADOS\\brain.bin";
 /// The neural voice, about 170 MB, read whole for the same reason.
 pub const VOICE_PATH: &str = "\\GLADOS\\voice.bin";
+/// The ISO's slim Linux root, read whole like the model: nothing after
+/// ExitBootServices can read a USB stick. A root on the SSD is preferred.
+pub const ROOT_PATH: &str = "\\GLADOS\\root.erofs";
 
 #[no_mangle]
 pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
@@ -393,6 +398,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     let tokenizer = uefi::read_file(bs, image, TOKENIZER_PATH);
     let brain = uefi::read_file(bs, image, BRAIN_PATH);
     let voice_model = uefi::read_file(bs, image, VOICE_PATH);
+    let linux_root = uefi::read_file(bs, image, ROOT_PATH);
     // The root bundle comes off the same volume for the same reason: this is
     // the only moment there is a filesystem to read it from.
     let roots = uefi::read_file(bs, image, net::trust::ROOTS_PATH);
@@ -494,6 +500,7 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         roots,
         brain,
         voice: voice_model,
+        linux_root,
     };
 
     console::init(boot.fb, 2, palette::BLACK);
@@ -787,6 +794,9 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // brings (a runtime directory and the session bus). Found rather than
     // asked for: a Linux program on the desktop should not need somebody to
     // know a partition number first.
+    if let Some(r) = boot.linux_root.as_ref() {
+        store::erofs::set_ram(r.ptr, r.len);
+    }
     if let Some(p) = linux::disk::auto_root() {
         linux::services::begin_session();
         kprintln!("[linux] the root filesystem is partition {}, with a session bus", p);

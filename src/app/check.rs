@@ -86,10 +86,7 @@ pub fn check_code(src: &str, jail: &str) -> Verdict {
 /// written across two lines; the parser already knows, exactly, and is the same
 /// parser that will run it.
 pub fn functions(src: &str) -> Vec<(String, usize)> {
-    let Ok(toks) = aiksi::lex::lex(src) else {
-        return Vec::new();
-    };
-    let Ok(prog) = aiksi::parse::parse(toks) else {
+    let Ok(prog) = aiksi::parse_source(src) else {
         return Vec::new();
     };
     prog.iter()

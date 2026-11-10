@@ -1,0 +1,22 @@
+#!/bin/bash
+# fakeroot, as orange's AUR builds need it on GLaDOS.
+#
+# fakeroot's job is to make the files a package is built from look as if
+# root owns them, so the package records root as their owner. On GLaDOS
+# that is already true of every file -- the kernel has no file ownership
+# and reports uid 0 for everything -- so there is nothing to fake. What
+# makepkg still needs is to be told it is inside fakeroot, which it reads
+# from FAKEROOTKEY. This sets it, skips fakeroot's own options, and runs the
+# command. It is installed outside PATH and put in front of it only for
+# orange's builds, so the real fakeroot, if installed, is untouched.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --) shift; break ;;
+        -l|--lib|--faked|-s|-i|-b) shift 2 ;;
+        -*) shift ;;
+        *) break ;;
+    esac
+done
+export FAKEROOTKEY=glados
+[ $# -eq 0 ] && set -- "${SHELL:-/bin/bash}"
+exec "$@"

@@ -134,6 +134,51 @@ pub fn ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
+/// Ticks, summed over every core, that arrived while that core was idle.
+///
+/// **Sampled, and exactly what Linux's idle figure is.** Each core's own timer
+/// fires at `TIMER_HZ`, and a tick that interrupted `hlt` or `mwait` is a tick
+/// of a core with nothing to do -- those are the only two ways a core here
+/// waits, and the interrupted `rip` is the instruction after the one that was
+/// waiting, so the bytes just behind it say which. Core 0 has no idle task
+/// (it waits in the shell's own loop), so asking the scheduler would miss the
+/// core that idles most; asking the instruction does not.
+///
+/// What it is for is `/proc/uptime`'s second field, which `proc.rs` refused
+/// to invent until something measured it.
+static IDLE_TICKS: AtomicU64 = AtomicU64::new(0);
+
+pub fn idle_ticks() -> u64 {
+    IDLE_TICKS.load(Ordering::Relaxed)
+}
+
+/// Set by an application processor's idle loop around each wait, because
+/// that wait is not always an instruction the timer can recognise: without
+/// MONITOR (KVM does not offer it) the loop spins on `pause`, which every
+/// spinlock spins on too. The tick *takes* the mark when it counts it, so a
+/// task that preempts the idle loop is never counted idle -- the loop puts the
+/// mark back on its next turn round, which is microseconds.
+static IDLE_MARK: [core::sync::atomic::AtomicBool; 64] = [const { core::sync::atomic::AtomicBool::new(false) }; 64];
+
+/// The idle loop saying "waiting now" (true) or "working" (false).
+pub fn mark_idle(cpu: usize, idle: bool) {
+    IDLE_MARK[cpu & 63].store(idle, Ordering::Relaxed);
+}
+
+/// Was this interrupt taken out of `hlt` (F4) or `mwait` (0F 01 C9)?
+/// Kernel code only: a ring-3 `rip` points into a guest's own pages, which a
+/// guest cannot halt in anyway.
+fn was_waiting(rip: u64, cs: u64) -> bool {
+    if cs & 3 != 0 || rip < 3 {
+        return false;
+    }
+    // Safety: a ring-0 `rip` is inside the kernel image or generated code,
+    // both identity-mapped and readable, and the three bytes before an
+    // instruction that was just executing are code too.
+    let b = unsafe { core::ptr::read_volatile((rip - 3) as *const [u8; 3]) };
+    b[2] == 0xF4 || b == [0x0F, 0x01, 0xC9]
+}
+
 pub fn timer_hz() -> u64 {
     unsafe { *TIMER_HZ.get() }
 }
@@ -175,6 +220,10 @@ extern "x86-interrupt" fn timer_isr(frame: idt::InterruptStackFrame) {
     // long time, and leaving the interrupt in service would block every
     // further interrupt at this priority in the meantime.
     eoi();
+    let marked = cpu::percpu::armed() && IDLE_MARK[cpu::percpu::cpu_id() as usize & 63].swap(false, Ordering::Relaxed);
+    if marked || was_waiting(frame.rip, frame.cs) {
+        IDLE_TICKS.fetch_add(1, Ordering::Relaxed);
+    }
 
     // A guest that never makes a syscall owns the machine, and there is no key
     // to press because the guest is what is running. The timer is the only
@@ -200,22 +249,36 @@ extern "x86-interrupt" fn timer_isr(frame: idt::InterruptStackFrame) {
 
 /// The vector a TLB shootdown arrives on.
 pub const VECTOR_SHOOTDOWN: u8 = 0xF3;
-static SHOT_ACKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 /// Which cores answered the shootdown in flight, so one that never does can
 /// be named rather than counted.
-static SHOT_FROM: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Another core changed a guest's page tables: drop every cached
 /// translation. A CR3 reload is the whole of it -- guest pages are never
 /// global, so it reaches every one of them -- and it is cheaper than finding
 /// out which few changed.
 extern "x86-interrupt" fn shootdown_isr(_frame: idt::InterruptStackFrame) {
+    flush_and_answer();
+    eoi();
+}
+
+/// Each core's count of the flushes it has done.
+///
+/// **A count per core, because one shared record cannot serve two senders.**
+/// It was a single mask that every sender zeroed on the way in, with nothing
+/// serialising them: two cores shooting at once erased each other's answers,
+/// waited out the whole timeout for acknowledgements that had already come,
+/// and said "unanswered". A sender here reads the counts, then asks, and a
+/// count that has moved since means a flush that happened after its change to
+/// the tables -- whoever asked for it.
+static SHOT_SEEN: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+/// Moves whenever anybody asks, so a sender waiting can see another's request.
+static SHOT_ASKED: AtomicU64 = AtomicU64::new(0);
+
+fn flush_and_answer() {
     unsafe {
         core::arch::asm!("mov {t}, cr3", "mov cr3, {t}", t = out(reg) _, options(nostack, preserves_flags));
     }
-    SHOT_ACKS.fetch_add(1, Ordering::AcqRel);
-    SHOT_FROM.fetch_or(1u64 << (crate::smp::this_cpu() as u64 & 63), Ordering::AcqRel);
-    eoi();
+    SHOT_SEEN[crate::smp::this_cpu() as usize & 63].fetch_add(1, Ordering::AcqRel);
 }
 
 /// Ask every other core to flush and wait until each has, or until a few
@@ -278,22 +341,36 @@ pub fn shootdown(root: u64) {
         return;
     }
     let me = 1u64 << (crate::smp::this_cpu() as u64 & 63);
-    let want = holding(root) & !me;
-    SHOT_ACKS.store(0, Ordering::Release);
-    SHOT_FROM.store(0, Ordering::Release);
+    let mut want = holding(root) & !me;
+    let mut before = [0u64; 64];
+    for (c, b) in before.iter_mut().enumerate() {
+        *b = SHOT_SEEN[c].load(Ordering::Acquire);
+    }
+    let mut asked = SHOT_ASKED.fetch_add(1, Ordering::AcqRel) + 1;
     ipi_settle();
     // Fixed delivery, assert, destination shorthand "all excluding self".
     write(REG_ICR_LO, VECTOR_SHOOTDOWN as u32 | 1 << 14 | 0b11 << 18);
     ipi_settle();
     let mhz = crate::time::tsc_mhz().max(1);
     let t0 = unsafe { core::arch::x86_64::_rdtsc() };
-    while SHOT_FROM.load(Ordering::Acquire) & want != want {
-        if unsafe { core::arch::x86_64::_rdtsc() } - t0 > 5_000 * mhz {
-            let missing = want & !SHOT_FROM.load(Ordering::Acquire);
+    while want != 0 {
+        // Two senders with interrupts off would each wait on the other, so
+        // somebody else's request is answered here too.
+        let now = SHOT_ASKED.load(Ordering::Acquire);
+        if now != asked {
+            asked = now;
+            flush_and_answer();
+        }
+        for c in 0..64 {
+            if want & (1 << c) != 0 && SHOT_SEEN[c].load(Ordering::Acquire) != before[c] {
+                want &= !(1u64 << c);
+            }
+        }
+        if want != 0 && unsafe { core::arch::x86_64::_rdtsc() } - t0 > 5_000 * mhz {
             crate::serial_println!(
                 "[smp] a TLB shootdown went unanswered by {} core(s): mask {:#x} from core {}",
-                missing.count_ones(),
-                missing,
+                want.count_ones(),
+                want,
                 crate::smp::this_cpu()
             );
             break;

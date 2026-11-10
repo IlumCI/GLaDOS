@@ -337,6 +337,30 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         ready(&Fd::Stdin) == POLLIN,
     ));
 
+    // ---- SOCK_SEQPACKET: one write is one message is one read ----
+    {
+        let (p, _) = unix::pair_packets();
+        unix::write(&p, Side::A, b"first").ok();
+        unix::write(&p, Side::A, b"second").ok();
+        let mut buf = [0u8; 64];
+        let one = unix::read(&p, Side::B, &mut buf);
+        out.push((
+            "two packets written are two reads, not one run of bytes",
+            one == Ok(5) && &buf[..5] == b"first",
+        ));
+        let mut small = [0u8; 3];
+        let two = unix::read(&p, Side::B, &mut small);
+        out.push((
+            "a buffer too small takes the front of a packet and the rest is gone",
+            two == Ok(3) && &small == b"sec" && unix::read(&p, Side::B, &mut buf) == Err(-11),
+        ));
+        let big = alloc::vec![0u8; 70 * 1024];
+        out.push((
+            "and a packet larger than the socket can hold is refused whole",
+            unix::write(&p, Side::A, &big) == Err(-90),
+        ));
+    }
+
     // ---- a Unix socket, which is the one that can actually block ----
     let (a, b) = unix::pair();
     let sa = alloc::rc::Rc::new(core::cell::RefCell::new(unix::Sock::Stream {

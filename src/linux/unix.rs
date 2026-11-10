@@ -76,6 +76,20 @@ pub struct Pipe {
     /// Bytes ever taken out of each direction.
     read_a: u64,
     read_b: u64,
+    /// `SOCK_SEQPACKET`: each write is one message and each read takes at
+    /// most one. Chromium's processes talk over these and nothing else, and
+    /// a stream would let two messages arrive as one read, which its framing
+    /// does not tolerate.
+    packets: bool,
+    /// `shutdown(SHUT_WR)` on that end: it sends nothing more, so the far end
+    /// reads what is queued and then end of stream -- while the end that shut
+    /// can still read, which is the whole difference from closing it.
+    a_shut: bool,
+    b_shut: bool,
+    /// Where each message ends, as a `sent_to_*` count, per direction --
+    /// stamps exactly like the descriptors', and for the same reason.
+    ends_to_b: VecDeque<u64>,
+    ends_to_a: VecDeque<u64>,
 }
 
 impl Pipe {
@@ -91,6 +105,11 @@ impl Pipe {
             sent_to_a: 0,
             read_a: 0,
             read_b: 0,
+            packets: false,
+            a_shut: false,
+            b_shut: false,
+            ends_to_b: VecDeque::new(),
+            ends_to_a: VecDeque::new(),
         }
     }
 }
@@ -244,6 +263,14 @@ pub fn pair() -> (Rc<RefCell<Pipe>>, Rc<RefCell<Pipe>>) {
     (Rc::clone(&p), p)
 }
 
+/// The same, keeping message boundaries: `SOCK_SEQPACKET`.
+pub fn pair_packets() -> (Rc<RefCell<Pipe>>, Rc<RefCell<Pipe>>) {
+    let mut pipe = Pipe::new();
+    pipe.packets = true;
+    let p = Rc::new(RefCell::new(pipe));
+    (Rc::clone(&p), p)
+}
+
 /// Read from this end. `Ok(0)` means the far end is gone, as a socket has it.
 pub fn read(pipe: &Rc<RefCell<Pipe>>, side: Side, out: &mut [u8]) -> Result<usize, i64> {
     const EAGAIN: i64 = -11;
@@ -251,9 +278,12 @@ pub fn read(pipe: &Rc<RefCell<Pipe>>, side: Side, out: &mut [u8]) -> Result<usiz
     // Read the flag out before taking the queue, since the borrow checker is
     // right that one `&mut` and one `&` into the same struct is two borrows.
     let far_open = match side {
-        Side::A => p.b_open,
-        Side::B => p.a_open,
+        Side::A => p.b_open && !p.b_shut,
+        Side::B => p.a_open && !p.a_shut,
     };
+    if p.packets {
+        return read_packet(&mut p, side, out, far_open);
+    }
     let q = match side {
         Side::A => &mut p.to_a,
         Side::B => &mut p.to_b,
@@ -276,14 +306,48 @@ pub fn read(pipe: &Rc<RefCell<Pipe>>, side: Side, out: &mut [u8]) -> Result<usiz
     Ok(n)
 }
 
+/// One message, or the front of it: a read never crosses a boundary, and
+/// what does not fit the buffer is discarded rather than left for the next
+/// read, which is what `SOCK_SEQPACKET` does on Linux (with `MSG_TRUNC`).
+fn read_packet(p: &mut Pipe, side: Side, out: &mut [u8], far_open: bool) -> Result<usize, i64> {
+    const EAGAIN: i64 = -11;
+    let read = match side {
+        Side::A => p.read_a,
+        Side::B => p.read_b,
+    };
+    let end = match side {
+        Side::A => p.ends_to_a.pop_front(),
+        Side::B => p.ends_to_b.pop_front(),
+    };
+    let Some(end) = end else {
+        return if far_open { Err(EAGAIN) } else { Ok(0) };
+    };
+    let len = end.saturating_sub(read) as usize;
+    let q = match side {
+        Side::A => &mut p.to_a,
+        Side::B => &mut p.to_b,
+    };
+    let n = out.len().min(len);
+    for (i, b) in q.drain(..len.min(q.len())).enumerate() {
+        if i < n {
+            out[i] = b;
+        }
+    }
+    match side {
+        Side::A => p.read_a = end,
+        Side::B => p.read_b = end,
+    }
+    Ok(n)
+}
+
 /// Write to this end. Short writes are real: a caller must look at the count.
 pub fn write(pipe: &Rc<RefCell<Pipe>>, side: Side, data: &[u8]) -> Result<usize, i64> {
     const EPIPE: i64 = -32;
     const EAGAIN: i64 = -11;
     let mut p = pipe.borrow_mut();
     let far_open = match side {
-        Side::A => p.b_open,
-        Side::B => p.a_open,
+        Side::A => p.b_open && !p.a_shut,
+        Side::B => p.a_open && !p.b_shut,
     };
     if !far_open {
         // Linux also raises `SIGPIPE` here. This answers the error and does
@@ -293,12 +357,22 @@ pub fn write(pipe: &Rc<RefCell<Pipe>>, side: Side, data: &[u8]) -> Result<usize,
         // than left to be discovered.
         return Err(EPIPE);
     }
+    let packets = p.packets;
     let q = match side {
         Side::A => &mut p.to_b,
         Side::B => &mut p.to_a,
     };
     let room = CAPACITY.saturating_sub(q.len());
-    if room == 0 {
+    if packets {
+        // Whole or not at all: half a message is a different message.
+        const EMSGSIZE: i64 = -90;
+        if data.len() > CAPACITY {
+            return Err(EMSGSIZE);
+        }
+        if data.len() > room {
+            return Err(EAGAIN);
+        }
+    } else if room == 0 {
         return Err(EAGAIN);
     }
     let n = data.len().min(room);
@@ -308,6 +382,18 @@ pub fn write(pipe: &Rc<RefCell<Pipe>>, side: Side, data: &[u8]) -> Result<usize,
     match side {
         Side::A => p.sent_to_b += n as u64,
         Side::B => p.sent_to_a += n as u64,
+    }
+    if p.packets {
+        match side {
+            Side::A => {
+                let e = p.sent_to_b;
+                p.ends_to_b.push_back(e);
+            }
+            Side::B => {
+                let e = p.sent_to_a;
+                p.ends_to_a.push_back(e);
+            }
+        }
     }
     Ok(n)
 }
@@ -376,9 +462,11 @@ pub fn room(pipe: &Rc<RefCell<Pipe>>, side: Side) -> usize {
 /// the connection ended without having to attempt a read to find out.
 pub fn peer_open(pipe: &Rc<RefCell<Pipe>>, side: Side) -> bool {
     let p = pipe.borrow();
+    // A peer that shut its sending is, to a reader, one that has gone: a
+    // read answers end of stream, so poll must not leave it waiting.
     match side {
-        Side::A => p.b_open,
-        Side::B => p.a_open,
+        Side::A => p.b_open && !p.b_shut,
+        Side::B => p.a_open && !p.a_shut,
     }
 }
 
@@ -394,9 +482,30 @@ pub fn pending_fds(pipe: &Rc<RefCell<Pipe>>, side: Side) -> usize {
 /// How many bytes are readable at this end, for `poll`-shaped questions.
 pub fn readable(pipe: &Rc<RefCell<Pipe>>, side: Side) -> usize {
     let p = pipe.borrow();
+    // A zero-length message is still a message to read.
+    let msgs = match side {
+        Side::A => p.ends_to_a.len(),
+        Side::B => p.ends_to_b.len(),
+    };
     match side {
         Side::A => p.to_a.len(),
         Side::B => p.to_b.len(),
+    }
+    .max(msgs)
+}
+
+/// What `FIONREAD` answers: the bytes a read would find. For a packet socket
+/// that is the next message, since a read never takes more than one.
+pub fn next_read(pipe: &Rc<RefCell<Pipe>>, side: Side) -> usize {
+    let p = pipe.borrow();
+    let (queued, end, read) = match side {
+        Side::A => (p.to_a.len(), p.ends_to_a.front(), p.read_a),
+        Side::B => (p.to_b.len(), p.ends_to_b.front(), p.read_b),
+    };
+    if p.packets {
+        end.map_or(0, |e| e.saturating_sub(read) as usize)
+    } else {
+        queued
     }
 }
 
@@ -410,6 +519,20 @@ pub fn close(pipe: &Rc<RefCell<Pipe>>, side: Side) {
     match side {
         Side::A => p.a_open = false,
         Side::B => p.b_open = false,
+    }
+}
+
+/// `shutdown`: `SHUT_WR` (1) and `SHUT_RDWR` (2) end this side's sending.
+/// `SHUT_RD` (0) is accepted and changes nothing a reader here can observe
+/// that matters: what the peer already sent stays queued, as on Linux.
+pub fn shutdown(pipe: &Rc<RefCell<Pipe>>, side: Side, how: u64) {
+    if how == 0 {
+        return;
+    }
+    let mut p = pipe.borrow_mut();
+    match side {
+        Side::A => p.a_shut = true,
+        Side::B => p.b_shut = true,
     }
 }
 

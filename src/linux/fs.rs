@@ -74,7 +74,16 @@ pub const AT_FDCWD: i64 = -100;
 /// rather than from a path comparison.
 pub struct File {
     pub path: String,
-    pub data: Vec<u8>,
+    /// The contents, shared between every read-only description of one file
+    /// and copied only when one of them is written (`Rc::make_mut`).
+    ///
+    /// An open file *is* its contents here, and it was a private copy per
+    /// open: git's index-pack opens the pack it is writing once per thread,
+    /// four threads and a writer were five copies of one pack, and the fifth
+    /// open hit `OPEN_MAX_BYTES` with "Cannot allocate memory". A second
+    /// reader of a file already open costs a reference now, and the budget
+    /// counts each buffer once.
+    pub data: Rc<Vec<u8>>,
     pub at: usize,
     /// Whether this description may be written through.
     pub writable: bool,
@@ -86,6 +95,106 @@ pub struct File {
     /// would produce a thousand objects and a thousand hashes of everything
     /// before them.
     pub dirty: bool,
+}
+
+/// Every description open on a file, by path, so a second open of the same
+/// file can see what the first has written.
+///
+/// **Writes are committed on the last close, and that is invisible until
+/// somebody else opens the file.** git's `index-pack` writes a pack through
+/// one descriptor and then has each of its threads open the same file *by
+/// name* to read it back: every thread got the blob as it stood before the
+/// write -- empty -- and git said "premature end of pack file, 154 bytes
+/// missing", which is how every `git clone` with more than one thread failed
+/// and with it every AUR package that builds from git. On Linux a write is
+/// seen by every open of the file at once.
+///
+/// So an open settles first: a writer of the same path with uncommitted
+/// bytes commits them, and the open reads what is there. Committing early is
+/// one extra store write per such open; the writer goes on buffering, and
+/// commits again at its last close. Guest syscalls hold the guest lock, which
+/// is what keeps this table to one core at a time.
+static WRITERS: crate::sync::Racy<Vec<(String, alloc::rc::Weak<RefCell<File>>)>> =
+    crate::sync::Racy::new(Vec::new());
+
+/// The contents of `path` if a description of it is already open and holds
+/// exactly what the namespace does -- nothing written since its last commit --
+/// so a new read-only open can share them rather than copy. Settles first.
+pub fn shared_contents(path: &str) -> Option<Rc<Vec<u8>>> {
+    settle(path);
+    let w = unsafe { WRITERS.get() };
+    for (p, f) in w.iter() {
+        if p != path {
+            continue;
+        }
+        let Some(f) = f.upgrade() else { continue };
+        let Ok(f) = f.try_borrow() else { continue };
+        if !f.dirty {
+            return Some(f.data.clone());
+        }
+    }
+    None
+}
+
+/// Remember a description that may be written, for `settle`.
+pub fn note_writer(b: &Rc<RefCell<File>>) {
+    let w = unsafe { WRITERS.get() };
+    w.retain(|(_, f)| f.strong_count() > 0);
+    w.push((b.borrow().path.clone(), Rc::downgrade(b)));
+}
+
+/// Commit whatever a live writer of `path` has not yet committed.
+pub fn settle(path: &str) {
+    let w = unsafe { WRITERS.get() };
+    w.retain(|(_, f)| f.strong_count() > 0);
+    for (p, f) in w.iter() {
+        if p != path {
+            continue;
+        }
+        let Some(f) = f.upgrade() else { continue };
+        let Ok(mut f) = f.try_borrow_mut() else { continue };
+        if f.dirty && f.writable {
+            f.dirty = false;
+            let data = (*f.data).clone();
+            super::ns::write_blob(&f.path, data);
+        }
+    }
+}
+
+/// A rename moves the file, and on Linux an open descriptor moves with it:
+/// what is written through it afterwards lands under the new name. Here a
+/// description commits by its *path* at its last close, so a file renamed
+/// while open had its bytes committed to the name it no longer has. That is
+/// exactly how a downloader works -- write to `incoming/.tmpXXXX`, rename to
+/// the content's hash, close -- and Discord's updater fetched 147 MB of
+/// correct bytes and then read six empty files back, failing with "Invalid
+/// Data". So the move commits what is pending first, then points every open
+/// description of the old path (or of anything under it, for a directory) at
+/// the new one. Called before the namespace moves anything.
+pub fn renamed(from: &str, to: &str) {
+    let w = unsafe { WRITERS.get() };
+    w.retain(|(_, f)| f.strong_count() > 0);
+    let under = alloc::format!("{}/", from);
+    for (p, f) in w.iter_mut() {
+        let moved = if p == from {
+            String::from(to)
+        } else if let Some(rest) = p.strip_prefix(under.as_str()) {
+            alloc::format!("{}/{}", to, rest)
+        } else {
+            continue;
+        };
+        if let Some(f) = f.upgrade() {
+            if let Ok(mut f) = f.try_borrow_mut() {
+                if f.dirty && f.writable {
+                    f.dirty = false;
+                    let data = (*f.data).clone();
+                    super::ns::write_blob(&f.path, data);
+                }
+                f.path = moved.clone();
+            }
+        }
+        *p = moved;
+    }
 }
 
 /// What a socket descriptor holds.
@@ -224,6 +333,12 @@ pub struct Memfd {
     pub cursor: usize,
     /// How many live mappings there are. A resize while any exists is refused.
     pub maps: usize,
+    /// `F_SEAL_*`. They were accepted and forgotten, and `F_GET_SEALS` said
+    /// "none": Firefox checks a buffer another process hands it is sealed
+    /// against shrinking before mapping it, since a shrink under a mapping
+    /// would crash the receiver, and it refused every one -- "Shared memory
+    /// PlatformHandle is not safe to map". Kept, reported and enforced.
+    pub seals: u32,
 }
 
 impl Memfd {
@@ -400,7 +515,7 @@ impl Fd {
             return false;
         }
         f.dirty = false;
-        let data = f.data.clone();
+        let data = (*f.data).clone();
         super::ns::write_blob(&f.path, data)
     }
 }
@@ -676,7 +791,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         {
             let a = Fd::File(Rc::new(RefCell::new(File {
                 path: String::from("/tmp/x"),
-                data: alloc::vec![1, 2, 3, 4],
+                data: Rc::new(alloc::vec![1, 2, 3, 4]),
                 at: 0,
                 writable: false,
                 dirty: false,
@@ -697,7 +812,7 @@ pub fn checks() -> Vec<(&'static str, bool)> {
         {
             let a = Fd::File(Rc::new(RefCell::new(File {
                 path: String::from("/tmp/never-written"),
-                data: Vec::new(),
+                data: Rc::new(Vec::new()),
                 at: 0,
                 writable: true,
                 dirty: true,

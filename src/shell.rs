@@ -149,7 +149,7 @@ fn find_core(want: &str) -> Option<[u8; 32]> {
 
 const KNOWN_COMMANDS: &[&str] = &[
     "term", "perf", "desk", "todo", "paint", "write", "mines", "oracle", "enternet", "net", "dhcp", "mem",
-    "mine", "uptime", "tasks", "status", "help", "app", "author", "video", "serial", "log", "snap",
+    "mine", "uptime", "tasks", "status", "help", "app", "author", "maker", "video", "serial", "log", "snap",
     "update", "repair", "gpu", "abstract", "study", "work", "redqueen", "grammar",
     "forest",
 ];
@@ -7037,6 +7037,25 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 other => kprintln!("  no such action: {}  (try: hold, release, clear, status)", other),
             }
         }
+        // Settings: the home grid, a page by name, or a search across every
+        // setting, printed -- which is how a page is found without a screen.
+        "settings" => {
+            let arg = rest.trim();
+            if let Some(q) = arg.strip_prefix("find ") {
+                for it in crate::gfx::prefs::search(q).iter().take(12) {
+                    let page = crate::gfx::prefs::page(it.page).map(|p| p.title).unwrap_or("");
+                    kprintln!("  {:<28} {} > {}", it.label, page, it.group);
+                }
+            } else if arg == "quick" {
+                crate::gfx::desk::toggle_quick();
+            } else if arg == "list" {
+                for p in crate::gfx::prefs::PAGES.iter() {
+                    kprintln!("  {:<10} {:<24} {}", p.id, p.title, (p.summary)());
+                }
+            } else {
+                crate::gfx::setapp::open(arg);
+            }
+        }
         "win" => {
             use crate::gfx::desk;
             let mut it = rest.split_whitespace();
@@ -7199,6 +7218,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 }
                 "open" => {
                     let what = it.next().unwrap_or("status");
+                    // Every settings page is a page of the one Settings window.
+                    if what == "settings" || what.starts_with("set:") {
+                        crate::gfx::setapp::open(what.strip_prefix("set:").unwrap_or(""));
+                        return;
+                    }
                     match crate::gfx::ui::panel_named(what) {
                         // The panel names its own window. `win open wifi`
                         // asked for a page, not for a window called "wifi",
@@ -8350,6 +8374,9 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         // adopted: `app try <name>` says what it managed and `app take <name>`
         // accepts it, which keeps a person between the machine's output and the
         // launcher.
+        // Programs written from a sentence, checked by the tools that run them.
+        "maker" => maker_cmd(rest),
+        "author" if rest.split_whitespace().next().and_then(crate::ai::maker::Target::parse).is_some() => maker_cmd(rest),
         "author" => {
             let mut a = rest.splitn(2, ' ');
             let name = a.next().unwrap_or("").trim();
@@ -9144,7 +9171,11 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             console::set_color(LTCYAN);
             kprintln!("  glados {}", crate::VERSION);
             console::set_color(LTGRAY);
-            kprintln!("  a ring-0 kernel for MSI MS-16R8, one address space, no syscalls");
+            // It said "for MSI MS-16R8, one address space, no syscalls", and
+            // all three stopped being true: it is an OS rather than one
+            // laptop's, guests get their own roots, and those guests trap.
+            kprintln!("  a ring-0 kernel written from scratch in Rust, with a language model inside it");
+            kprintln!("  Linux programs run as guests at ring 3; every syscall they make is answered here");
             // The formats an update has to stay compatible with. Each is
             // refused rather than guessed at when its version does not match,
             // so this is the map of what a new image may not silently change.
@@ -11107,4 +11138,178 @@ pub fn guest_words(line: &str) -> alloc::vec::Vec<alloc::string::String> {
         out.push(cur);
     }
     out
+}
+
+
+/// `maker`: write a program from a sentence, list and read what was written,
+/// run it, and say who writes.
+fn maker_cmd(rest: &str) {
+    use crate::ai::maker::{self, Target};
+    let rest = rest.trim();
+    let (verb, tail) = rest.split_once(' ').map(|(a, b)| (a, b.trim())).unwrap_or((rest, ""));
+    match verb {
+        "" | "help" => {
+            let b = maker::brain();
+            kprintln!("  maker <app|web|python|c|aiksi> <name> <what it should do>");
+            kprintln!("      app is a window on this desktop; aiksi a script; web one HTML file");
+            kprintln!("      writes it, checks it with the real tools, and rewrites it until they accept it");
+            kprintln!("  maker list               what has been written, in {}", maker::projects_dir());
+            kprintln!("  maker show <name>        its log: every round, and what the checks said");
+            kprintln!("  maker code <name>        the program itself");
+            kprintln!("  maker change <name> <what to change>   grow it a step, checked the same way");
+            kprintln!("  maker edit <name>        open it in the editor");
+            kprintln!("  maker run <name>         run it here");
+            kprintln!("  maker stop               stop the run at its next step");
+            kprintln!("  maker cloud [on|off|url <u>|model <m>|key <k>]   an optional cloud brain");
+            kprintln!("  written by: {}", b.describe());
+        }
+        "stop" => kprintln!("  {}", crate::ai::agent::request_abort()),
+        "change" => {
+            let (name, req) = tail.split_once(' ').map(|(a, b)| (a, b.trim())).unwrap_or((tail, ""));
+            if req.is_empty() || !maker::list().iter().any(|(n, t)| n == name && t.is_some()) {
+                kprintln!("  maker change <name> <what to change> -- 'maker list' says what exists");
+                return;
+            }
+            if crate::ai::agent::queue_change(name, req) {
+                kprintln!("  queued -- the change is checked like a new program; 'maker show {}' follows it", name);
+            } else {
+                kprintln!("  something is already pending or running -- 'agent stop' cancels it");
+            }
+        }
+        "edit" => {
+            let Some((_, Some(t))) = maker::list().into_iter().find(|(n, _)| n == tail) else {
+                kprintln!("  no project called '{}' -- 'maker list'", tail);
+                return;
+            };
+            // The editor works on the kernel's namespace; with a root image
+            // mounted a guest path lives under the guest's own layer.
+            let guest = alloc::format!("{}/{}", maker::project_dir(tail), t.file());
+            let ns = if crate::linux::disk::root_mounted() { alloc::format!("{}{}", crate::linux::ns::UPPER, guest) } else { guest };
+            // Queued as the command a person would type, so the editor opens
+            // the way it always does.
+            crate::gfx::desk::queue_command(&alloc::format!("edit {}", ns));
+        }
+        "list" => {
+            let all = maker::list();
+            if all.is_empty() {
+                kprintln!("  nothing written yet");
+            }
+            for (n, t) in all {
+                kprintln!("  {:<24} {}", n, t.map(|t| t.name()).unwrap_or("-"));
+            }
+        }
+        "code" => {
+            let Some((_, Some(t))) = maker::list().into_iter().find(|(n, _)| n == tail) else {
+                kprintln!("  no project called '{}' -- 'maker list'", tail);
+                return;
+            };
+            match crate::linux::ns::read_blob(&alloc::format!("{}/{}", maker::project_dir(tail), t.file())) {
+                Some(b) => {
+                    for (i, l) in alloc::string::String::from_utf8_lossy(&b).lines().enumerate() {
+                        kprintln!("  {:>3}  {}", i + 1, l);
+                    }
+                }
+                None => kprintln!("  nothing written yet"),
+            }
+        }
+        "show" => {
+            let dir = maker::project_dir(tail);
+            match crate::linux::ns::read_blob(&alloc::format!("{}/log.txt", dir)) {
+                Some(b) => {
+                    for l in alloc::string::String::from_utf8_lossy(&b).lines() {
+                        kprintln!("  {}", l);
+                    }
+                    if let Some(o) = crate::linux::ns::read_blob(&alloc::format!("{}/run-output.txt", dir)) {
+                        kprintln!("  -- what it printed --");
+                        for l in alloc::string::String::from_utf8_lossy(&o).lines().take(20) {
+                            kprintln!("  {}", l);
+                        }
+                    }
+                }
+                None => kprintln!("  no project called '{}' -- 'maker list'", tail),
+            }
+        }
+        "run" => {
+            let Some((_, Some(t))) = maker::list().into_iter().find(|(n, _)| n == tail) else {
+                kprintln!("  no project called '{}' -- 'maker list'", tail);
+                return;
+            };
+            let d = maker::project_dir(tail);
+            match t {
+                Target::Python => {
+                    let p = alloc::format!("{}/main.py", d);
+                    match crate::linux::start_job("/usr/bin/python3", &[&p]) {
+                        Ok(id) => kprintln!("  running as job {} -- 'jobs' and 'kill {}'", id, id),
+                        Err(e) => kprintln!("  {}", e),
+                    }
+                }
+                Target::C => {
+                    let script = alloc::format!("cd {} && gcc -std=c11 -O2 -o /tmp/{} main.c -lm && exec /tmp/{}", d, tail, tail);
+                    match crate::linux::start_job("/usr/bin/bash", &["-c", &script]) {
+                        Ok(id) => kprintln!("  running as job {} -- 'jobs' and 'kill {}'", id, id),
+                        Err(e) => kprintln!("  {}", e),
+                    }
+                }
+                Target::App => {
+                    let p = alloc::format!("{}/{}", d, t.file());
+                    match crate::linux::ns::read_blob(&p) {
+                        Some(b) => {
+                            let src = alloc::string::String::from_utf8_lossy(&b).into_owned();
+                            crate::gfx::aiksiapp::open(tail, &src, &alloc::format!("/tmp/maker/{}", tail));
+                        }
+                        None => kprintln!("  {} is missing", p),
+                    }
+                }
+                other => kprintln!("  {}", maker::how_to_run(other, tail)),
+            }
+        }
+        "cloud" => {
+            let (w, v) = tail.split_once(' ').map(|(a, b)| (a, b.trim())).unwrap_or((tail, ""));
+            match w {
+                "on" => maker::set_cloud(None, None, Some(true)),
+                "off" => maker::set_cloud(None, None, Some(false)),
+                "url" if !v.is_empty() => maker::set_cloud(Some(v), None, None),
+                "model" if !v.is_empty() => maker::set_cloud(None, Some(v), None),
+                "key" if !v.is_empty() => {
+                    maker::set_key(v);
+                    kprintln!("  key kept in {} and never printed", maker::CLOUD_KEY);
+                }
+                "" => {}
+                _ => {
+                    kprintln!("  maker cloud [on|off|url <https://.../v1>|model <name>|key <key>]");
+                    return;
+                }
+            }
+            let (u, m, on) = maker::brain_cfg();
+            kprintln!("  cloud   {}", if on { "on" } else { "off -- the local model writes" });
+            kprintln!("  url     {}", if u.is_empty() { "-" } else { &u });
+            kprintln!("  model   {}", if m.is_empty() { "-" } else { &m });
+            kprintln!("  key     {}", if maker::has_key() { "set" } else { "not set" });
+            kprintln!("  in use  {}", maker::brain().describe());
+        }
+        _ => {
+            let Some(t) = Target::parse(verb) else {
+                kprintln!("  '{}' is not a kind of program -- app, web, python, c or aiksi", verb);
+                return;
+            };
+            let (name, desc) = tail.split_once(' ').map(|(a, b)| (a, b.trim())).unwrap_or((tail, ""));
+            if !maker::valid_name(name) {
+                kprintln!("  a name is letters, digits, '-' and '_', up to 40 of them");
+                return;
+            }
+            let desc = if desc.is_empty() { name } else { desc };
+            if maker::brain() == maker::Brain::Local && !crate::ai::engine_ready() {
+                kprintln!("  no model loaded, and the cloud brain is off -- nothing can write it");
+                return;
+            }
+            if crate::ai::agent::queue_make(t, name, desc) {
+                console::set_color(LTGREEN);
+                kprintln!("  queued -- {} writes it, the tools check it; the shell stays yours", maker::brain().describe());
+                console::set_color(LTGRAY);
+                kprintln!("  it will be in {} -- 'maker show {}' follows it", maker::project_dir(name), name);
+            } else {
+                kprintln!("  something is already pending or running -- 'agent stop' cancels it");
+            }
+        }
+    }
 }

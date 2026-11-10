@@ -20,6 +20,7 @@
 //! absolute target restarts at the image's own root, and forty hops is a loop
 //! -- Linux's own limit.
 
+use core::sync::atomic::Ordering;
 use crate::store::block;
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -145,6 +146,19 @@ impl Inode {
 /// Copyable: four numbers, and every read through one takes its own locks
 /// (the block cache's and the controller's), so a holder of a copy may read
 /// without the guest lock.
+/// The `base` meaning "the image in memory" rather than a partition: the root
+/// the ISO carries, read whole before ExitBootServices because nothing after
+/// that can read a USB stick (`set_ram`). No partition starts at this sector.
+pub const RAM_BASE: u64 = u64::MAX;
+static RAM_AT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static RAM_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Hand over the in-memory image. The pool is the firmware's, kept for life.
+pub fn set_ram(at: *const u8, len: usize) {
+    RAM_LEN.store(len, core::sync::atomic::Ordering::Release);
+    RAM_AT.store(at as usize, core::sync::atomic::Ordering::Release);
+}
+
 #[derive(Clone, Copy)]
 pub struct Image {
     /// Partition start, in 512-byte sectors.
@@ -221,6 +235,17 @@ impl Image {
     /// partition and block and only ever filled.
     fn read_raw(base: u64, off: u64, out: &mut [u8]) -> Result<(), Error> {
         if out.is_empty() {
+            return Ok(());
+        }
+        if base == RAM_BASE {
+            let (at, len) = (RAM_AT.load(Ordering::Acquire), RAM_LEN.load(Ordering::Acquire));
+            let end = off.checked_add(out.len() as u64).ok_or(Error::Io)?;
+            if at == 0 || end > len as u64 {
+                return Err(Error::Io);
+            }
+            // Safety: `set_ram` was handed a boot-time pool that is never
+            // freed, and the range is checked against its length above.
+            unsafe { core::ptr::copy_nonoverlapping((at as u64 + off) as *const u8, out.as_mut_ptr(), out.len()) };
             return Ok(());
         }
         let b0 = off / CBLOCK;

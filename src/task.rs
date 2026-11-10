@@ -33,11 +33,15 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 ///     2   clock and compositor
 ///     16  mining slices, at MAX_SLICES = 16
 ///     3   the resident mind, the agent and the socket task
-///     48  guest threads, at `linux::thread::MAX_THREADS`
+///     256 guest threads, at `linux::thread::MAX_THREADS`
 ///     --
-///     85
+///     293
 ///
-/// Ninety-six leaves eleven. **The guest threads were eight, and that was
+/// Three hundred and twenty leaves twenty-seven. **Forty-eight threads was
+/// found the same way eight was**: Firefox's parent process alone wants more
+/// than that, and when `clone` said no it stopped on its own assertions --
+/// "Failed to create a new thread when pool is empty", "Could not start
+/// software vsync thread". **The guest threads were eight, and that was
 /// found as a hang rather than a refusal**: llvmpipe starts one rasterizer per
 /// core, so a game at four cores had four of them, two gallium queues, a
 /// filesystem thread and tier0's -- eight -- and the ninth thread the engine
@@ -49,7 +53,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 /// The cost is the static `TASKS` array and nothing else: `adopt_idle` takes a
 /// stack that already exists, and only `spawn` allocates `STACK_SIZE`, so the
 /// sixteen slices are 1 MiB of stacks whether this is 24 or 40.
-pub const MAX_TASKS: usize = 96;
+pub const MAX_TASKS: usize = 320;
 const STACK_SIZE: usize = 64 * 1024;
 
 // Defined in assembly rather than as a `#[naked]` fn: this must have exactly
@@ -157,6 +161,8 @@ pub struct Ring3 {
     pub syscall_stack: u64,
     pub host_rsp: u64,
     pub fs_base: u64,
+    /// `IA32_GS_BASE`, the guest's own (`syscall::sys_arch_prctl`).
+    pub gs_base: u64,
     /// A 32-bit guest's thread-local descriptors, its `%gs` selector, and
     /// whether it is one at all. See `linux::i386`.
     pub tls: [u64; 3],
@@ -510,7 +516,14 @@ fn migrant() {
             MIG_SEEN.fetch_or(1 << cpu, Ordering::Relaxed);
         }
         MIG_LOOPS.fetch_add(1, Ordering::Relaxed);
-        yield_now();
+        // **A tick's sleep, not a yield.** An idle task no longer displaces
+        // one that can run (`schedule`, pass 1), so a task that only yields
+        // keeps its core for as long as nothing else wants it, and never
+        // becomes a task another core could take: this check failed three
+        // boots in four after that change while the scheduler was right. A
+        // task that sleeps is woken by whichever core's pass finds it due,
+        // which is the migration this exists to show.
+        sleep_until(crate::dev::lapic::ticks() + 1);
     }
 }
 
@@ -1658,6 +1671,11 @@ fn schedule() {
         // as `Running` also sees which core owns it.
         CURRENT[me].store(next, Ordering::Release);
         PENDING[me].store(cur, Ordering::Release);
+        // The idle loop's "waiting" mark belongs to the idle task: anything
+        // else switched onto this core is working, whatever the mark said.
+        if !t[next].idle {
+            crate::dev::lapic::mark_idle(me as usize, false);
+        }
         // So the allocator knows who to bill without asking the interrupt
         // controller which core it is on.
         crate::cpu::percpu::set_task(next as u64);

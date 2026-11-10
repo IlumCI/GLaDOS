@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod answer;
 pub mod author;
+pub mod maker;
 pub mod adapter;
 pub mod abstraction;
 pub mod acquire;
@@ -1464,6 +1465,32 @@ static ECHO: Racy<Option<alloc::string::String>> = Racy::new(None);
 
 const ECHO_CAP: usize = 4096;
 
+/// How much `echo` keeps this time. 4 KB is a turn of conversation; a program
+/// being written is several times that, and a capture that stopped at 4 KB
+/// would hand the checker a file cut off mid-function -- a syntax error the
+/// model did not make.
+static ECHO_LIMIT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(ECHO_CAP);
+
+/// Generated text is kept and not printed. `maker` writes whole programs on
+/// the agent task, and a terminal full of somebody else's source code is the
+/// shell being taken away from the person using it.
+static QUIET: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// `echo_begin`, keeping up to `limit` bytes and printing nothing.
+pub fn echo_begin_quiet(limit: usize) {
+    ECHO_LIMIT.store(limit, Ordering::Relaxed);
+    QUIET.store(true, Ordering::Relaxed);
+    unsafe { *ECHO.get() = Some(alloc::string::String::new()) };
+}
+
+/// End a quiet capture: the limit and the printing go back to what a
+/// conversation expects.
+pub fn echo_end_quiet() -> Option<alloc::string::String> {
+    QUIET.store(false, Ordering::Relaxed);
+    ECHO_LIMIT.store(ECHO_CAP, Ordering::Relaxed);
+    unsafe { (*ECHO.get()).take() }
+}
+
 /// Start keeping a copy of generated text. Returns whatever the last arming
 /// left behind, which is always `None` in practice and is discarded here
 /// rather than being appended to somebody else's turn.
@@ -1491,7 +1518,7 @@ fn echo(s: &str) {
         f(s);
     }
     if let Some(buf) = unsafe { (*ECHO.get()).as_mut() } {
-        if buf.len() + s.len() <= ECHO_CAP {
+        if buf.len() + s.len() <= ECHO_LIMIT.load(Ordering::Relaxed) {
             buf.push_str(s);
         }
     }
@@ -1695,10 +1722,12 @@ pub fn markdown_selftest() -> bool {
 /// Print rendered runs and keep their clean text for the transcript.
 fn show(runs: Vec<(alloc::string::String, u8)>) {
     for (t, col) in runs {
-        if col != 0xff {
-            console::set_color(col);
+        if !QUIET.load(Ordering::Relaxed) {
+            if col != 0xff {
+                console::set_color(col);
+            }
+            kprint!("{}", t);
         }
-        kprint!("{}", t);
         echo(&t);
     }
 }

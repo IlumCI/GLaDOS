@@ -254,6 +254,11 @@ jobs:
             # reason and same image. Without it the kernel runs the worm it
             # carries compiled in, so the 2B images still have a brain.
             brain: true
+            # The slim Linux root (payload/linux-root.txt, 700 MB): a shell,
+            # the userland and `orange`, read into memory at boot. `orange
+            # upgrade` brings in the rest of the desktop. This image only, for
+            # the size reason the voice gives.
+            linux: true
           # The 2B distill, Apache-2.0. Its payload is canonical at seq 512,
           # which is not a context worth shipping for a model this size, so
           # both variants stamp. The weights are uploaded once and these two
@@ -385,6 +390,20 @@ jobs:
       # the pinned sources; `check` walks them to the last byte and requires
       # every sense and an approach, avoid and arousal readout, with the
       # standard library alone, since the runner has no numpy.
+      # The slim Linux root, \GLADOS\root.erofs, from a pinned release like
+      # the rest of the payload: built by `tools/rootfs.py build --slim`.
+      - name: Fetch the slim Linux root
+        if: matrix.linux == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p payload-linux
+          for f in $(grep -v '^#' payload/linux-root.txt | awk 'NF >= 3 {print $3}'); do
+            gh release download payload-linux-root-v1 --dir payload-linux --clobber --pattern "$f"
+          done
+          python3 tools/payload.py verify payload-linux payload/linux-root.txt
+          mv payload-linux/* payload-dir/
+
       - name: Fetch the fly's connectome
         if: matrix.brain == true
         env:

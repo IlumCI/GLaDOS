@@ -32,8 +32,7 @@
 //!
 //! `/proc/meminfo` and `/proc/cpuinfo`, because `sysinfo` and `CPUID` answer
 //! those without inventing the dozen fields neither can fill.
-//! `/proc/uptime`, because its second field is idle time and nothing here
-//! measures it. `/proc/stat`, for the same reason several times over. And
+//! `/proc/stat`, for the same reason several times over. And
 //! every other process, because there is one.
 
 use super::syscall;
@@ -82,12 +81,20 @@ pub fn claims(path: &str) -> bool {
     is_dir(path) || is_file(path)
 }
 
+/// `/proc/uptime`: seconds since boot, then idle seconds summed over every
+/// core, each to a hundredth, as Linux writes them.
+fn uptime() -> String {
+    let hz = crate::TIMER_HZ as u64;
+    let two = |t: u64| format!("{}.{:02}", t / hz, (t % hz) * 100 / hz);
+    format!("{} {}\n", two(crate::dev::lapic::ticks()), two(crate::dev::lapic::idle_ticks()))
+}
+
 /// The synthetic files, as a table rather than as four scattered matches.
 pub fn is_file(path: &str) -> bool {
     matches!(
         path,
         "/proc/self/exe" | "/proc/self/cmdline" | "/proc/self/environ" | "/proc/self/maps"
-            | "/proc/self/mounts" | "/proc/mounts" | "/proc/meminfo" | "/proc/version" | CPU_MAX_FREQ
+            | "/proc/self/mounts" | "/proc/mounts" | "/proc/meminfo" | "/proc/version" | "/proc/uptime" | CPU_MAX_FREQ
             | RESOLV
     ) || super::drm::sys_is_file(path)
 }
@@ -184,7 +191,7 @@ pub fn read(path: &str) -> Option<Vec<u8>> {
         // `/proc` is not mounted, and stops -- but every field is one `uname`
         // already gives, so nothing in it is invented to satisfy a check.
         "/proc/version" => Some(
-            format!("Linux version {} (glados) #1 SMP {}\n", crate::VERSION, "ring 0, with guests at ring 3").into_bytes(),
+            format!("Linux version {} (glados) #1 SMP {}\n", syscall::release(), "ring 0, with guests at ring 3").into_bytes(),
         ),
         // **Every field here is one this machine knows**, which is what
         // admits the file under the rule above: total and free are the
@@ -194,6 +201,13 @@ pub fn read(path: &str) -> Option<Vec<u8>> {
         // engine reads this file to size its caches and does not check that
         // the open worked; without it, it parsed a stream that was never
         // opened and faulted.
+        // Both fields are measured. It was absent under the rule above,
+        // because the second is idle time and nothing measured it -- and
+        // absence cost more than it saved: neofetch and procps `uptime` read
+        // this and nothing else, fell back to the epoch, and reported 20,761
+        // days. `lapic::idle_ticks` samples whether each core was halted at
+        // each of its own ticks, so idle is summed over cores as Linux sums it.
+        "/proc/uptime" => Some(uptime().into_bytes()),
         "/proc/meminfo" => {
             let (used, total) = crate::mem::heap::HEAP.stats();
             let kib = |b: usize| b / 1024;
@@ -305,8 +319,16 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     out.push((
         "a file whose fields this machine cannot fill is absent rather than invented",
         read("/proc/cpuinfo").is_none()
-            && read("/proc/uptime").is_none()
             && read("/proc/loadavg").is_none(),
+    ));
+    // Idle is summed over cores, so it can exceed the uptime -- but never the
+    // uptime times the cores that could have been idle in it.
+    let up = read("/proc/uptime").map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+    let f: Vec<f64> = up.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+    let cores = crate::smp::online().max(1) as f64;
+    out.push((
+        "/proc/uptime is two measured numbers, idle bounded by uptime times the cores",
+        up.ends_with('\n') && f.len() == 2 && f[0] > 0.0 && f[1] >= 0.0 && f[1] <= f[0] * cores + 0.02,
     ));
     out.push((
         "only /proc/self/exe is a link, since it is the only one with no other way in",

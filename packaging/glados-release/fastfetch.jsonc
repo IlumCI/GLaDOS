@@ -1,0 +1,28 @@
+// GLaDOS's look for fastfetch: the mark the boot banner prints
+// (`gfx::intro::MARK`, copied here by hand -- change both together), in the
+// boot console's amber, with the keys in the same colour. Read from
+// /etc/xdg, so a person's own ~/.config/fastfetch/config.jsonc still wins.
+//
+// The module list is spelt out because a config file that names none
+// gets none: the first version gave a logo and nothing beside it.
+{
+    "logo": {
+        "type": "file",
+        "source": "/usr/share/glados/logo.txt",
+        "color": { "1": "38;2;221;163;60" },
+        "padding": { "top": 1, "right": 3 }
+    },
+    "display": {
+        "color": {
+            "keys": "38;2;221;163;60",
+            "title": "38;2;255;206;114"
+        }
+    },
+    "modules": [
+        "title", "separator",
+        "os", "host", "kernel", "uptime", "packages", "shell",
+        "display", "terminal", "cpu", "gpu", "memory", "disk", "localip",
+        "battery", "locale",
+        "break", "colors"
+    ]
+}

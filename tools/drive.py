@@ -760,6 +760,11 @@ def main():
         del argv[i:i + 2]
     # The neural voice, staged as \GLADOS\voice.bin on the same terms.
     voice_src = None
+    linux_root_src = None
+    if "--linux-root" in argv:
+        i = argv.index("--linux-root")
+        linux_root_src = Path(argv[i + 1])
+        del argv[i:i + 2]
     if "--voice" in argv:
         i = argv.index("--voice")
         voice_src = Path(argv[i + 1])
@@ -832,6 +837,15 @@ def main():
         print(f"[drive] staged {voice_src} as \\GLADOS\\voice.bin")
     elif voice_target.exists():
         voice_target.unlink()
+    # The ISO's slim Linux root (main.rs ROOT_PATH), for testing what a
+    # booted USB stick does with no root on the disk.
+    root_target = esp / "GLADOS" / "root.erofs"
+    if linux_root_src is not None:
+        if not root_target.exists() or differs(linux_root_src, root_target):
+            root_target.write_bytes(linux_root_src.read_bytes())
+        print(f"[drive] staged {linux_root_src} as \\GLADOS\\root.erofs")
+    elif root_target.exists():
+        root_target.unlink()
     # The WAD staging went with `src/doom/`. A stale copy on the ESP would be
     # a file nothing reads, so it is cleared rather than left.
     old_wad = esp / "GLADOS" / "DOOM.WAD"

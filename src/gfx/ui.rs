@@ -139,7 +139,7 @@ pub fn note(text: &str) -> Widget {
     Widget::Note(lines)
 }
 
-#[derive(Hash)]
+#[derive(Hash, Clone)]
 pub enum Widget {
     Label(String),
     Sep,
@@ -1325,6 +1325,20 @@ fn updates_rows() -> Vec<Widget> {
         action: Action::Run(String::from("update unstage")),
     });
     v
+}
+
+/// A settings page's widgets without the old window's page list round them,
+/// for the Settings app (`setapp`), which draws its own navigation.
+pub fn settings_body(page: &str) -> Vec<Widget> {
+    let mut w = settings(page).widgets;
+    // The page list and the separator under it, and the Close button.
+    if w.len() >= 2 {
+        w.drain(..2);
+    }
+    if matches!(w.last(), Some(Widget::Button { action: Action::Close, .. })) {
+        w.pop();
+    }
+    w
 }
 
 pub fn settings(page: &str) -> Panel {

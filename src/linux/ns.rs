@@ -42,13 +42,33 @@ pub const GONE: &str = "/linux/gone";
 /// image inode's mode, or the default for its kind.
 pub const MODES: &str = "/linux/mode";
 
+/// Where a path's bits are kept: one flat entry per path, named by a hash
+/// of it.
+///
+/// **It mirrored the path, and a mirror cannot hold a directory's bits and
+/// its children's at once.** `/linux/mode/a/.git` became a four-byte blob the
+/// moment `.git` was chmodded, after which `/linux/mode/a/.git/config.lock`
+/// needed `.git` to be a directory and the write failed: git's `chmod` of its
+/// own lock file answered EIO, and every AUR package built from git stopped
+/// there. A flat name cannot collide with anything.
 fn mode_path(guest: &str) -> String {
+    let h = crate::store::sha256::hash(guest.as_bytes());
+    let mut name = String::with_capacity(32);
+    for b in &h[..16] {
+        name.push_str(&format!("{:02x}", b));
+    }
+    format!("{}/{}", MODES, name)
+}
+
+/// Where the mirrored layout kept it, read so bits set before the change are
+/// still honoured.
+fn old_mode_path(guest: &str) -> String {
     format!("{}{}", MODES, guest)
 }
 
 /// The permission bits set on a guest path, if any were.
 pub fn mode_of(guest: &str) -> Option<u32> {
-    let b = sysbox::read_blob(&mode_path(guest))?;
+    let b = sysbox::read_blob(&mode_path(guest)).or_else(|| sysbox::read_blob(&old_mode_path(guest)))?;
     (b.len() == 4).then(|| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) & 0o7777)
 }
 
@@ -57,9 +77,10 @@ pub fn set_mode(guest: &str, perm: u32) -> bool {
 }
 
 pub fn forget_mode(guest: &str) {
-    let p = mode_path(guest);
-    if sysbox::blob_len(&p).is_some() {
-        sysbox::detach(&p);
+    for p in [mode_path(guest), old_mode_path(guest)] {
+        if sysbox::blob_len(&p).is_some() {
+            sysbox::detach(&p);
+        }
     }
 }
 

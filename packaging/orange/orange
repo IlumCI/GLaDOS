@@ -9,31 +9,85 @@
 #   orange install <pkg>...    orange -S <pkg>...
 #   orange remove <pkg>...     orange -Rs <pkg>...
 #   orange update              orange -Sy
-#   orange upgrade             orange -Syu      (orange -Syyu forces a refresh)
+#   orange upgrade             orange -Syu, and the full desktop if missing
 #   orange search <words>      orange -Ss <words>
 #   orange info <pkg>          installed: -Qi, otherwise -Si
 #   orange list                orange -Q
 #   orange files <pkg>         orange -Ql <pkg>
 #   orange owns <path>         orange -Qo <path>
 #   orange clean               orange -Sc
+#   orange aur <command>       the AUR, unreviewed: search info show install upgrade list
+#   orange install ./x.deb     a Debian package, converted to a pacman one
+#   orange deb <command>       show <file.deb>, list
 #
 # Anything starting with '-' goes to pacman as it is.
 
 usage() {
-    sed -n '9,20p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '9,23p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 pac() {
     exec /usr/bin/pacman "$@"
 }
 
+AUR=/usr/lib/orange/aur.py
+DEB=/usr/lib/orange/deb.py
+
+# Names no repository has go to the AUR -- but only as far as saying so.
+# Building from the AUR runs code nobody reviewed, so it takes its own
+# command: `orange install` never builds anything.
+install() {
+    # A path to a .deb is not a name: it is converted, never looked up.
+    local debs=() names=() flags=() a
+    for a in "$@"; do
+        case "$a" in
+            *.deb) [ -f "$a" ] && { debs+=("$a"); continue; } ;;
+            --force) flags+=("$a"); continue ;;
+        esac
+        names+=("$a")
+    done
+    if [ ${#debs[@]} -gt 0 ]; then
+        /usr/bin/python3 "$DEB" install "${flags[@]}" "${debs[@]}" || exit $?
+        local left=()
+        for a in "${names[@]}"; do case "$a" in -*) ;; *) left+=("$a") ;; esac; done
+        [ ${#left[@]} -eq 0 ] && exit 0
+        set -- "${names[@]}"
+    fi
+    local aur_only repo=()
+    aur_only=" $(/usr/bin/python3 "$AUR" split "$@") "
+    for a in "$@"; do
+        case "$aur_only" in *" $a "*) ;; *) repo+=("$a") ;; esac
+    done
+    local named=0
+    for a in "${repo[@]}"; do case "$a" in -*) ;; *) named=1 ;; esac; done
+    local rc=0
+    if [ $named -eq 1 ]; then
+        /usr/bin/pacman -S "${repo[@]}" || rc=$?
+    fi
+    if [ -n "${aur_only// /}" ]; then
+        /usr/bin/python3 "$AUR" offer $aur_only || rc=1
+    fi
+    exit $rc
+}
+
 verb=$1
 [ $# -gt 0 ] && shift
 case "$verb" in
-    install|add|get)      pac -S "$@" ;;
+    install|add|get)      install "$@" ;;
     remove|uninstall|rm)  pac -Rs "$@" ;;
     update|refresh)       pac -Sy "$@" ;;
-    upgrade)              pac -Syu "$@" ;;
+    upgrade)
+        /usr/bin/pacman -Syu "$@"; rc=$?
+        # The ISO carries a slim root; the rest of the desktop is one package
+        # away, and an upgrade is when to bring it in.
+        if [ $rc -eq 0 ] && ! /usr/bin/pacman -Q glados-desktop >/dev/null 2>&1; then
+            echo "orange: installing the full GLaDOS desktop (glados-desktop)"
+            /usr/bin/pacman -S --needed "$@" glados-desktop; rc=$?
+        fi
+        /usr/bin/python3 "$AUR" pending 2>/dev/null
+        exit $rc ;;
+    aur)                  exec /usr/bin/python3 "$AUR" "$@" ;;
+    deb)                  exec /usr/bin/python3 "$DEB" "$@" ;;
     search|find)          pac -Ss "$@" ;;
     info|show)
         if /usr/bin/pacman -Q "$@" >/dev/null 2>&1; then pac -Qi "$@"; else pac -Si "$@"; fi ;;

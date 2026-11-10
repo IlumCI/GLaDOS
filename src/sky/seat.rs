@@ -380,7 +380,7 @@ impl Client {
             *((at + KEYMAP.len() as u64) as *mut u8) = 0;
         }
         let fd = crate::linux::fs::Fd::Memfd(alloc::rc::Rc::new(core::cell::RefCell::new(
-            crate::linux::fs::Memfd { name: alloc::string::String::from("keymap"), at, len, cursor: 0, maps: 0 },
+            crate::linux::fs::Memfd { name: alloc::string::String::from("keymap"), at, len, cursor: 0, maps: 0, seals: 1 },
         )));
         self.out_fds.push(fd);
         let mut w = Writer::new(id, 0);

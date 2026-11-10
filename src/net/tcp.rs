@@ -566,6 +566,12 @@ pub fn alive(h: Handle) -> bool {
     at(h, |t| t.state != State::Closed).unwrap_or(false)
 }
 
+/// The two ends of a connection, ours first: what `getsockname` and
+/// `getpeername` report, and what a program checks to know it is connected.
+pub fn endpoints(h: Handle) -> Option<((super::Ipv4, u16), (super::Ipv4, u16))> {
+    at(h, |t| ((t.local_ip, t.local_port), (t.remote, t.remote_port)))
+}
+
 /// What a given connection is doing.
 pub fn state_of(h: Handle) -> State {
     at(h, |t| t.state).unwrap_or(State::Closed)
