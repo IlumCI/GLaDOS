@@ -1,0 +1,26 @@
+loopcert 1
+seq 9
+utc 2026-09-22T12:54:35Z
+point 7c5d4a6c8a190078dcdebcba68b5c75248040b1b0dd2c86c6a7c6c807b4ee87a
+kind cleanup
+rung 3
+axis template
+parent-tree d5638b0527ce2e1eb40ba50d751f72cfa1d24548
+candidate-tree 066e0031a0c453df7ee9db33da934c4128202fb2
+rail cost.warnings
+corpus ae595a23
+alpha-k 8
+chi-bar 12.652
+minutes 80
+half extend
+level 1
+boots 2
+queries 500
+sections 29/29
+suites 68/68
+claims 1219/1219
+witness -
+moved absent
+why no line for the claimed rail
+verdict refuse
+runner 35728763739/1

@@ -1,0 +1,1 @@
+  attempt 1 did not compile: src/fmt/pixel_format.rs:22:6: error: expected one of `!` or `::`, found `:`: expected one of `!` or `::` error: could not compile `glados` (bin "glados") due to 1 previous error; 32 warnings emitted   refused: the patch carries 'copy from' 

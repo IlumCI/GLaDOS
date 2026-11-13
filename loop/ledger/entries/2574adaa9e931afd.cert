@@ -1,0 +1,26 @@
+loopcert 1
+seq 1
+utc 2026-09-21T17:47:07Z
+point fff38dcc104c49e627e389151e12bb99af5f1f041f5f139b401dcb53cca0e573
+kind tune
+rung 1
+axis grid
+parent-tree 367f9d7f7bf112b83d43146534b9665e5230aa2f
+candidate-tree 8b2e3c68f54b6a3621636321ad51d70a1afec574
+rail host.retrieval
+corpus ae595a23
+alpha-k 0
+chi-bar 4.687
+minutes 40
+half extend
+level 0
+boots 1
+queries 250
+sections 29/29
+suites 68/68
+claims 1219/1218
+witness -
+moved same
+why the candidate answers less than the baseline (sections 29->29 suites 68->68 claims 1219->1218)
+verdict refuse
+runner 35633377377/1

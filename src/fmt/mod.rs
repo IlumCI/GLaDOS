@@ -30,6 +30,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 pub mod outline;
+pub mod pixel_format;
 pub mod table;
 pub mod xml;
 
@@ -668,5 +669,7 @@ pub fn selftest() -> bool {
     ok &= table::selftest();
     ok &= outline::selftest();
     kprintln!("  {} kinds known", 13);
+    ok &= pixel_format::selftest();
+
     ok
 }

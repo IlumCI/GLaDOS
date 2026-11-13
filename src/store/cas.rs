@@ -695,7 +695,6 @@ pub fn read_bench(reps: usize) -> bool {
 }
 
 pub fn stream_selftest() -> bool {
-    use alloc::vec;
     use alloc::vec::Vec;
 
     let Some(bs) = crate::dev::nvme::with(|n| n.block_size as usize) else {
