@@ -95,3 +95,11 @@ pub fn mount(region_start: u64) -> Result<(), cas::Error> {
     unsafe { *STORE.get() = Some(s) };
     Ok(())
 }
+
+/// Forget the mounted store and close its write window. The installer does
+/// this before erasing the disk the store is on; `sysbox::detach_from_store`
+/// must run first, or the namespace is left naming blocks on that disk.
+pub fn unmount() {
+    unsafe { *STORE.get() = None };
+    crate::dev::nvme::release(crate::dev::nvme::Holder::Store);
+}

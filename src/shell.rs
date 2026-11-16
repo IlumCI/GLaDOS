@@ -151,7 +151,7 @@ const KNOWN_COMMANDS: &[&str] = &[
     "term", "perf", "desk", "todo", "paint", "write", "mines", "oracle", "enternet", "net", "dhcp", "mem",
     "mine", "uptime", "tasks", "status", "help", "app", "author", "maker", "video", "serial", "log", "snap",
     "update", "repair", "gpu", "abstract", "study", "work", "redqueen", "grammar",
-    "forest",
+    "forest", "install",
 ];
 
 /// How many steps an authoring run gets.
@@ -2204,7 +2204,9 @@ fn store_cmd(rest: &str) {
             console::set_color(if sha_ok { LTGREEN } else { LTRED });
             kprintln!("  sha-256 vectors: {}", if sha_ok { "pass" } else { "FAIL" });
             console::set_color(WHITE);
-            if store::mounted() {
+            // The round trip writes, so it runs only when the store's window
+            // is open; a mounted, locked store is the ordinary state.
+            if store::mounted() && crate::dev::nvme::holds(crate::dev::nvme::Holder::Store) {
                 let st = store::cas::stream_selftest();
                 console::set_color(if st { LTGREEN } else { LTRED });
                 kprintln!(
@@ -9254,6 +9256,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         // command.
         "repair" => repair_cmd(rest),
         "update" => update_cmd(rest),
+        "install" => crate::install::cmd(rest),
         "words" => {
             console::set_color(YELLOW);
             kprintln!("builtins");

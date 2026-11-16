@@ -126,7 +126,10 @@ store's window); controller lock already existed (`nvme::with`);
 writes (SHA-NI later). Cached dir hashes moved to P3/P4: measure commit
 time once bodies are on disk, cache only if it shows.
 
-**P1 — `install` verb, erase mode.** `src/install/apply.rs`: GPT write (backup
+**P1 — `install` verb, erase mode. Done:** sfdisk verifies the table, slot A
+byte-identical to the root, reboot mounts / from slot A and restores the store.
+Refuses 4Kn disks until `store::erofs` stops assuming 512-byte sectors.
+Was: `src/install/apply.rs`: GPT write (backup
 first, then primary, read back through `block::parse_gpt_entries`, confirm by
 typed digest), slot A raw from the RAM `root.erofs`, store formatted and
 adopted. `auto_root` by type GUID. Verify: 64 GiB blank image, reboot sees

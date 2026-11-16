@@ -119,6 +119,9 @@ pub struct Partition {
     pub mbr_type: u8,
     /// GPT type GUID in on-disk (mixed-endian) form, or zeroes for MBR.
     pub type_guid: [u8; 16],
+    /// This partition's own GPT GUID, or zeroes for MBR. What a boot entry's
+    /// device path and a slot record name a partition by.
+    pub unique_guid: [u8; 16],
 }
 
 impl Partition {
@@ -265,6 +268,8 @@ pub fn parse_gpt_entries(ebuf: &[u8], entry_count: usize, entry_size: usize) -> 
         if guid == [0u8; 16] {
             continue; // unused slot
         }
+        let mut unique = [0u8; 16];
+        unique.copy_from_slice(&e[16..32]);
         let first = rd_u64(e, 32);
         let last = rd_u64(e, 40);
         if last < first {
@@ -277,6 +282,7 @@ pub fn parse_gpt_entries(ebuf: &[u8], entry_count: usize, entry_size: usize) -> 
             block_count: last - first + 1,
             mbr_type: 0,
             type_guid: guid,
+            unique_guid: unique,
         });
     }
     parts
@@ -299,6 +305,7 @@ pub fn parse_mbr(mbr: &[u8]) -> Vec<Partition> {
             block_count: count,
             mbr_type: ty,
             type_guid: [0u8; 16],
+            unique_guid: [0u8; 16],
         });
     }
     parts

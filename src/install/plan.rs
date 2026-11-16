@@ -141,9 +141,9 @@ impl Refusal {
                 have / GIB,
                 need.div_ceil(GIB)
             ),
-            Refusal::NotGpt => "the disk uses an MBR table; installing alongside needs GPT, \
-                                and converting a disk in use is not offered -- erase it instead, \
-                                or convert it from the system that owns it"
+            Refusal::NotGpt => "installing alongside needs a GPT partition table and this disk \
+                                has none -- erase it instead, or convert it from the system that \
+                                owns it (converting a disk in use is not offered)"
                 .into(),
             Refusal::NoRoom { need, largest } => format!(
                 "the largest unallocated space is {} GiB and GLaDOS needs {} GiB -- \

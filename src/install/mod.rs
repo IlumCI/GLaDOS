@@ -8,6 +8,7 @@
 //!
 //! `design/installer.md` is the plan this module is the first piece of.
 
+pub mod apply;
 pub mod gpt;
 pub mod plan;
 
@@ -23,7 +24,7 @@ const GIB: u64 = 1 << 30;
 const MIB: u64 = 1 << 20;
 
 fn part(index: u32, start: u64, blocks: u64, ty: [u8; 16]) -> Partition {
-    Partition { index, start_lba: start, block_count: blocks, mbr_type: 0, type_guid: ty }
+    Partition { index, start_lba: start, block_count: blocks, mbr_type: 0, type_guid: ty, unique_guid: [index as u8; 16] }
 }
 
 /// A 512 GB disk shaped like a Windows install with 60 GiB freed by shrinking
@@ -86,6 +87,8 @@ pub fn checks() -> Vec<(String, bool)> {
                         back.len() == 4 && back.iter().zip(&p.new).all(|(b, n)|
                             b.start_lba == n.first_lba && b.block_count == n.blocks
                                 && b.type_guid == n.role.type_guid())));
+                    c.push(("each partition's own GUID reads back as the one written".into(),
+                        back.iter().enumerate().all(|(i, b)| b.unique_guid == [i as u8 + 1; 16])));
                     c.push(("the protective MBR is a single 0xEE entry and parses as one".into(), {
                         let m = crate::store::block::parse_mbr(&img.primary[..bs]);
                         m.len() == 1 && m[0].mbr_type == 0xEE && m[0].start_lba == 1
@@ -150,7 +153,7 @@ pub fn checks() -> Vec<(String, bool)> {
         matches!(plan::plan(&small, Mode::Erase, &want), Err(Refusal::DiskTooSmall { .. }))));
     let mbr = Disk { geometry: g, scheme: Scheme::Mbr,
         partitions: vec![Partition { index: 1, start_lba: 2048, block_count: 1 << 20,
-            mbr_type: 0x07, type_guid: [0; 16] }] };
+            mbr_type: 0x07, type_guid: [0; 16], unique_guid: [0; 16] }] };
     c.push(("alongside on an MBR disk is refused, not converted".into(),
         plan::plan(&mbr, Mode::Alongside, &want).err() == Some(Refusal::NotGpt)));
     c.push(("erase on that same MBR disk is allowed".into(), plan::plan(&mbr, Mode::Erase, &want).is_ok()));
@@ -217,4 +220,91 @@ pub fn selftest() -> bool {
     }
     kprintln!("    {} claim(s)", n);
     ok
+}
+
+/// `install`: what the disk is, what an install would do to it, and doing it.
+pub fn cmd(rest: &str) {
+    use crate::gfx::console::{self, LTGRAY, LTGREEN, LTRED, WHITE, YELLOW};
+    use crate::kprintln;
+    let mut words = rest.split_whitespace();
+    let verb = words.next().unwrap_or("");
+    let arg = words.next().unwrap_or("");
+    let mode = |w: &str| match w {
+        "" | "erase" => Some(Mode::Erase),
+        "alongside" => Some(Mode::Alongside),
+        _ => None,
+    };
+    match verb {
+        "" | "plan" => {
+            let Some(m) = mode(arg) else {
+                kprintln!("  install plan [erase|alongside]");
+                return;
+            };
+            let disk = match apply::survey() {
+                Ok(d) => d,
+                Err(e) => {
+                    console::set_color(LTRED);
+                    kprintln!("  {}", e);
+                    console::set_color(WHITE);
+                    return;
+                }
+            };
+            match plan::plan(&disk, m, &Want::DEFAULT) {
+                Ok(p) => {
+                    for line in apply::describe(&disk, &p) {
+                        kprintln!("  {}", line);
+                    }
+                    let why = apply::blockers(
+                        &disk,
+                        crate::store::erofs::ram().map(|r| r.len()),
+                        crate::linux::disk::uses_disk(),
+                        &p,
+                    );
+                    if why.is_empty() {
+                        console::set_color(YELLOW);
+                        match m {
+                            Mode::Erase => kprintln!(
+                                "  to do this: install erase {}",
+                                apply::code(&disk, &p)
+                            ),
+                            Mode::Alongside => kprintln!("  installing alongside is not built yet"),
+                        }
+                    } else {
+                        console::set_color(LTRED);
+                        for w in why {
+                            kprintln!("  cannot install: {}", w);
+                        }
+                    }
+                    console::set_color(WHITE);
+                }
+                Err(r) => {
+                    console::set_color(LTRED);
+                    kprintln!("  {}", r.say());
+                    console::set_color(WHITE);
+                }
+            }
+        }
+        "erase" => {
+            if arg.is_empty() {
+                kprintln!("  'install plan erase' first, then 'install erase <code>'");
+                return;
+            }
+            console::set_color(LTGRAY);
+            let r = apply::erase(arg, &mut |line| kprintln!("{}", line));
+            match r {
+                Ok(()) => {
+                    console::set_color(LTGREEN);
+                    kprintln!("  installed: tables, system slot A and the store");
+                    console::set_color(YELLOW);
+                    kprintln!("  the boot partition is not written yet, so this disk does not boot on its own");
+                }
+                Err(e) => {
+                    console::set_color(LTRED);
+                    kprintln!("  stopped: {}", e);
+                }
+            }
+            console::set_color(WHITE);
+        }
+        _ => kprintln!("  install [plan [erase|alongside]] | install erase <code>"),
+    }
 }

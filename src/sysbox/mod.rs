@@ -2050,6 +2050,67 @@ fn cmd_move(a: &str, b: &str, detach: bool) {
 
 // --- persistence --------------------------------------------------------
 
+/// Cut the namespace loose from the store it was restored from, so that store
+/// can be erased under it.
+///
+/// Two things tie a running namespace to its store, and both go wrong in
+/// silence if the store is reformatted: **away blobs**, whose bytes are still
+/// on the old disk, and **`written`**, the memo of what is already stored and
+/// where. Left alone, the first snapshot into a new store would skip every
+/// object the memo names and commit a tree pointing at blocks that now hold
+/// something else. So every away blob is read back into memory first (that is
+/// also what carries a machine's memories into its new install), and the memo
+/// is emptied.
+///
+/// Answers how many blobs were fetched and their bytes, or the first path
+/// that could not be read -- in which case nothing has been changed.
+pub fn detach_from_store() -> Result<(usize, u64), String> {
+    // Collected under the lock, fetched outside it: a fetch is disk I/O and
+    // `with` holds interrupts off.
+    let mut away: Vec<(Vec<String>, cas::ChunkRef)> = Vec::new();
+    fn walk(n: &Node, at: &mut Vec<String>, out: &mut Vec<(Vec<String>, cas::ChunkRef)>) {
+        match n {
+            Node::Away(r) => out.push((at.clone(), *r)),
+            Node::Dir(es) => {
+                for (k, v) in es {
+                    at.push(k.clone());
+                    walk(v, at, out);
+                    at.pop();
+                }
+            }
+            Node::Blob(_) => {}
+        }
+    }
+    with(|s| walk(&s.root, &mut Vec::new(), &mut away));
+    let mut fetched: Vec<(Vec<String>, Vec<u8>)> = Vec::new();
+    let mut bytes = 0u64;
+    for (path, r) in away {
+        match fetch(&r) {
+            Some(b) => {
+                bytes += b.len() as u64;
+                fetched.push((path, b));
+            }
+            None => return Err(format!("/{}", path.join("/"))),
+        }
+    }
+    let n = fetched.len();
+    with(|s| {
+        for (path, b) in fetched {
+            if let Some(slot) = tree::resolve_mut(&mut s.root, &path) {
+                *slot = Node::Blob(b);
+            }
+        }
+        s.written = Written::default();
+    });
+    unsafe { *LAST_ROOT.get() = None };
+    Ok((n, bytes))
+}
+
+/// Commit the working tree now, as `snap` does.
+pub fn snap_now() {
+    cmd_snap();
+}
+
 fn cmd_snap() {
     let ok = with(|s| {
         let res = store::with(|st| {

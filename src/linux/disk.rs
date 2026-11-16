@@ -160,11 +160,38 @@ pub fn auto_root() -> Option<u32> {
     }
     // A root on the disk first: an installed system's. Then the one the ISO
     // carried into memory, answered as partition 0.
+    //
+    // **A disk carrying GLaDOS system slots is asked only about those.** Every
+    // partition used to be offered in table order and the first EROFS took,
+    // which on an installed disk is slot A whichever slot is active, and on a
+    // disk with some other EROFS volume on it is that volume. Which slot is
+    // the slot record's business (installer P5); until it exists, the first
+    // system slot that mounts.
     let on_disk = crate::store::block::scan().ok().and_then(|layout| {
-        let indices: Vec<u32> = layout.partitions.iter().map(|p| p.index).collect();
+        let slots: Vec<u32> = layout
+            .partitions
+            .iter()
+            .filter(|p| p.type_guid == crate::install::plan::ROOT_TYPE_GUID)
+            .map(|p| p.index)
+            .collect();
+        let indices: Vec<u32> = if slots.is_empty() {
+            layout.partitions.iter().map(|p| p.index).collect()
+        } else {
+            slots
+        };
         indices.into_iter().find(|&i| mount("/", i).is_ok())
     });
     on_disk.or_else(|| mount_ram().ok().map(|_| 0))
+}
+
+/// Whether anything mounted is read from the NVMe disk rather than memory.
+/// The installer refuses to erase a disk a running guest is reading from.
+pub fn uses_disk() -> bool {
+    let _g = big();
+    unsafe { MOUNTS.get() }.iter().chain(unsafe { RETIRED.get() }.iter()).any(|m| match &m.vol {
+        Vol::Fat { .. } => true,
+        Vol::Erofs(img) => img.base() != erofs::RAM_BASE,
+    })
 }
 
 /// Mount the in-memory root (`erofs::set_ram`) at `/`.
