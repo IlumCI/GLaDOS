@@ -2251,6 +2251,11 @@ fn store_cmd(rest: &str) {
             cas::read_bench(5);
         }
 
+        r if r == "wbench" || r.starts_with("wbench ") => {
+            let mib = r[6..].trim().parse::<u64>().unwrap_or(256).clamp(4, 8192);
+            cas::write_bench(mib);
+        }
+
         "init" => match store::init() {
             Ok((start, blocks)) => {
                 console::set_color(LTGREEN);

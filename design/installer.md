@@ -118,10 +118,13 @@ hash, so only chunks the current slot lacks need downloading (casync-style).
 
 ## Phases (each driven under QEMU on a blank NVMe image, `-smp 4`, kvm)
 
-**P0 — foundations.** `cas::dma` → static scratch + 2 MiB streaming puts;
-named multi-window NVMe write gate; NVMe controller lock (it is `Racy`);
-cached dir hashes; `store wbench`. Claims: heap delta ≈0 over 10k puts;
-per-window gate; cached == recomputed hash.
+**P0 — foundations. Done.** `cas::DmaBuf` (owned, freed; not a shared
+scratch, since `get` and `put` run on different tasks) + 2 MiB streaming;
+one NVMe write window per holder (fixed: `update stage` used to close the
+store's window); controller lock already existed (`nvme::with`);
+`store wbench`: SHA-256 is ~250 MiB/s under KVM and is the bound on slot
+writes (SHA-NI later). Cached dir hashes moved to P3/P4: measure commit
+time once bodies are on disk, cache only if it shows.
 
 **P1 — `install` verb, erase mode.** `src/install/apply.rs`: GPT write (backup
 first, then primary, read back through `block::parse_gpt_entries`, confirm by

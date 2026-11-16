@@ -732,6 +732,75 @@ pub fn read_bench(reps: usize) -> bool {
     ok
 }
 
+/// What writing costs: raw sequential block writes, and SHA-256 over the same
+/// bytes, timed apart because a system-slot write does both and either could
+/// be the one that bounds it.
+///
+/// **Nothing is consumed.** The blocks written are in the store's unallocated
+/// tail, past `alloc_next`, which no checkpoint references and the next `put`
+/// overwrites. So the bench can be run as often as wanted without the store
+/// growing, which matters while the store has no GC.
+pub fn write_bench(mib: u64) -> bool {
+    let Some((next, end)) = crate::store::with(|s| (s.sb.alloc_next, s.sb.region_start + s.sb.region_blocks))
+    else {
+        kprintln!("  no store mounted");
+        return false;
+    };
+    if !nvme::holds(nvme::Holder::Store) {
+        kprintln!("  writes are locked -- 'store unlock' first");
+        return false;
+    }
+    let bsz = bs();
+    let want = mib * 1024 * 1024 / bsz;
+    // Leave the last superblock-sized margin alone and refuse rather than wrap.
+    if end.saturating_sub(next) < want + 8 {
+        kprintln!("  only {} MiB unallocated -- ask for less", end.saturating_sub(next) * bsz >> 20);
+        return false;
+    }
+    let Ok(mut buf) = DmaBuf::new(STREAM) else {
+        kprintln!("  could not get a {} B buffer", STREAM);
+        return false;
+    };
+    for (i, b) in buf.iter_mut().enumerate() {
+        *b = (i as u32).wrapping_mul(2654435761).to_le_bytes()[3];
+    }
+    let per = (STREAM as u64 / bsz) as u32;
+    let mhz = crate::time::tsc_mhz().max(1);
+
+    let t0 = crate::time::rdtsc();
+    let mut done = 0u64;
+    while done < want {
+        let n = (want - done).min(per as u64) as u32;
+        if block::write(next + done, n, &buf).is_err() {
+            kprintln!("  write failed at block {}", next + done);
+            return false;
+        }
+        done += n as u64;
+    }
+    let w_us = ((crate::time::rdtsc() - t0) / mhz).max(1);
+
+    let t1 = crate::time::rdtsc();
+    let mut h = sha256::Sha256::new();
+    for _ in 0..(done * bsz).div_ceil(STREAM as u64) {
+        h.update(&buf);
+    }
+    let _ = h.finish();
+    let h_us = ((crate::time::rdtsc() - t1) / mhz).max(1);
+
+    let bytes = done * bsz;
+    let rate = |us: u64| bytes * 1_000_000 / us / (1024 * 1024);
+    if crate::cpu::hypervisor().is_some() {
+        console::set_color(console::YELLOW);
+        kprintln!("  under a hypervisor the disk is a host file, so this measures the host");
+        console::set_color(console::WHITE);
+    }
+    kprintln!("  {} MiB written raw     {:>8} us   {:>5} MiB/s", bytes >> 20, w_us, rate(w_us));
+    kprintln!("  {} MiB hashed SHA-256  {:>8} us   {:>5} MiB/s", bytes >> 20, h_us, rate(h_us));
+    kprintln!("  so a 6 GiB system slot is about {} s at the slower of the two",
+        (6u64 << 30) / (rate(w_us).min(rate(h_us)).max(1) << 20));
+    true
+}
+
 pub fn stream_selftest() -> bool {
     use alloc::vec::Vec;
 
