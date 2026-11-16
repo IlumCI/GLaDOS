@@ -1071,7 +1071,7 @@ fn cmd_remember(text: &str) {
         // mounted but not writable.
         if !crate::store::mounted() {
             crate::kprintln!("  but there is no store -- it ends with this boot ('store init')");
-        } else if !crate::dev::nvme::writes_unlocked() {
+        } else if !crate::dev::nvme::holds(crate::dev::nvme::Holder::Store) {
             crate::kprintln!("  but writes are locked -- 'store unlock' to keep it past the reboot");
         } else if !autosnap_enabled() {
             crate::kprintln!("  autosnap is off -- 'snap' to carry it past this boot");
@@ -2673,7 +2673,7 @@ pub fn autosnap_poll() {
     if !AUTOSNAP_DUE.swap(false, Ordering::Relaxed) {
         return;
     }
-    if !crate::store::mounted() || !crate::dev::nvme::writes_unlocked() {
+    if !crate::store::mounted() || !crate::dev::nvme::holds(crate::dev::nvme::Holder::Store) {
         return;
     }
 
@@ -2735,7 +2735,7 @@ pub fn autosnap_report() {
         console::set_color(YELLOW);
         kprintln!("  but no store is mounted, so nothing will be written");
         console::set_color(LTGRAY);
-    } else if !crate::dev::nvme::writes_unlocked() {
+    } else if !crate::dev::nvme::holds(crate::dev::nvme::Holder::Store) {
         console::set_color(YELLOW);
         kprintln!("  but writes are locked -- 'store unlock'");
         console::set_color(LTGRAY);

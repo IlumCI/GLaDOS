@@ -56,7 +56,8 @@ pub fn init() -> Result<(u64, u64), InitError> {
     // The region and nothing else. Unlocking used to be a bare bit, so from
     // here every LBA on the device was writable -- including the partition
     // table and the ESP, on the one disk that also holds Windows.
-    crate::dev::nvme::unlock_writes(0xD15EA5E, start, blocks);
+    use crate::dev::nvme::{claim, Holder, CONFIRM};
+    claim(CONFIRM, Holder::Store, start, blocks);
     match cas::Store::format(start, blocks) {
         Ok(s) => {
             unsafe { *STORE.get() = Some(s) };
@@ -66,7 +67,7 @@ pub fn init() -> Result<(u64, u64), InitError> {
             // Any other failure -- I/O, a short region -- puts the lock back
             // too. Leaving it open on the way out of an error path is how a
             // safety mechanism becomes decorative.
-            crate::dev::nvme::lock_writes();
+            crate::dev::nvme::release(crate::dev::nvme::Holder::Store);
             Err(InitError::Store(e))
         }
     }
@@ -82,7 +83,9 @@ pub fn unlock() -> Result<(u64, u64), cas::Error> {
         return Err(cas::Error::NotFormatted);
     };
     cas::verify_region_safe(start, blocks)?;
-    crate::dev::nvme::unlock_writes(0xD15EA5E, start, blocks);
+    if !crate::dev::nvme::claim(crate::dev::nvme::CONFIRM, crate::dev::nvme::Holder::Store, start, blocks) {
+        return Err(cas::Error::Unsafe);
+    }
     Ok((start, blocks))
 }
 

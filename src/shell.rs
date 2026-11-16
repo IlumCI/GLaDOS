@@ -2208,7 +2208,7 @@ fn store_cmd(rest: &str) {
                 let st = store::cas::stream_selftest();
                 console::set_color(if st { LTGREEN } else { LTRED });
                 kprintln!(
-                    "  {}  a 300 KiB blob round-trips, and its middle reads without it",
+                    "  {}  300 KiB and 4 MiB blobs round-trip, read by range, and leak nothing",
                     if st { "ok " } else { "FAIL" }
                 );
                 console::set_color(WHITE);
@@ -2297,7 +2297,7 @@ fn store_cmd(rest: &str) {
                 console::set_color(WHITE);
                 return;
             }
-            if !crate::dev::nvme::writes_unlocked() {
+            if !crate::dev::nvme::holds(crate::dev::nvme::Holder::Store) {
                 console::set_color(LTRED);
                 kprintln!("  writes are locked -- run 'store unlock' first");
                 console::set_color(WHITE);
@@ -6371,13 +6371,19 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // exactly what it meant -- the gate held one bit and no
                 // range. The window is the answer to the question an operator
                 // is actually asking when they look at this line.
-                if let Some((start, end)) = crate::dev::nvme::write_window() {
-                    kprintln!(
-                        "          only LBA {}..{} ({} block(s)); everything else is refused",
-                        start,
-                        end,
-                        end.saturating_sub(start)
-                    );
+                for h in crate::dev::nvme::Holder::ALL {
+                    if let Some((start, end)) = crate::dev::nvme::window(h) {
+                        kprintln!(
+                            "          {:<10} LBA {}..{} ({} block(s))",
+                            h.name(),
+                            start,
+                            end,
+                            end.saturating_sub(start)
+                        );
+                    }
+                }
+                if crate::dev::nvme::writes_unlocked() {
+                    kprintln!("          everything outside those is refused");
                 }
                 console::set_color(WHITE);
 
@@ -9812,7 +9818,7 @@ fn fat_cmd(rest: &str) {
                 kprintln!("  no such partition");
                 return;
             };
-            if crate::dev::nvme::unlock_writes(0xD15EA5E, p.start_lba, p.block_count) {
+            if crate::dev::nvme::claim(crate::dev::nvme::CONFIRM, crate::dev::nvme::Holder::Volume, p.start_lba, p.block_count) {
                 console::set_color(LTRED);
                 kprintln!(
                     "  partition {} is writable: lba {}..{}",
@@ -9824,7 +9830,7 @@ fn fat_cmd(rest: &str) {
                 kprintln!("  nothing outside that range can be written, including the table");
                 console::set_color(LTGRAY);
             } else {
-                kprintln!("  refused");
+                kprintln!("  refused -- that range overlaps a window another holder has open");
             }
         }
         // Writing. Refused unless the operator has claimed a range covering
@@ -9835,9 +9841,9 @@ fn fat_cmd(rest: &str) {
                 kprintln!("  no FAT filesystem found");
                 return;
             };
-            if !crate::dev::nvme::writes_unlocked() {
+            if !crate::dev::nvme::holds(crate::dev::nvme::Holder::Volume) {
                 console::set_color(YELLOW);
-                kprintln!("  writes are locked. 'store unlock' claims a range first.");
+                kprintln!("  writes are locked. 'fat unlock [partition]' claims its range first.");
                 console::set_color(LTGRAY);
                 return;
             }

@@ -373,7 +373,7 @@ fn sec_system() -> Vec<Widget> {
 }
 fn sec_storage() -> Vec<Widget> {
     let mounted = crate::store::mounted();
-    let unlocked = crate::dev::nvme::writes_unlocked();
+    let unlocked = crate::dev::nvme::holds(crate::dev::nvme::Holder::Store);
     alloc::vec![
         Widget::Status {
             name: String::from("Store"),
