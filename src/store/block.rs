@@ -146,7 +146,7 @@ impl Partition {
 /// GPT type GUIDs are stored mixed-endian: the first three fields are
 /// little-endian, the last two are byte order as written. These constants are
 /// in on-disk form so comparison is a plain byte match.
-const GUID_ESP: [u8; 16] = [
+pub const GUID_ESP: [u8; 16] = [
     0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b,
 ];
 const GUID_MS_BASIC: [u8; 16] = [
@@ -230,7 +230,6 @@ pub fn scan() -> Result<Layout, Error> {
         let entry_count = rd_u32(gpt, 80).min(256);
         let entry_size = rd_u32(gpt, 84).max(128) as usize;
 
-        let mut parts = Vec::new();
         let per_block = bs / entry_size;
         if per_block == 0 {
             return Err(Error::Unaligned);
@@ -243,32 +242,48 @@ pub fn scan() -> Result<Layout, Error> {
         let ebuf =
             unsafe { core::slice::from_raw_parts_mut(edma, blocks_needed as usize * bs) };
         read(entry_lba, blocks_needed, ebuf)?;
-
-        for i in 0..entry_count as usize {
-            let e = &ebuf[i * entry_size..i * entry_size + entry_size];
-            let mut guid = [0u8; 16];
-            guid.copy_from_slice(&e[0..16]);
-            if guid == [0u8; 16] {
-                continue; // unused slot
-            }
-            let first = rd_u64(e, 32);
-            let last = rd_u64(e, 40);
-            if last < first {
-                continue;
-            }
-            parts.push(Partition {
-                index: i as u32 + 1,
-                start_lba: first,
-                // GPT stores the last block inclusive.
-                block_count: last - first + 1,
-                mbr_type: 0,
-                type_guid: guid,
-            });
-        }
+        let parts = parse_gpt_entries(ebuf, entry_count as usize, entry_size);
         return Ok(Layout { scheme: Scheme::Gpt, partitions: parts });
     }
 
-    // Plain MBR: four 16-byte entries starting at offset 446.
+    let parts = parse_mbr(mbr);
+    Ok(Layout { scheme: Scheme::Mbr, partitions: parts })
+}
+
+/// A GPT entry array, as the disk has it.
+///
+/// Pure so that `install::gpt` can hand it an array it encoded and check the
+/// layout comes back through the reader the kernel actually boots with -- a
+/// writer checked only against a second reader of its own is two copies of
+/// one misunderstanding.
+pub fn parse_gpt_entries(ebuf: &[u8], entry_count: usize, entry_size: usize) -> Vec<Partition> {
+    let mut parts = Vec::new();
+    for i in 0..entry_count {
+        let Some(e) = ebuf.get(i * entry_size..i * entry_size + entry_size) else { break };
+        let mut guid = [0u8; 16];
+        guid.copy_from_slice(&e[0..16]);
+        if guid == [0u8; 16] {
+            continue; // unused slot
+        }
+        let first = rd_u64(e, 32);
+        let last = rd_u64(e, 40);
+        if last < first {
+            continue;
+        }
+        parts.push(Partition {
+            index: i as u32 + 1,
+            start_lba: first,
+            // GPT stores the last block inclusive.
+            block_count: last - first + 1,
+            mbr_type: 0,
+            type_guid: guid,
+        });
+    }
+    parts
+}
+
+/// The four primary entries of a plain MBR, starting at offset 446.
+pub fn parse_mbr(mbr: &[u8]) -> Vec<Partition> {
     let mut parts = Vec::new();
     for i in 0..4 {
         let e = &mbr[446 + i * 16..446 + i * 16 + 16];
@@ -286,5 +301,5 @@ pub fn scan() -> Result<Layout, Error> {
             type_guid: [0u8; 16],
         });
     }
-    Ok(Layout { scheme: Scheme::Mbr, partitions: parts })
+    parts
 }

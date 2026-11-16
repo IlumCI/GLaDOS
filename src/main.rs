@@ -34,6 +34,7 @@ mod edit;
 mod fmt;
 mod gfx;
 mod gpu;
+mod install;
 mod job;
 mod json;
 mod aiksi;
