@@ -169,6 +169,17 @@ pub fn list() -> Vec<(String, usize)> {
         .collect()
 }
 
+/// The files the boot volume provided, as `(name, bytes)`, for the installer
+/// to carry onto a new ESP.
+pub fn boot_files() -> Vec<(String, &'static [u8])> {
+    let table = unsafe { &*TABLE.get() };
+    table
+        .iter()
+        .flatten()
+        .map(|e| (String::from_utf8_lossy(&e.name[..e.len as usize]).into_owned(), e.blob.as_slice()))
+        .collect()
+}
+
 /// How many files under `DIR` were refused: too many, too large, or unreadable.
 pub fn skipped() -> usize {
     unsafe { *SKIPPED.get() }

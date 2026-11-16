@@ -112,8 +112,11 @@ pub fn code(disk: &Disk, p: &Plan) -> String {
 
 /// What stops an install before any byte is written. Pure over the facts, so
 /// the wizard and the verb refuse for the same reasons in the same words.
-pub fn blockers(disk: &Disk, root_len: Option<usize>, disk_in_use: bool, p: &Plan) -> Vec<String> {
+pub fn blockers(disk: &Disk, root_len: Option<usize>, disk_in_use: bool, has_kernel: bool, p: &Plan) -> Vec<String> {
     let mut why = Vec::new();
+    if !has_kernel {
+        why.push("this boot did not keep its own kernel file to copy".into());
+    }
     // The EROFS reader counts in 512-byte sectors; on a 4Kn disk it would
     // read a slot at eight times its real offset. The planner handles 4K;
     // the reader is what is owed.
@@ -146,7 +149,7 @@ fn random_guid() -> [u8; 16] {
 }
 
 /// Write `data` at `lba` inside `holder`'s window, which the caller claimed.
-fn write_at(lba: u64, data: &[u8]) -> Result<(), String> {
+pub(crate) fn write_at(lba: u64, data: &[u8]) -> Result<(), String> {
     let bs = block::block_size() as usize;
     let mut buf = DmaBuf::new(data.len().min(STREAM)).map_err(|_| String::from("out of memory for a write buffer"))?;
     let per = buf.len();
@@ -163,7 +166,7 @@ fn write_at(lba: u64, data: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn read_at(lba: u64, len: usize) -> Result<Vec<u8>, String> {
+pub(crate) fn read_at(lba: u64, len: usize) -> Result<Vec<u8>, String> {
     let bs = block::block_size() as usize;
     let mut buf = DmaBuf::new(len.min(STREAM)).map_err(|_| String::from("out of memory for a read buffer"))?;
     let per = buf.len();
@@ -277,7 +280,9 @@ pub fn erase(given: &str, say: &mut dyn FnMut(&str)) -> Result<(), String> {
         ));
     }
     let root = crate::store::erofs::ram();
-    let why = blockers(&disk, root.map(|r| r.len()), crate::linux::disk::uses_disk(), &p);
+    let carried = super::carried();
+    let has_kernel = carried.iter().any(|(p, _)| p == "EFI/BOOT/BOOTX64.EFI");
+    let why = blockers(&disk, root.map(|r| r.len()), crate::linux::disk::uses_disk(), has_kernel, &p);
     if let Some(w) = why.first() {
         return Err(w.clone());
     }
@@ -298,12 +303,16 @@ pub fn erase(given: &str, say: &mut dyn FnMut(&str)) -> Result<(), String> {
     write_tables(&g, &img)?;
     say("  tables  written and read back");
 
-    // 3. System slot A.
+    // 3. The boot partition.
+    let e = p.part(Role::Esp).ok_or("the plan has no boot partition")?;
+    write_esp(e.first_lba, e.blocks, &carried, say)?;
+
+    // 4. System slot A.
     let a = p.part(Role::RootA).ok_or("the plan has no system slot")?;
     write_slot(a.first_lba, a.blocks, root, say)?;
     say(&format!("  system  {} MiB in slot A, verified and mountable", root.len() >> 20));
 
-    // 4. Slot B's head, so no earlier install's image looks like a system.
+    // 5. Slot B's head, so no earlier install's image looks like a system.
     if let Some(b) = p.part(Role::RootB) {
         if !nvme::claim(CONFIRM, Holder::Slot, b.first_lba, 8) {
             return Err("the write gate refused slot B".into());
@@ -313,7 +322,7 @@ pub fn erase(given: &str, say: &mut dyn FnMut(&str)) -> Result<(), String> {
         r?;
     }
 
-    // 5. The store, and the namespace into it.
+    // 6. The store, and the namespace into it.
     let (start, blocks) = crate::store::init().map_err(|e| format!("the store did not format: {:?}", e))?;
     let s = p.part(Role::Store).ok_or("the plan has no store")?;
     if start != s.first_lba || blocks != s.blocks {
@@ -321,5 +330,51 @@ pub fn erase(given: &str, say: &mut dyn FnMut(&str)) -> Result<(), String> {
     }
     say(&format!("  store   {} formatted", gib(blocks, g.block_size)));
     crate::sysbox::snap_now();
+
+    // 7. The firmware's boot entry, by the ESP's GUID as the table now says.
+    let esp = block::scan()
+        .ok()
+        .and_then(|l| l.partitions.into_iter().find(|q| q.start_lba == e.first_lba))
+        .ok_or("the boot partition is not in the table that was just written")?;
+    match super::bootopt::register(&esp) {
+        Ok(n) => say(&format!("  firmware Boot{:04X} \"GLaDOS\" is first in the boot order", n)),
+        // Not fatal: the kernel is on the removable-media path, so firmware
+        // boots it from this disk regardless. Said, because on a laptop with
+        // another system the entry is what puts GLaDOS first.
+        Err(w) => say(&format!("  firmware {} -- the disk still boots by the fallback path", w)),
+    }
+    Ok(())
+}
+
+/// The ESP: formatted with every file this boot carried plus an install
+/// identity, then every file read back through `store::fat`, the reader the
+/// kernel uses for FAT everywhere else.
+fn write_esp(start: u64, blocks: u64, carried: &[(String, &'static [u8])], say: &mut dyn FnMut(&str)) -> Result<(), String> {
+    use crate::store::fatfmt;
+    let mut id = Vec::new();
+    let mut raw = [0u8; 16];
+    crate::rng::fill(&mut raw);
+    for b in raw {
+        id.extend_from_slice(format!("{:02x}", b).as_bytes());
+    }
+    id.extend_from_slice(b"\n");
+    let mut files: Vec<fatfmt::File> = carried.iter().map(|(p, d)| fatfmt::File { path: p, data: d }).collect();
+    files.push(fatfmt::File { path: "GLADOS/INSTALL.ID", data: &id });
+    let l = fatfmt::layout(blocks, &files).map_err(String::from)?;
+    if !nvme::claim(CONFIRM, Holder::Esp, start, blocks) {
+        return Err("the write gate refused the boot partition".into());
+    }
+    let r = fatfmt::write(start, &l, &files, say);
+    nvme::release(Holder::Esp);
+    r?;
+    let vol = crate::store::fat::Volume::mount(start).map_err(|_| String::from("the new boot partition does not mount"))?;
+    for f in &files {
+        let ent = vol.find(f.path).map_err(|_| format!("{} is not on the new boot partition", f.path))?;
+        let back = vol.read_file(&ent).map_err(|_| format!("{} does not read back", f.path))?;
+        if sha256::hash(&back) != sha256::hash(f.data) {
+            return Err(format!("{} read back differently", f.path));
+        }
+    }
+    say(&format!("  boot    {} file(s), read back through the FAT reader", files.len()));
     Ok(())
 }

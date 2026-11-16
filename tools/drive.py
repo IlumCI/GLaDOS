@@ -94,8 +94,11 @@ def find_qemu():
     raise SystemExit("qemu-system-x86_64 not found on PATH or in the usual places")
 
 
-def find_firmware():
+def find_firmware(keep_vars=False):
     """Firmware arguments, with NVRAM reset to pristine every run.
+
+    `keep_vars` keeps the previous run's NVRAM instead: an install writes a
+    boot entry, and only the next boot can show whether the firmware kept it.
 
     The vars image accumulates boot entries. A stale Boot0001 pointing at a
     device that is no longer attached sends the firmware to the UEFI shell
@@ -148,7 +151,8 @@ def find_firmware():
                 if pristine.exists():
                     scratch = ROOT / ".qemu/drive-vars.fd"
                     scratch.parent.mkdir(parents=True, exist_ok=True)
-                    scratch.write_bytes(pristine.read_bytes())
+                    if not (keep_vars and scratch.exists()):
+                        scratch.write_bytes(pristine.read_bytes())
                     return [
                         "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={code}",
                         "-drive", f"if=pflash,format=raw,unit=1,file={scratch}",
@@ -541,6 +545,9 @@ def main():
     # correctly and silently fails to change anything. This boots a raw FAT32
     # image instead, and the guest's writes stay in it across runs, which is
     # what makes the two-boot apply/prove flow observable.
+    keep_vars = "--keep-vars" in argv
+    if keep_vars:
+        argv.remove("--keep-vars")
     esp_on_nvme = "--esp-on-nvme" in argv
     if esp_on_nvme:
         argv.remove("--esp-on-nvme")
@@ -1080,7 +1087,7 @@ def main():
         "-m", memory,
         *smp,
         *qemu_extra,
-        *find_firmware(),
+        *find_firmware(keep_vars),
         # Plain VVFAT, which is FAT16. `fat:32:` raises the 516 MB ceiling in
         # principle, but QEMU says outright that its FAT32 is untested and the
         # firmware cannot read the directory it produces -- the guest boots to

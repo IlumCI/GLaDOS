@@ -403,6 +403,31 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // The root bundle comes off the same volume for the same reason: this is
     // the only moment there is a filesystem to read it from.
     let roots = uefi::read_file(bs, image, net::trust::ROOTS_PATH);
+    // The kernel's own file, which nothing else reads: the image in memory is
+    // relocated and section-aligned, so it cannot be written back out as a
+    // file. Only the installer wants it.
+    let kernel_file = uefi::read_file(bs, image, "\\EFI\\BOOT\\BOOTX64.EFI");
+    // Written by the installer onto an installed disk's ESP and nowhere else,
+    // so this says which kind of medium this boot came from.
+    match uefi::read_file(bs, image, "\\GLADOS\\INSTALL.ID") {
+        Some(b) => serial_println!(
+            "glados: booted from an installed disk, id {}",
+            core::str::from_utf8(b.as_slice()).unwrap_or("?").trim()
+        ),
+        None => serial_println!("glados: booted from install or live media"),
+    }
+    for (path, blob) in [
+        ("EFI/BOOT/BOOTX64.EFI", &kernel_file),
+        ("GLADOS/model.bin", &model),
+        ("GLADOS/tokenizer.bin", &tokenizer),
+        ("GLADOS/brain.bin", &brain),
+        ("GLADOS/voice.bin", &voice_model),
+        ("GLADOS/roots.der", &roots),
+    ] {
+        if let Some(b) = blob {
+            install::carry(path, b.as_slice());
+        }
+    }
     // Device firmware, every file of it, for the same reason: which image a part
     // wants is read off its registers, and that is MMIO this path does not do.
     dev::firmware::load(bs, image);

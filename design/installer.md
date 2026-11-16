@@ -135,7 +135,12 @@ typed digest), slot A raw from the RAM `root.erofs`, store formatted and
 adopted. `auto_root` by type GUID. Verify: 64 GiB blank image, reboot sees
 slot A.
 
-**P2 — bootable disk.** Keep `\EFI\BOOT\BOOTX64.EFI` file bytes pre-EBS
+**P2 — bootable disk. Done:** fsck.fat clean, kernel on the ESP byte-equal
+to the build, reboot with NVRAM kept boots the installed disk through
+`Boot####` (`INSTALL.ID` printed), model loads from it, `ask` answers. The
+kernel sits at `\EFI\BOOT\BOOTX64.EFI` on our own ESP, not `\EFI\GLADOS\`:
+no collision possible, and `update stage` keeps swapping the same path.
+Was: Keep `\EFI\BOOT\BOOTX64.EFI` file bytes pre-EBS
 (`main.rs`); `src/store/fatfmt.rs` = port of `tools/mkiso.py::build_fat` (pure
 layout plan with LFN + directories, then large sequential writes), checked by
 formatting into RAM and reading back with `store::fat`; copy kernel, model,

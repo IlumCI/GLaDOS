@@ -9,16 +9,43 @@
 //! `design/installer.md` is the plan this module is the first piece of.
 
 pub mod apply;
+pub mod bootopt;
 pub mod gpt;
 pub mod plan;
 
 use crate::store::block::{Partition, Scheme, GUID_ESP};
+use crate::sync::Racy;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use gpt::Geometry;
 use plan::{Disk, Mode, Refusal, Role, Want};
+
+/// What this boot read off its own volume and an install copies to the new
+/// one, as `(path on the ESP, bytes)`. Filled before ExitBootServices, which is
+/// before the heap, so a fixed table rather than a `Vec`; the blobs are the
+/// firmware's pools and live for the machine's life.
+static CARRIED: Racy<[Option<(&'static str, &'static [u8])>; 8]> = Racy::new([None; 8]);
+
+/// Record a file the boot volume provided. Called from `main` only.
+pub fn carry(path: &'static str, data: &'static [u8]) {
+    let t = unsafe { CARRIED.get() };
+    if let Some(slot) = t.iter_mut().find(|s| s.is_none()) {
+        *slot = Some((path, data));
+    }
+}
+
+/// Everything the boot carried that belongs on an installed ESP: the table
+/// above and every firmware file, the latter under `GLADOS/FW/`.
+pub fn carried() -> Vec<(String, &'static [u8])> {
+    let mut out: Vec<(String, &'static [u8])> =
+        unsafe { CARRIED.get() }.iter().flatten().map(|(p, d)| (String::from(*p), *d)).collect();
+    for (name, data) in crate::dev::firmware::boot_files() {
+        out.push((format!("GLADOS/FW/{}", name), data));
+    }
+    out
+}
 
 const GIB: u64 = 1 << 30;
 const MIB: u64 = 1 << 20;
@@ -211,7 +238,11 @@ pub fn selftest() -> bool {
     use crate::kprintln;
     let mut ok = true;
     let mut n = 0usize;
-    for (what, good) in checks() {
+    let all = checks()
+        .into_iter()
+        .chain(crate::store::fatfmt::checks())
+        .chain(bootopt::checks());
+    for (what, good) in all {
         n += 1;
         if !good {
             kprintln!("    FAIL: {}", what);
@@ -258,6 +289,7 @@ pub fn cmd(rest: &str) {
                         &disk,
                         crate::store::erofs::ram().map(|r| r.len()),
                         crate::linux::disk::uses_disk(),
+                        carried().iter().any(|(p, _)| p == "EFI/BOOT/BOOTX64.EFI"),
                         &p,
                     );
                     if why.is_empty() {
@@ -294,9 +326,7 @@ pub fn cmd(rest: &str) {
             match r {
                 Ok(()) => {
                     console::set_color(LTGREEN);
-                    kprintln!("  installed: tables, system slot A and the store");
-                    console::set_color(YELLOW);
-                    kprintln!("  the boot partition is not written yet, so this disk does not boot on its own");
+                    kprintln!("  installed -- remove the install medium and restart");
                 }
                 Err(e) => {
                     console::set_color(LTRED);
