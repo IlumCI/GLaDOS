@@ -1484,6 +1484,29 @@ pub fn selftest() -> bool {
         );
     }
 
+    // Collection, the arithmetic. What is in use may overlap and arrive in
+    // any order; the free runs are exactly the gaps, and never touch a block
+    // in use -- the one property a collector must not get wrong.
+    {
+        let mut used = alloc::vec![(30u64, 5u64), (10, 10), (12, 2), (40, 1), (19, 3)];
+        let free = cas::sweep(2, 50, &mut used);
+        ok &= check("free runs are exactly the gaps between what is in use",
+            free == alloc::vec![(2, 8), (22, 8), (35, 5), (41, 9)]);
+        let touches = |f: &[(u64, u64)], u: &[(u64, u64)]| {
+            f.iter().any(|&(fs, fn_)| u.iter().any(|&(us, un)| fs < us + un && us < fs + fn_))
+        };
+        ok &= check("and no free run overlaps a block in use", !touches(&free, &used));
+        let mut none: Vec<(u64, u64)> = Vec::new();
+        ok &= check("nothing in use frees the whole range", cas::sweep(2, 9, &mut none) == alloc::vec![(2, 7)]);
+        let mut all = alloc::vec![(0u64, 100u64)];
+        ok &= check("everything in use frees nothing", cas::sweep(2, 50, &mut all).is_empty());
+        let mut f = alloc::vec![(5u64, 2u64), (20, 10)];
+        ok &= check("first fit skips a run too small rather than splitting a blob",
+            cas::take(&mut f, 4) == Some(20) && f == alloc::vec![(5, 2), (24, 6)]);
+        ok &= check("an exact fit removes the run", cas::take(&mut f, 2) == Some(5) && f == alloc::vec![(24, 6)]);
+        ok &= check("and a need nothing satisfies is refused", cas::take(&mut f, 7).is_none());
+    }
+
     let a = tree_with("/x/y/z", b"hello");
     let b = tree_with("/x/y/z", b"hello");
     let c = tree_with("/x/y/z", b"hellp");
@@ -2206,13 +2229,9 @@ pub fn snap_now() {
 fn cmd_snap() {
     let ok = with(|s| {
         let res = store::with(|st| {
-            let before = st.sb.alloc_next;
-            let root = write_node(st, &mut s.root, &mut s.written)?;
-            let mut name = [0u8; cas::NAME_LEN];
-            name[..4].copy_from_slice(b"root");
-            let entry = cas::Entry { name, chunk: root };
-            let m = st.commit(core::slice::from_ref(&entry))?;
-            Ok::<_, cas::Error>((st.sb.seq, m, st.sb.alloc_next - before))
+            let before = st.written_blocks;
+            let m = commit_tree(s, st)?;
+            Ok::<_, cas::Error>((st.sb.seq, m, st.written_blocks - before))
         });
         match res {
             None => {
@@ -2264,6 +2283,144 @@ fn report_store_error(e: cas::Error) {
             console::set_color(LTGRAY);
         }
     }
+}
+
+/// How many checkpoints a collection keeps: the newest and the ones before
+/// it. **At least two, and that is the safety argument.** Mount takes the
+/// newer of two superblocks and falls back to the older when the newer is
+/// torn, so the older one's tree must survive any collection -- and the
+/// free runs are only in memory, so nothing freed here is reused until this
+/// boot writes over it, after which a commit names only live objects.
+pub const GC_KEEP: usize = 8;
+
+/// Write the tree and commit it. A store that is full collects once and
+/// tries again, so a machine that has used its space up by changing things
+/// keeps working rather than refusing every snapshot.
+fn commit_tree(s: &mut Sysbox, st: &mut cas::Store) -> Result<cas::ChunkRef, cas::Error> {
+    let attempt = |s: &mut Sysbox, st: &mut cas::Store| {
+        let root = write_node(st, &mut s.root, &mut s.written)?;
+        let mut name = [0u8; cas::NAME_LEN];
+        name[..4].copy_from_slice(b"root");
+        st.commit(core::slice::from_ref(&cas::Entry { name, chunk: root }))
+    };
+    match attempt(s, st) {
+        Err(cas::Error::Full) => {
+            let (freed, _) = collect(s, st, GC_KEEP)?;
+            kprintln!("  [store] full -- collected {} block(s), trying again", freed);
+            attempt(s, st)
+        }
+        r => r,
+    }
+}
+
+/// Find every block the last `keep` checkpoints and the live tree still
+/// reach, and make the rest allocatable. Answers blocks freed and
+/// checkpoints kept. Reads directory chunks only: a blob's chunk reference is
+/// its extent, so blobs are marked without being read.
+///
+/// **Any directory that will not read stops the whole collection** with
+/// nothing freed. A collection that skipped it would free everything under
+/// it, which is everything that directory's tree still names.
+fn collect(s: &mut Sysbox, st: &mut cas::Store, keep: usize) -> Result<(u64, usize), cas::Error> {
+    use alloc::collections::BTreeSet;
+    let bsz = crate::store::block::block_size() as u64;
+    let ext = |r: &cas::ChunkRef| (r.lba, r.len.div_ceil(bsz).max(1));
+    let mut used: Vec<(u64, u64)> = Vec::new();
+    let mut dirs: BTreeSet<u64> = BTreeSet::new();
+    fn mark(
+        st: &cas::Store,
+        r: &cas::ChunkRef,
+        dir: bool,
+        used: &mut Vec<(u64, u64)>,
+        dirs: &mut BTreeSet<u64>,
+        bsz: u64,
+        depth: usize,
+    ) -> Result<(), cas::Error> {
+        if r.is_none() {
+            return Ok(());
+        }
+        used.push((r.lba, r.len.div_ceil(bsz).max(1)));
+        if !dir || !dirs.insert(r.lba) {
+            return Ok(());
+        }
+        if depth > tree::MAX_DEPTH + 2 {
+            return Err(cas::Error::Corrupt);
+        }
+        let raw = st.get(r)?;
+        let entries = tree::decode_dir(&raw).ok_or(cas::Error::Corrupt)?;
+        for (_, k, cr, _) in entries {
+            mark(st, &cr, tree::base_kind(k) == tree::KIND_DIR, used, dirs, bsz, depth + 1)?;
+        }
+        Ok(())
+    }
+    let mut m = st.sb.root;
+    let mut kept = 0;
+    while !m.is_none() && kept < keep {
+        // An older checkpoint that will not read is past where history is
+        // intact; the newest must read, or there is nothing to keep.
+        let man = match st.read_manifest(&m) {
+            Ok(x) => x,
+            Err(e) if kept == 0 => return Err(e),
+            Err(_) => break,
+        };
+        used.push(ext(&m));
+        for e in &man.entries {
+            // A snapshot's entry is its tree; anything else committed beside
+            // one is told apart by whether it decodes as a directory.
+            let dir = st.get(&e.chunk).ok().is_some_and(|b| tree::decode_dir(&b).is_some());
+            mark(st, &e.chunk, dir, &mut used, &mut dirs, bsz, 0)?;
+        }
+        m = man.prev;
+        kept += 1;
+    }
+    // What the running tree names on disk, committed or not.
+    fn live(n: &Node, used: &mut Vec<(u64, u64)>, bsz: u64) {
+        match n {
+            Node::Away(r) => used.push((r.lba, r.len.div_ceil(bsz).max(1))),
+            Node::Dir(es) => es.iter().for_each(|e| live(&e.node, used, bsz)),
+            Node::Blob(_) => {}
+        }
+    }
+    live(&s.root, &mut used, bsz);
+    let free = cas::sweep(st.sb.region_start + 2, st.sb.alloc_next, &mut used);
+
+    // **A second walk, written separately, must agree before anything is
+    // freed.** A marker that misses part of a tree frees live blocks, and
+    // nothing notices until a later write lands on them -- which first fit
+    // may not do for a long time, so a test can pass with the bug in. So the
+    // newest checkpoint is walked again by `reach`, which follows the kinds
+    // its directories record rather than guessing, and the live tree's
+    // stored blobs are added; if any free run touches what it found, the
+    // collection is refused whole.
+    let mut must: Vec<(u64, u64)> = Vec::new();
+    let newest = st.read_manifest(&st.sb.root)?;
+    must.push(ext(&st.sb.root));
+    for e in &newest.entries {
+        let is_root = &e.name[..4] == b"root";
+        reach(st, &e.chunk, if is_root { tree::KIND_DIR } else { tree::KIND_BLOB }, 0, &mut must)?;
+    }
+    live(&s.root, &mut must, bsz);
+    let overlaps = free.iter().any(|&(fs, fl)| must.iter().any(|&(ms, ml)| fs < ms + ml && ms < fs + fl));
+    if overlaps {
+        return Err(cas::Error::Disagree);
+    }
+    st.free = free;
+    // The memo names chunks by where they were; some of those are free now.
+    s.written = Written::default();
+    unsafe { *LAST_ROOT.get() = None };
+    Ok((st.free.iter().map(|&(_, n)| n).sum(), kept))
+}
+
+/// `store gc`.
+pub fn gc_now() -> Result<(u64, usize, u64), cas::Error> {
+    with(|s| {
+        store::with(|st| {
+            let r = collect(s, st, GC_KEEP)?;
+            Ok((r.0, r.1, st.free_blocks()))
+        })
+        .unwrap_or(Err(cas::Error::NotFormatted))
+    })
+    .unwrap_or(Err(cas::Error::NotFormatted))
 }
 
 /// Blobs at least this large leave memory once they are on disk.
@@ -2786,6 +2943,26 @@ fn cmd_fsck() {
     }
 }
 
+/// Every block reachable from `r`, for `collect`'s cross-check. Reads
+/// directories and not blobs, by the kinds the directories record.
+fn reach(st: &cas::Store, r: &cas::ChunkRef, kind: u8, depth: usize, out: &mut Vec<(u64, u64)>) -> Result<(), cas::Error> {
+    if r.is_none() {
+        return Ok(());
+    }
+    if depth > tree::MAX_DEPTH + 2 {
+        return Err(cas::Error::Corrupt);
+    }
+    let bsz = crate::store::block::block_size() as u64;
+    out.push((r.lba, r.len.div_ceil(bsz).max(1)));
+    if tree::base_kind(kind) == tree::KIND_DIR {
+        let raw = st.get(r)?;
+        for (_, k, cr, _) in tree::decode_dir(&raw).ok_or(cas::Error::Corrupt)? {
+            reach(st, &cr, k, depth + 1, out)?;
+        }
+    }
+    Ok(())
+}
+
 fn verify(
     st: &cas::Store,
     r: &cas::ChunkRef,
@@ -2896,14 +3073,8 @@ pub fn autosnap_poll() {
 
     let saved = with(|s| {
         crate::store::with(|st| {
-            let before = st.sb.alloc_next;
-            let root = write_node(st, &mut s.root, &mut s.written).ok()?;
-            let mut name = [0u8; cas::NAME_LEN];
-            name[..4].copy_from_slice(b"root");
-            let entry = cas::Entry { name, chunk: root };
-            st.commit(core::slice::from_ref(&entry))
-                .ok()
-                .map(|_| (st.sb.seq, st.sb.alloc_next - before, st.free_blocks()))
+            let before = st.written_blocks;
+            commit_tree(s, st).ok().map(|_| (st.sb.seq, st.written_blocks - before, st.free_blocks()))
         })
     })
     .flatten()
@@ -2912,10 +3083,9 @@ pub fn autosnap_poll() {
     if let Some((seq, blocks, free)) = saved {
         unsafe { *LAST_ROOT.get() = Some(current) };
         console::set_color(LTGRAY);
-        // The block count is not decoration. This store is append-only --
-        // `alloc_next` only ever goes up and nothing reclaims -- so anything
-        // large that changes often will fill it, and printing the cost each
-        // time is the only way to find out which thing that is.
+        // The block count is not decoration: anything large that changes
+        // often costs this every time, and printing it is how to find out
+        // which thing that is.
         kprintln!("\n[autosnap] snapshot {}, {} block(s), {} free", seq, blocks, free);
     }
 }

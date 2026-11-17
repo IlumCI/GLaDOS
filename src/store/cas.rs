@@ -54,6 +54,8 @@ pub enum Error {
     Full,
     Unsafe,
     TooManyEntries,
+    /// A collection's two reachability walks disagreed, so it freed nothing.
+    Disagree,
 }
 
 impl From<block::Error> for Error {
@@ -254,6 +256,54 @@ fn sb_lba(region_start: u64, seq: u64) -> u64 {
 
 pub struct Store {
     pub sb: Superblock,
+    /// Runs of blocks below `alloc_next` that nothing retained refers to, as
+    /// `(first, blocks)`, sorted. **Only in memory**: a GC pass recomputes it
+    /// from what is reachable, so the on-disk format does not change and an
+    /// older kernel reads a collected store as it reads any other. Empty after
+    /// mount, which is the safe direction -- the store just appends until it
+    /// next runs out of tail and collects.
+    pub free: Vec<(u64, u64)>,
+    /// Blocks `put` has written this boot, for reporting what a snapshot
+    /// cost now that a write may land below `alloc_next`.
+    pub written_blocks: u64,
+}
+
+/// The free runs in `[lo, hi)` given the runs in use, which may overlap and
+/// come in any order. Pure, so its claims need no disk.
+pub fn sweep(lo: u64, hi: u64, used: &mut Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+    used.sort_unstable();
+    let mut free = Vec::new();
+    let mut at = lo;
+    for &(s, n) in used.iter() {
+        let e = s.saturating_add(n);
+        if e <= at {
+            continue;
+        }
+        if s > at && s <= hi {
+            free.push((at, s - at));
+        }
+        at = at.max(e);
+        if at >= hi {
+            break;
+        }
+    }
+    if at < hi {
+        free.push((at, hi - at));
+    }
+    free
+}
+
+/// First fit: `need` contiguous blocks out of `free`, which shrinks. A blob is
+/// stored as one run, so a run too small for it is skipped, not split.
+pub fn take(free: &mut Vec<(u64, u64)>, need: u64) -> Option<u64> {
+    let i = free.iter().position(|&(_, n)| n >= need)?;
+    let (s, n) = free[i];
+    if n == need {
+        free.remove(i);
+    } else {
+        free[i] = (s + need, n - need);
+    }
+    Some(s)
 }
 
 impl Store {
@@ -277,7 +327,7 @@ impl Store {
         let mut buf = dma(bs() as usize)?;
         encode_sb(&sb, &mut buf[..bs() as usize]);
         block::write(sb_lba(region_start, sb.seq), 1, &buf)?;
-        Ok(Self { sb })
+        Ok(Self { sb, free: Vec::new(), written_blocks: 0 })
     }
 
     /// Read both superblocks and adopt the newest that verifies.
@@ -293,20 +343,26 @@ impl Store {
             (None, None) => None,
         }
         .ok_or(Error::NotFormatted)?;
-        Ok(Self { sb })
+        Ok(Self { sb, free: Vec::new(), written_blocks: 0 })
     }
 
     pub fn free_blocks(&self) -> u64 {
         (self.sb.region_start + self.sb.region_blocks).saturating_sub(self.sb.alloc_next)
+            + self.free.iter().map(|&(_, n)| n).sum::<u64>()
     }
 
     /// Append a chunk. Returns its content address and location.
     pub fn put(&mut self, data: &[u8]) -> Result<ChunkRef, Error> {
         let need = blocks_for(data.len() as u64).max(1);
-        if need > self.free_blocks() {
-            return Err(Error::Full);
-        }
-        let lba = self.sb.alloc_next;
+        // A collected run first, then the tail. Taking from the tail moves
+        // `alloc_next`, which is committed with the next superblock; taking a
+        // run does not, because the run is below it.
+        let tail = (self.sb.region_start + self.sb.region_blocks).saturating_sub(self.sb.alloc_next);
+        let (lba, from_tail) = match take(&mut self.free, need) {
+            Some(l) => (l, false),
+            None if need <= tail => (self.sb.alloc_next, true),
+            None => return Err(Error::Full),
+        };
         let mut buf = dma(data.len().min(STREAM))?;
         let per = buf.len();
         let mut off = 0usize;
@@ -324,7 +380,10 @@ impl Store {
                 break;
             }
         }
-        self.sb.alloc_next += need;
+        if from_tail {
+            self.sb.alloc_next += need;
+        }
+        self.written_blocks += need;
         Ok(ChunkRef { hash: sha256::hash(data), lba, len: data.len() as u64 })
     }
 

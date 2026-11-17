@@ -2253,6 +2253,25 @@ fn store_cmd(rest: &str) {
             cas::read_bench(5);
         }
 
+        "gc" => match crate::sysbox::gc_now() {
+            Ok((freed, kept, free)) => {
+                console::set_color(LTGREEN);
+                kprintln!("  {} block(s) reclaimed, keeping the last {} snapshot(s)", freed, kept);
+                console::set_color(WHITE);
+                kprintln!("  {} block(s) free in all", free);
+            }
+            Err(e) => {
+                console::set_color(LTRED);
+                match e {
+                    crate::store::cas::Error::Disagree => kprintln!(
+                        "  collection stopped, nothing freed: its two walks of the store disagree -- a bug, not a bad disk"
+                    ),
+                    other => kprintln!("  collection stopped, nothing freed: {:?}", other),
+                }
+                console::set_color(WHITE);
+            }
+        },
+
         r if r == "wbench" || r.starts_with("wbench ") => {
             let mib = r[6..].trim().parse::<u64>().unwrap_or(256).clamp(4, 8192);
             cas::write_bench(mib);
