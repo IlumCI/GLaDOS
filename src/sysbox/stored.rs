@@ -166,8 +166,8 @@ pub fn find(path: &str) -> Option<(cas::ChunkRef, u8)> {
             }
             let raw = st.get(&cur).ok()?;
             let entries = tree::decode_dir(&raw)?;
-            let hit = entries.into_iter().find(|(n, _, _)| n == p)?;
-            kind = hit.1;
+            let hit = entries.into_iter().find(|(n, ..)| n == p)?;
+            kind = tree::base_kind(hit.1);
             cur = hit.2;
         }
         Some((cur, kind))
@@ -215,7 +215,8 @@ fn collect(
         Some(v) => v,
         None => return,
     };
-    for (name, kind, cr) in entries {
+    for (name, kind, cr, _) in entries {
+        let kind = tree::base_kind(kind);
         let mut p = path.clone();
         p.push('/');
         p.push_str(&name);

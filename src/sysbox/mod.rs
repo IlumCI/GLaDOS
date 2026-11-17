@@ -414,8 +414,8 @@ fn index_walk(st: &cas::Store, r: &cas::ChunkRef, kind: u8, depth: usize, w: &mu
         None => return,
     };
     let mut rebuilt = Vec::new();
-    for (name, k, cr) in &entries {
-        index_walk(st, cr, *k, depth + 1, w);
+    for (name, k, cr, _) in &entries {
+        index_walk(st, cr, tree::base_kind(*k), depth + 1, w);
         rebuilt.push((name.clone(), *k, *cr));
     }
     // A directory's chunk address covers block locations, so it is not the
@@ -1288,9 +1288,9 @@ pub fn listing(path: &str) -> Vec<(String, bool, usize)> {
         match tree::resolve(&s.root, &p) {
             Some(Node::Dir(es)) => es
                 .iter()
-                .map(|(k, v)| match v {
-                    Node::Dir(inner) => (k.clone(), true, inner.len()),
-                    other => (k.clone(), false, other.blob_len().unwrap_or(0) as usize),
+                .map(|e| match &e.node {
+                    Node::Dir(inner) => (e.name.clone(), true, inner.len()),
+                    other => (e.name.clone(), false, other.blob_len().unwrap_or(0) as usize),
                 })
                 .collect(),
             _ => Vec::new(),
@@ -1359,7 +1359,7 @@ pub fn children(path: &str) -> Vec<String> {
     with(|s| {
         let p = parse(&s.cwd, path);
         match tree::resolve(&s.root, &p) {
-            Some(Node::Dir(es)) => es.iter().map(|(k, _)| k.clone()).collect(),
+            Some(Node::Dir(es)) => es.iter().map(|e| e.name.clone()).collect(),
             _ => Vec::new(),
         }
     })
@@ -1394,6 +1394,60 @@ pub fn selftest() -> bool {
     }
 
     let mut ok = true;
+
+    // Attributes, and the promise that they cost no existing tree its address.
+    // The golden value was computed from the hashing rule in Python before
+    // attributes existed, so it is a statement about the rule, not about
+    // whatever this code happens to compute today.
+    {
+        let mut g = Node::empty_dir();
+        let _ = tree::put(&mut g, &path_of("/a"), Node::Blob(b"hello".to_vec()));
+        let _ = tree::put(&mut g, &path_of("/d/b"), Node::Blob(Vec::new()));
+        let golden = "c802439c8d82b118f76291716afdfeb62ed988b21f929c85f6799c48ff330a17";
+        let h = tree::content_hash(&g);
+        let hx: String = h.iter().map(|b| alloc::format!("{:02x}", b)).collect();
+        ok &= check("a tree with no attributes keeps the address it had before they existed", hx == golden);
+        let before = h;
+        if let Some(e) = tree::entry_mut(&mut g, &path_of("/a")) {
+            e.attr = Some(alloc::boxed::Box::new(tree::Attr { mode: 0o100644, ..Default::default() }));
+        }
+        let with_mode = tree::content_hash(&g);
+        ok &= check("setting attributes on a file changes the root", with_mode != before);
+        if let Some(e) = tree::entry_mut(&mut g, &path_of("/a")) {
+            e.attr.as_mut().unwrap().mode = 0o100755;
+        }
+        ok &= check("and changing one bit of the mode changes it again", tree::content_hash(&g) != with_mode);
+        let a = tree::Attr {
+            mode: 0o100755,
+            uid: 1000,
+            gid: 100,
+            mtime_ns: 1_767_225_600_000_000_000,
+            xattrs: alloc::vec![(String::from("security.capability"), alloc::vec![1, 2, 3])],
+        };
+        ok &= check("attributes survive their own encoding", tree::Attr::decode(&a.encode()).as_ref() == Some(&a));
+        let cr = cas::ChunkRef { hash: [7; 32], lba: 9, len: 5 };
+        let enc = tree::encode_dir(&[
+            (String::from("plain"), tree::KIND_BLOB, cr, None),
+            (String::from("owned"), tree::KIND_BLOB_A, cr, Some(a.clone())),
+        ]);
+        let dec = tree::decode_dir(&enc);
+        ok &= check(
+            "a stored directory mixes plain and attributed entries and reads both back",
+            dec.as_ref().is_some_and(|d| d.len() == 2 && d[0].3.is_none() && d[1].3.as_ref() == Some(&a)),
+        );
+        let mut bad = enc.clone();
+        let k = 12 + 2 + 5; // first entry's kind byte
+        bad[k] = 9;
+        ok &= check("a kind this kernel does not know is refused, not half-read", tree::decode_dir(&bad).is_none());
+        // A move carries the attributes; a write in place keeps them.
+        let ent = tree::remove_ent(&mut g, &path_of("/a"));
+        let _ = ent.map(|e| tree::put_ent(&mut g, &path_of("/moved"), e));
+        let _ = tree::put(&mut g, &path_of("/moved"), Node::Blob(b"new body".to_vec()));
+        ok &= check(
+            "a moved file keeps its attributes, and so does one written in place",
+            tree::entry(&g, &path_of("/moved")).and_then(|e| e.attr.as_ref()).map(|a| a.mode) == Some(0o100755),
+        );
+    }
 
     let a = tree_with("/x/y/z", b"hello");
     let b = tree_with("/x/y/z", b"hello");
@@ -1667,7 +1721,8 @@ fn cmd_ls(arg: &str) {
                     kprintln!("  (empty)");
                     return;
                 }
-                for (name, child) in es {
+                for e in es {
+                    let (name, child) = (&e.name, &e.node);
                     let h = tree::content_hash(child);
                     let hx = tree::short(&h);
                     let hx = core::str::from_utf8(&hx).unwrap_or("?");
@@ -1735,7 +1790,8 @@ fn walk_tree(n: &Node, depth: usize) {
         return;
     }
     if let Node::Dir(es) = n {
-        for (name, child) in es {
+        for e in es {
+            let (name, child) = (&e.name, &e.node);
             let mut pad = String::new();
             for _ in 0..depth {
                 pad.push_str("  ");
@@ -1937,7 +1993,8 @@ fn find_walk(n: &Node, at: &mut Vec<String>, needle: &str, hits: &mut u32, skipp
             }
         }
         Node::Dir(es) => {
-            for (name, child) in es {
+            for e in es {
+                let (name, child) = (&e.name, &e.node);
                 at.push(name.clone());
                 find_walk(child, at, needle, hits, skipped);
                 at.pop();
@@ -2072,9 +2129,9 @@ pub fn detach_from_store() -> Result<(usize, u64), String> {
         match n {
             Node::Away(r) => out.push((at.clone(), *r)),
             Node::Dir(es) => {
-                for (k, v) in es {
-                    at.push(k.clone());
-                    walk(v, at, out);
+                for e in es {
+                    at.push(e.name.clone());
+                    walk(&e.node, at, out);
                     at.pop();
                 }
             }
@@ -2191,9 +2248,9 @@ fn write_node(
         Node::Away(r) => *r,
         Node::Dir(es) => {
             let mut encoded = Vec::new();
-            for (name, child) in es {
-                let cr = write_node(st, child, w)?;
-                encoded.push((name.clone(), child.kind(), cr));
+            for e in es {
+                let cr = write_node(st, &e.node, w)?;
+                encoded.push((e.name.clone(), e.kind(), cr, e.attr.as_deref().cloned()));
             }
             st.put(&tree::encode_dir(&encoded))?
         }
@@ -2217,14 +2274,15 @@ fn read_node(
     // *directory* instead of one per node, plus a SHA-256 over every byte on
     // the disk. A machine whose snapshot held an 8,913-node forest did not
     // reach a prompt inside fifteen minutes because of the line this replaces.
-    if kind == tree::KIND_BLOB {
+    if tree::base_kind(kind) == tree::KIND_BLOB {
         return Ok(Node::Away(*r));
     }
     let raw = st.get(r)?;
     let entries = tree::decode_dir(&raw).ok_or(cas::Error::Corrupt)?;
     let mut out = Vec::new();
-    for (name, k, cr) in entries {
-        out.push((name, read_node(st, &cr, k, depth + 1)?));
+    for (name, k, cr, attr) in entries {
+        let node = read_node(st, &cr, k, depth + 1)?;
+        out.push(tree::Ent { name, attr: attr.map(alloc::boxed::Box::new), node });
     }
     Ok(Node::Dir(out))
 }
@@ -2415,28 +2473,34 @@ fn diff_walk(
             let mut j = 0;
             while i < ea.len() || j < eb.len() {
                 let ord = match (ea.get(i), eb.get(j)) {
-                    (Some((ka, _)), Some((kb, _))) => ka.cmp(kb),
+                    (Some(ea_), Some(eb_)) => ea_.name.cmp(&eb_.name),
                     (Some(_), None) => core::cmp::Ordering::Less,
                     (None, Some(_)) => core::cmp::Ordering::Greater,
                     (None, None) => break,
                 };
                 match ord {
                     core::cmp::Ordering::Equal => {
-                        at.push(ea[i].0.clone());
-                        diff_walk(&ea[i].1, &eb[j].1, at, changes, sink);
+                        at.push(ea[i].name.clone());
+                        // Same contents with different attributes is a change
+                        // too -- a chmod -- and the content walk cannot see it.
+                        if ea[i].attr != eb[j].attr && tree::content_hash(&ea[i].node) == tree::content_hash(&eb[j].node) {
+                            *changes += 1;
+                            sink("~", at);
+                        }
+                        diff_walk(&ea[i].node, &eb[j].node, at, changes, sink);
                         at.pop();
                         i += 1;
                         j += 1;
                     }
                     core::cmp::Ordering::Less => {
-                        at.push(ea[i].0.clone());
+                        at.push(ea[i].name.clone());
                         *changes += 1;
                         sink("-", at);
                         at.pop();
                         i += 1;
                     }
                     core::cmp::Ordering::Greater => {
-                        at.push(eb[j].0.clone());
+                        at.push(eb[j].name.clone());
                         *changes += 1;
                         sink("+", at);
                         at.pop();
@@ -2654,9 +2718,9 @@ fn verify(
     let raw = st.get(r)?;
     *objects += 1;
     *bytes += raw.len() as u64;
-    if kind == tree::KIND_DIR {
+    if tree::base_kind(kind) == tree::KIND_DIR {
         let entries = tree::decode_dir(&raw).ok_or(cas::Error::Corrupt)?;
-        for (_, k, cr) in entries {
+        for (_, k, cr, _) in entries {
             verify(st, &cr, k, depth + 1, objects, bytes)?;
         }
     }
