@@ -222,12 +222,29 @@ an installed disk, reboot, `pacman -Qk` clean, heap flat; torn-superblock claim
   stalls ~2 s during a slot read-back; `update system fetch` over a real
   channel.
 
-**P6 — alongside + startup menu.** Alongside mode in `apply.rs` (kept slots'
-raw 128-byte entries overlaid from disk); `src/boot/menu.rs` pre-EBS, shown
-when another ESP has `\EFI\Microsoft\Boot\bootmgfw.efi`; Windows via
-`BootNext` + reset (first find why a pre-EBS `ResetSystem` went silent),
-chainload fallback. Verify: fake Windows ESP whose `bootmgfw.efi` is OVMF's
-shell.
+**P6 — alongside + startup menu. Done:**
+- `install alongside <code>`: the disk's own GPT read raw (standard shape and
+  both CRCs, or refused), the disk GUID and every existing 128-byte entry
+  carried byte for byte (`gpt::encode_over`, refuses a raw entry whose extent
+  disagrees with the plan), then erase's steps from the ESP on. A volume
+  mounted on a *kept* partition no longer blocks it (the app scanner mounts
+  Windows' ESP). Driven on a fake Windows disk (ESP with `bootmgfw.efi`, MSR,
+  20 GiB "C:", recovery flagged required): GUIDs, names, attributes and disk
+  GUID identical after, C:'s first MiB hashes the same, Windows' ESP passes
+  `fsck.fat`.
+- `install::menu`: other systems are the firmware's own `Boot####` entries
+  shaped like an OS loader (active, not hidden, boot category, a hard-drive
+  node then a file node), in boot order, not GLaDOS. Shown pre-EBS on an
+  installed disk only, 4 s, Enter or a number. Another system is started by
+  `BootNext` + reset, so the firmware starts it from a clean reset (BitLocker
+  sees what it always sees); `LoadImage` is the fallback. Driven: timeout to
+  GLaDOS; `1` pressed through QEMU's keyboard -> Boot0006 "Windows Boot
+  Manager" from Windows' ESP.
+- `boot [list | next <n> | add <part> <path> <name>]`: the same from a
+  running system, and `efibootmgr -c` for anyone.
+- `ResetSystem` before EBS: see P5 -- it was the harness.
+- Owed: the chainload fallback (OVMF took `BootNext`); the GF63's firmware
+  with two ESPs, `BootNext` and BitLocker.
 
 **P7 — wizard and images.** DeskApp pages (disk → mode → plan shown exactly
 → typed confirmation → progress → reboot), each page calling the same
