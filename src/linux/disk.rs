@@ -531,9 +531,15 @@ enum Body {
         cache: Vec<u8>,
     },
     Erofs(erofs::Inode),
+    /// A layer file whose bytes are in the store and not in memory: read by
+    /// range like an image file, rather than copied whole into the heap at
+    /// `open`, which for a 100 MB library is 100 MB per program that maps it.
+    /// Unverified, because a range is not the blob its address covers -- the
+    /// bargain every streamed read here makes.
+    Store(crate::store::cas::ChunkRef),
 }
 
-/// An open file on a mounted volume.
+/// An open file on a mounted volume, or a stored layer file read the same way.
 pub struct DiskFile {
     pub path: String,
     pub size: usize,
@@ -567,6 +573,12 @@ impl DiskFile {
         Ok(DiskFile { path: String::from(path), size: n.size, at: 0, mount: m.id, body })
     }
 
+    /// A layer file held in the store, read by range. No volume backs it, so
+    /// it names mount 0, which no mount ever has.
+    pub fn stored(path: &str, r: crate::store::cas::ChunkRef) -> DiskFile {
+        DiskFile { path: String::from(path), size: r.len as usize, at: 0, mount: 0, body: Body::Store(r) }
+    }
+
     /// What reading this file needs, copied out so the read can be made
     /// without the guest lock: the image's handle and the inode. `None` on
     /// FAT, whose reads go through state behind that lock.
@@ -589,10 +601,20 @@ impl DiskFile {
 
     /// Copy up to `out.len()` bytes from offset `off`. Answers how many.
     pub fn read_at(&mut self, off: usize, out: &mut [u8]) -> usize {
-        let _g = big();
         if off >= self.size || out.is_empty() {
             return 0;
         }
+        if let Body::Store(r) = &self.body {
+            let want = out.len().min(self.size - off);
+            return match crate::sysbox::stored::read_at(r, off as u64, want) {
+                Some(b) => {
+                    out[..b.len()].copy_from_slice(&b);
+                    b.len()
+                }
+                None => 0,
+            };
+        }
+        let _g = big();
         let Some(m) = by_id(self.mount) else { return 0 };
         match (&m.vol, &mut self.body) {
             (Vol::Erofs(img), Body::Erofs(ino)) => img.read(ino, off as u64, out).unwrap_or(0),

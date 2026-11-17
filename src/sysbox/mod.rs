@@ -1326,6 +1326,15 @@ pub fn blob_len(path: &str) -> Option<usize> {
     .flatten()
 }
 
+/// Where `path`'s bytes are on disk, if it is a blob that is not in memory.
+pub fn away_ref(path: &str) -> Option<cas::ChunkRef> {
+    with(|s| {
+        let p = parse(&s.cwd, path);
+        tree::resolve(&s.root, &p).and_then(|n| n.away())
+    })
+    .flatten()
+}
+
 /// Create an empty directory, failing if the name is taken.
 ///
 /// `write_blob` already creates intermediate directories, so this exists for

@@ -2936,6 +2936,17 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, mode: u64) -> u64
             if size.is_some() && flags & (O_CREAT | O_EXCL) == (O_CREAT | O_EXCL) {
                 return EEXIST;
             }
+            // **A large stored file is read by range, not copied in.** Only a
+            // read-only open: a writer gets the whole contents as before,
+            // because writes buffer in memory and commit at the last close.
+            if !wants_write && flags & O_TRUNC == 0 {
+                if let Some(r) = super::ns::away_ref(&path) {
+                    if r.len as usize >= crate::sysbox::EVICT_AT {
+                        let f = super::disk::DiskFile::stored(&path, r);
+                        return place_fd(fds, super::fs::Fd::Disk(alloc::rc::Rc::new(core::cell::RefCell::new(f))));
+                    }
+                }
+            }
             // A reader of a file already open shares its contents.
             let reading = flags & O_TRUNC == 0 && size.is_some();
             let shared = if reading { super::fs::shared_contents(&path) } else { None };

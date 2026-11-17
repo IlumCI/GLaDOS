@@ -93,6 +93,11 @@ pub fn set_mode(guest: &str, perm: u32) -> bool {
     sysbox::write_blob(&mode_path(guest), Vec::from((perm & 0o7777).to_le_bytes()))
 }
 
+/// Where a guest file's bytes are on disk, when the layer holds it there.
+pub fn away_ref(guest: &str) -> Option<crate::store::cas::ChunkRef> {
+    sysbox::away_ref(&backing(guest))
+}
+
 /// The attributes on a guest path's layer entry. `None` for a path only the
 /// image has, or one nobody set anything on.
 pub fn attr_of(guest: &str) -> Option<crate::sysbox::tree::Attr> {
