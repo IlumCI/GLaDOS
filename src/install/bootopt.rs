@@ -146,6 +146,35 @@ pub fn register(part: &crate::store::block::Partition) -> Result<u16, String> {
     Ok(n)
 }
 
+/// Add an entry for another loader -- `efibootmgr -c` -- at the end of the
+/// boot order, so it is offered and never takes over. Answers its number.
+pub fn add(part: &crate::store::block::Partition, path: &str, desc: &str) -> Result<u16, String> {
+    let opt = load_option(desc, &device_path(part.index, part.start_lba, part.block_count, &part.unique_guid, path));
+    let mut n = None;
+    for i in 0..0x100u16 {
+        match crate::cpu::efi_variable_exists(&var_name(i), &GLOBAL) {
+            Some(false) => {
+                n = Some(i);
+                break;
+            }
+            Some(true) => {}
+            None => return Err("the firmware's variable service did not answer".into()),
+        }
+    }
+    let n = n.ok_or("no free Boot#### number")?;
+    if !crate::cpu::efi_set_variable(&var_name(n), &GLOBAL, &opt) {
+        return Err("the firmware refused the boot entry".into());
+    }
+    let mut order = read_order();
+    order.retain(|&x| x != n);
+    order.push(n);
+    let bytes: Vec<u8> = order.iter().flat_map(|v| v.to_le_bytes()).collect();
+    if !crate::cpu::efi_set_variable(&ORDER, &GLOBAL, &bytes) {
+        return Err("the firmware refused the boot order".into());
+    }
+    Ok(n)
+}
+
 /// Pure claims about the encoding.
 pub fn checks() -> Vec<(String, bool)> {
     let mut c: Vec<(String, bool)> = Vec::new();

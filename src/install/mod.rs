@@ -11,6 +11,7 @@
 pub mod apply;
 pub mod bootopt;
 pub mod feed;
+pub mod menu;
 pub mod gpt;
 pub mod plan;
 pub mod slot;
@@ -210,6 +211,32 @@ pub fn checks() -> Vec<(String, bool)> {
                 ents.iter().filter(|(_, e)| e.type_guid == GUID_ESP).count() == 2));
             c.push(("the whole table encodes with nothing overlapping".into(),
                 gpt::encode(&win.geometry, &[0; 16], &ents).is_some()));
+            // The disk's own entries, as raw bytes with things the planner
+            // never sees: a GUID, an attribute bit, a name.
+            let raw: Vec<(usize, [u8; gpt::ENTRY_SIZE])> = win.partitions.iter().map(|o| {
+                let mut b = [0u8; gpt::ENTRY_SIZE];
+                b[0..16].copy_from_slice(&o.type_guid);
+                b[16..32].copy_from_slice(&[0xC0 + o.index as u8; 16]);
+                b[32..40].copy_from_slice(&o.start_lba.to_le_bytes());
+                b[40..48].copy_from_slice(&(o.start_lba + o.block_count - 1).to_le_bytes());
+                b[48] = 1; // "required by the platform"
+                b[56] = b'W';
+                (o.index as usize - 1, b)
+            }).collect();
+            match gpt::encode_over(&win.geometry, &[0x77; 16], &ents, &raw) {
+                Some(img) => {
+                    let arr = &img.primary[1024..1024 + gpt::ENTRIES * gpt::ENTRY_SIZE];
+                    c.push(("alongside carries every kept entry byte for byte: GUID, attributes, name".into(),
+                        raw.iter().all(|(s, b)| arr[s * gpt::ENTRY_SIZE..(s + 1) * gpt::ENTRY_SIZE] == b[..])));
+                    c.push(("and keeps the disk's own GUID".into(), img.primary[512 + 56..512 + 72] == [0x77; 16]));
+                    c.push(("and the table still passes its CRCs".into(), gpt::verify(&img.primary[512..1024], arr)));
+                }
+                None => c.push(("alongside encodes over the disk's own entries".into(), false)),
+            }
+            let mut moved = raw.clone();
+            moved[0].1[32] ^= 1;
+            c.push(("a raw entry that does not match the plan's extent is refused".into(),
+                gpt::encode_over(&win.geometry, &[0x77; 16], &ents, &moved).is_none()));
         }
         Err(r) => c.push((format!("alongside a 60 GiB gap plans ({})", r.say()), false)),
     }
@@ -244,7 +271,8 @@ pub fn selftest() -> bool {
         .into_iter()
         .chain(crate::store::fatfmt::checks())
         .chain(bootopt::checks())
-        .chain(slot::checks());
+        .chain(slot::checks())
+        .chain(menu::checks());
     for (what, good) in all {
         n += 1;
         if !good {
@@ -291,7 +319,7 @@ pub fn cmd(rest: &str) {
                     let why = apply::blockers(
                         &disk,
                         crate::store::erofs::ram().map(|r| r.len()),
-                        crate::linux::disk::uses_disk(),
+                        crate::linux::disk::uses_disk_outside(&p.kept.iter().map(|k| (k.start_lba, k.block_count)).collect::<Vec<_>>()),
                         carried().iter().any(|(p, _)| p == "EFI/BOOT/BOOTX64.EFI"),
                         &p,
                     );
@@ -302,7 +330,10 @@ pub fn cmd(rest: &str) {
                                 "  to do this: install erase {}",
                                 apply::code(&disk, &p)
                             ),
-                            Mode::Alongside => kprintln!("  installing alongside is not built yet"),
+                            Mode::Alongside => kprintln!(
+                                "  to do this: install alongside {}",
+                                apply::code(&disk, &p)
+                            ),
                         }
                     } else {
                         console::set_color(LTRED);
@@ -319,13 +350,17 @@ pub fn cmd(rest: &str) {
                 }
             }
         }
-        "erase" => {
+        "erase" | "alongside" => {
             if arg.is_empty() {
-                kprintln!("  'install plan erase' first, then 'install erase <code>'");
+                kprintln!("  'install plan {}' first, then 'install {} <code>'", verb, verb);
                 return;
             }
             console::set_color(LTGRAY);
-            let r = apply::erase(arg, &mut |line| kprintln!("{}", line));
+            let r = if verb == "erase" {
+                apply::erase(arg, &mut |line| kprintln!("{}", line))
+            } else {
+                apply::alongside(arg, &mut |line| kprintln!("{}", line))
+            };
             match r {
                 Ok(()) => {
                     console::set_color(LTGREEN);
@@ -338,6 +373,6 @@ pub fn cmd(rest: &str) {
             }
             console::set_color(WHITE);
         }
-        _ => kprintln!("  install [plan [erase|alongside]] | install erase <code>"),
+        _ => kprintln!("  install [plan [erase|alongside]] | install erase|alongside <code>"),
     }
 }

@@ -200,6 +200,19 @@ pub fn auto_root() -> Option<u32> {
     on_disk.or_else(|| mount_ram().ok().map(|_| 0))
 }
 
+/// Whether anything mounted from the disk starts outside every one of `keep`
+/// (`(start, blocks)`): an install alongside rewrites only what it does not
+/// keep, so a volume mounted on a kept partition -- Windows' ESP, which the
+/// app scanner mounts -- is no obstacle.
+pub fn uses_disk_outside(keep: &[(u64, u64)]) -> bool {
+    let _g = big();
+    let inside = |b: u64| keep.iter().any(|&(s, n)| b >= s && b < s + n);
+    unsafe { MOUNTS.get() }.iter().chain(unsafe { RETIRED.get() }.iter()).any(|m| match &m.vol {
+        Vol::Fat { vol, .. } => !inside(vol.base()),
+        Vol::Erofs(img) => img.base() != erofs::RAM_BASE && !inside(img.base()),
+    })
+}
+
 /// Whether anything mounted is read from the NVMe disk rather than memory.
 /// The installer refuses to erase a disk a running guest is reading from.
 pub fn uses_disk() -> bool {

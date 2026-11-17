@@ -329,6 +329,14 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         cpu::reboot();
     }
 
+    // --- the startup menu, when this disk has another system on it ---
+    //
+    // Only on an installed disk: install media and live boots are already
+    // the thing somebody chose in the firmware's menu.
+    if install::slot::chosen().is_some() {
+        install::menu::at_boot(st, bs, image);
+    }
+
     // --- repairs this machine decided for itself on an earlier boot ---
     //
     // Here because it is the earliest point there is: the ESP is readable, and

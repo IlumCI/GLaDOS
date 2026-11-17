@@ -270,28 +270,73 @@ pub fn write_slot(start: u64, blocks: u64, image: &[u8], say: &mut dyn FnMut(&st
 
 /// Erase the disk and install, under the code `install plan erase` printed.
 pub fn erase(given: &str, say: &mut dyn FnMut(&str)) -> Result<(), String> {
+    install(Mode::Erase, given, say)
+}
+
+/// Install into the largest free stretch beside what is on the disk, under
+/// the code `install plan alongside` printed. Nothing that exists moves.
+pub fn alongside(given: &str, say: &mut dyn FnMut(&str)) -> Result<(), String> {
+    install(Mode::Alongside, given, say)
+}
+
+/// The disk's own GPT, raw: its GUID and every 128-byte entry by slot. Only
+/// the standard shape (128 entries of 128 bytes, array right after the
+/// header) is accepted, and both CRCs must check: alongside rewrites the
+/// table around somebody else's partitions, and a table this code did not
+/// fully understand is one it refuses to rewrite.
+fn raw_table() -> Result<([u8; 16], Vec<(usize, [u8; gpt::ENTRY_SIZE])>), String> {
+    let bs = block::block_size() as usize;
+    let h = read_at(1, bs)?;
+    let n = u32::from_le_bytes(h[80..84].try_into().unwrap()) as usize;
+    let size = u32::from_le_bytes(h[84..88].try_into().unwrap()) as usize;
+    let at = u64::from_le_bytes(h[72..80].try_into().unwrap());
+    if &h[0..8] != b"EFI PART" || n != gpt::ENTRIES || size != gpt::ENTRY_SIZE || at != 2 {
+        return Err("the disk's partition table is not the standard shape, so it is not rewritten".into());
+    }
+    let array = read_at(at, n * size)?;
+    if !gpt::verify(&h, &array) {
+        return Err("the disk's partition table fails its own checksums -- repair it first".into());
+    }
+    let mut guid = [0u8; 16];
+    guid.copy_from_slice(&h[56..72]);
+    let mut out = Vec::new();
+    for i in 0..n {
+        let e = &array[i * size..(i + 1) * size];
+        if e[0..16].iter().any(|&b| b != 0) {
+            let mut raw = [0u8; gpt::ENTRY_SIZE];
+            raw.copy_from_slice(e);
+            out.push((i, raw));
+        }
+    }
+    Ok((guid, out))
+}
+
+fn install(mode: Mode, given: &str, say: &mut dyn FnMut(&str)) -> Result<(), String> {
     let disk = survey()?;
-    let p = plan::plan(&disk, Mode::Erase, &plan::Want::DEFAULT).map_err(|r| r.say())?;
+    let word = if mode == Mode::Erase { "erase" } else { "alongside" };
+    let p = plan::plan(&disk, mode, &plan::Want::DEFAULT).map_err(|r| r.say())?;
     let want = code(&disk, &p);
     if given != want {
         return Err(format!(
-            "that code is not this plan's -- run 'install plan erase' and type the code it prints (now {})",
-            want
+            "that code is not this plan's -- run 'install plan {}' and type the code it prints (now {})",
+            word, want
         ));
     }
     let root = crate::store::erofs::ram();
     let carried = super::carried();
     let has_kernel = carried.iter().any(|(p, _)| p == "EFI/BOOT/BOOTX64.EFI");
-    let why = blockers(&disk, root.map(|r| r.len()), crate::linux::disk::uses_disk(), has_kernel, &p);
+    let why = blockers(&disk, root.map(|r| r.len()), crate::linux::disk::uses_disk_outside(&p.kept.iter().map(|k| (k.start_lba, k.block_count)).collect::<Vec<_>>()), has_kernel, &p);
     if let Some(w) = why.first() {
         return Err(w.clone());
     }
     let root = root.unwrap_or(&[]);
+    // Read before anything is written: what alongside keeps, exactly.
+    let kept_raw = if mode == Mode::Alongside { Some(raw_table()?) } else { None };
 
     // 1. Free the namespace from the old store before anything is written.
     if crate::store::mounted() {
         let (n, bytes) = crate::sysbox::detach_from_store()
-            .map_err(|p| format!("could not bring {} into memory, so nothing was erased", p))?;
+            .map_err(|p| format!("could not bring {} into memory, so nothing was written", p))?;
         say(&format!("  memory  {} stored file(s), {} KiB, brought into memory", n, bytes / 1024));
         crate::store::unmount();
     }
@@ -299,9 +344,21 @@ pub fn erase(given: &str, say: &mut dyn FnMut(&str)) -> Result<(), String> {
     // 2. Tables.
     let g = disk.geometry;
     let ents = p.entries(|_| random_guid());
-    let img = gpt::encode(&g, &random_guid(), &ents).ok_or("the plan did not encode")?;
+    let img = match &kept_raw {
+        None => gpt::encode(&g, &random_guid(), &ents),
+        Some((guid, raw)) => {
+            // Every entry the disk has must be one the plan kept, in its slot.
+            let kept: Vec<(usize, [u8; gpt::ENTRY_SIZE])> =
+                raw.iter().filter(|(i, _)| p.kept.iter().any(|k| k.index as usize - 1 == *i)).cloned().collect();
+            if kept.len() != raw.len() || kept.len() != p.kept.len() {
+                return Err("the disk changed since it was surveyed -- plan again".into());
+            }
+            gpt::encode_over(&g, guid, &ents, &kept)
+        }
+    }
+    .ok_or("the plan did not encode")?;
     write_tables(&g, &img)?;
-    say("  tables  written and read back");
+    say(&format!("  tables  written and read back{}", if mode == Mode::Alongside { format!(", {} existing partition(s) kept byte for byte", p.kept.len()) } else { String::new() }));
 
     // 3. The boot partition.
     let e = p.part(Role::Esp).ok_or("the plan has no boot partition")?;

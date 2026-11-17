@@ -71,6 +71,11 @@ fn u32_at(b: &[u8], o: usize) -> u32 {
 
 impl Volume {
     /// Parse the boot sector of a partition starting at `base`.
+    /// Where the volume starts on the disk.
+    pub fn base(&self) -> u64 {
+        self.base
+    }
+
     pub fn mount(base: u64) -> Result<Self, Error> {
         let mut buf = vec![0u8; block::block_size() as usize];
         block::read(base, 1, &mut buf).map_err(|_| Error::Io)?;

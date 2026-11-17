@@ -151,7 +151,7 @@ const KNOWN_COMMANDS: &[&str] = &[
     "term", "perf", "desk", "todo", "paint", "write", "mines", "oracle", "enternet", "net", "dhcp", "mem",
     "mine", "uptime", "tasks", "status", "help", "app", "author", "maker", "video", "serial", "log", "snap",
     "update", "repair", "gpu", "abstract", "study", "work", "redqueen", "grammar",
-    "forest", "install",
+    "forest", "install", "boot",
 ];
 
 /// How many steps an authoring run gets.
@@ -9407,6 +9407,7 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         "repair" => repair_cmd(rest),
         "update" => update_cmd(rest),
         "install" => crate::install::cmd(rest),
+        "boot" => crate::install::menu::cmd(rest),
         "words" => {
             console::set_color(YELLOW);
             kprintln!("builtins");

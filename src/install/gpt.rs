@@ -199,6 +199,32 @@ pub fn encode(g: &Geometry, disk_guid: &[u8; 16], entries: &[(usize, Entry)]) ->
         }
     }
     let array = encode_array(entries)?;
+    Some(assemble(g, disk_guid, array))
+}
+
+/// `encode`, with some slots' entries replaced by the bytes the disk already
+/// has there: a partition kept alongside is carried **byte for byte** -- its
+/// own GUID, attribute bits and name -- because Windows' boot configuration
+/// names its partitions by GUID and an attribute such as "required" or
+/// "hidden" is not something to reset by rewriting a table. Each raw entry
+/// must describe exactly the extent the plan placed in that slot.
+pub fn encode_over(g: &Geometry, disk_guid: &[u8; 16], entries: &[(usize, Entry)], raw: &[(usize, [u8; ENTRY_SIZE])]) -> Option<Image> {
+    encode(g, disk_guid, entries)?;
+    let mut array = encode_array(entries)?;
+    for (slot, bytes) in raw {
+        let (_, e) = entries.iter().find(|(s, _)| s == slot)?;
+        let first = u64::from_le_bytes(bytes[32..40].try_into().ok()?);
+        let last = u64::from_le_bytes(bytes[40..48].try_into().ok()?);
+        if first != e.first_lba || last != e.first_lba + e.blocks - 1 || bytes[0..16] != e.type_guid {
+            return None;
+        }
+        array[slot * ENTRY_SIZE..(slot + 1) * ENTRY_SIZE].copy_from_slice(bytes);
+    }
+    Some(assemble(g, disk_guid, array))
+}
+
+fn assemble(g: &Geometry, disk_guid: &[u8; 16], array: Vec<u8>) -> Image {
+    let bs = g.block_size as usize;
     let array_crc = crc32(&array);
     let mut padded = array.clone();
     padded.resize(g.array_blocks() as usize * bs, 0);
@@ -216,7 +242,7 @@ pub fn encode(g: &Geometry, disk_guid: &[u8; 16], entries: &[(usize, Entry)]) ->
         g.backup_array_lba(),
         array_crc,
     ));
-    Some(Image { primary, backup, backup_lba: g.backup_array_lba() })
+    Image { primary, backup, backup_lba: g.backup_array_lba() }
 }
 
 /// Whether a header block and its array are internally consistent: magic,
