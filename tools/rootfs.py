@@ -99,6 +99,26 @@ SLIM = [
     "gdk-pixbuf2",
 ]
 
+# The Netinstall image's root: what it takes to reach the network and run
+# pacman, a terminal to watch it in, and nothing else. The rest of the
+# system comes down from the [glados] repository's package sets after the
+# install, at the snapshot this root is pinned to.
+NET = [
+    "filesystem", "glibc", "bash", "coreutils", "grep", "sed", "gawk", "findutils",
+    "which", "less", "nano", "tar", "gzip", "xz", "util-linux", "procps-ng",
+    "pacman", "pacman-mirrorlist", "archlinux-keyring", "ca-certificates", "curl",
+    "fontconfig", "ttf-dejavu", "foot", "xkeyboard-config", "dbus",
+]
+
+# Which of the [glados] repository's own packages an image records as
+# installed. A list rather than "everything built": a package recorded as
+# installed tells pacman its dependencies are met, so the slim root carrying
+# glados-desktop would believe the whole desktop was there -- and the model
+# package is 600 MB the ISO already carries on its ESP.
+OWN_BASE = ["orange", "glados-keyring", "glados-release", "quickjs-ng"]
+OWN_FULL = OWN_BASE + ["glados-desktop", "glados-set-desktop", "glados-set-office", "glados-set-media"]
+OWN = OWN_FULL
+
 # Packages replaced by an older build, and why. gdk-pixbuf 2.43 and later
 # decode every image format in a glycin helper process inside a bwrap
 # sandbox, spoken to over D-Bus; 2.42 decodes in-process and keeps the soname.
@@ -296,11 +316,10 @@ def glados_packages(names):
     the image is refused without them rather than built with a package manager
     that cannot update itself."""
     repo = ROOT / "out/repo/x86_64"
-    # glados-desktop is the set the slim root leaves out; recorded as
-    # installed, pacman would believe the whole desktop was already there.
-    pkgs = sorted(p for p in repo.glob("*.pkg.tar.zst") if PACKAGES is not SLIM or not p.name.startswith("glados-desktop-"))
-    if not pkgs:
-        sys.exit("rootfs: no [glados] packages -- run tools/pkgrepo.py build first")
+    pkgs = sorted(p for p in repo.glob("*.pkg.tar.zst") if pkgname(p.name) in OWN)
+    missing = set(OWN) - {pkgname(p.name) for p in pkgs}
+    if missing:
+        sys.exit(f"rootfs: [glados] packages not built: {', '.join(sorted(missing))} -- run tools/pkgrepo.py build first")
     for p in pkgs:
         unpack(p)
         names.append(local_db(p, True))
@@ -601,6 +620,46 @@ def image():
     subprocess.run([str(MKFS), "-T0", "-b4096", "--all-root", str(IMAGE), str(TREE)], check=True)
 
 
+# Left out of the Netinstall root, and out of everything installed on top of
+# it: pacman's own NoExtract, so the rule outlives the image. Translations,
+# manuals and headers were two thirds of a 491 MiB root whose whole job is
+# to reach the network and run pacman. The price is stated: `pacman -Qk`
+# lists these as missing on a Netinstall machine, as it does on any Arch
+# system configured this way.
+NET_NOEXTRACT = [
+    "usr/share/locale/*", "usr/share/man/*", "usr/share/doc/*", "usr/share/info/*",
+    "usr/share/gtk-doc/*", "usr/share/gir-1.0/*", "usr/share/i18n/*", "usr/include/*", "usr/lib/*.a",
+]
+
+
+def prune_net():
+    """Delete NET_NOEXTRACT's paths from the tree and write the same patterns
+    into pacman.conf. Only for the Netinstall root."""
+    import fnmatch
+    gone = 0
+    for top in ("usr/share", "usr/include", "usr/lib"):
+        base = TREE / top
+        if not base.exists():
+            continue
+        for path in sorted(base.rglob("*"), reverse=True):
+            rel = str(path.relative_to(TREE))
+            if any(fnmatch.fnmatch(rel, pat) for pat in NET_NOEXTRACT):
+                if path.is_dir() and not path.is_symlink():
+                    try:
+                        path.rmdir()
+                    except OSError:
+                        pass
+                else:
+                    gone += path.lstat().st_size
+                    path.unlink()
+    conf = TREE / "etc/pacman.conf"
+    text = conf.read_text()
+    if "NoExtract" not in text.split("[options]", 1)[-1].split("\n[", 1)[0] or "usr/share/locale/*" not in text:
+        text = text.replace("[options]\n", "[options]\nNoExtract = " + " ".join(NET_NOEXTRACT) + "\n", 1)
+        conf.write_text(text)
+    print(f"  Netinstall: {gone / 2**20:.0f} MiB of translations, manuals and headers left out")
+
+
 def build(reuse=False):
     if reuse and TREE.exists():
         glados_packages([])
@@ -632,6 +691,8 @@ def build(reuse=False):
     readable()
     settings()
     data_hooks()
+    if PACKAGES is NET:
+        prune_net()
     image()
     size = IMAGE.stat().st_size
     print(f"{IMAGE}  {size / 2**20:.0f} MiB")
@@ -642,6 +703,9 @@ def selftest():
     claims = [
         ("a snapshot names one Archive day", snapshot_mirror("2026/11/15") == "https://archive.archlinux.org/repos/2026/11/15"),
         ("no snapshot is the live mirror", snapshot_mirror(None) == MIRROR),
+        ("the Netinstall root can run pacman and reach the network", {"pacman", "curl", "ca-certificates", "archlinux-keyring"} <= set(NET)),
+        ("and is a subset of the Base root's userland apart from curl", set(NET) - set(SLIM) <= {"curl"}),
+        ("no image records the model package or the sets it lacks", "glados-model-qwen3-0.6b" not in OWN_FULL and not any(o.startswith("glados-set") or o == "glados-desktop" for o in OWN_BASE)),
         ("a host mirror URL is rewritten to the pinned day's",
          pinned_url("https://elsewhere.example/extra/os/x86_64/a-1-1-x86_64.pkg.tar.zst")
          == f"{MIRROR}/extra/os/x86_64/a-1-1-x86_64.pkg.tar.zst"),
@@ -668,7 +732,8 @@ def main():
     a.add_argument("cmd", nargs="?", choices=["resolve", "build"])
     a.add_argument("--selftest", action="store_true")
     a.add_argument("--reuse", action="store_true", help="image the tree already unpacked")
-    a.add_argument("--slim", action="store_true", help="the ISO's root (SLIM) into .qemu/root-slim.erofs")
+    a.add_argument("--slim", action="store_true", help="the Base ISO's root (SLIM) into .qemu/root-slim.erofs")
+    a.add_argument("--net", action="store_true", help="the Netinstall ISO's root (NET) into .qemu/root-net.erofs")
     a.add_argument("--snapshot", metavar="YYYY/MM/DD", help="the Arch Archive day to pin (default: yesterday, UTC)")
     a.add_argument("--live-mirror", action="store_true", help="resolve against the rotating mirror instead (unpinned)")
     args = a.parse_args()
@@ -677,11 +742,17 @@ def main():
         SNAPSHOT = args.snapshot or default_snapshot()
         MIRROR = snapshot_mirror(SNAPSHOT)
         print(f"  pinned to the Arch Archive of {SNAPSHOT}", file=sys.stderr)
+    global PACKAGES, IMAGE, TREE, OWN
     if args.slim:
-        global PACKAGES, IMAGE, TREE
         PACKAGES = SLIM
+        OWN = OWN_BASE
         IMAGE = ROOT / ".qemu" / "root-slim.erofs"
         TREE = OUT / "root-slim"
+    if args.net:
+        PACKAGES = NET
+        OWN = OWN_BASE
+        IMAGE = ROOT / ".qemu" / "root-net.erofs"
+        TREE = OUT / "root-net"
     if args.selftest:
         selftest()
     elif args.cmd == "resolve":

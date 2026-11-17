@@ -1,0 +1,14 @@
+# A package set the installer offers: the graphical desktop's toolkits and
+# a few small programs, with no office suite and no media player. Nothing
+# but dependencies, like glados-desktop, so pacman resolves and upgrades it
+# and `orange remove -s` takes it back out.
+pkgname=glados-set-desktop
+pkgver=1
+pkgrel=1
+pkgdesc="GLaDOS package set: desktop toolkits (GTK 3/4, Qt 6), fonts, icons, an editor and an image viewer"
+arch=('any')
+url="https://github.com/IlumCI/GLaDOS"
+license=('custom')
+depends=('gtk3' 'adwaita-icon-theme' 'adwaita-icon-theme-legacy' 'hicolor-icon-theme'
+         'shared-mime-info' 'gsettings-desktop-schemas' 'ttf-liberation'
+         'gtk4-demos' 'qt6-wayland' 'featherpad' 'imv')

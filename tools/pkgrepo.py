@@ -83,7 +83,12 @@ def build(home):
         shutil.rmtree(arch)
     arch.mkdir(parents=True)
     pkgs = []
-    for d in sorted(p for p in PACKAGING.iterdir() if (p / "PKGBUILD").exists()):
+    # `GLADOS_PKG_SKIP=a,b` leaves packages out of a local build -- the model
+    # package downloads 600 MB of weights, which CI fetches anyway and a test
+    # of the package sets does not need. A published repository is built
+    # without it.
+    skip = {x for x in os.environ.get("GLADOS_PKG_SKIP", "").split(",") if x}
+    for d in sorted(p for p in PACKAGING.iterdir() if (p / "PKGBUILD").exists() and p.name not in skip):
         # Built in a scratch copy, so makepkg's src/ and pkg/ never land in
         # the tree, and signed by makepkg itself with the repository's key.
         with tempfile.TemporaryDirectory() as t:
