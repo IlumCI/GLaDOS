@@ -1353,6 +1353,32 @@ pub fn is_dir(path: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// The attributes on the entry at `path`, if it has any.
+pub fn attr(path: &str) -> Option<tree::Attr> {
+    with(|s| {
+        let p = parse(&s.cwd, path);
+        tree::entry(&s.root, &p).and_then(|e| e.attr.as_deref().cloned())
+    })
+    .flatten()
+}
+
+/// Change the attributes on the entry at `path`, creating them if it had
+/// none. False when nothing is at `path`.
+pub fn edit_attr(path: &str, f: impl FnOnce(&mut tree::Attr, bool)) -> bool {
+    with(|s| {
+        let p = parse(&s.cwd, path);
+        match tree::entry_mut(&mut s.root, &p) {
+            Some(e) => {
+                let dir = e.node.is_dir();
+                f(e.attr.get_or_insert_with(Default::default), dir);
+                true
+            }
+            None => false,
+        }
+    })
+    .unwrap_or(false)
+}
+
 /// Entry names directly under `path`, in sorted order. Empty if it is missing
 /// or is a file.
 pub fn children(path: &str) -> Vec<String> {

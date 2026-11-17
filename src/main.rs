@@ -923,6 +923,24 @@ fn init_storage(acpi: &Option<acpi::Acpi>) -> bool {
                         bad = true;
                     }
                 });
+                // **An installed disk is writable from boot.** Mounting stays
+                // read-only everywhere else -- a store found in a disk's
+                // unclaimed tail, beside somebody's Windows, waits for a person
+                // to type `store unlock` -- but a disk the installer laid out
+                // carries a GLaDOS store partition *and* GLaDOS system slots,
+                // and on one of those the operator already said yes, once, by
+                // installing. Asking again every boot would mean nothing a user
+                // does persists until they learn a command.
+                let installed = store::block::scan().is_ok_and(|l| {
+                    l.partitions.iter().any(|p| p.type_guid == store::cas::GLADOS_TYPE_GUID && p.start_lba == start)
+                        && l.partitions.iter().any(|p| p.type_guid == install::plan::ROOT_TYPE_GUID)
+                });
+                if installed && !bad {
+                    match store::unlock() {
+                        Ok(_) => kprintln!("  writable: this is an installed disk"),
+                        Err(e) => kprintln!("  installed disk, but the store would not unlock: {:?}", e),
+                    }
+                }
                 bad
             }
             Err(_) => {

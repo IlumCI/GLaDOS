@@ -67,13 +67,44 @@ fn old_mode_path(guest: &str) -> String {
 }
 
 /// The permission bits set on a guest path, if any were.
+///
+/// **On the layer's own entry when it has one**, which is where they persist
+/// with the file through a move and a snapshot; the flat table above is for a
+/// path that exists only in the image, which has no entry to carry them, and
+/// for bits set before entries had attributes.
 pub fn mode_of(guest: &str) -> Option<u32> {
+    if let Some(a) = attr_of(guest).filter(|a| a.mode != 0) {
+        return Some(a.mode & 0o7777);
+    }
     let b = sysbox::read_blob(&mode_path(guest)).or_else(|| sysbox::read_blob(&old_mode_path(guest)))?;
     (b.len() == 4).then(|| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) & 0o7777)
 }
 
 pub fn set_mode(guest: &str, perm: u32) -> bool {
+    // With the type bits, so a set mode is never zero and zero means unset.
+    let on_entry = layered()
+        && sysbox::edit_attr(&backing(guest), |a, dir| {
+            a.mode = if dir { 0o040000 } else { 0o100000 } | (perm & 0o7777)
+        });
+    if on_entry {
+        forget_mode(guest);
+        return true;
+    }
     sysbox::write_blob(&mode_path(guest), Vec::from((perm & 0o7777).to_le_bytes()))
+}
+
+/// The attributes on a guest path's layer entry. `None` for a path only the
+/// image has, or one nobody set anything on.
+pub fn attr_of(guest: &str) -> Option<crate::sysbox::tree::Attr> {
+    if !layered() {
+        return None;
+    }
+    sysbox::attr(&backing(guest))
+}
+
+/// Edit a path's layer attributes. False when the layer has no entry there.
+pub fn edit_attr(guest: &str, f: impl FnOnce(&mut crate::sysbox::tree::Attr)) -> bool {
+    layered() && sysbox::edit_attr(&backing(guest), |a, _| f(a))
 }
 
 pub fn forget_mode(guest: &str) {

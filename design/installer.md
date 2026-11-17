@@ -149,7 +149,13 @@ tokenizer, FW, roots, voice, brain; `src/install/bootopt.rs` builds
 `BootOrder` (vectors checked against efibootmgr output). Verify: second boot
 from NVMe only, no ISO; host `fsck.fat -n`.
 
-**P3 — layer v2 metadata + auto-unlock + commit on fsync/exit.** Golden-hash
+**P3 — metadata + auto-unlock. Done** (commit-on-fsync moved to P4, where
+writes stop being whole-file): real `chmod`/`chown`/`touch -d`/`setcap` on
+an installed disk survive a reboot, read back by `stat` and `getcap`; the
+store unlocks itself only on a disk with GLaDOS slots. Planted unconditional
+attribute rendering fails the golden hash and halts boot (sysbox is vital).
+One `diag all` showed `migrate` heap +2 MB; it passes alone twice.
+Was: Golden-hash
 claim (planted unconditional render must fail it); `chmod/chown/touch`
 survive reboot.
 
