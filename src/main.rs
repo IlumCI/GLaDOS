@@ -301,6 +301,34 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
 ");
     }
 
+    // --- which system slot, on an installed disk ---
+    //
+    // After the kernel's hook, because a kernel that was just undone takes
+    // the system image staged with it back too, and a kernel just written
+    // makes the image staged with it wait for it.
+    let slot_said = install::slot::at_boot(bs, image, update::kernel_event());
+    if let Some(line) = slot_said {
+        serial_println!("glados: {}", line);
+        con_out(st, "glados: ");
+        con_out(st, line);
+        con_out(st, "
+");
+    }
+    // **And then restart, when the boot image just changed.** The hook used
+    // to leave that to the next boot, on the strength of `ResetSystem` going
+    // silent when called here. It was not silent: the harness runs QEMU with
+    // `-no-reboot -action shutdown=pause`, so a reset *paused the VM*, which
+    // reads exactly like a firmware that took the call and did nothing.
+    // Restarting now means a release that moves the kernel and the system
+    // image together is one reboot, not two, and the image never waits on a
+    // kernel that is written but not running.
+    if matches!(update::kernel_event(), install::slot::Kernel::AppliedNow | install::slot::Kernel::RolledBack)
+        || install::slot::restored_kernel()
+    {
+        serial_println!("glados: restarting into the boot image just written");
+        cpu::reboot();
+    }
+
     // --- repairs this machine decided for itself on an earlier boot ---
     //
     // Here because it is the earliest point there is: the ESP is readable, and
@@ -826,6 +854,12 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     if let Some(p) = linux::disk::auto_root() {
         linux::services::begin_session();
         kprintln!("[linux] the root filesystem is partition {}, with a session bus", p);
+    }
+    // A system image on trial: this boot reached here on it, so keep it --
+    // after the root is mounted, because what is kept is the slot that
+    // actually mounted, and before that nothing has.
+    if let Some(line) = install::slot::settle_now() {
+        kprintln!("[update] {}", line);
     }
 
     // What is installed, so the desktop can offer it. Read off every FAT

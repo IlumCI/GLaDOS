@@ -305,7 +305,23 @@ pub fn erase(given: &str, say: &mut dyn FnMut(&str)) -> Result<(), String> {
 
     // 3. The boot partition.
     let e = p.part(Role::Esp).ok_or("the plan has no boot partition")?;
-    write_esp(e.first_lba, e.blocks, &carried, say)?;
+    // Slot A, kept: the record a later system update starts from. Written
+    // with the ESP rather than after, so there is no installed disk that
+    // lacks one.
+    let rec = super::slot::Record {
+        seq: 1,
+        active: 0,
+        previous: 0,
+        trial: None,
+        with_kernel: false,
+        image_len: root.len() as u64,
+        digest: sha256::hash(root),
+        prev_len: root.len() as u64,
+        prev_digest: sha256::hash(root),
+        ..super::slot::pending(None, 0, 0, 0, [0; 32], crate::VERSION, "", false)
+    }
+    .encode();
+    write_esp(e.first_lba, e.blocks, &carried, &rec, say)?;
 
     // 4. System slot A.
     let a = p.part(Role::RootA).ok_or("the plan has no system slot")?;
@@ -349,7 +365,7 @@ pub fn erase(given: &str, say: &mut dyn FnMut(&str)) -> Result<(), String> {
 /// The ESP: formatted with every file this boot carried plus an install
 /// identity, then every file read back through `store::fat`, the reader the
 /// kernel uses for FAT everywhere else.
-fn write_esp(start: u64, blocks: u64, carried: &[(String, &'static [u8])], say: &mut dyn FnMut(&str)) -> Result<(), String> {
+fn write_esp(start: u64, blocks: u64, carried: &[(String, &'static [u8])], rec: &[u8], say: &mut dyn FnMut(&str)) -> Result<(), String> {
     use crate::store::fatfmt;
     let mut id = Vec::new();
     let mut raw = [0u8; 16];
@@ -360,6 +376,7 @@ fn write_esp(start: u64, blocks: u64, carried: &[(String, &'static [u8])], say: 
     id.extend_from_slice(b"\n");
     let mut files: Vec<fatfmt::File> = carried.iter().map(|(p, d)| fatfmt::File { path: p, data: d }).collect();
     files.push(fatfmt::File { path: "GLADOS/INSTALL.ID", data: &id });
+    files.push(fatfmt::File { path: "GLADOS/SLOT1.REC", data: rec });
     let l = fatfmt::layout(blocks, &files).map_err(String::from)?;
     if !nvme::claim(CONFIRM, Holder::Esp, start, blocks) {
         return Err("the write gate refused the boot partition".into());

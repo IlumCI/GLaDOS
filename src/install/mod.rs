@@ -10,8 +10,10 @@
 
 pub mod apply;
 pub mod bootopt;
+pub mod feed;
 pub mod gpt;
 pub mod plan;
+pub mod slot;
 
 use crate::store::block::{Partition, Scheme, GUID_ESP};
 use crate::sync::Racy;
@@ -241,7 +243,8 @@ pub fn selftest() -> bool {
     let all = checks()
         .into_iter()
         .chain(crate::store::fatfmt::checks())
-        .chain(bootopt::checks());
+        .chain(bootopt::checks())
+        .chain(slot::checks());
     for (what, good) in all {
         n += 1;
         if !good {

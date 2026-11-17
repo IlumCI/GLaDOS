@@ -377,13 +377,14 @@ pub enum Outcome {
 /// Apply a staged update, or resolve one on trial. Runs before
 /// `ExitBootServices`, which is the only time the ESP is writable.
 ///
-/// **It does not reboot.** The first version did, and the guest never came
-/// back: `ResetSystem` through the runtime table, called while boot services
-/// are still up, left the machine silent -- no reset, no fault, no further
-/// output. Rather than debug a firmware path that this arrangement does not
-/// need, the swap simply takes effect at the next boot, whenever that is. The
-/// session carries on running the image it started with, which is the one that
-/// has already proved it works.
+/// **The caller restarts afterwards when the boot image changed** (`main`,
+/// once the slot record has had its say). This said the hook could not: the
+/// first version reset from here and "the guest never came back", which was
+/// recorded as a firmware path that goes silent. It was the harness --
+/// `drive.py` runs QEMU with `-no-reboot -action shutdown=pause`, so the
+/// reset paused the VM. `--allow-reboot` lets one carry on, and with it an
+/// apply restarts straight into the new image, so a release that moves the
+/// kernel and the system image together costs one reboot.
 pub fn hook(bs: &crate::uefi::BootServices, image: crate::uefi::Handle) -> Outcome {
     let flag = slurp(bs, image, UPDATE_FLAG).is_some();
     let health = health_count(bs, image);
@@ -453,6 +454,7 @@ pub fn hook(bs: &crate::uefi::BootServices, image: crate::uefi::Handle) -> Outco
                 return Outcome::Said("update: the rollback would not write -- boot the USB");
             }
             crate::uefi::delete_file(bs, image, HEALTH_FLAG);
+            unsafe { *KERNEL.get() = crate::install::slot::Kernel::RolledBack };
             Outcome::Said("update: rolled back -- reboot to run the restored image")
         }
 
@@ -484,12 +486,30 @@ pub fn hook(bs: &crate::uefi::BootServices, image: crate::uefi::Handle) -> Outco
             }
             // 6. On trial from here.
             crate::uefi::write_file(bs, image, HEALTH_FLAG, b"0");
+            unsafe { *KERNEL.get() = crate::install::slot::Kernel::AppliedNow };
             // Armed, not Said: the trial belongs to the image that boots
             // next, and this boot clearing it would pass a verdict on a run
             // that has not happened.
             Outcome::Armed("update: applied -- reboot to run it")
         }
     }
+}
+
+/// Put `BOOTX64.OLD` back over the boot image, proved. The slot record's
+/// rollback calls this when the release it undoes moved the kernel too.
+pub fn restore_old(bs: &crate::uefi::BootServices, image: crate::uefi::Handle) -> bool {
+    match slurp(bs, image, OLD_PATH) {
+        Some(old) => copy_verified(bs, image, old, BOOT_PATH),
+        None => false,
+    }
+}
+
+/// What the hook did to the kernel this boot, for the slot record.
+static KERNEL: crate::sync::Racy<crate::install::slot::Kernel> =
+    crate::sync::Racy::new(crate::install::slot::Kernel::Quiet);
+
+pub fn kernel_event() -> crate::install::slot::Kernel {
+    unsafe { *KERNEL.get() }
 }
 
 /// The image reached the end of what this hook can watch. Stop the trial.

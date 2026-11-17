@@ -125,6 +125,13 @@ pub fn mount(prefix: &str, index: u32) -> Result<(), &'static str> {
         .iter()
         .find(|p| p.index == index)
         .ok_or("no partition with that number -- 'fat' lists them")?;
+    // A system slot is the root or nothing. Mounted anywhere else -- the
+    // app scanner walks every partition -- the spare slot would count as in
+    // use and no system update could be written into it, and one that was
+    // would be rewritten under a reader that cached its old blocks.
+    if !prefix.is_empty() && p.type_guid == crate::install::plan::ROOT_TYPE_GUID {
+        return Err("that is a system slot, which mounts at / or not at all");
+    }
     let vol = match erofs::Image::mount(p.start_lba) {
         Ok(img) => Vol::Erofs(img),
         Err(_) if prefix.is_empty() => return Err("only an EROFS root image can be mounted at /"),
@@ -161,25 +168,34 @@ pub fn auto_root() -> Option<u32> {
     // A root on the disk first: an installed system's. Then the one the ISO
     // carried into memory, answered as partition 0.
     //
-    // **A disk carrying GLaDOS system slots is asked only about those.** Every
+    // **A disk carrying GLaDOS system slots is asked only about those**, and
+    // in the order the slot record says: the slot this boot chose first, then
+    // the other, so a slot that will not mount still leaves a system. Every
     // partition used to be offered in table order and the first EROFS took,
-    // which on an installed disk is slot A whichever slot is active, and on a
-    // disk with some other EROFS volume on it is that volume. Which slot is
-    // the slot record's business (installer P5); until it exists, the first
-    // system slot that mounts.
+    // which on an installed disk is slot A whichever slot is active.
     let on_disk = crate::store::block::scan().ok().and_then(|layout| {
-        let slots: Vec<u32> = layout
+        let mut slots: Vec<u32> = layout
             .partitions
             .iter()
             .filter(|p| p.type_guid == crate::install::plan::ROOT_TYPE_GUID)
             .map(|p| p.index)
             .collect();
+        if let Some(c) = crate::install::slot::chosen() {
+            if (c as usize) < slots.len() {
+                let first = slots.remove(c as usize);
+                slots.insert(0, first);
+            }
+        }
         let indices: Vec<u32> = if slots.is_empty() {
             layout.partitions.iter().map(|p| p.index).collect()
         } else {
-            slots
+            slots.clone()
         };
-        indices.into_iter().find(|&i| mount("/", i).is_ok())
+        let got = indices.iter().copied().find(|&i| mount("/", i).is_ok());
+        if !slots.is_empty() && got.is_some() && got != slots.first().copied() {
+            crate::kprintln!("[linux] the chosen system slot would not mount; running the other one");
+        }
+        got
     });
     on_disk.or_else(|| mount_ram().ok().map(|_| 0))
 }
@@ -191,6 +207,25 @@ pub fn uses_disk() -> bool {
     unsafe { MOUNTS.get() }.iter().chain(unsafe { RETIRED.get() }.iter()).any(|m| match &m.vol {
         Vol::Fat { .. } => true,
         Vol::Erofs(img) => img.base() != erofs::RAM_BASE,
+    })
+}
+
+/// Where the image mounted at `/` lives, when it is read off the disk.
+pub fn root_base() -> Option<u64> {
+    let _g = big();
+    unsafe { MOUNTS.get() }.iter().find(|m| m.prefix.is_empty()).and_then(|m| match &m.vol {
+        Vol::Erofs(img) if img.base() != erofs::RAM_BASE => Some(img.base()),
+        _ => None,
+    })
+}
+
+/// Whether the image at `base` is mounted, so a system update never writes
+/// under a running system.
+pub fn slot_mounted(base: u64) -> bool {
+    let _g = big();
+    unsafe { MOUNTS.get() }.iter().chain(unsafe { RETIRED.get() }.iter()).any(|m| match &m.vol {
+        Vol::Erofs(img) => img.base() == base,
+        _ => false,
     })
 }
 

@@ -577,6 +577,114 @@ fn repair_cmd(rest: &str) {
     }
 }
 
+/// `update system`: whole system images, into the slot this boot is not
+/// running. The image is never held in memory -- a guest copies it to
+/// `/dev/glados/slot`, which hashes, writes, reads back and names it.
+fn update_system(rest: &str, manifest_now: fn() -> Option<crate::update::manifest::Manifest>) {
+    use crate::install::{feed, slot};
+    let mut w = rest.split_whitespace();
+    let verb = w.next().unwrap_or("");
+    let unhex = |s: &str| -> Option<[u8; 32]> {
+        if s.len() != 64 {
+            return None;
+        }
+        let mut o = [0u8; 32];
+        for i in 0..32 {
+            o[i] = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()?;
+        }
+        Some(o)
+    };
+    match verb {
+        "" | "status" => {
+            console::set_color(YELLOW);
+            kprintln!("[update system]");
+            console::set_color(LTGRAY);
+            match (slot::chosen(), slot::current()) {
+                (None, _) => kprintln!("  running from install or live media -- system updates need an installed disk"),
+                (Some(c), None) => kprintln!("  slot {} running, no slot record yet", feed::slot_name(c)),
+                (Some(c), Some(r)) => {
+                    kprintln!("  slot {} running{}", feed::slot_name(c), if r.trial.is_some() && r.active == c { " on trial" } else { "" });
+                    kprintln!(
+                        "  record    seq {}, slot {} is {} -- system {}{}",
+                        r.seq,
+                        feed::slot_name(r.active),
+                        if r.trial.is_some() { "on trial" } else { "kept" },
+                        r.version(),
+                        if r.snapshot().is_empty() { alloc::string::String::new() } else { alloc::format!(", packages from {}", r.snapshot()) }
+                    );
+                }
+            }
+            if let Some(s) = feed::status() {
+                kprintln!("  {}", s);
+            }
+            kprintln!("  check | fetch | arm <bytes> <sha256> [version] [snapshot] | cancel");
+        }
+        "check" | "fetch" => {
+            let Some(m) = manifest_now() else { return };
+            let Some(s) = m.system.clone() else {
+                kprintln!("  {} {} names no system image -- a kernel-only release", m.channel, m.version);
+                return;
+            };
+            kprintln!("  system {} ({} MiB, packages from {})", s.version, s.size >> 20, if s.snapshot.is_empty() { "?" } else { &s.snapshot });
+            if slot::current().is_some_and(|r| r.digest == s.sha256) {
+                kprintln!("  that is the system already running -- nothing to fetch");
+                return;
+            }
+            if let Some(k) = &m.min_kernel {
+                if crate::version_newer(k, crate::VERSION) {
+                    console::set_color(LTRED);
+                    kprintln!("  it needs kernel {} and this is {} -- 'update fetch' and 'update stage' first", k, crate::VERSION);
+                    console::set_color(LTGRAY);
+                    return;
+                }
+            }
+            if m.store_format.is_some_and(|f| f > slot::STORE_FORMAT) {
+                console::set_color(LTRED);
+                kprintln!("  it writes store format {}, newer than this kernel reads ({})", m.store_format.unwrap_or(0), slot::STORE_FORMAT);
+                console::set_color(LTGRAY);
+                return;
+            }
+            if verb == "check" {
+                kprintln!("  'update system fetch' writes it into the spare slot");
+                return;
+            }
+            match feed::arm(s.size, s.sha256, &s.version, &s.snapshot, false) {
+                Ok(line) => kprintln!("  {}", line),
+                Err(e) => {
+                    console::set_color(LTRED);
+                    kprintln!("  {}", e);
+                    console::set_color(LTGRAY);
+                    return;
+                }
+            }
+            let u = alloc::format!("https://{}{}", s.url.host, s.url.path);
+            match crate::linux::start_job("/usr/bin/curl", &["curl", "-fsSL", "--retry", "3", "-o", "/dev/glados/slot", &u]) {
+                Ok(j) => kprintln!("  downloading in job {} -- 'update system' shows how far it is", j),
+                Err(e) => {
+                    feed::cancel();
+                    kprintln!("  could not start the download: {}", e);
+                }
+            }
+        }
+        "arm" => {
+            let (Some(n), Some(d)) = (w.next().and_then(|s| s.parse::<u64>().ok()), w.next().and_then(unhex)) else {
+                kprintln!("  update system arm <bytes> <sha256> [version] [snapshot]");
+                return;
+            };
+            let v = w.next().unwrap_or("local");
+            let snap = w.next().unwrap_or("");
+            match feed::arm(n, d, v, snap, false) {
+                Ok(line) => kprintln!("  {}", line),
+                Err(e) => kprintln!("  {}", e),
+            }
+        }
+        "cancel" => {
+            kprintln!("  {}", if feed::cancel() { "called off; the slot record is unchanged" } else { "nothing was armed" });
+        }
+        _ => kprintln!("  update system [status|check|fetch|arm|cancel]"),
+    }
+}
+
 fn update_cmd(rest: &str) {
     use crate::store::sha256;
     use crate::update::{channel, fetch, stage};
@@ -621,6 +729,10 @@ fn update_cmd(rest: &str) {
     }
 
     match verb {
+        "system" => {
+            update_system(arg, manifest_now);
+            return;
+        }
         "" | "status" => {
             console::set_color(YELLOW);
             kprintln!("[update]");
@@ -9878,6 +9990,13 @@ fn fat_cmd(rest: &str) {
             } else {
                 kprintln!("  refused -- that range overlaps a window another holder has open");
             }
+        }
+        // The way back from `unlock`. There was none short of a reboot, and
+        // a window held open blocks every other holder that overlaps it --
+        // the slot record's own write to the ESP among them.
+        "lock" => {
+            crate::dev::nvme::release(crate::dev::nvme::Holder::Volume);
+            kprintln!("  FAT writes locked again");
         }
         // Writing. Refused unless the operator has claimed a range covering
         // this partition, because that gate is the only thing standing between

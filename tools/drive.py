@@ -548,6 +548,13 @@ def main():
     keep_vars = "--keep-vars" in argv
     if keep_vars:
         argv.remove("--keep-vars")
+    # A guest reset reboots instead of pausing. For flows that restart on
+    # purpose -- an update applied, a slot rolled back -- where a paused VM
+    # reads exactly like a firmware that ignored ResetSystem (which is how
+    # that belief got recorded in update::hook).
+    allow_reboot = "--allow-reboot" in argv
+    if allow_reboot:
+        argv.remove("--allow-reboot")
     esp_on_nvme = "--esp-on-nvme" in argv
     if esp_on_nvme:
         argv.remove("--esp-on-nvme")
@@ -1141,7 +1148,7 @@ def main():
         # reading a closed socket as a quiet guest. Paused, the monitor still
         # answers, so `vm_stopped` sees it within seconds and `dump_regs`
         # keeps the state that says why.
-        "-no-reboot", "-action", "shutdown=pause",
+        *([] if allow_reboot else ["-no-reboot", "-action", "shutdown=pause"]),
         *qemu_late,
     ]
 

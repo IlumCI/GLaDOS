@@ -91,6 +91,19 @@ fn cache_fill(base: u64, b0: u64, buf: &[u8]) {
     }
 }
 
+/// Forget everything cached about the image at `base`. A system update
+/// rewrites a slot in place, and the cache is keyed by where an image lives,
+/// not by what is in it: without this a slot mounted earlier in the boot
+/// would answer the new image's reads with the old image's blocks.
+pub fn forget(base: u64) {
+    {
+        let mut c = CACHE.lock_irq();
+        c.map.retain(|k, _| k.0 != base);
+        c.order.retain(|k| k.0 != base);
+    }
+    DENTRIES.lock_irq().retain(|k, _| k.0 != base);
+}
+
 /// Names in the lookup cache, for `mem`.
 pub fn cached_names() -> usize {
     DENTRIES.lock_irq().len()
