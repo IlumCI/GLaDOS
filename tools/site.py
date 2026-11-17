@@ -80,6 +80,12 @@ VARIANTS = {
     "miner": dict(model="$GLaDOS miner", ctx="", kv="", ram="2 GB", order=-1,
                   note="Boots straight to the miner and pays in $GLaDOS. "
                        "Wired Ethernet or USB tethering; Secure Boot off."),
+    # The Netinstall image (1.4.5): a kernel, a root that can run pacman, and
+    # the installer. Everything else -- the desktop, the office suite, the
+    # model -- comes down on the installed system's first start.
+    "netinstall": dict(model="Netinstall", ctx="", kv="", ram="2 GB", order=0,
+                       note="The smallest image. Installs GLaDOS and fetches the "
+                            "desktop and the model you choose on the first start."),
     "nomodel": dict(model="Kernel only", ctx="", kv="", ram="1 GB", order=0,
                     note="Kernel only. Boots to a desktop, reports that it has "
                          "no model, and everything except inference works."),

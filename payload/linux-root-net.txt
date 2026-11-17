@@ -1,0 +1,5 @@
+# payload manifest -- sha256, size, name
+#
+# Written by tools/payload.py. The bytes an ISO build must fetch
+# before it can run mkiso.py, and what they have to hash to.
+9657e8e139e6d2ee4ac07ba95968569dc8d58b603a3a700bf41db5164f71265b  277643264  root.erofs

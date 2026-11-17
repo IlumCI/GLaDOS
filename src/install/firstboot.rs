@@ -97,8 +97,12 @@ pub fn pending() -> Option<Plan> {
     parse(core::str::from_utf8(b).ok()?)
 }
 
+/// What will be written. Unchosen on a medium without the model, that is a
+/// Netinstall, the default is the model and nothing else -- "ask, default
+/// yes" -- so an install typed by hand gets what the wizard would offer.
 pub fn choice() -> Option<Plan> {
-    CHOICE.lock().clone()
+    let c = CHOICE.lock().clone();
+    c.or_else(|| (!medium_has_model()).then(|| Plan { sets: alloc::vec![String::from("minimal")], model: true }))
 }
 
 pub fn set_choice(p: Option<Plan>) {
