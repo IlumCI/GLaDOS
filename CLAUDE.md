@@ -1915,6 +1915,65 @@ pure function, so all eight of its states are asserted at boot without staging
 anything -- including that an image already on trial refuses to apply a further
 update on top of itself.
 
+### Installing to a disk, and updating what is installed (1.4.5)
+
+`src/install/` and `design/installer.md`, which carries each phase's
+measurements. Two images: **Base** (`qwen3-0.6b` in `release.yml`: model,
+slim root, voice, brain, under 2 GB) and **Netinstall** (kernel, firmware and
+a 265 MiB root from `rootfs.py build --net` that can run pacman; no model).
+
+```
+install [plan [erase|alongside]]      what the disk is and exactly what would happen
+install erase|alongside <code>        do it; the code is the plan's own digest, typed back
+install sets [desktop office media]   what a Netinstall's first boot fetches
+install model yes|no|now [dir]        the model on first boot, or copy it to the ESP now
+install finish | install ui           first boot's work, by hand; the wizard window
+update system [check|fetch|arm|cancel]  a whole system image into the spare slot
+boot [list | next <n> | add <part> <path> <name>]   other systems, BootNext, efibootmgr -c
+```
+
+**The disk:** GLaDOS's own ESP (4 GiB, even beside Windows), system slots A
+and B (EROFS, 6 GiB each, `ROOT_TYPE_GUID`), the CAS store for the rest.
+Alongside reads the GPT raw and carries every existing 128-byte entry and the
+disk GUID byte for byte (`gpt::encode_over`); it never shrinks anything.
+
+**A system update is a whole image into the slot not running**, through
+`/dev/glados/slot`: armed with a length and digest, present only while armed,
+hashed in flight, read back, test-mounted, then named in a **slot record** --
+two alternating 512-byte ESP files (`SLOT0.REC`/`SLOT1.REC`), decided pre-EBS
+by the pure `install::slot::decide`, kept at the shell once the trial slot
+actually mounted. A kernel staged beside an image is one release
+(`with_kernel`): the boot that writes a kernel restarts at once and spends no
+try, and a failed kernel takes its image back. `linux::reconcile` settles the
+user's layer against a new image by pacman's `vercmp`, through an attic it can
+undo.
+
+**`ResetSystem` before ExitBootServices works.** `update::hook` recorded it
+as going silent; that was `drive.py`'s `-no-reboot -action shutdown=pause`.
+`--allow-reboot` lets a reset reboot, which every two-boot flow here needs.
+
+**The startup menu** finds other systems in the firmware's own `Boot####`
+entries (an OS loader's shape: hard-drive node then file node) and starts one
+by `BootNext` + reset, never by chainloading, so Windows' measured boot sees
+the firmware start it.
+
+Three things that cost a run each:
+
+- **A system slot mounts at `/` or not at all.** The app scanner mounts every
+  partition, and a mounted spare slot can never be written.
+- **Reconciling by package name breaks pacman.** An `orange upgrade` leaves
+  newer versions in the layer and whiteouts over the image's files; handing
+  those back to an older image left `liblz4.so.1` hidden. Compare versions,
+  lift whiteouts, and never white out a path a layer package owns.
+- **The kernel's FAT writer creates 8.3 names only**, so `tokenizer.bin` is
+  rewritten through the alias the formatter gave it (`TOKENI~1.BIN`).
+
+Test disks live in `.qemu/p5/` (an installed disk with the desktop layer) and
+`.qemu/p6/` (a fake Windows disk built with `sfdisk`, whose `bootmgfw.efi` is
+a copy of the kernel -- booted from there it says "install or live media").
+Keys at the pre-EBS menu go through QEMU's monitor (`sendkey`); `@send` waits
+for a shell prompt.
+
 ### Ported programs, and the seam they reach through
 
 `src/port/` is everything a program written somewhere else may ask of this

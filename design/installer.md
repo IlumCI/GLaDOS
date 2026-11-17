@@ -246,13 +246,32 @@ an installed disk, reboot, `pacman -Qk` clean, heap flat; torn-superblock claim
 - Owed: the chainload fallback (OVMF took `BootNext`); the GF63's firmware
   with two ESPs, `BootNext` and BitLocker.
 
-**P7 — wizard and images.** DeskApp pages (disk → mode → plan shown exactly
-→ typed confirmation → progress → reboot), each page calling the same
-`install` steps; Netinstall root (`rootfs.py --net`) + package-set
-definitions (`packaging/glados-set-*` meta packages); model as a `[glados]`
-package (`glados-model-qwen3-0.6b`) copied store→ESP after install; Base
-trimmed to ≤2 GB; `release.yml` builds both. Update `CLAUDE.md`,
-`design/installer.md`, release notes.
+**P7 — wizard and images. Done:**
+- `gfx::installwin`: disk -> software -> plan with the code typed back ->
+  progress -> restart, each page calling the same `install` verb through
+  `desk::queue_command`. Digits press buttons, Esc goes back, so it is driven
+  over serial: a whole erase install from the wizard, screenshots in
+  `.qemu/p6/w*.png`.
+- `install::firstboot`: the wizard's (or `install sets`/`model`) choices go
+  onto the new ESP as `FIRSTBOOT.TXT`; the installed system's first boot
+  queues `install finish` (online, `pacman -S` the sets and the model at the
+  pinned snapshot, copy the model to the ESP, remove the file). On a medium
+  without the model the default is the model alone. Driven: the first boot
+  ran it, pacman answered "target not found" (the sets are not published yet)
+  and the file stayed for a retry; `install model now` copied and read back.
+- Packaging: `glados-set-{desktop,office,media}` meta packages,
+  `glados-desktop` now the three together, `glados-model-qwen3-0.6b` from the
+  pinned payload release. `rootfs.py` records an explicit list of [glados]
+  packages per image (the slim root carrying the sets would claim the desktop
+  was installed).
+- Netinstall root: `rootfs.py build --net`, 265 MiB with translations,
+  manuals and headers left out and the same paths in pacman's `NoExtract`.
+  The ISO is 279 MB, boots, mounts its root, runs pacman, plans an install.
+- `release.yml`: a `netinstall` variant (firmware, the root from
+  `payload-linux-root-net-v1`, `--no-license`) and a 2 GB check on every ISO.
+- **Operator steps owed:** publish `payload-linux-root-net-v1` (the
+  `root.erofs` `payload/linux-root-net.txt` names, or rebuild and re-record),
+  and `pkgrepo.py publish` so the sets and the model package exist.
 
 **1.4.6 groundwork kept in view (not built):** model path on ESP is per-file so
 a second model can be staged; store→ESP copy path is the "switch model after
