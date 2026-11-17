@@ -2411,6 +2411,26 @@ fn collect(s: &mut Sysbox, st: &mut cas::Store, keep: usize) -> Result<(u64, usi
     Ok((st.free.iter().map(|&(_, n)| n).sum(), kept))
 }
 
+/// Commit the tree now if it changed since the last commit and the store is
+/// writable. `Ok(false)` when there was nothing to do or nowhere to write --
+/// not an error: a machine with no store has always answered `fsync` as done.
+pub fn commit_now() -> Result<bool, cas::Error> {
+    if !store::mounted() || !crate::dev::nvme::holds(crate::dev::nvme::Holder::Store) {
+        return Ok(false);
+    }
+    let current = with(|s| tree::content_hash(&s.root));
+    let Some(current) = current else { return Ok(false) };
+    if unsafe { LAST_ROOT.get().map(|h| h == current).unwrap_or(false) } {
+        return Ok(false);
+    }
+    let r = with(|s| store::with(|st| commit_tree(s, st)).unwrap_or(Err(cas::Error::NotFormatted)))
+        .unwrap_or(Err(cas::Error::NotFormatted));
+    r.map(|_| {
+        unsafe { *LAST_ROOT.get() = Some(current) };
+        true
+    })
+}
+
 /// `store gc`.
 pub fn gc_now() -> Result<(u64, usize, u64), cas::Error> {
     with(|s| {

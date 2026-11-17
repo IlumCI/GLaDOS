@@ -161,6 +161,14 @@ pub fn settle(path: &str) {
     }
 }
 
+/// Commit every live writer's pending bytes, for `sync`.
+pub fn settle_all() {
+    let paths: Vec<String> = unsafe { WRITERS.get() }.iter().map(|(p, _)| p.clone()).collect();
+    for p in paths {
+        settle(&p);
+    }
+}
+
 /// A rename moves the file, and on Linux an open descriptor moves with it:
 /// what is written through it afterwards lands under the new name. Here a
 /// description commits by its *path* at its last close, so a file renamed

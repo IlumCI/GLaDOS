@@ -10089,14 +10089,30 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         SYS_LINK => (sys_linkat(super::fs::AT_FDCWD as u64, f.rdi, super::fs::AT_FDCWD as u64, f.rsi, 0), true),
         SYS_LINKAT => (sys_linkat(f.rdi, f.rsi, f.rdx, f.r10, f.r8), true),
         SYS_UTIMENSAT => (sys_utimensat(f.rdi, f.rsi, f.rdx, f.r10), true),
-        // What a program saving a file asks after writing it, and none of it
-        // has anything to do here. A write reaches the store at the last
-        // close whatever is synced; there are no permissions or owners to
-        // change, every file reporting one mode already; and there is one
-        // machine, so an advisory lock has nobody to exclude. Refused, they
-        // stopped LibreOffice saving anything: `impl_store ... Io General`
-        // on every document written into /tmp.
-        SYS_FSYNC | SYS_FDATASYNC | SYS_SYNC | SYS_SYNCFS | SYS_FLOCK => (0, true),
+        // **A sync is a commit now**, where it used to answer done and leave
+        // the bytes in memory until the next autosnap -- up to a minute in
+        // which a power cut lost what a program had been told was safe.
+        // `fsync` settles that file's pending writes, `sync` everybody's,
+        // and either commits the tree if it changed. Answering EIO when the
+        // commit fails is the honest half: the program asked precisely
+        // whether its data is on the disk. With no writable store there is
+        // nowhere to commit and the answer stays done, as it always was.
+        SYS_FSYNC | SYS_FDATASYNC | SYS_SYNC | SYS_SYNCFS => {
+            let open = nr == SYS_SYNC || nr == SYS_SYNCFS || path_of_fd(f.rdi).is_some()
+                || with_fds(|fds, _| matches!(fds.get(f.rdi as usize), Some(Some(_)))).unwrap_or(false);
+            if !open {
+                (EBADF, true)
+            } else {
+                match path_of_fd(f.rdi) {
+                    Some(p) if nr == SYS_FSYNC || nr == SYS_FDATASYNC => super::fs::settle(&p),
+                    _ if nr == SYS_SYNC || nr == SYS_SYNCFS => super::fs::settle_all(),
+                    _ => {}
+                }
+                (if crate::sysbox::commit_now().is_ok() { 0 } else { EIO }, true)
+            }
+        }
+        // One machine, so an advisory lock has nobody to exclude.
+        SYS_FLOCK => (0, true),
         SYS_CHMOD => (sys_chmodat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi), true),
         SYS_FCHMODAT => (sys_chmodat(f.rdi, f.rsi, f.rdx), true),
         SYS_FCHMODAT2 => (sys_fchmodat2(f.rdi, f.rsi, f.rdx, f.r10), true),

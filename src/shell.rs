@@ -6538,12 +6538,24 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         }
         "reboot" => {
             console::set_color(YELLOW);
+            // What changed since the last snapshot, kept before the power goes.
+            match crate::sysbox::commit_now() {
+                Ok(true) => kprintln!("  committed what changed since the last snapshot"),
+                Ok(false) => {}
+                Err(e) => kprintln!("  could not commit before going: {:?}", e),
+            }
             kprintln!("  asking the firmware for a cold reset...");
             console::set_color(LTGRAY);
             crate::cpu::reboot();
         }
         "shutdown" | "poweroff" | "halt" => {
             console::set_color(YELLOW);
+            // What changed since the last snapshot, kept before the power goes.
+            match crate::sysbox::commit_now() {
+                Ok(true) => kprintln!("  committed what changed since the last snapshot"),
+                Ok(false) => {}
+                Err(e) => kprintln!("  could not commit before going: {:?}", e),
+            }
             kprintln!("  asking the firmware to power down...");
             console::set_color(LTGRAY);
             crate::cpu::shutdown();
