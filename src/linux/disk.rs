@@ -425,6 +425,30 @@ static LISTINGS: Racy<alloc::collections::BTreeMap<(u64, u64), Listing>> =
 /// Entries kept across every cached listing before the cache starts again.
 const LISTING_CAP: usize = 200_000;
 
+/// The root image's own listing of a directory, ignoring the guest's layer
+/// *and* its whiteouts: what the system image ships, for `reconcile`, which
+/// has to see the image's files that an upgrade in the layer hid.
+pub fn image_entries(path: &str) -> Vec<(String, bool, usize)> {
+    let _g = big();
+    let m = unsafe { MOUNTS.get() };
+    let Some(root) = m.iter().find(|x| x.prefix.is_empty()) else { return Vec::new() };
+    let Vol::Erofs(img) = &root.vol else { return Vec::new() };
+    let Ok(ino) = img.lookup(path, true) else { return Vec::new() };
+    img.dir(&ino)
+        .map(|v| v.into_iter().filter(|e| e.0 != "." && e.0 != "..").map(|(name, _, t)| (name, t == 2, 0)).collect())
+        .unwrap_or_default()
+}
+
+/// A file's bytes as the root image has them, under the same rule.
+pub fn image_read(path: &str) -> Option<Vec<u8>> {
+    let _g = big();
+    let m = unsafe { MOUNTS.get() };
+    let root = m.iter().find(|x| x.prefix.is_empty())?;
+    let Vol::Erofs(img) = &root.vol else { return None };
+    let ino = img.lookup(path, true).ok()?;
+    img.read_all(&ino).ok()
+}
+
 pub fn entries(path: &str) -> Vec<(String, bool, usize)> {
     let _g = big();
     let Some(Some(n)) = lookup(path) else { return Vec::new() };

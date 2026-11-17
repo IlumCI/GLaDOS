@@ -858,7 +858,15 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // A system image on trial: this boot reached here on it, so keep it --
     // after the root is mounted, because what is kept is the slot that
     // actually mounted, and before that nothing has.
+    if let Some(line) = linux::reconcile::at_boot() {
+        kprintln!("[update] {}", line);
+    }
     if let Some(line) = install::slot::settle_now() {
+        kprintln!("[update] {}", line);
+    }
+    // Again, now the verdict is in: a kept image drops the attic and one that
+    // did not mount puts it back, this boot rather than the next.
+    if let Some(line) = linux::reconcile::at_boot() {
         kprintln!("[update] {}", line);
     }
 

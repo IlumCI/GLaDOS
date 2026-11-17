@@ -44,6 +44,7 @@ pub mod session;
 pub mod i386;
 pub mod disk;
 pub mod ns;
+pub mod reconcile;
 pub mod link;
 pub mod timer;
 pub mod pty;
@@ -78,6 +79,7 @@ pub fn checks() -> alloc::vec::Vec<(&'static str, bool)> {
     out.extend(i386::checks());
     out.extend(disk::checks());
     out.extend(ns::checks());
+    out.extend(reconcile::checks());
     out.extend(link::checks());
     out.extend(timer::checks());
     out.extend(pty::checks());
