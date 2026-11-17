@@ -182,11 +182,45 @@ Was: Verify: install the Desktop set on
 an installed disk, reboot, `pacman -Qk` clean, heap flat; torn-superblock claim
 (planted immediate free must fail).
 
-**P5 — system updates.** Manifest keys, `/dev/glados/slot`, slot records,
-`slot::decide`, one pending-release record coupling kernel + slot, the
-format rule, import of an old store, reconcile, pinned Arch snapshot in the image's `pacman.conf`
-(`tools/rootfs.py`). Verify: two images a version apart flip; a deliberately
-broken one rolls back.
+**P5 — system updates. Done:**
+- `install::slot`: a 512-byte record in two alternating ESP files
+  (`SLOT0.REC`/`SLOT1.REC`, CRC, higher sequence wins, a successor always goes
+  to the other file). Decided pre-EBS beside `update::hook` by a pure
+  `decide` (22 claims); kept at the shell once the trial slot has actually
+  mounted, and undone at once if it did not. The record carries the previous
+  system's digest and version, so a rollback describes what it went back to.
+- `install::feed` + `/dev/glados/slot`: armed with length and digest, present
+  only while armed, aimed only at the slot not running, hashed on the way in,
+  read back, test-mounted, then named. Driven: a 1 MiB junk image refused and
+  never named; 700 MiB images flipped A->B, B->A.
+- **The kernel and the image are one release.** `with_kernel` is read off the
+  ESP (a staged `UPDATE.FLG`) when the image finishes. The boot that writes a
+  kernel spends no try and restarts at once; a failed kernel takes its image
+  back. Driven with a throwaway-key build: apply -> wait -> restart -> both
+  on trial -> kept; and apply -> trial killed before the shell -> next boot
+  restored the old kernel *and* slot in one restart.
+- **`ResetSystem` before EBS works.** The "silent" note in `update::hook` was
+  the harness: QEMU ran with `-no-reboot -action shutdown=pause`.
+  `drive.py --allow-reboot` lets resets reboot.
+- Manifest: `system-version/url/size/sha256` (all or none), `arch-snapshot`,
+  `min-kernel`, `store-format`; `update system check|fetch|arm|cancel`
+  (`fetch` runs `curl -o /dev/glados/slot` as a job; not driven against a
+  real channel yet).
+- `linux::reconcile`: on a trial's first boot, shared packages are decided by
+  pacman's `vercmp` -- image at least as new takes the package (layer entry
+  and files to an attic, whiteouts over the image's copy lifted); layer newer
+  keeps it (image's entry and unowned files whited out, never a path a layer
+  package owns). `/etc` is never handed back. Undone from the attic if the
+  trial fails. Driven on the desktop layer: 1 handed back, 24 upgraded kept,
+  `pacman -Qkq` clean. The first version (names only) broke pacman.
+- `rootfs.py` pins the Arch Archive day (default yesterday UTC), rewrites
+  every package URL to it and writes `/etc/glados/arch-snapshot`.
+- Import of an old store is the erase path's step 1: a store found at boot is
+  restored into memory, `detach_from_store` brings every away file in, and the
+  new store's first snapshot holds it. Bounded by the heap.
+- Owed: the image-led rollback with a kernel (claims only); the compositor
+  stalls ~2 s during a slot read-back; `update system fetch` over a real
+  channel.
 
 **P6 — alongside + startup menu.** Alongside mode in `apply.rs` (kept slots'
 raw 128-byte entries overlaid from disk); `src/boot/menu.rs` pre-EBS, shown
