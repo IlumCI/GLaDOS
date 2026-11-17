@@ -445,6 +445,9 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     let kernel_file = uefi::read_file(bs, image, "\\EFI\\BOOT\\BOOTX64.EFI");
     // Written by the installer onto an installed disk's ESP and nowhere else,
     // so this says which kind of medium this boot came from.
+    if let Some(b) = uefi::read_file(bs, image, install::firstboot::UEFI_PATH) {
+        install::firstboot::found(b.as_slice());
+    }
     match uefi::read_file(bs, image, "\\GLADOS\\INSTALL.ID") {
         Some(b) => serial_println!(
             "glados: booted from an installed disk, id {}",
@@ -871,6 +874,14 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     }
     if let Some(line) = install::slot::settle_now() {
         kprintln!("[update] {}", line);
+    }
+    // A Netinstall's first boot: what was chosen in the installer comes down
+    // now, through the shell, as if typed -- so it prints where a person is
+    // looking and can be run again by hand if the network was not there.
+    if let Some(p) = install::firstboot::pending() {
+        kprintln!("[install] first boot: fetching {} -- 'install finish' does it again if this fails",
+            if p.packages().is_empty() { alloc::string::String::from("nothing") } else { p.packages().join(" ") });
+        gfx::desk::queue_command("install finish");
     }
     // Again, now the verdict is in: a kept image drops the attic and one that
     // did not mount puts it back, this boot rather than the next.

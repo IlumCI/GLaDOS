@@ -11,6 +11,7 @@
 pub mod apply;
 pub mod bootopt;
 pub mod feed;
+pub mod firstboot;
 pub mod menu;
 pub mod gpt;
 pub mod plan;
@@ -272,7 +273,8 @@ pub fn selftest() -> bool {
         .chain(crate::store::fatfmt::checks())
         .chain(bootopt::checks())
         .chain(slot::checks())
-        .chain(menu::checks());
+        .chain(menu::checks())
+        .chain(firstboot::checks());
     for (what, good) in all {
         n += 1;
         if !good {
@@ -282,6 +284,23 @@ pub fn selftest() -> bool {
     }
     kprintln!("    {} claim(s)", n);
     ok
+}
+
+/// What the last install printed, and how it stands, for the wizard window.
+static LOG: crate::sync::Spin<Vec<String>> = crate::sync::Spin::new(Vec::new());
+/// 0 idle, 1 installing, 2 installed, 3 stopped.
+pub static STATE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+pub fn log() -> Vec<String> {
+    LOG.lock_irq().clone()
+}
+
+fn note(line: &str) {
+    let mut l = LOG.lock_irq();
+    if l.len() > 200 {
+        l.remove(0);
+    }
+    l.push(String::from(line.trim_start()));
 }
 
 /// `install`: what the disk is, what an install would do to it, and doing it.
@@ -356,11 +375,24 @@ pub fn cmd(rest: &str) {
                 return;
             }
             console::set_color(LTGRAY);
-            let r = if verb == "erase" {
-                apply::erase(arg, &mut |line| kprintln!("{}", line))
-            } else {
-                apply::alongside(arg, &mut |line| kprintln!("{}", line))
+            use core::sync::atomic::Ordering::Relaxed;
+            LOG.lock_irq().clear();
+            STATE.store(1, Relaxed);
+            let mut say = |line: &str| {
+                note(line);
+                kprintln!("{}", line);
             };
+            let r = if verb == "erase" { apply::erase(arg, &mut say) } else { apply::alongside(arg, &mut say) };
+            match &r {
+                Ok(()) => {
+                    note("installed -- remove the install medium and restart");
+                    STATE.store(2, Relaxed);
+                }
+                Err(e) => {
+                    note(&format!("stopped: {}", e));
+                    STATE.store(3, Relaxed);
+                }
+            }
             match r {
                 Ok(()) => {
                     console::set_color(LTGREEN);
@@ -373,6 +405,51 @@ pub fn cmd(rest: &str) {
             }
             console::set_color(WHITE);
         }
-        _ => kprintln!("  install [plan [erase|alongside]] | install erase|alongside <code>"),
+        "sets" => {
+            let names: Vec<&str> = rest.split_whitespace().skip(1).collect();
+            if names.is_empty() {
+                for (n, what) in firstboot::SETS {
+                    kprintln!("  {:<8} {}", n, what);
+                }
+                match firstboot::choice() {
+                    Some(p) => kprintln!("  chosen: {} -- model {}", p.sets.join(" "), if p.model { "yes" } else { "no" }),
+                    None => kprintln!("  nothing chosen: an install carries what this medium has"),
+                }
+                return;
+            }
+            if let Some(bad) = names.iter().find(|n| !firstboot::SETS.iter().any(|(s, _)| s == *n)) {
+                kprintln!("  no set '{}' -- 'install sets' lists them", bad);
+                return;
+            }
+            let model = firstboot::choice().map(|p| p.model).unwrap_or(!firstboot::medium_has_model());
+            firstboot::set_choice(Some(firstboot::Plan { sets: names.iter().map(|s| String::from(*s)).collect(), model }));
+            kprintln!("  the installed system fetches these on its first boot");
+        }
+        "model" => match arg {
+            "yes" | "no" => {
+                let mut p = firstboot::choice().unwrap_or(firstboot::Plan { sets: Vec::new(), model: false });
+                p.model = arg == "yes";
+                firstboot::set_choice(Some(p));
+                kprintln!("  model: {} on the installed system's first boot", if arg == "yes" { "fetched" } else { "not fetched" });
+            }
+            "now" => {
+                let dir = words.next().unwrap_or(firstboot::MODEL_DIR);
+                match firstboot::model_install(dir, &mut |l| kprintln!("{}", l)) {
+                    Ok(()) => {}
+                    Err(e) => kprintln!("  {}", e),
+                }
+            }
+            _ => kprintln!("  install model yes|no (for a Netinstall's first boot) | install model now [dir]"),
+        },
+        "ui" => crate::gfx::installwin::open(),
+        "finish" => match firstboot::finish(&mut |l| kprintln!("{}", l)) {
+            Ok(()) => {}
+            Err(e) => {
+                console::set_color(LTRED);
+                kprintln!("  {}", e);
+                console::set_color(WHITE);
+            }
+        },
+        _ => kprintln!("  install [plan [erase|alongside]] | erase|alongside <code> | sets [..] | model yes|no|now | finish"),
     }
 }

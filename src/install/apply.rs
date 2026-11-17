@@ -434,6 +434,10 @@ fn write_esp(start: u64, blocks: u64, carried: &[(String, &'static [u8])], rec: 
     let mut files: Vec<fatfmt::File> = carried.iter().map(|(p, d)| fatfmt::File { path: p, data: d }).collect();
     files.push(fatfmt::File { path: "GLADOS/INSTALL.ID", data: &id });
     files.push(fatfmt::File { path: "GLADOS/SLOT1.REC", data: rec });
+    let first = super::firstboot::text().map(String::into_bytes).unwrap_or_default();
+    if !first.is_empty() {
+        files.push(fatfmt::File { path: "GLADOS/FIRSTBOOT.TXT", data: &first });
+    }
     let l = fatfmt::layout(blocks, &files).map_err(String::from)?;
     if !nvme::claim(CONFIRM, Holder::Esp, start, blocks) {
         return Err("the write gate refused the boot partition".into());
