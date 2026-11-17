@@ -114,6 +114,32 @@ SKIP = {"systemd", "systemd-libs-dummy", "bubblewrap", "glycin", "linux-api-head
 MIRROR = "https://geo.mirror.pkgbuild.com"
 REPOS = ["core", "extra", "multilib"]
 
+# **An image is pinned to a dated Arch snapshot** (installer decision,
+# 2026-11-16). The live mirror rotates packages out within days, so a
+# system image resolved against it and an `orange install` run a month later
+# against the same mirror are two different distributions -- a library the
+# image has at one version and a package built against the next. The
+# Archive keeps every day's repositories forever, so the image is resolved
+# against one day, its pacman.conf points at the same day, and what the user
+# installs on top matches it. The date is written into the image
+# (`/etc/glados/arch-snapshot`) and into the release manifest's
+# `arch-snapshot` line; the next system image moves both.
+ARCHIVE = "https://archive.archlinux.org/repos"
+SNAPSHOT = None
+
+
+def snapshot_mirror(day):
+    """The Archive's repositories for `day` (YYYY/MM/DD), or the live mirror."""
+    return f"{ARCHIVE}/{day}" if day else MIRROR
+
+
+def default_snapshot(today=None):
+    """Yesterday, UTC: the Archive publishes a day once it is over, so
+    today's directory may not exist yet when a build starts."""
+    import datetime
+    d = (today or datetime.datetime.now(datetime.timezone.utc).date()) - datetime.timedelta(days=1)
+    return d.strftime("%Y/%m/%d")
+
 
 def private_db():
     """Fresh sync databases from the mirror, and an empty local database, so
@@ -146,8 +172,21 @@ def resolve(pkgs):
         name = pkgname(u.rsplit("/", 1)[-1])
         if name in SKIP:
             continue
-        out.append(PINS.get(name, u))
+        out.append(PINS.get(name, pinned_url(u)))
     return out
+
+
+def pinned_url(u):
+    """`u` from the day the image is pinned to. pacman prints its own
+    configured servers -- the host's -- whatever database it resolved from,
+    so without this the set is resolved against one day and downloaded from
+    another. A file already in the host's cache is the same file, since the
+    database named it by version."""
+    if not u.startswith("http"):
+        return u
+    parts = u.split("/")
+    # .../<repo>/os/<arch>/<file>
+    return f"{MIRROR}/{parts[-4]}/os/{parts[-2]}/{parts[-1]}"
 
 
 def pkgname(filename):
@@ -388,7 +427,13 @@ def pacman_conf(names):
     run."""
     d = TREE / "etc/pacman.d"
     d.mkdir(parents=True, exist_ok=True)
-    (d / "mirrorlist").write_text(f"# The mirror the image was built from.\nServer = {MIRROR}/$repo/os/$arch\n")
+    (d / "mirrorlist").write_text(
+        f"# The mirror the image was built from{' -- the Arch Archive, pinned to ' + SNAPSHOT if SNAPSHOT else ''}.\n"
+        f"# Packages installed on top come from the same day, so they match the image.\n"
+        f"Server = {MIRROR}/$repo/os/$arch\n")
+    if SNAPSHOT:
+        (TREE / "etc/glados").mkdir(parents=True, exist_ok=True)
+        (TREE / "etc/glados/arch-snapshot").write_text(SNAPSHOT + "\n")
     conf = TREE / "etc/pacman.conf"
     text = conf.read_text() if conf.exists() else "[options]\n"
     if "IgnorePkg = gdk-pixbuf2" not in text:
@@ -593,7 +638,16 @@ def build(reuse=False):
 
 
 def selftest():
+    import datetime
     claims = [
+        ("a snapshot names one Archive day", snapshot_mirror("2026/11/15") == "https://archive.archlinux.org/repos/2026/11/15"),
+        ("no snapshot is the live mirror", snapshot_mirror(None) == MIRROR),
+        ("a host mirror URL is rewritten to the pinned day's",
+         pinned_url("https://elsewhere.example/extra/os/x86_64/a-1-1-x86_64.pkg.tar.zst")
+         == f"{MIRROR}/extra/os/x86_64/a-1-1-x86_64.pkg.tar.zst"),
+        ("and a cached file is left alone", pinned_url("file:///var/cache/x.pkg.tar.zst") == "file:///var/cache/x.pkg.tar.zst"),
+        ("the default is the day before, which the Archive has finished",
+         default_snapshot(datetime.date(2026, 3, 1)) == "2026/02/28"),
         ("a plain package name is everything before version, release and arch",
          pkgname("gtk3-1:3.24.52-1-x86_64.pkg.tar.zst") == "gtk3"),
         ("and a name with dashes in it keeps them",
@@ -615,7 +669,14 @@ def main():
     a.add_argument("--selftest", action="store_true")
     a.add_argument("--reuse", action="store_true", help="image the tree already unpacked")
     a.add_argument("--slim", action="store_true", help="the ISO's root (SLIM) into .qemu/root-slim.erofs")
+    a.add_argument("--snapshot", metavar="YYYY/MM/DD", help="the Arch Archive day to pin (default: yesterday, UTC)")
+    a.add_argument("--live-mirror", action="store_true", help="resolve against the rotating mirror instead (unpinned)")
     args = a.parse_args()
+    global MIRROR, SNAPSHOT
+    if not args.live_mirror and not args.selftest:
+        SNAPSHOT = args.snapshot or default_snapshot()
+        MIRROR = snapshot_mirror(SNAPSHOT)
+        print(f"  pinned to the Arch Archive of {SNAPSHOT}", file=sys.stderr)
     if args.slim:
         global PACKAGES, IMAGE, TREE
         PACKAGES = SLIM
