@@ -91,6 +91,11 @@ fn cache_fill(base: u64, b0: u64, buf: &[u8]) {
     }
 }
 
+/// Names in the lookup cache, for `mem`.
+pub fn cached_names() -> usize {
+    DENTRIES.lock_irq().len()
+}
+
 /// Blocks cached, for `linux mount`'s report.
 pub fn cached_blocks() -> usize {
     CACHE.lock_irq().map.len()

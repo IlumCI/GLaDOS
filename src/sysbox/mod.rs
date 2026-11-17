@@ -2473,10 +2473,48 @@ pub fn gc_now() -> Result<(u64, usize, u64), cas::Error> {
 /// hundred bytes, and an NVMe round trip per read of `/etc/desk` buys nothing.
 pub const EVICT_AT: usize = 64 * 1024;
 
+/// The same, for the Linux layer (`/linux/root`), and smaller on purpose.
+/// **A desktop is mostly small files**: of the 1,689 MiB `orange upgrade`
+/// adds, 284 MiB is in files under 64 KiB -- icons, translations, Python
+/// modules -- and only 40 MiB in files under 4 KiB. Measured on the built
+/// root, not guessed. At 64 KiB every one of those stayed resident after
+/// being stored, and an install took the heap from 87 MB to 578.
+pub const LAYER_EVICT_AT: usize = 4 * 1024;
+
+/// Where in the tree a node is, for which threshold applies to it.
+#[derive(Clone, Copy, PartialEq)]
+enum Region {
+    Top,
+    Linux,
+    Layer,
+}
+
+impl Region {
+    fn child(self, name: &str) -> Region {
+        match (self, name) {
+            (Region::Top, "linux") => Region::Linux,
+            (Region::Linux, "root") | (Region::Layer, _) => Region::Layer,
+            _ => Region::Top,
+        }
+    }
+    fn evict_at(self) -> usize {
+        if self == Region::Layer { LAYER_EVICT_AT } else { EVICT_AT }
+    }
+}
+
 fn write_node(
     st: &mut cas::Store,
     n: &mut Node,
     w: &mut Written,
+) -> Result<cas::ChunkRef, cas::Error> {
+    write_in(st, n, w, Region::Top)
+}
+
+fn write_in(
+    st: &mut cas::Store,
+    n: &mut Node,
+    w: &mut Written,
+    at: Region,
 ) -> Result<cas::ChunkRef, cas::Error> {
     let h = tree::content_hash(n);
     let r = match w.get(&h) {
@@ -2485,7 +2523,7 @@ fn write_node(
             // under it may still be resident: a file rewritten with the bytes
             // it already had makes the whole tree hash as before, and this
             // early exit at the root used to leave a 100 MB blob in the heap.
-            evict_written(n, w);
+            evict_written(n, w, at);
             r
         }
         None => {
@@ -2497,7 +2535,7 @@ fn write_node(
                 Node::Dir(es) => {
                     let mut encoded = Vec::new();
                     for e in es.iter_mut() {
-                        let cr = write_node(st, &mut e.node, w)?;
+                        let cr = write_in(st, &mut e.node, w, at.child(&e.name))?;
                         encoded.push((e.name.clone(), e.kind(), cr, e.attr.as_deref().cloned()));
                     }
                     st.put(&tree::encode_dir(&encoded))?
@@ -2511,7 +2549,7 @@ fn write_node(
     // its chunk reference *is* its content address and length, so swapping it
     // in changes no address anywhere above it.
     if let Node::Blob(b) = n {
-        if b.len() >= EVICT_AT {
+        if b.len() >= at.evict_at() {
             *n = Node::Away(r);
         }
     }
@@ -2521,16 +2559,16 @@ fn write_node(
 /// Swap every large resident blob under `n` for the reference `w` already
 /// holds for it. Called where `n` is known to be stored whole, so every blob
 /// under it is in `w`; one that somehow is not is left resident, never guessed.
-fn evict_written(n: &mut Node, w: &Written) {
+fn evict_written(n: &mut Node, w: &Written, at: Region) {
     match n {
-        Node::Blob(b) if b.len() >= EVICT_AT => {
+        Node::Blob(b) if b.len() >= at.evict_at() => {
             if let Some(r) = w.get(&tree::content_hash(n)) {
                 *n = Node::Away(r);
             }
         }
         Node::Dir(es) => {
             for e in es.iter_mut() {
-                evict_written(&mut e.node, w);
+                evict_written(&mut e.node, w, at.child(&e.name));
             }
         }
         _ => {}

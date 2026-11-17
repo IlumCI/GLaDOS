@@ -159,7 +159,7 @@ Was: Golden-hash
 claim (planted unconditional render must fail it); `chmod/chown/touch`
 survive reboot.
 
-**P4 — disk-backed bodies, space map, GC.** Done so far:
+**P4 — disk-backed bodies, space map, GC. Done:**
 - blobs ≥ 64 KiB become `Node::Away` once stored (also under a cached
   ancestor): 297 MB heap → 88 MB across a snapshot of two 100 MB files;
 - large stored files open read-only as range-read `DiskFile`s; `ld.so`
@@ -169,6 +169,12 @@ survive reboot.
   a planted marker bug freed live data *without* the first test noticing
   (first fit missed it), which is why the cross-check exists, and it caught
   the same plant; reclaimed space reused, reboot + fsck clean;
+- the Linux layer evicts from 4 KiB (kernel namespace keeps 64 KiB): an
+  82 MB copy of Python's stdlib took the heap +89 MB and back to +6.5 MB
+  after the snapshot; a full desktop install (244 packages) persisted and
+  `pacman -Qkq` is clean after reboot; heap growth after that is the root
+  image's bounded caches (`mem` reports them) — a second identical query
+  adds 704 B;
 - `fsync`/`sync` commit; a power-cut test keeps the fsynced file and loses
   the unsynced one; writes commit at 256 MiB pending, since autosnap never
   runs while a guest holds the shell.

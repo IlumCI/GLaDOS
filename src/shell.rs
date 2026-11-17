@@ -5335,6 +5335,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             let (used, total) = mem::heap::HEAP.stats();
             kprintln!("  heap  {} B used / {} B total", used, total);
             kprintln!("  free  {} KiB", (total - used) / 1024);
+            // The two caches that grow with use and are bounded by design,
+            // so heap growth can be told apart from a leak by reading this.
+            kprintln!(
+                "  root image cache  {} MiB of 128, {} name(s) looked up",
+                crate::store::erofs::cached_blocks() * 4096 >> 20,
+                crate::store::erofs::cached_names()
+            );
             // Where a fixed-address image may be placed, which the heap figures
             // above say nothing about: they describe one contiguous allocation
             // the kernel already owns, and this is everything it does not.
