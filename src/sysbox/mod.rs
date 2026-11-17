@@ -2198,7 +2198,7 @@ fn cmd_snap() {
     let ok = with(|s| {
         let res = store::with(|st| {
             let before = st.sb.alloc_next;
-            let root = write_node(st, &s.root, &mut s.written)?;
+            let root = write_node(st, &mut s.root, &mut s.written)?;
             let mut name = [0u8; cas::NAME_LEN];
             name[..4].copy_from_slice(b"root");
             let entry = cas::Entry { name, chunk: root };
@@ -2257,32 +2257,79 @@ fn report_store_error(e: cas::Error) {
     }
 }
 
+/// Blobs at least this large leave memory once they are on disk.
+///
+/// **A snapshot used to double what it saved**: the bytes went to disk and
+/// stayed resident, so a desktop's packages (~1.8 GB) sat in the heap for the
+/// rest of the boot after being written. Past this size a committed blob
+/// becomes `Node::Away` -- its address and length, which is all the tree
+/// needs -- and is read back from disk when something opens it. Below it a
+/// file stays: the kernel's own configuration is read often and is a few
+/// hundred bytes, and an NVMe round trip per read of `/etc/desk` buys nothing.
+pub const EVICT_AT: usize = 64 * 1024;
+
 fn write_node(
     st: &mut cas::Store,
-    n: &Node,
+    n: &mut Node,
     w: &mut Written,
 ) -> Result<cas::ChunkRef, cas::Error> {
     let h = tree::content_hash(n);
-    if let Some(r) = w.get(&h) {
-        return Ok(r);
-    }
-    let r = match n {
-        Node::Blob(b) => st.put(b)?,
-        // Already stored, at this exact address, which is what the reference
-        // says. Re-writing it would allocate a second copy of identical bytes
-        // in an append-only store that never reclaims.
-        Node::Away(r) => *r,
-        Node::Dir(es) => {
-            let mut encoded = Vec::new();
-            for e in es {
-                let cr = write_node(st, &e.node, w)?;
-                encoded.push((e.name.clone(), e.kind(), cr, e.attr.as_deref().cloned()));
-            }
-            st.put(&tree::encode_dir(&encoded))?
+    let r = match w.get(&h) {
+        Some(r) => {
+            // Already stored, and so is everything under it -- but what is
+            // under it may still be resident: a file rewritten with the bytes
+            // it already had makes the whole tree hash as before, and this
+            // early exit at the root used to leave a 100 MB blob in the heap.
+            evict_written(n, w);
+            r
+        }
+        None => {
+            let r = match n {
+                Node::Blob(b) => st.put(b)?,
+                // Already stored, at this exact address, which is what the
+                // reference says. Re-writing it would allocate a second copy.
+                Node::Away(r) => *r,
+                Node::Dir(es) => {
+                    let mut encoded = Vec::new();
+                    for e in es.iter_mut() {
+                        let cr = write_node(st, &mut e.node, w)?;
+                        encoded.push((e.name.clone(), e.kind(), cr, e.attr.as_deref().cloned()));
+                    }
+                    st.put(&tree::encode_dir(&encoded))?
+                }
+            };
+            w.insert(h, r);
+            r
         }
     };
-    w.insert(h, r);
+    // On disk now, whether this call put it there or an earlier one did; and
+    // its chunk reference *is* its content address and length, so swapping it
+    // in changes no address anywhere above it.
+    if let Node::Blob(b) = n {
+        if b.len() >= EVICT_AT {
+            *n = Node::Away(r);
+        }
+    }
     Ok(r)
+}
+
+/// Swap every large resident blob under `n` for the reference `w` already
+/// holds for it. Called where `n` is known to be stored whole, so every blob
+/// under it is in `w`; one that somehow is not is left resident, never guessed.
+fn evict_written(n: &mut Node, w: &Written) {
+    match n {
+        Node::Blob(b) if b.len() >= EVICT_AT => {
+            if let Some(r) = w.get(&tree::content_hash(n)) {
+                *n = Node::Away(r);
+            }
+        }
+        Node::Dir(es) => {
+            for e in es.iter_mut() {
+                evict_written(&mut e.node, w);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn read_node(
@@ -2841,7 +2888,7 @@ pub fn autosnap_poll() {
     let saved = with(|s| {
         crate::store::with(|st| {
             let before = st.sb.alloc_next;
-            let root = write_node(st, &s.root, &mut s.written).ok()?;
+            let root = write_node(st, &mut s.root, &mut s.written).ok()?;
             let mut name = [0u8; cas::NAME_LEN];
             name[..4].copy_from_slice(b"root");
             let entry = cas::Entry { name, chunk: root };
