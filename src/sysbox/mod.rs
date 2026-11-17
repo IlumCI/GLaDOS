@@ -1150,13 +1150,32 @@ fn note(root: &Node, p: &[String]) {
 }
 
 pub fn write_blob(path: &str, data: Vec<u8>) -> bool {
-    with(|s| {
+    let len = data.len();
+    let ok = with(|s| {
         let p = parse(&s.cwd, path);
         note(&s.root, &p);
         tree::put(&mut s.root, &p, Node::Blob(data)).is_ok()
     })
-    .unwrap_or(false)
+    .unwrap_or(false);
+    // **Memory pressure commits.** Autosnap runs from the shell's idle loop,
+    // and while a guest runs the shell is not idle: `orange upgrade` writing a
+    // desktop's ~1.8 GB of files would hold every one of them in the heap
+    // until it exited. Past this much written and uncommitted, the write that
+    // crosses it commits, which also moves what it wrote out of memory.
+    if ok && len >= 4096 {
+        let pending = UNCOMMITTED.fetch_add(len, core::sync::atomic::Ordering::Relaxed) + len;
+        if pending >= COMMIT_AT {
+            UNCOMMITTED.store(0, core::sync::atomic::Ordering::Relaxed);
+            let _ = commit_now();
+        }
+    }
+    ok
 }
+
+/// Bytes written by `write_blob` since the last pressure commit.
+static UNCOMMITTED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+/// How much may wait in memory before a write commits it.
+pub const COMMIT_AT: usize = 256 << 20;
 
 /// An away blob, read back and checked against its own address.
 ///

@@ -159,7 +159,20 @@ Was: Golden-hash
 claim (planted unconditional render must fail it); `chmod/chown/touch`
 survive reboot.
 
-**P4 — disk-backed bodies, space map, GC.** Verify: install the Desktop set on
+**P4 — disk-backed bodies, space map, GC.** Done so far:
+- blobs ≥ 64 KiB become `Node::Away` once stored (also under a cached
+  ancestor): 297 MB heap → 88 MB across a snapshot of two 100 MB files;
+- large stored files open read-only as range-read `DiskFile`s; `ld.so`
+  loaded glibc from the layer, `tail` of 100 MB read the end only;
+- mark-and-sweep keeping 8 checkpoints, free runs in memory only (format
+  unchanged); a second independent walk must agree or nothing is freed —
+  a planted marker bug freed live data *without* the first test noticing
+  (first fit missed it), which is why the cross-check exists, and it caught
+  the same plant; reclaimed space reused, reboot + fsck clean;
+- `fsync`/`sync` commit; a power-cut test keeps the fsynced file and loses
+  the unsynced one; writes commit at 256 MiB pending, since autosnap never
+  runs while a guest holds the shell.
+Was: Verify: install the Desktop set on
 an installed disk, reboot, `pacman -Qk` clean, heap flat; torn-superblock claim
 (planted immediate free must fail).
 
