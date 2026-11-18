@@ -273,6 +273,35 @@ an installed disk, reboot, `pacman -Qk` clean, heap flat; torn-superblock claim
   `root.erofs` `payload/linux-root-net.txt` names, or rebuild and re-record),
   and `pkgrepo.py publish` so the sets and the model package exist.
 
+**Release readiness (2026-11-18).** An independent review of P0-P7 found 14
+bugs, all fixed in a40246a6. One was data loss: a forged pacman entry in the layer
+could make `reconcile` move the kernel's own `/ai` or `/etc`. The rest:
+- rollback ordering;
+- a downgrade through a stale `BOOTX64.OLD`;
+- the startup menu failing a trial;
+- races and unbounded buffering in the slot feed;
+- curl `--retry` corrupting the stream;
+- the wrong running slot after a fallback;
+- the ESP written before the slots.
+
+Also done:
+- `manifest.py` writes `system-*`, `arch-snapshot`, `min-kernel` and
+  `store-format`.
+- Both `install plan alongside` and the wizard warn about Secure Boot and
+  BitLocker.
+- The version is 1.4.5.
+
+Owed before tagging:
+- **Operator:** publish `payload-linux-root-net-v1` and run
+  `pkgrepo.py publish`.
+- **GF63:** two ESPs, `BootNext`, BitLocker, write speed, and the Netinstall
+  first boot's memory with the 0.6B.
+- **Not re-driven after the fixes:** the power-cut paths. Only the
+  unmountable-slot test was re-run.
+- **Release pipeline:** it does not build or publish system images yet, so the
+  first system update needs that.
+- **Pre-existing:** `/proc/uptime`'s claim fails in `diag linux`.
+
 **1.4.6 groundwork kept in view (not built):** model path on ESP is per-file so
 a second model can be staged; store→ESP copy path is the "switch model after
 reboot" mechanism; space reserved on the ESP for two models.

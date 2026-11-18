@@ -286,6 +286,18 @@ pub fn selftest() -> bool {
     ok
 }
 
+/// Said before an install beside another system, because the cost lands on
+/// the other system and only on its next start. GLaDOS's kernel is not signed
+/// for Secure Boot, so it boots with Secure Boot off -- and Windows'
+/// BitLocker seals its key to the Secure Boot state, so the first Windows
+/// start after the change asks for the recovery key. Nothing GLaDOS writes
+/// causes that (its startup menu starts Windows through the firmware for
+/// exactly that reason); the setting does, and the key is the way through.
+pub const BITLOCKER: [&str; 2] = [
+    "Before this: if Windows uses BitLocker, have its recovery key (aka.ms/myrecoverykey).",
+    "GLaDOS needs Secure Boot off, and Windows asks for that key once after the change.",
+];
+
 /// What the last install printed, and how it stands, for the wizard window.
 static LOG: crate::sync::Spin<Vec<String>> = crate::sync::Spin::new(Vec::new());
 /// 0 idle, 1 installing, 2 installed, 3 stopped.
@@ -349,10 +361,12 @@ pub fn cmd(rest: &str) {
                                 "  to do this: install erase {}",
                                 apply::code(&disk, &p)
                             ),
-                            Mode::Alongside => kprintln!(
-                                "  to do this: install alongside {}",
-                                apply::code(&disk, &p)
-                            ),
+                            Mode::Alongside => {
+                                for l in BITLOCKER {
+                                    kprintln!("  {}", l);
+                                }
+                                kprintln!("  to do this: install alongside {}", apply::code(&disk, &p))
+                            }
                         }
                     } else {
                         console::set_color(LTRED);

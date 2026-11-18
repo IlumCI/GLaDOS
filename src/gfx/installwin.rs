@@ -231,6 +231,9 @@ impl Installer {
                         push(String::from("Everything on this disk will be erased. Nothing on it can be recovered afterwards."), true);
                     } else {
                         push(String::from("Nothing on this disk moves. GLaDOS goes in the free space shown."), false);
+                        for l in crate::install::BITLOCKER {
+                            push(String::from(l), true);
+                        }
                     }
                     for l in lines {
                         push(format!("  {}", l), false);
