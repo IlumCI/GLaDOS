@@ -48,7 +48,14 @@ FINGERPRINT = "83E75C5B98F2579892AF3019AB32E9629000D4EC"
 def run(cmd, **kw):
     r = subprocess.run(cmd, **kw)
     if r.returncode != 0:
-        sys.exit(f"pkgrepo: {' '.join(map(str, cmd))} failed ({r.returncode})")
+        # The tool's own words, which `capture_output` would otherwise throw
+        # away: "makepkg failed (1)" names neither the package nor the reason.
+        for stream in (r.stdout, r.stderr):
+            if stream:
+                text = stream.decode(errors="replace") if isinstance(stream, bytes) else stream
+                sys.stderr.write("\n".join(text.splitlines()[-30:]) + "\n")
+        where = f" in {kw['cwd']}" if kw.get("cwd") else ""
+        sys.exit(f"pkgrepo: {' '.join(map(str, cmd))} failed ({r.returncode}){where}")
     return r
 
 

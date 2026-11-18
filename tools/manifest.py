@@ -322,9 +322,11 @@ def main():
         system = {"system-version": opt("--system-version"), "system-url": opt("--system-url"),
                   "system-size": len(sdata), "system-sha256": hashlib.sha256(sdata).hexdigest()}
         del sdata
-    for flag, key in (("--arch-snapshot", "arch-snapshot"), ("--min-kernel", "min-kernel"), ("--store-format", "store-format")):
+    # Not `key`: that name holds the signing key, and reusing it here signed
+    # with the string "store-format" -- which is how the v1.4.5 run failed.
+    for flag, field in (("--arch-snapshot", "arch-snapshot"), ("--min-kernel", "min-kernel"), ("--store-format", "store-format")):
         if flag in argv:
-            extra[key] = opt(flag)
+            extra[field] = opt(flag)
     text = render(channel, version, base, len(data), digest, notes, system, extra)
     blob = sign.pack(*sign.sign(int(key, 16), hashlib.sha256(text).digest()))
 
