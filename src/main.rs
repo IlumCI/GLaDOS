@@ -333,7 +333,13 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     //
     // Only on an installed disk: install media and live boots are already
     // the thing somebody chose in the firmware's menu.
-    if install::slot::chosen().is_some() {
+    //
+    // **Not on a trial boot.** The try is already counted and the kernel's
+    // health flag is open; leaving for another system here would read, at
+    // the next GLaDOS boot, as a release that never reached the desktop, and
+    // a good update would be rolled back.
+    let trial = install::slot::current().is_some_and(|r| r.trial.is_some()) || update::kernel_on_trial();
+    if install::slot::chosen().is_some() && !trial {
         install::menu::at_boot(st, bs, image);
     }
 
@@ -862,10 +868,11 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     if let Some(r) = boot.linux_root.as_ref() {
         store::erofs::set_ram(r.ptr, r.len);
     }
-    if let Some(p) = linux::disk::auto_root() {
-        linux::services::begin_session();
-        kprintln!("[linux] the root filesystem is partition {}, with a session bus", p);
-    }
+    // The root first, then everything that edits the guests' layer -- the
+    // reconcile and the trial's verdict -- and only then the session, whose
+    // supervisor starts guests: the namespace is not safe to rearrange under
+    // a running guest (see `sysbox`'s preemption note).
+    let root = linux::disk::auto_root();
     // A system image on trial: this boot reached here on it, so keep it --
     // after the root is mounted, because what is kept is the slot that
     // actually mounted, and before that nothing has.
@@ -875,6 +882,15 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     if let Some(line) = install::slot::settle_now() {
         kprintln!("[update] {}", line);
     }
+    // Again, now the verdict is in: a kept image drops the attic and one that
+    // did not mount puts it back, this boot rather than the next.
+    if let Some(line) = linux::reconcile::at_boot() {
+        kprintln!("[update] {}", line);
+    }
+    if let Some(p) = root {
+        linux::services::begin_session();
+        kprintln!("[linux] the root filesystem is partition {}, with a session bus", p);
+    }
     // A Netinstall's first boot: what was chosen in the installer comes down
     // now, through the shell, as if typed -- so it prints where a person is
     // looking and can be run again by hand if the network was not there.
@@ -882,11 +898,6 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
         kprintln!("[install] first boot: fetching {} -- 'install finish' does it again if this fails",
             if p.packages().is_empty() { alloc::string::String::from("nothing") } else { p.packages().join(" ") });
         gfx::desk::queue_command("install finish");
-    }
-    // Again, now the verdict is in: a kept image drops the attic and one that
-    // did not mount puts it back, this boot rather than the next.
-    if let Some(line) = linux::reconcile::at_boot() {
-        kprintln!("[update] {}", line);
     }
 
     // What is installed, so the desktop can offer it. Read off every FAT

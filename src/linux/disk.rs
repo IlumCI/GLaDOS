@@ -194,6 +194,9 @@ pub fn auto_root() -> Option<u32> {
         let got = indices.iter().copied().find(|&i| mount("/", i).is_ok());
         if !slots.is_empty() && got.is_some() && got != slots.first().copied() {
             crate::kprintln!("[linux] the chosen system slot would not mount; running the other one");
+            if let Some(c) = crate::install::slot::chosen() {
+                crate::install::slot::fell_back_to(1 - c.min(1));
+            }
         }
         got
     });

@@ -86,6 +86,15 @@ pub fn parse(entry: &str, desc: &str, files: &str) -> Option<Pkg> {
             list.push(String::from(l));
         }
     }
+    // The layer's database is written by guests, which run as root. A path
+    // that climbs (`..`), is absolute, or an entry name that is not one
+    // component would let a forged entry reach outside the layer -- the
+    // namespace resolves `..` -- and move the kernel's own `/ai` or `/etc`
+    // into the attic. Such an entry is not a package; it is refused whole.
+    let bad = |f: &str| f.starts_with('/') || f.split('/').any(|c| c == ".." || c == ".");
+    if entry.is_empty() || entry.contains('/') || entry == ".." || entry == "." || list.iter().any(|f| bad(f)) {
+        return None;
+    }
     Some(Pkg {
         name: field(desc, "%NAME%")?,
         version: field(desc, "%VERSION%").unwrap_or_default(),
@@ -304,7 +313,7 @@ fn hex(d: &[u8; 32]) -> String {
 fn note() -> Option<[u8; 32]> {
     let t = read_text(NOTE);
     let t = t.trim();
-    if t.len() != 64 {
+    if t.len() != 64 || !t.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let mut o = [0u8; 32];
@@ -359,6 +368,7 @@ pub fn at_boot() -> Option<String> {
         Act::Nothing => None,
         Act::Drop => {
             forget();
+            let _ = crate::sysbox::commit_now();
             None
         }
         Act::Restore => {
@@ -369,9 +379,18 @@ pub fn at_boot() -> Option<String> {
                 crate::sysbox::detach(&gone(p));
             }
             forget();
+            let _ = crate::sysbox::commit_now();
             Some(format!("the previous system is back, and {} file(s) of what you installed with it", n))
         }
         Act::Reconcile => {
+            // Only against the image on trial. When it would not mount, the
+            // root is the old image and the trial is about to be undone;
+            // reconciling the layer against the old image would hand it
+            // packages for nothing and lean on the undo to put them back.
+            let trial = crate::install::slot::slots().get(r.active as usize).map(|p| p.start_lba);
+            if super::disk::root_base() != trial {
+                return None;
+            }
             let image = image_pkgs();
             let layer = layer_pkgs();
             let p = plan(&layer, &image);
@@ -405,6 +424,10 @@ pub fn at_boot() -> Option<String> {
             }
             crate::sysbox::write_blob(ATTIC_MADE, made.into_bytes());
             crate::sysbox::write_blob(NOTE, hex(&r.digest).into_bytes());
+            // Committed before the shell can keep the trial: a kept record
+            // on the ESP over a layer that was never saved reconciled is a
+            // state no later boot repairs (the note is gone with it).
+            let _ = crate::sysbox::commit_now();
             (p.to_image + p.kept > 0).then(|| {
                 format!(
                     "{} package(s) you installed now come with the system and use its copy; {} you upgraded past it stay yours ({} file(s) set aside, {} of the system's hidden, until it is kept)",
@@ -442,6 +465,10 @@ pub fn checks() -> Vec<(&'static str, bool)> {
     let d = [7u8; 32];
     let other = [8u8; 32];
     alloc::vec![
+        ("a forged entry whose files climb out of the layer is refused",
+            parse("x-1-1", "%NAME%\nx\n", "%FILES%\n../../ai\n").is_none()
+                && parse("x-1-1", "%NAME%\nx\n", "%FILES%\nusr/../../etc/x\n").is_none()
+                && parse("../x", "%NAME%\nx\n", "%FILES%\nusr/bin/x\n").is_none()),
         ("vercmp orders numbers as numbers", vercmp("1.10-1", "1.9-1") == Greater && vercmp("1.0", "1.0") == Equal),
         ("vercmp puts an epoch first", vercmp("1:0.1-1", "9.9-1") == Greater),
         ("vercmp puts a release candidate before the release", vercmp("1.0rc1-1", "1.0-1") == Less),

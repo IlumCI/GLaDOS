@@ -360,26 +360,6 @@ fn install(mode: Mode, given: &str, say: &mut dyn FnMut(&str)) -> Result<(), Str
     write_tables(&g, &img)?;
     say(&format!("  tables  written and read back{}", if mode == Mode::Alongside { format!(", {} existing partition(s) kept byte for byte", p.kept.len()) } else { String::new() }));
 
-    // 3. The boot partition.
-    let e = p.part(Role::Esp).ok_or("the plan has no boot partition")?;
-    // Slot A, kept: the record a later system update starts from. Written
-    // with the ESP rather than after, so there is no installed disk that
-    // lacks one.
-    let rec = super::slot::Record {
-        seq: 1,
-        active: 0,
-        previous: 0,
-        trial: None,
-        with_kernel: false,
-        image_len: root.len() as u64,
-        digest: sha256::hash(root),
-        prev_len: root.len() as u64,
-        prev_digest: sha256::hash(root),
-        ..super::slot::pending(None, 0, 0, 0, [0; 32], crate::VERSION, "", false)
-    }
-    .encode();
-    write_esp(e.first_lba, e.blocks, &carried, &rec, say)?;
-
     // 4. System slot A.
     let a = p.part(Role::RootA).ok_or("the plan has no system slot")?;
     write_slot(a.first_lba, a.blocks, root, say)?;
@@ -403,6 +383,31 @@ fn install(mode: Mode, given: &str, say: &mut dyn FnMut(&str)) -> Result<(), Str
     }
     say(&format!("  store   {} formatted", gib(blocks, g.block_size)));
     crate::sysbox::snap_now();
+
+    // 6b. The boot partition, last of the writes. It is what makes the disk
+    // an installed system -- the kernel, INSTALL.ID, a kept record naming
+    // slot A -- so an install cut off in slot A's gigabytes, or in the store,
+    // leaves a disk the firmware will not boot as GLaDOS and the installer
+    // plans over again, not one that boots half a system or a previous
+    // install's slot B.
+    let e = p.part(Role::Esp).ok_or("the plan has no boot partition")?;
+    // Slot A, kept: the record a later system update starts from. Written
+    // with the ESP rather than after, so there is no installed disk that
+    // lacks one.
+    let rec = super::slot::Record {
+        seq: 1,
+        active: 0,
+        previous: 0,
+        trial: None,
+        with_kernel: false,
+        image_len: root.len() as u64,
+        digest: sha256::hash(root),
+        prev_len: root.len() as u64,
+        prev_digest: sha256::hash(root),
+        ..super::slot::pending(None, 0, 0, 0, [0; 32], crate::VERSION, "", false)
+    }
+    .encode();
+    write_esp(e.first_lba, e.blocks, &carried, &rec, say)?;
 
     // 7. The firmware's boot entry, by the ESP's GUID as the table now says.
     let esp = block::scan()

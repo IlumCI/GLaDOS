@@ -438,6 +438,7 @@ pub fn hook(bs: &crate::uefi::BootServices, image: crate::uefi::Handle) -> Outco
                 }
             }
             crate::uefi::write_file(bs, image, HEALTH_FLAG, &buf[i..]);
+            TRYING.store(true, core::sync::atomic::Ordering::Relaxed);
             Outcome::Said("update: this image is on trial")
         }
 
@@ -507,6 +508,13 @@ pub fn restore_old(bs: &crate::uefi::BootServices, image: crate::uefi::Handle) -
 /// What the hook did to the kernel this boot, for the slot record.
 static KERNEL: crate::sync::Racy<crate::install::slot::Kernel> =
     crate::sync::Racy::new(crate::install::slot::Kernel::Quiet);
+
+static TRYING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Whether this boot is a kernel's trial.
+pub fn kernel_on_trial() -> bool {
+    TRYING.load(core::sync::atomic::Ordering::Relaxed)
+}
 
 pub fn kernel_event() -> crate::install::slot::Kernel {
     unsafe { *KERNEL.get() }

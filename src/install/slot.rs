@@ -67,6 +67,11 @@ pub struct Record {
     pub prev_digest: [u8; 32],
     pub prev_version: [u8; 32],
     pub prev_snapshot: [u8; 32],
+    /// The digest of the kernel staged with this image, when `with_kernel`.
+    /// A failed trial restores `BOOTX64.OLD` only if the boot image *is* this
+    /// kernel: one the updater refused never ran, and restoring over it would
+    /// put back whatever an older update left as `OLD` -- a downgrade.
+    pub kernel_digest: [u8; 32],
 }
 
 fn fixed(s: &str) -> [u8; 32] {
@@ -108,6 +113,7 @@ impl Record {
         o[136..168].copy_from_slice(&self.prev_digest);
         o[168..200].copy_from_slice(&self.prev_version);
         o[200..232].copy_from_slice(&self.prev_snapshot);
+        o[232..264].copy_from_slice(&self.kernel_digest);
         let crc = super::gpt::crc32(&o[..LEN - 4]);
         o[LEN - 4..].copy_from_slice(&crc.to_le_bytes());
         o
@@ -142,6 +148,7 @@ impl Record {
             prev_digest: b[136..168].try_into().ok()?,
             prev_version: b[168..200].try_into().ok()?,
             prev_snapshot: b[200..232].try_into().ok()?,
+            kernel_digest: b[232..264].try_into().ok()?,
         })
     }
 
@@ -263,6 +270,7 @@ pub fn pending(cur: Option<&Record>, running: u8, target: u8, len: u64, digest: 
         prev_digest: cur.map(|r| r.digest).unwrap_or([0; 32]),
         prev_version: cur.map(|r| r.version).unwrap_or([0; 32]),
         prev_snapshot: cur.map(|r| r.snapshot).unwrap_or([0; 32]),
+        kernel_digest: [0; 32],
     }
 }
 
@@ -289,6 +297,15 @@ pub fn chosen() -> Option<u8> {
     unsafe { NOW.get() }.1
 }
 
+/// The slot that actually mounted, when it was not the one chosen: the boot
+/// fell back to the other. Everything after asks `chosen` which slot is
+/// running -- the spare an update writes, what the shell reports -- so it
+/// must name the slot in use, not the one that failed.
+pub fn fell_back_to(slot: u8) {
+    let n = unsafe { NOW.get() };
+    n.1 = Some(slot);
+}
+
 pub fn current() -> Option<Record> {
     unsafe { NOW.get() }.0
 }
@@ -304,6 +321,25 @@ pub fn at_boot(bs: &crate::uefi::BootServices, image: crate::uefi::Handle, kerne
     let c = decide(rec, kernel);
     let mut said = c.say;
     let mut kept = rec;
+    // The kernel first, then the record. The other way round, a power cut
+    // between the two leaves a record saying the old system is back -- kept,
+    // `with_kernel` cleared -- over the new kernel, and no later boot retries.
+    if c.restore_kernel {
+        let want = rec.map(|r| r.kernel_digest).unwrap_or([0; 32]);
+        let running = crate::uefi::read_file(bs, image, crate::update::BOOT_PATH)
+            .map(|b| crate::store::sha256::hash(b.as_slice()));
+        if running != Some(want) {
+            // The staged kernel never became the boot image (refused, or
+            // undone already): there is nothing of this release to take back.
+        } else if crate::update::restore_old(bs, image) {
+            RESTORED.store(true, core::sync::atomic::Ordering::Relaxed);
+        } else {
+            // Leave the record on trial so the next boot tries again rather
+            // than recording a rollback that did not happen.
+            unsafe { *NOW.get() = (rec, installed.then_some(c.mount)) };
+            return Some("system update: rolling back, and the old kernel would not write -- boot the USB");
+        }
+    }
     if let Some(w) = c.write {
         // Counted before the risky part of the boot, so a system that dies
         // in it has had its try.
@@ -314,13 +350,6 @@ pub fn at_boot(bs: &crate::uefi::BootServices, image: crate::uefi::Handle, kerne
             let mount = rec.map(|r| if r.trial.is_some() { r.previous } else { r.active }).unwrap_or(0);
             unsafe { *NOW.get() = (rec, installed.then_some(mount)) };
             return said;
-        }
-    }
-    if c.restore_kernel {
-        if crate::update::restore_old(bs, image) {
-            RESTORED.store(true, core::sync::atomic::Ordering::Relaxed);
-        } else {
-            said = Some("system update: rolled back the image, and the old kernel would not write -- boot the USB");
         }
     }
     unsafe { *NOW.get() = (kept, (installed || rec.is_some()).then_some(c.mount)) };

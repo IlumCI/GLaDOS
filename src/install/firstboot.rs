@@ -197,6 +197,11 @@ pub fn finish(say: &mut dyn FnMut(&str)) -> Result<(), String> {
         }
     }
     if plan.model {
+        // Room first: pacman's cached package is another 550 MB the layer
+        // would hold, and a commit moves what was installed out of the heap
+        // onto the store, so the copy below is the only large thing resident.
+        let _ = guest("rm -f /var/cache/pacman/pkg/glados-model-*", 60);
+        let _ = crate::sysbox::commit_now();
         model_install(MODEL_DIR, say)?;
     }
     let esp = crate::update::stage::find_esp()?;

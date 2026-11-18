@@ -53,8 +53,17 @@ struct Feed {
 
 static FEED: Spin<Option<Feed>> = Spin::new(None);
 
+/// True while the last byte's read-back and naming run, outside the lock.
+/// `arm` and `cancel` refuse then: the slot is still claimed and about to be
+/// named, and a second feed armed into it would write under the record.
+static FINISHING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn finishing() -> bool {
+    FINISHING.load(core::sync::atomic::Ordering::Acquire)
+}
+
 pub fn armed() -> bool {
-    FEED.lock().as_ref().is_some_and(|f| f.done.is_none() && f.failed.is_none())
+    !finishing() && FEED.lock().as_ref().is_some_and(|f| f.done.is_none() && f.failed.is_none())
 }
 
 /// What the feed is doing, for `update system`.
@@ -93,7 +102,7 @@ pub fn spare() -> Result<(u8, block::Partition), String> {
 /// Arm the device for one image. Holds the slot's write window until the feed
 /// finishes or is called off.
 pub fn arm(len: u64, digest: [u8; 32], version: &str, snapshot: &str, with_kernel: bool) -> Result<String, String> {
-    if FEED.lock().as_ref().is_some_and(|f| f.done.is_none() && f.failed.is_none()) {
+    if finishing() || FEED.lock().as_ref().is_some_and(|f| f.done.is_none() && f.failed.is_none()) {
         return Err("a system image is already being written -- 'update system cancel' first".into());
     }
     let (target, p) = spare()?;
@@ -130,6 +139,9 @@ pub fn arm(len: u64, digest: [u8; 32], version: &str, snapshot: &str, with_kerne
 }
 
 pub fn cancel() -> bool {
+    if finishing() {
+        return false;
+    }
     let had = FEED.lock().take().is_some();
     nvme::release(Holder::Slot);
     had
@@ -162,20 +174,27 @@ pub fn write(data: &[u8]) -> usize {
         nvme::release(Holder::Slot);
         return 0;
     }
-    f.hash.update(data);
-    f.buf.extend_from_slice(data);
-    f.written += data.len() as u64;
-    let last = f.written == f.a.len;
-    if f.buf.len() >= BATCH || last {
-        if let Err(e) = flush(f, last) {
-            f.failed = Some(e);
-            nvme::release(Holder::Slot);
-            return 0;
+    // A batch at a time, however large the write: a guest's `dd bs=1G` is
+    // one call, and copying it whole into the heap first is a gigabyte the
+    // kernel has no way to refuse later.
+    for piece in data.chunks(BATCH) {
+        f.hash.update(piece);
+        f.buf.extend_from_slice(piece);
+        f.written += piece.len() as u64;
+        let last = f.written == f.a.len;
+        if f.buf.len() >= BATCH || last {
+            if let Err(e) = flush(f, last) {
+                f.failed = Some(e);
+                nvme::release(Holder::Slot);
+                return 0;
+            }
         }
     }
+    let last = f.written == f.a.len;
     if last {
         // Out of the lock for the read-back: a 2 GB slot is seconds of I/O,
         // and `status` from the shell should not wait behind it.
+        FINISHING.store(true, core::sync::atomic::Ordering::Release);
         let mut own = g.take().unwrap();
         drop(g);
         let r = finish(&mut own);
@@ -186,6 +205,7 @@ pub fn write(data: &[u8]) -> usize {
         }
         own.done = Some(r);
         *FEED.lock() = Some(own);
+        FINISHING.store(false, core::sync::atomic::Ordering::Release);
     }
     data.len()
 }
@@ -217,8 +237,14 @@ fn finish(f: &mut Feed) -> Result<String, String> {
     // rolls back with it. Read off the ESP rather than asked for, so a kernel
     // staged before, during or after the download is counted the same way
     // -- and one that is not staged is never restored over.
-    let with_kernel = f.a.with_kernel
-        || crate::update::stage::find_esp().is_ok_and(|e| e.volume.find("/GLADOS/UPDATE.FLG").is_ok());
+    // The digest of the staged kernel is what ties it to this image: a
+    // rollback restores the old kernel only if this one is what boots.
+    let staged = crate::update::stage::find_esp().ok().and_then(|e| {
+        e.volume.find("/GLADOS/UPDATE.FLG").ok()?;
+        let ent = e.volume.find("/GLADOS/STAGED.EFI").ok()?;
+        e.volume.read_file(&ent).ok().map(|b| crate::store::sha256::hash(&b))
+    });
+    let with_kernel = staged.is_some();
     let rec = super::slot::pending(
         super::slot::current().as_ref(),
         running,
@@ -229,6 +255,7 @@ fn finish(f: &mut Feed) -> Result<String, String> {
         &f.a.snapshot,
         with_kernel,
     );
+    let rec = super::slot::Record { kernel_digest: staged.unwrap_or([0; 32]), ..rec };
     super::slot::write_now(&rec)?;
     Ok(format!(
         "system {} is in slot {}, verified -- restart to try it (the running system stays if it fails)",

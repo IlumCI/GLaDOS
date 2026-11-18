@@ -585,7 +585,7 @@ fn update_system(rest: &str, manifest_now: fn() -> Option<crate::update::manifes
     let mut w = rest.split_whitespace();
     let verb = w.next().unwrap_or("");
     let unhex = |s: &str| -> Option<[u8; 32]> {
-        if s.len() != 64 {
+        if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
             return None;
         }
         let mut o = [0u8; 32];
@@ -648,6 +648,9 @@ fn update_system(rest: &str, manifest_now: fn() -> Option<crate::update::manifes
                 kprintln!("  'update system fetch' writes it into the spare slot");
                 return;
             }
+            // A download that died half way leaves the feed armed; a fetch
+            // starts it over rather than refusing until somebody cancels.
+            feed::cancel();
             match feed::arm(s.size, s.sha256, &s.version, &s.snapshot, false) {
                 Ok(line) => kprintln!("  {}", line),
                 Err(e) => {
@@ -658,7 +661,7 @@ fn update_system(rest: &str, manifest_now: fn() -> Option<crate::update::manifes
                 }
             }
             let u = alloc::format!("https://{}{}", s.url.host, s.url.path);
-            match crate::linux::start_job("/usr/bin/curl", &["curl", "-fsSL", "--retry", "3", "-o", "/dev/glados/slot", &u]) {
+            match crate::linux::start_job("/usr/bin/curl", &["curl", "-fsSL", "-o", "/dev/glados/slot", &u]) {
                 Ok(j) => kprintln!("  downloading in job {} -- 'update system' shows how far it is", j),
                 Err(e) => {
                     feed::cancel();
