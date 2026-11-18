@@ -101,7 +101,12 @@ def build(home):
         with tempfile.TemporaryDirectory() as t:
             work = Path(t) / d.name
             shutil.copytree(d, work)
-            benv = dict(env, PKGDEST=str(arch), GPGKEY=FINGERPRINT, SRCDEST=t, BUILDDIR=t)
+            # `GLADOS_PKG_SRCDEST` is sources fetched beforehand: the model
+            # package's come from a draft release, which has no anonymous URL,
+            # so CI downloads them with its token and makepkg finds them here
+            # by name -- still checked against the PKGBUILD's sha256sums.
+            src = os.environ.get("GLADOS_PKG_SRCDEST") or t
+            benv = dict(env, PKGDEST=str(arch), GPGKEY=FINGERPRINT, SRCDEST=src, BUILDDIR=t)
             run(["makepkg", "--force", "--clean", "--sign", "--nodeps", "--noconfirm"],
                 cwd=work, env=benv, capture_output=True)
     for p in sorted(arch.glob("*.pkg.tar.zst")):
