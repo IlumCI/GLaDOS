@@ -374,35 +374,78 @@ impl Nvme {
     }
 }
 
-static WRITES: AtomicBool = AtomicBool::new(false);
-
-/// The only blocks a write may touch, as `[start, end)`.
+/// Who is allowed to write where, as one `[start, end)` window per holder.
 ///
 /// **The lock used to be a bit, and a bit is the wrong shape.** Unlocking said
 /// "writes are allowed" and nothing said *where*, so from the moment
-/// `store::init` succeeded, every LBA on the device was writable -- the
-/// partition table at zero, the EFI system partition, and the Windows volume
-/// that is still the only other thing on this disk. The gate's own doc comment
-/// says there is no undo for a misplaced LBA, and then the gate did not check
-/// the LBA.
+/// `store::init` succeeded every LBA on the device was writable -- the
+/// partition table, the EFI system partition, and the Windows volume beside
+/// them. It became one window, and every caller had to name its range.
 ///
-/// It is a window now, and every caller that unlocks has to name one. That is
-/// not extra ceremony: both callers already had the region in hand from
-/// `find_store_region`, and a caller that cannot say which blocks it means is
-/// exactly the caller that should not be writing.
-static WIN_START: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-static WIN_END: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-
-pub fn writes_unlocked() -> bool {
-    WRITES.load(Ordering::Relaxed)
+/// **One window was the wrong number, and it was costing a live bug.** The
+/// store, the ESP and a FAT volume each claimed *the* window, so the last to
+/// claim it replaced the others -- and every one of them closed it on the way
+/// out. `update stage` wrote the ESP and then locked writes, which silently
+/// closed the store's window: nothing snapshotted again until somebody typed
+/// `store unlock`, with no message saying why. The installer needs four at
+/// once (table, ESP, a system slot, the store), so it is a window per holder
+/// now. Claiming or releasing one leaves the others exactly as they were, and
+/// windows of different holders may not overlap, so two writers can never be
+/// handed the same blocks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Holder {
+    /// The checkpoint store's own partition.
+    Store = 0,
+    /// The ESP, for staged updates and repairs.
+    Esp = 1,
+    /// A FAT volume an operator claimed with `fat unlock`.
+    Volume = 2,
+    /// The partition tables: LBA 0 through the primary array, and the backup
+    /// at the disk's tail. Only the installer claims these.
+    Table = 3,
+    /// A system slot being written whole, by the installer or an update.
+    Slot = 4,
+    /// The installer's second table window (the backup tail), since a window
+    /// is one range and the two tables are at opposite ends of the disk.
+    TableTail = 5,
 }
 
-/// The window writes are confined to, or `None` when locked.
-pub fn write_window() -> Option<(u64, u64)> {
-    if !writes_unlocked() {
-        return None;
+pub const HOLDERS: usize = 6;
+
+impl Holder {
+    pub const ALL: [Holder; HOLDERS] =
+        [Holder::Store, Holder::Esp, Holder::Volume, Holder::Table, Holder::Slot, Holder::TableTail];
+    pub fn name(self) -> &'static str {
+        match self {
+            Holder::Store => "store",
+            Holder::Esp => "esp",
+            Holder::Volume => "volume",
+            Holder::Table => "table",
+            Holder::Slot => "slot",
+            Holder::TableTail => "table tail",
+        }
     }
-    Some((WIN_START.load(Ordering::Relaxed), WIN_END.load(Ordering::Relaxed)))
+}
+
+/// The confirmation every claim wants, so a stray call cannot open the gate.
+pub const CONFIRM: u64 = 0xD15EA5E;
+
+static WINDOWS: crate::sync::Spin<[Option<(u64, u64)>; HOLDERS]> =
+    crate::sync::Spin::new([None; HOLDERS]);
+
+/// Any window open at all. For display; a writer asks `holds`.
+pub fn writes_unlocked() -> bool {
+    WINDOWS.lock().iter().any(|w| w.is_some())
+}
+
+/// Whether `h` has a window open.
+pub fn holds(h: Holder) -> bool {
+    WINDOWS.lock()[h as usize].is_some()
+}
+
+/// `h`'s window, or `None` when it holds none.
+pub fn window(h: Holder) -> Option<(u64, u64)> {
+    WINDOWS.lock()[h as usize]
 }
 
 /// Would this write be allowed?
@@ -416,90 +459,102 @@ pub const ERR_OUTSIDE: u16 = 0xFFFB;
 /// Separated from `write` so the gate can be checked without a device and
 /// without writing anything -- the property is arithmetic, and a safety gate
 /// nobody can test is a safety gate nobody has tested.
+///
+/// A write must lie wholly inside **one** window. Two adjacent windows do not
+/// combine into one a write may straddle, because each is a claim by a
+/// different holder about its own blocks.
 pub fn may_write(lba: u64, count: u32) -> bool {
-    let Some((start, end)) = write_window() else { return false };
     let Some(last) = lba.checked_add(count as u64) else { return false };
-    // An empty window admits nothing, which is the right answer for a caller
-    // that unlocked with a zero-length region.
-    start < end && lba >= start && last <= end
+    WINDOWS
+        .lock()
+        .iter()
+        .flatten()
+        // An empty window admits nothing.
+        .any(|&(start, end)| start < end && lba >= start && last <= end)
 }
 
-/// Deliberately explicit, and deliberately not wired to a shell command that
-/// could be typed by accident.
+/// Open `h`'s window over `blocks` blocks from `start`, replacing any window
+/// `h` already had and touching nobody else's.
 ///
-/// `start` and `blocks` are the region the caller is claiming. Everything
-/// outside it stays refused whether or not this succeeds.
-pub fn unlock_writes(confirm: u64, start: u64, blocks: u64) -> bool {
-    if confirm != 0xD15EA5E {
+/// Refused: a wrong confirmation, a range that overflows, and a range that
+/// overlaps another holder's open window.
+pub fn claim(confirm: u64, h: Holder, start: u64, blocks: u64) -> bool {
+    if confirm != CONFIRM {
         return false;
     }
     let Some(end) = start.checked_add(blocks) else { return false };
-    WIN_START.store(start, Ordering::Relaxed);
-    WIN_END.store(end, Ordering::Relaxed);
-    // The window before the bit: a reader that sees writes unlocked must never
-    // see the previous caller's window still standing.
-    WRITES.store(true, Ordering::Relaxed);
+    let mut w = WINDOWS.lock();
+    for (i, other) in w.iter().enumerate() {
+        if i == h as usize {
+            continue;
+        }
+        if let Some((s, e)) = *other {
+            if start < e && s < end {
+                return false;
+            }
+        }
+    }
+    w[h as usize] = Some((start, end));
     true
 }
 
-/// Put the lock back.
-///
-/// Needed because unlocking was one-way. `store::init` unlocked writes and then
-/// formatted, so a region that failed its safety check returned an error while
-/// leaving the disk writable -- the failure of a guard made the system less
-/// safe than not having tried. Anything that unlocks speculatively must be able
-/// to undo it.
-pub fn lock_writes() {
-    WRITES.store(false, Ordering::Relaxed);
-    // The window goes too. A stale one left behind would be a window somebody
-    // could re-open into by unlocking with a bad confirmation and getting the
-    // early return -- which does not set it, and so would inherit this.
-    WIN_START.store(0, Ordering::Relaxed);
-    WIN_END.store(0, Ordering::Relaxed);
+/// Close `h`'s window. Everybody else's stays open.
+pub fn release(h: Holder) {
+    WINDOWS.lock()[h as usize] = None;
 }
 
 /// The gate, checked without a device and without writing anything.
 ///
-/// Every claim here is about `may_write`, which is the whole of the decision.
-/// It restores whatever window was in force, because this runs at boot on a
-/// machine that may already have mounted a store.
+/// Every claim here is about `may_write` and `claim`, which are the whole of
+/// the decision. It restores every window that was in force, because this runs
+/// at boot on a machine that may already have mounted a store.
 pub fn gate_selftest() -> bool {
     use crate::kprintln;
-    let saved = write_window();
+    let saved = *WINDOWS.lock();
     let mut ok = true;
-    let mut claim = |what: &str, good: bool| {
+    let mut claim_ = |what: &str, good: bool| {
         if !good {
             ok = false;
         }
         kprintln!("  {}  {}", if good { "ok " } else { "FAIL" }, what);
     };
+    let clear = || *WINDOWS.lock() = [None; HOLDERS];
 
-    lock_writes();
-    claim("locked, nothing may be written", !may_write(0, 1) && !may_write(1000, 1));
+    clear();
+    claim_("locked, nothing may be written", !may_write(0, 1) && !may_write(1000, 1));
 
-    unlock_writes(0xD15EA5E, 2048, 512);
-    claim("unlocked, the claimed region may be written", may_write(2048, 512));
-    claim("and the first block outside it may not", !may_write(2560, 1));
-    claim("nor the one before it", !may_write(2047, 1));
+    claim(CONFIRM, Holder::Store, 2048, 512);
+    claim_("unlocked, the claimed region may be written", may_write(2048, 512));
+    claim_("and the first block outside it may not", !may_write(2560, 1));
+    claim_("nor the one before it", !may_write(2047, 1));
     // The case that matters most on this machine: LBA 0 is the partition
     // table, and before the window existed an unlocked store made it writable.
-    claim("nor the partition table", !may_write(0, 1));
-    // A write that starts inside and runs out the far end is the shape that
-    // gets a bounds check wrong.
-    claim("nor one that starts inside and overruns", !may_write(2560 - 4, 8));
-    // Length is attacker-controlled in the sense that matters: a caller with
-    // an arithmetic bug should not wrap into a pass.
-    claim("nor one whose length overflows", !may_write(u64::MAX - 1, 8));
+    claim_("nor the partition table", !may_write(0, 1));
+    claim_("nor one that starts inside and overruns", !may_write(2560 - 4, 8));
+    claim_("nor one whose length overflows", !may_write(u64::MAX - 1, 8));
 
-    unlock_writes(0xD15EA5E, 2048, 0);
-    claim("an empty claim admits nothing", !may_write(2048, 1));
+    // Several holders at once, which is what the installer and an update need.
+    claim_("a second holder may claim a range that does not overlap",
+        claim(CONFIRM, Holder::Esp, 8192, 1024));
+    claim_("and both ranges are writable", may_write(2048, 1) && may_write(8192, 1));
+    claim_("but a write may not straddle two holders' windows",
+        claim(CONFIRM, Holder::Volume, 2560, 100) && !may_write(2558, 4));
+    release(Holder::Volume);
+    // The bug this shape exists to fix: closing the ESP used to close the store.
+    release(Holder::Esp);
+    claim_("releasing one holder leaves the other's window open",
+        may_write(2048, 1) && !may_write(8192, 1));
+    claim_("a holder may not claim into another holder's window",
+        !claim(CONFIRM, Holder::Slot, 2500, 100) && !may_write(2600, 1));
+    claim_("re-claiming replaces only that holder's own window",
+        claim(CONFIRM, Holder::Store, 4096, 64) && !may_write(2048, 1) && may_write(4096, 64));
 
-    claim("a wrong confirmation does not unlock", !unlock_writes(1, 0, u64::MAX));
+    claim(CONFIRM, Holder::Store, 2048, 0);
+    claim_("an empty claim admits nothing", !may_write(2048, 1));
+    claim_("a wrong confirmation does not unlock", !claim(1, Holder::Table, 0, u64::MAX));
+    claim_("and an overflowing range does not either", !claim(CONFIRM, Holder::Table, 1, u64::MAX));
 
-    lock_writes();
-    if let Some((start, end)) = saved {
-        unlock_writes(0xD15EA5E, start, end.saturating_sub(start));
-    }
+    *WINDOWS.lock() = saved;
     ok
 }
 

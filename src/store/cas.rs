@@ -54,6 +54,8 @@ pub enum Error {
     Full,
     Unsafe,
     TooManyEntries,
+    /// A collection's two reachability walks disagreed, so it freed nothing.
+    Disagree,
 }
 
 impl From<block::Error> for Error {
@@ -121,45 +123,67 @@ fn blocks_for(bytes: u64) -> u64 {
     bytes.div_ceil(bs())
 }
 
-/// A page-aligned scratch buffer sized to whole blocks.
+/// A page-aligned scratch buffer sized to whole blocks, freed when dropped.
 ///
-/// **It is never freed, and here is what that costs, measured rather than
-/// estimated.** `alloc_dma` is `alloc_zeroed` with no matching `dealloc`, and
-/// every `put`, `get`, `commit`, `format` and `mount` comes through here. The
-/// request is `rounded + 4096`, so a blob of 512 bytes or fewer takes 4,608
-/// bytes of heap permanently.
+/// **It used to be leaked**, and what that cost is worth keeping: every `put`,
+/// `get`, `commit`, `format` and `mount` took `4096 + ceil(size / 512) * 512`
+/// bytes of heap for good. Measured under QEMU, a first snapshot of 812 blocks
+/// moved the heap by 3,512,864 bytes, and a forest import of 8,913 nodes by
+/// 52 MB. Survivable for a snapshot of notes; fatal for the installer, where a
+/// desktop's worth of packages is ~1.8 GB written through here, so roughly the
+/// same again of heap gone.
 ///
-/// Under QEMU, a fresh boot snapshotted twice with `autosnap off`:
-///
-///     snap 1   812 block(s)   heap 22,260,592 -> 25,773,456   +3,512,864
-///     snap 2     1 block(s)   heap 25,773,456 -> 25,786,992      +13,536
-///
-/// **The cost is per blob, not per block**, and the first version of this note
-/// said per block because the blobs it measured were one block each. A second
-/// measurement settled it: importing 8,913 forest nodes averaging 865 bytes
-/// wrote 21,425 blocks for `heap 30,199,328 -> 82,328,560`, which is 2,433
-/// bytes per *block* against the 4,315 above -- half, because a two-block blob
-/// pays one spare page rather than two. Per blob the two agree: about
-/// `4096 + ceil(size / 512) * 512`, which is exactly what the line below asks
-/// for. A figure in the wrong unit generalises in the wrong direction, and
-/// this one would have over-predicted a large corpus by a factor of two.
-///
-/// What that buys before it hurts: a full forest import plus its snapshot took
-/// the heap to 82 MiB of the ~1.9 GiB this machine reports, and `Written`
-/// memoises so an unchanged subtree is never re-put. A reboot clears it. So
-/// bulk import is affordable and *repeated* import in one session is not,
-/// which is the opposite of what anybody would assume.
-///
-/// The fix, when it is worth the risk of touching this path: every caller uses
-/// its buffer inside one short scope and none of them escapes, so one static
-/// scratch grown on demand would serve them all -- single core, one store, and
-/// `put`/`get` are not reentrant. Not done here, because this is the most
-/// dangerous code in the building and the leak is survivable at present sizes.
-fn dma(bytes: usize) -> Result<&'static mut [u8], Error> {
-    let rounded = (blocks_for(bytes as u64) as usize).max(1) * bs() as usize;
-    let p = nvme::alloc_dma(rounded + 4096).ok_or(Error::NoDevice)?;
-    Ok(unsafe { core::slice::from_raw_parts_mut(p, rounded) })
+/// **Not one static scratch, which the old note proposed, and the reason is
+/// preemption.** A guest reading a stored file goes through `get` on its own
+/// task while the shell's autosnap goes through `put`; with one buffer, the
+/// first to be preempted mid-I/O has its bytes overwritten by the second. A
+/// buffer owned by its scope cannot be shared by accident.
+pub(crate) struct DmaBuf {
+    ptr: *mut u8,
+    layout: core::alloc::Layout,
+    len: usize,
 }
+
+impl DmaBuf {
+    /// `bytes` rounded up to whole blocks, at least one.
+    pub(crate) fn new(bytes: usize) -> Result<Self, Error> {
+        let rounded = (blocks_for(bytes as u64) as usize).max(1) * bs() as usize;
+        let layout = core::alloc::Layout::from_size_align(rounded, 4096).map_err(|_| Error::Full)?;
+        let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
+        if ptr.is_null() {
+            return Err(Error::NoDevice);
+        }
+        Ok(Self { ptr, layout, len: rounded })
+    }
+}
+
+impl core::ops::Deref for DmaBuf {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl core::ops::DerefMut for DmaBuf {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl Drop for DmaBuf {
+    fn drop(&mut self) {
+        unsafe { alloc::alloc::dealloc(self.ptr, self.layout) };
+    }
+}
+
+fn dma(bytes: usize) -> Result<DmaBuf, Error> {
+    DmaBuf::new(bytes)
+}
+
+/// The most a single `put` or `get` holds in scratch at once. A blob larger
+/// than this streams through it, so writing a 600 MB model costs 2 MiB of
+/// heap rather than a second copy of the model.
+pub const STREAM: usize = 2 << 20;
 
 #[inline]
 fn put_u64(b: &mut [u8], o: usize, v: u64) {
@@ -232,6 +256,54 @@ fn sb_lba(region_start: u64, seq: u64) -> u64 {
 
 pub struct Store {
     pub sb: Superblock,
+    /// Runs of blocks below `alloc_next` that nothing retained refers to, as
+    /// `(first, blocks)`, sorted. **Only in memory**: a GC pass recomputes it
+    /// from what is reachable, so the on-disk format does not change and an
+    /// older kernel reads a collected store as it reads any other. Empty after
+    /// mount, which is the safe direction -- the store just appends until it
+    /// next runs out of tail and collects.
+    pub free: Vec<(u64, u64)>,
+    /// Blocks `put` has written this boot, for reporting what a snapshot
+    /// cost now that a write may land below `alloc_next`.
+    pub written_blocks: u64,
+}
+
+/// The free runs in `[lo, hi)` given the runs in use, which may overlap and
+/// come in any order. Pure, so its claims need no disk.
+pub fn sweep(lo: u64, hi: u64, used: &mut Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+    used.sort_unstable();
+    let mut free = Vec::new();
+    let mut at = lo;
+    for &(s, n) in used.iter() {
+        let e = s.saturating_add(n);
+        if e <= at {
+            continue;
+        }
+        if s > at && s <= hi {
+            free.push((at, s - at));
+        }
+        at = at.max(e);
+        if at >= hi {
+            break;
+        }
+    }
+    if at < hi {
+        free.push((at, hi - at));
+    }
+    free
+}
+
+/// First fit: `need` contiguous blocks out of `free`, which shrinks. A blob is
+/// stored as one run, so a run too small for it is skipped, not split.
+pub fn take(free: &mut Vec<(u64, u64)>, need: u64) -> Option<u64> {
+    let i = free.iter().position(|&(_, n)| n >= need)?;
+    let (s, n) = free[i];
+    if n == need {
+        free.remove(i);
+    } else {
+        free[i] = (s + need, n - need);
+    }
+    Some(s)
 }
 
 impl Store {
@@ -252,16 +324,16 @@ impl Store {
             checkpoints: 0,
         };
 
-        let buf = dma(bs() as usize)?;
+        let mut buf = dma(bs() as usize)?;
         encode_sb(&sb, &mut buf[..bs() as usize]);
-        block::write(sb_lba(region_start, sb.seq), 1, buf)?;
-        Ok(Self { sb })
+        block::write(sb_lba(region_start, sb.seq), 1, &buf)?;
+        Ok(Self { sb, free: Vec::new(), written_blocks: 0 })
     }
 
     /// Read both superblocks and adopt the newest that verifies.
     pub fn mount(region_start: u64) -> Result<Self, Error> {
-        let buf = dma(2 * bs() as usize)?;
-        block::read(region_start, 2, buf)?;
+        let mut buf = dma(2 * bs() as usize)?;
+        block::read(region_start, 2, &mut buf)?;
         let a = decode_sb(&buf[..bs() as usize]);
         let b = decode_sb(&buf[bs() as usize..2 * bs() as usize]);
         let sb = match (a, b) {
@@ -271,27 +343,47 @@ impl Store {
             (None, None) => None,
         }
         .ok_or(Error::NotFormatted)?;
-        Ok(Self { sb })
+        Ok(Self { sb, free: Vec::new(), written_blocks: 0 })
     }
 
     pub fn free_blocks(&self) -> u64 {
         (self.sb.region_start + self.sb.region_blocks).saturating_sub(self.sb.alloc_next)
+            + self.free.iter().map(|&(_, n)| n).sum::<u64>()
     }
 
     /// Append a chunk. Returns its content address and location.
     pub fn put(&mut self, data: &[u8]) -> Result<ChunkRef, Error> {
         let need = blocks_for(data.len() as u64).max(1);
-        if need > self.free_blocks() {
-            return Err(Error::Full);
+        // A collected run first, then the tail. Taking from the tail moves
+        // `alloc_next`, which is committed with the next superblock; taking a
+        // run does not, because the run is below it.
+        let tail = (self.sb.region_start + self.sb.region_blocks).saturating_sub(self.sb.alloc_next);
+        let (lba, from_tail) = match take(&mut self.free, need) {
+            Some(l) => (l, false),
+            None if need <= tail => (self.sb.alloc_next, true),
+            None => return Err(Error::Full),
+        };
+        let mut buf = dma(data.len().min(STREAM))?;
+        let per = buf.len();
+        let mut off = 0usize;
+        // At least one pass, so an empty blob still owns its one block.
+        loop {
+            let n = (data.len() - off).min(per);
+            buf[..n].copy_from_slice(&data[off..off + n]);
+            // The tail of the last block, and a stale tail of the scratch from
+            // the previous piece, must not reach the disk as data.
+            buf[n..].fill(0);
+            let blocks = blocks_for(n as u64).max(1);
+            block::write(lba + (off as u64 / bs()), blocks as u32, &buf)?;
+            off += per;
+            if off >= data.len() {
+                break;
+            }
         }
-        let lba = self.sb.alloc_next;
-        let buf = dma(data.len())?;
-        buf[..data.len()].copy_from_slice(data);
-        for v in buf[data.len()..].iter_mut() {
-            *v = 0;
+        if from_tail {
+            self.sb.alloc_next += need;
         }
-        block::write(lba, need as u32, buf)?;
-        self.sb.alloc_next += need;
+        self.written_blocks += need;
         Ok(ChunkRef { hash: sha256::hash(data), lba, len: data.len() as u64 })
     }
 
@@ -300,10 +392,18 @@ impl Store {
         if r.len == 0 {
             return Ok(Vec::new());
         }
-        let need = blocks_for(r.len).max(1);
-        let buf = dma(r.len as usize)?;
-        block::read(r.lba, need as u32, buf)?;
-        let data = buf[..r.len as usize].to_vec();
+        let len = r.len as usize;
+        let mut buf = dma(len.min(STREAM))?;
+        let per = buf.len();
+        let mut data = Vec::with_capacity(len);
+        let mut off = 0usize;
+        while off < len {
+            let n = (len - off).min(per);
+            let blocks = blocks_for(n as u64).max(1);
+            block::read(r.lba + (off as u64 / bs()), blocks as u32, &mut buf)?;
+            data.extend_from_slice(&buf[..n]);
+            off += n;
+        }
         if sha256::hash(&data) != r.hash {
             return Err(Error::HashMismatch);
         }
@@ -317,11 +417,10 @@ impl Store {
     /// is a contiguous run too. Reading the middle of a 30 GiB model costs one
     /// command, and the model never has to be resident to be read from.
     ///
-    /// **Block-granular, and allocation-free, on purpose.** `get` calls `dma`,
-    /// which calls `alloc_zeroed` and hands back a `&'static mut [u8]` -- it
-    /// never frees. That is survivable for a manifest read at boot and fatal
-    /// for a path that runs once per layer per token, so this takes the
-    /// caller's buffer and allocates nothing. Page-align it (`nvme::alloc_dma`)
+    /// **Block-granular, and allocation-free, on purpose.** `get` allocates a
+    /// scratch per call, which is fine for a manifest and wasteful for a path
+    /// that runs once per layer per token, so this takes the caller's buffer
+    /// and allocates nothing. Page-align it (`nvme::alloc_dma`)
     /// or pay an extra PRP per command.
     ///
     /// No hash is checked, and cannot be: the hash covers the whole blob. A
@@ -382,9 +481,9 @@ impl Store {
         sb.root = root;
         sb.checkpoints += 1;
 
-        let buf = dma(bs() as usize)?;
+        let mut buf = dma(bs() as usize)?;
         encode_sb(&sb, &mut buf[..bs() as usize]);
-        block::write(sb_lba(sb.region_start, seq), 1, buf)?;
+        block::write(sb_lba(sb.region_start, seq), 1, &buf)?;
         self.sb = sb;
         Ok(root)
     }
@@ -437,9 +536,9 @@ impl Store {
         let mut sb = self.sb;
         sb.seq += 1;
         sb.root = target;
-        let buf = dma(bs() as usize)?;
+        let mut buf = dma(bs() as usize)?;
         encode_sb(&sb, &mut buf[..bs() as usize]);
-        block::write(sb_lba(sb.region_start, sb.seq), 1, buf)?;
+        block::write(sb_lba(sb.region_start, sb.seq), 1, &buf)?;
         self.sb = sb;
         Ok(())
     }
@@ -574,15 +673,13 @@ pub fn read_bench(reps: usize) -> bool {
         return false;
     }
 
-    // One buffer, page-aligned, allocated once. `nvme::alloc_dma` never frees
-    // (`dev/nvme.rs:156`), so a bench that allocated per size would leak its
-    // way through the heap to make a point about the disk.
+    // One buffer, page-aligned, allocated once and freed on the way out.
     const BIG: usize = 2 * 1024 * 1024;
-    let Some(p) = nvme::alloc_dma(BIG) else {
+    let Ok(mut owned) = DmaBuf::new(BIG) else {
         kprintln!("  could not get a {} B DMA buffer", BIG);
         return false;
     };
-    let buf = unsafe { core::slice::from_raw_parts_mut(p, BIG) };
+    let buf: &mut [u8] = &mut owned;
 
     let mhz = crate::time::tsc_mhz().max(1);
     if let Some(h) = crate::cpu::hypervisor() {
@@ -694,56 +791,155 @@ pub fn read_bench(reps: usize) -> bool {
     ok
 }
 
+/// What writing costs: raw sequential block writes, and SHA-256 over the same
+/// bytes, timed apart because a system-slot write does both and either could
+/// be the one that bounds it.
+///
+/// **Nothing is consumed.** The blocks written are in the store's unallocated
+/// tail, past `alloc_next`, which no checkpoint references and the next `put`
+/// overwrites. So the bench can be run as often as wanted without the store
+/// growing, which matters while the store has no GC.
+pub fn write_bench(mib: u64) -> bool {
+    let Some((next, end)) = crate::store::with(|s| (s.sb.alloc_next, s.sb.region_start + s.sb.region_blocks))
+    else {
+        kprintln!("  no store mounted");
+        return false;
+    };
+    if !nvme::holds(nvme::Holder::Store) {
+        kprintln!("  writes are locked -- 'store unlock' first");
+        return false;
+    }
+    let bsz = bs();
+    let want = mib * 1024 * 1024 / bsz;
+    // Leave the last superblock-sized margin alone and refuse rather than wrap.
+    if end.saturating_sub(next) < want + 8 {
+        kprintln!("  only {} MiB unallocated -- ask for less", end.saturating_sub(next) * bsz >> 20);
+        return false;
+    }
+    let Ok(mut buf) = DmaBuf::new(STREAM) else {
+        kprintln!("  could not get a {} B buffer", STREAM);
+        return false;
+    };
+    for (i, b) in buf.iter_mut().enumerate() {
+        *b = (i as u32).wrapping_mul(2654435761).to_le_bytes()[3];
+    }
+    let per = (STREAM as u64 / bsz) as u32;
+    let mhz = crate::time::tsc_mhz().max(1);
+
+    let t0 = crate::time::rdtsc();
+    let mut done = 0u64;
+    while done < want {
+        let n = (want - done).min(per as u64) as u32;
+        if block::write(next + done, n, &buf).is_err() {
+            kprintln!("  write failed at block {}", next + done);
+            return false;
+        }
+        done += n as u64;
+    }
+    let w_us = ((crate::time::rdtsc() - t0) / mhz).max(1);
+
+    let t1 = crate::time::rdtsc();
+    let mut h = sha256::Sha256::new();
+    for _ in 0..(done * bsz).div_ceil(STREAM as u64) {
+        h.update(&buf);
+    }
+    let _ = h.finish();
+    let h_us = ((crate::time::rdtsc() - t1) / mhz).max(1);
+
+    let bytes = done * bsz;
+    let rate = |us: u64| bytes * 1_000_000 / us / (1024 * 1024);
+    if crate::cpu::hypervisor().is_some() {
+        console::set_color(console::YELLOW);
+        kprintln!("  under a hypervisor the disk is a host file, so this measures the host");
+        console::set_color(console::WHITE);
+    }
+    kprintln!("  {} MiB written raw     {:>8} us   {:>5} MiB/s", bytes >> 20, w_us, rate(w_us));
+    kprintln!("  {} MiB hashed SHA-256  {:>8} us   {:>5} MiB/s", bytes >> 20, h_us, rate(h_us));
+    kprintln!("  so a 6 GiB system slot is about {} s at the slower of the two",
+        (6u64 << 30) / (rate(w_us).min(rate(h_us)).max(1) << 20));
+    true
+}
+
 pub fn stream_selftest() -> bool {
     use alloc::vec::Vec;
 
     let Some(bs) = crate::dev::nvme::with(|n| n.block_size as usize) else {
         return true;
     };
-    // Comfortably past the old two-page ceiling and not a whole number of
-    // blocks, so the tail is short.
-    let n = 300 * 1024 + 7;
-    let data: Vec<u8> = (0..n)
-        .map(|i| ((i as u32).wrapping_mul(2654435761) >> 24) as u8)
-        .collect();
+    let pattern = |n: usize, salt: u32| -> Vec<u8> {
+        (0..n).map(|i| ((i as u32 ^ salt).wrapping_mul(2654435761) >> 24) as u8).collect()
+    };
 
     let mut ok = true;
-    crate::store::with(|s| {
-        let Ok(r) = s.put(&data) else {
-            crate::kprintln!("  could not store {} B", n);
-            ok = false;
-            return;
-        };
-        match s.get(&r) {
-            Ok(back) => {
-                if back != data {
+    // Two sizes. The small one is past the old two-page ceiling and not a
+    // whole number of blocks. The large one is two full `STREAM` pieces and an
+    // odd tail, because a blob under 2 MiB never runs the streaming loop at
+    // all, and an off-by-one piece offset there writes a plausible blob with
+    // its second piece in the wrong place.
+    for (n, salt) in [(300 * 1024 + 7, 0u32), (2 * STREAM + 4100 + 3, 0x5a5a)] {
+        let data = pattern(n, salt);
+        crate::store::with(|s| {
+            let Ok(r) = s.put(&data) else {
+                crate::kprintln!("  could not store {} B", n);
+                ok = false;
+                return;
+            };
+            match s.get(&r) {
+                Ok(back) if back == data => {}
+                Ok(_) => {
                     crate::kprintln!("  a {} B blob did not survive the round trip", n);
                     ok = false;
                     return;
                 }
+                Err(_) => {
+                    crate::kprintln!("  a {} B blob could not be read back", n);
+                    ok = false;
+                    return;
+                }
             }
-            Err(_) => {
+            // The middle by block, without the whole -- and for the large blob,
+            // straddling the boundary between its first and second pieces.
+            let blocks = 40u32;
+            let first = if n > STREAM { (STREAM / bs) as u64 - 20 } else { 17 };
+            let Ok(mut owned) = DmaBuf::new(blocks as usize * bs) else {
+                return;
+            };
+            let buf: &mut [u8] = &mut owned;
+            if s.read_blocks(&r, first, blocks, buf).is_err() {
+                crate::kprintln!("  ranged read refused");
                 ok = false;
                 return;
             }
+            let lo = first as usize * bs;
+            if buf[..blocks as usize * bs] != data[lo..lo + blocks as usize * bs] {
+                crate::kprintln!("  a ranged read of a {} B blob disagreed with the whole", n);
+                ok = false;
+            }
+        });
+        if !ok {
+            return false;
         }
-        // Now the middle, by block, without reading the whole thing.
-        let first = 17u64;
-        let blocks = 40u32;
-        let Some(buf) = crate::dev::nvme::alloc_dma(blocks as usize * bs) else {
-            return;
-        };
-        let buf = unsafe { core::slice::from_raw_parts_mut(buf, blocks as usize * bs) };
-        if s.read_blocks(&r, first, blocks, buf).is_err() {
-            crate::kprintln!("  ranged read refused");
-            ok = false;
-            return;
+    }
+
+    // And the store must give back what it takes. Eight round trips of the
+    // large blob through `put` and `get` (16 MiB of I/O) used to cost the heap
+    // ~16 MiB for good; now only the returned copies, which are dropped.
+    let (before, _) = crate::mem::heap::HEAP.stats();
+    let data = pattern(2 * STREAM + 4100 + 3, 7);
+    for _ in 0..8 {
+        let r = crate::store::with(|s| s.put(&data).ok().and_then(|r| s.get(&r).ok().map(|_| ())));
+        if r.flatten().is_none() {
+            crate::kprintln!("  the leak check could not round-trip its blob");
+            return false;
         }
-        let lo = first as usize * bs;
-        if buf[..blocks as usize * bs] != data[lo..lo + blocks as usize * bs] {
-            crate::kprintln!("  a ranged read disagreed with the whole-blob read");
-            ok = false;
-        }
-    });
+    }
+    drop(data);
+    let (after, _) = crate::mem::heap::HEAP.stats();
+    let grew = after.saturating_sub(before);
+    // One block of slack per round trip, against the ~4.3 MB a trip leaked.
+    if grew > 8 * 4096 {
+        crate::kprintln!("  eight round trips grew the heap by {} B -- the store is leaking", grew);
+        return false;
+    }
     ok
 }

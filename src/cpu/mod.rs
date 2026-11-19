@@ -730,6 +730,35 @@ pub fn efi_get_variable(name: &[u16], guid: &crate::uefi::Guid, buf: &mut [u8]) 
 
 /// Write a firmware variable; an empty `data` deletes it. Whether the firmware
 /// accepted it.
+/// `efi_get_variable` that says *why* it found nothing. `None` above is both
+/// "no such variable" and "your buffer is too small", and a caller looking
+/// for a free `Boot####` number must not read the second as the first: it
+/// would overwrite somebody's boot entry.
+pub fn efi_variable_exists(name: &[u16], guid: &crate::uefi::Guid) -> Option<bool> {
+    type Get = extern "efiapi" fn(
+        *const u16,
+        *const crate::uefi::Guid,
+        *mut u32,
+        *mut usize,
+        *mut core::ffi::c_void,
+    ) -> crate::uefi::Status;
+    const NOT_FOUND: usize = 0x8000_0000_0000_000E;
+    const TOO_SMALL: usize = 0x8000_0000_0000_0005;
+    let rt = runtime()?;
+    if rt.get_variable == 0 || name.last() != Some(&0) {
+        return None;
+    }
+    let f: Get = unsafe { core::mem::transmute(rt.get_variable) };
+    let mut size = 0usize;
+    let mut attrs = 0u32;
+    let st = f(name.as_ptr(), guid, &mut attrs, &mut size, core::ptr::null_mut()) as usize;
+    match st {
+        NOT_FOUND => Some(false),
+        TOO_SMALL | 0 => Some(true),
+        _ => None,
+    }
+}
+
 pub fn efi_set_variable(name: &[u16], guid: &crate::uefi::Guid, data: &[u8]) -> bool {
     type Set = extern "efiapi" fn(
         *const u16,

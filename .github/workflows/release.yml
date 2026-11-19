@@ -280,6 +280,17 @@ jobs:
             manifest: q35-2b
             seq: 32768
             label: GLADOS
+          # The Netinstall image (installer, 1.4.5): the kernel, wireless
+          # firmware and a root that can run pacman (`rootfs.py build --net`,
+          # about 265 MiB) -- no model. The desktop sets and the model come
+          # down on the installed system's first start. The Base image is
+          # qwen3-0.6b above: the model, the slim root, voice and brain.
+          - name: netinstall
+            payload: ''
+            manifest: ''
+            seq: 0
+            label: GLADOS
+            netinstall: true
     steps:
       - uses: actions/checkout@v4
 
@@ -349,7 +360,7 @@ jobs:
       # bytes must hash to, and the licence is one of the recorded files, so an
       # asset set missing it fails here rather than shipping without it.
       - name: Fetch the wireless firmware
-        if: matrix.payload != ''
+        if: matrix.payload != '' || matrix.netinstall == true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -404,6 +415,22 @@ jobs:
           python3 tools/payload.py verify payload-linux payload/linux-root.txt
           mv payload-linux/* payload-dir/
 
+      # The Netinstall root, \GLADOS\root.erofs: `rootfs.py build --net`,
+      # pinned to the Arch Archive day it was built against. Published by hand
+      # to payload-linux-root-net-v1, like the slim root, and checked against
+      # payload/linux-root-net.txt.
+      - name: Fetch the Netinstall root
+        if: matrix.netinstall == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p payload-dir payload-net
+          for f in $(grep -v '^#' payload/linux-root-net.txt | awk 'NF >= 3 {print $3}'); do
+            gh release download payload-linux-root-net-v1 --dir payload-net --clobber --pattern "$f"
+          done
+          python3 tools/payload.py verify payload-net payload/linux-root-net.txt
+          mv payload-net/* payload-dir/
+
       - name: Fetch the fly's connectome
         if: matrix.brain == true
         env:
@@ -435,11 +462,22 @@ jobs:
           if [ -n "${{ matrix.payload }}" ]; then
             PAYLOAD_ARG=(--payload payload-dir)
           fi
+          # The Netinstall payload carries no weights, so no weights' licence.
+          if [ "${{ matrix.netinstall }}" = "true" ]; then
+            PAYLOAD_ARG=(--payload payload-dir --no-license)
+          fi
           python3 tools/mkiso.py "out/$NAME.iso" \
             --efi "out/glados-$VERSION.efi" \
             "${PAYLOAD_ARG[@]}" \
             --label "${{ matrix.label }}"
           ls -la "out/$NAME.iso"
+          # GitHub refuses an asset over 2 GB, and the installer decision
+          # holds Base to it: refused here, with the size, rather than at
+          # upload after the whole job has run.
+          SIZE=$(stat -c%s "out/$NAME.iso")
+          if [ "$SIZE" -ge 2000000000 ]; then
+            echo "out/$NAME.iso is $SIZE bytes, over the 2 GB a release asset may be"; exit 1
+          fi
           echo "ISO_NAME=$NAME" >> "$GITHUB_ENV"
 
       - name: Record what was built

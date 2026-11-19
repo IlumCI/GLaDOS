@@ -49,8 +49,7 @@ const MARKER: &str = "/EFI/BOOT/BOOTX64.EFI";
 /// reads the medium the image was actually loaded from.
 const PAYLOAD: &str = "/GLADOS";
 
-/// The magic `unlock_writes` wants, so a stray call cannot open the gate.
-const CONFIRM: u64 = 0xD15EA5E;
+use crate::dev::nvme::CONFIRM;
 
 pub struct Esp {
     pub index: u32,
@@ -177,13 +176,13 @@ fn put_verified(esp: &Esp, path: &str, data: &[u8]) -> Result<(), String> {
 /// own is the point: there is one place that opens the write window on this
 /// disk, and one place that closes it on every path out.
 pub fn put_one(esp: &Esp, path: &str, data: &[u8]) -> Result<String, String> {
-    if !nvme::unlock_writes(CONFIRM, esp.start_lba, esp.blocks) {
+    if !nvme::claim(CONFIRM, nvme::Holder::Esp, esp.start_lba, esp.blocks) {
         return Err(String::from(
             "the write gate refused the claim -- no NVMe controller, or no such range",
         ));
     }
     let outcome = put_verified(esp, path, data);
-    nvme::lock_writes();
+    nvme::release(nvme::Holder::Esp);
     outcome?;
     Ok(format!("wrote {} B to {}", data.len(), path))
 }
@@ -194,7 +193,7 @@ pub fn put_one(esp: &Esp, path: &str, data: &[u8]) -> Result<String, String> {
 /// pass the arming flag first, so an interrupted removal leaves a machine that
 /// does what it already did rather than a half-disarmed one.
 pub fn remove_some(esp: &Esp, paths: &[&str]) -> Result<String, String> {
-    if !nvme::unlock_writes(CONFIRM, esp.start_lba, esp.blocks) {
+    if !nvme::claim(CONFIRM, nvme::Holder::Esp, esp.start_lba, esp.blocks) {
         return Err(String::from("the write gate refused the claim"));
     }
     let mut gone: Vec<String> = Vec::new();
@@ -203,7 +202,7 @@ pub fn remove_some(esp: &Esp, paths: &[&str]) -> Result<String, String> {
             gone.push(String::from(*path));
         }
     }
-    nvme::lock_writes();
+    nvme::release(nvme::Holder::Esp);
 
     if gone.is_empty() {
         return Ok(String::from("there was nothing to remove"));
@@ -232,7 +231,7 @@ fn write_all(esp: &Esp, image: &[u8], sig: &[u8]) -> Result<(), String> {
 pub fn stage(image: &[u8], sig: &[u8]) -> Result<String, String> {
     let esp = find_esp()?;
 
-    if !nvme::unlock_writes(CONFIRM, esp.start_lba, esp.blocks) {
+    if !nvme::claim(CONFIRM, nvme::Holder::Esp, esp.start_lba, esp.blocks) {
         return Err(String::from(
             "the write gate refused the claim -- no NVMe controller, or no such range",
         ));
@@ -242,7 +241,7 @@ pub fn stage(image: &[u8], sig: &[u8]) -> Result<String, String> {
 
     // Dropped on every path, including the ones that failed halfway. A gate
     // left open by an error is a gate that was never closed.
-    nvme::lock_writes();
+    nvme::release(nvme::Holder::Esp);
 
     outcome?;
     Ok(format!(
@@ -261,7 +260,7 @@ pub fn stage(image: &[u8], sig: &[u8]) -> Result<String, String> {
 pub fn unstage() -> Result<String, String> {
     let esp = find_esp()?;
 
-    if !nvme::unlock_writes(CONFIRM, esp.start_lba, esp.blocks) {
+    if !nvme::claim(CONFIRM, nvme::Holder::Esp, esp.start_lba, esp.blocks) {
         return Err(String::from("the write gate refused the claim"));
     }
     let mut gone: Vec<&str> = Vec::new();
@@ -270,7 +269,7 @@ pub fn unstage() -> Result<String, String> {
             gone.push(path);
         }
     }
-    nvme::lock_writes();
+    nvme::release(nvme::Holder::Esp);
 
     if gone.is_empty() {
         return Ok(String::from("nothing was staged"));

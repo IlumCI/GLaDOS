@@ -40,6 +40,11 @@ pub struct Suite {
 
 pub const SUITES: &[Suite] = &[
     Suite {
+        name: "install",
+        about: "the partition plan and the GPT it encodes, read back by the boot parser",
+        run: crate::install::selftest,
+    },
+    Suite {
         name: "crypto",
         about: "published vectors for every primitive",
         run: crate::crypto::selftest,
@@ -885,7 +890,7 @@ fn web_selftest() -> bool {
 /// says it exists to prevent. A `static` cannot be read in a const context, so
 /// the array cannot be measured directly; naming its length is the next best
 /// thing and it is now the only place the number appears.
-const SLOTS: usize = 107;
+const SLOTS: usize = 108;
 
 /// One slot per suite. Indexed by position in `SUITES`, which is a constant,
 /// so the table cannot get out of step with the list.

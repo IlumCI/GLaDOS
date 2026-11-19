@@ -91,6 +91,24 @@ fn cache_fill(base: u64, b0: u64, buf: &[u8]) {
     }
 }
 
+/// Forget everything cached about the image at `base`. A system update
+/// rewrites a slot in place, and the cache is keyed by where an image lives,
+/// not by what is in it: without this a slot mounted earlier in the boot
+/// would answer the new image's reads with the old image's blocks.
+pub fn forget(base: u64) {
+    {
+        let mut c = CACHE.lock_irq();
+        c.map.retain(|k, _| k.0 != base);
+        c.order.retain(|k| k.0 != base);
+    }
+    DENTRIES.lock_irq().retain(|k, _| k.0 != base);
+}
+
+/// Names in the lookup cache, for `mem`.
+pub fn cached_names() -> usize {
+    DENTRIES.lock_irq().len()
+}
+
 /// Blocks cached, for `linux mount`'s report.
 pub fn cached_blocks() -> usize {
     CACHE.lock_irq().map.len()
@@ -159,6 +177,17 @@ pub fn set_ram(at: *const u8, len: usize) {
     RAM_AT.store(at as usize, core::sync::atomic::Ordering::Release);
 }
 
+/// The in-memory image's bytes, if the boot carried one. The installer writes
+/// these to a system slot.
+pub fn ram() -> Option<&'static [u8]> {
+    let (at, len) = (RAM_AT.load(Ordering::Acquire), RAM_LEN.load(Ordering::Acquire));
+    if at == 0 || len == 0 {
+        return None;
+    }
+    // Safety: `set_ram` was handed a boot-time pool that is never freed.
+    Some(unsafe { core::slice::from_raw_parts(at as *const u8, len) })
+}
+
 #[derive(Clone, Copy)]
 pub struct Image {
     /// Partition start, in 512-byte sectors.
@@ -196,6 +225,11 @@ fn u64_at(b: &[u8], o: usize) -> u64 {
 }
 
 impl Image {
+    /// Where it was mounted from: a partition's first sector, or `RAM_BASE`.
+    pub fn base(&self) -> u64 {
+        self.base
+    }
+
     /// Mount the image at partition sector `base`, refusing anything that is
     /// not an EROFS superblock.
     pub fn mount(base: u64) -> Result<Image, Error> {

@@ -3,12 +3,13 @@
 # upgrades the set like any other, and `orange remove glados-desktop` with
 # `-s` takes it back out.
 pkgname=glados-desktop
-pkgver=1
+pkgver=2
 pkgrel=1
 pkgdesc="The full GLaDOS desktop userland: office suite, toolkits, media"
 arch=('any')
 url="https://github.com/IlumCI/GLaDOS"
 license=('custom')  # the project has no licence file yet
-depends=('gtk3' 'adwaita-icon-theme' 'adwaita-icon-theme-legacy' 'hicolor-icon-theme'
-         'shared-mime-info' 'gsettings-desktop-schemas' 'ttf-liberation'
-         'gtk4-demos' 'qt6-wayland' 'featherpad' 'imv' 'mpv' 'libreoffice-fresh')
+# Since 1.4.5 the same thing as the installer's three package sets together,
+# so a machine that took `orange upgrade` before the sets existed and one
+# that chose all three in the installer hold the same packages.
+depends=('glados-set-desktop' 'glados-set-office' 'glados-set-media')

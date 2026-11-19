@@ -78,6 +78,7 @@ pub mod desk;
 pub mod agentwin;
 pub mod mindwin;
 pub mod officewin;
+pub mod installwin;
 
 /// A program that owns a window's client area.
 ///

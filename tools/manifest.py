@@ -3,6 +3,8 @@
 
     manifest.py <image> --version V --base URL --key-file FILE
                 [--channel C] [--notes TEXT] [--out DIR]
+                [--system ROOT.erofs --system-version V --system-url URL
+                 [--arch-snapshot YYYY/MM/DD] [--min-kernel V] [--store-format N]]
     manifest.py --verify <manifest> [--image <file>] [--key <hex-public>]
     manifest.py --selftest
 
@@ -52,7 +54,10 @@ HEADER = "glados-update 1"
 REQUIRED = ("channel", "version", "image", "sig", "size", "sha256")
 
 
-def render(channel, version, base, size, digest, notes):
+SYSTEM = ("system-version", "system-url", "system-size", "system-sha256")
+
+
+def render(channel, version, base, size, digest, notes, system=None, extra=None):
     """The manifest bytes, exactly as they will be signed and served."""
     base = base.rstrip("/")
     stem = f"{base}/glados-{version}.efi"
@@ -65,6 +70,15 @@ def render(channel, version, base, size, digest, notes):
         f"size {size}",
         f"sha256 {digest}",
     ]
+    # A release that ships a system image (installer, 1.4.5): the four
+    # `system-*` lines go together or not at all -- the kernel refuses a
+    # manifest naming an image without its digest. `extra` carries
+    # `arch-snapshot`, `min-kernel` and `store-format`.
+    if system:
+        for k in SYSTEM:
+            lines.append(f"{k} {system[k]}")
+    for k, v in (extra or {}).items():
+        lines.append(f"{k} {v}")
     if notes:
         # One line: the kernel takes the rest of the line verbatim, and a
         # newline here would silently become a key it does not know.
@@ -108,12 +122,34 @@ def parse(text):
             if len(value) != 64 or any(c not in "0123456789abcdefABCDEF" for c in value):
                 raise ValueError("the 'sha256' line is not a 64-character digest")
             out[key] = value.lower()
+        elif key == "system-url":
+            if not value.startswith("https://"):
+                raise ValueError("the 'system-url' line does not parse")
+            out[key] = value
+        elif key == "system-size":
+            if not value.isdigit():
+                raise ValueError("the 'system-size' line does not parse")
+            out[key] = int(value)
+        elif key == "system-sha256":
+            if len(value) != 64 or any(c not in "0123456789abcdefABCDEF" for c in value):
+                raise ValueError("the 'system-sha256' line does not parse")
+            out[key] = value.lower()
+        elif key == "store-format":
+            if not value.isdigit():
+                raise ValueError("the 'store-format' line does not parse")
+            out[key] = int(value)
+        elif key in ("system-version", "arch-snapshot", "min-kernel"):
+            out[key] = value
         # Anything else is ignored, as the kernel ignores it, so a later field
         # does not make an older kernel reject the whole file.
 
     missing = [k for k in REQUIRED if k not in out]
     if missing:
         raise ValueError("the manifest has no " + ", ".join(repr(m) for m in missing))
+    have = [k for k in SYSTEM if k in out]
+    if have and len(have) != len(SYSTEM):
+        gone = [k for k in SYSTEM if k not in out]
+        raise ValueError(f"the manifest has no {gone[0]!r} line")
     return out
 
 
@@ -197,6 +233,17 @@ def selftest():
     except ValueError:
         claim("an unknown field is ignored, not refused", False)
 
+    sysimg = os.urandom(2048)
+    sysd = {"system-version": "9.9.9", "system-url": "https://example.invalid/root-9.9.9.erofs",
+            "system-size": len(sysimg), "system-sha256": hashlib.sha256(sysimg).hexdigest()}
+    st = render("stable", "9.9.9", "https://example.invalid/stable", len(image), digest, "",
+                sysd, {"arch-snapshot": "2026/11/20", "min-kernel": "1.4.5", "store-format": 2})
+    ms = parse(st)
+    claim("a system image's four lines and its snapshot read back",
+          ms["system-size"] == len(sysimg) and ms["arch-snapshot"] == "2026/11/20" and ms["store-format"] == 2)
+    refuses("an image named without its digest is refused, as the kernel refuses it",
+            lambda: parse(st.replace(b"system-sha256", b"x-sha256")))
+
     return ok
 
 
@@ -267,7 +314,20 @@ def main():
 
     data = image.read_bytes()
     digest = hashlib.sha256(data).hexdigest()
-    text = render(channel, version, base, len(data), digest, notes)
+    system, extra = None, {}
+    if "--system" in argv:
+        # Hashed here, from the file, never typed: a digest copied by hand is
+        # one character away from an image nobody can install.
+        sdata = pathlib.Path(opt("--system")).read_bytes()
+        system = {"system-version": opt("--system-version"), "system-url": opt("--system-url"),
+                  "system-size": len(sdata), "system-sha256": hashlib.sha256(sdata).hexdigest()}
+        del sdata
+    # Not `key`: that name holds the signing key, and reusing it here signed
+    # with the string "store-format" -- which is how the v1.4.5 run failed.
+    for flag, field in (("--arch-snapshot", "arch-snapshot"), ("--min-kernel", "min-kernel"), ("--store-format", "store-format")):
+        if flag in argv:
+            extra[field] = opt(flag)
+    text = render(channel, version, base, len(data), digest, notes, system, extra)
     blob = sign.pack(*sign.sign(int(key, 16), hashlib.sha256(text).digest()))
 
     # Refuse to publish something we cannot read back. A manifest that the

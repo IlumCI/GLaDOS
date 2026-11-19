@@ -414,8 +414,8 @@ fn index_walk(st: &cas::Store, r: &cas::ChunkRef, kind: u8, depth: usize, w: &mu
         None => return,
     };
     let mut rebuilt = Vec::new();
-    for (name, k, cr) in &entries {
-        index_walk(st, cr, *k, depth + 1, w);
+    for (name, k, cr, _) in &entries {
+        index_walk(st, cr, tree::base_kind(*k), depth + 1, w);
         rebuilt.push((name.clone(), *k, *cr));
     }
     // A directory's chunk address covers block locations, so it is not the
@@ -1071,7 +1071,7 @@ fn cmd_remember(text: &str) {
         // mounted but not writable.
         if !crate::store::mounted() {
             crate::kprintln!("  but there is no store -- it ends with this boot ('store init')");
-        } else if !crate::dev::nvme::writes_unlocked() {
+        } else if !crate::dev::nvme::holds(crate::dev::nvme::Holder::Store) {
             crate::kprintln!("  but writes are locked -- 'store unlock' to keep it past the reboot");
         } else if !autosnap_enabled() {
             crate::kprintln!("  autosnap is off -- 'snap' to carry it past this boot");
@@ -1150,13 +1150,32 @@ fn note(root: &Node, p: &[String]) {
 }
 
 pub fn write_blob(path: &str, data: Vec<u8>) -> bool {
-    with(|s| {
+    let len = data.len();
+    let ok = with(|s| {
         let p = parse(&s.cwd, path);
         note(&s.root, &p);
         tree::put(&mut s.root, &p, Node::Blob(data)).is_ok()
     })
-    .unwrap_or(false)
+    .unwrap_or(false);
+    // **Memory pressure commits.** Autosnap runs from the shell's idle loop,
+    // and while a guest runs the shell is not idle: `orange upgrade` writing a
+    // desktop's ~1.8 GB of files would hold every one of them in the heap
+    // until it exited. Past this much written and uncommitted, the write that
+    // crosses it commits, which also moves what it wrote out of memory.
+    if ok && len >= 4096 {
+        let pending = UNCOMMITTED.fetch_add(len, core::sync::atomic::Ordering::Relaxed) + len;
+        if pending >= COMMIT_AT {
+            UNCOMMITTED.store(0, core::sync::atomic::Ordering::Relaxed);
+            let _ = commit_now();
+        }
+    }
+    ok
 }
+
+/// Bytes written by `write_blob` since the last pressure commit.
+static UNCOMMITTED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+/// How much may wait in memory before a write commits it.
+pub const COMMIT_AT: usize = 256 << 20;
 
 /// An away blob, read back and checked against its own address.
 ///
@@ -1288,9 +1307,9 @@ pub fn listing(path: &str) -> Vec<(String, bool, usize)> {
         match tree::resolve(&s.root, &p) {
             Some(Node::Dir(es)) => es
                 .iter()
-                .map(|(k, v)| match v {
-                    Node::Dir(inner) => (k.clone(), true, inner.len()),
-                    other => (k.clone(), false, other.blob_len().unwrap_or(0) as usize),
+                .map(|e| match &e.node {
+                    Node::Dir(inner) => (e.name.clone(), true, inner.len()),
+                    other => (e.name.clone(), false, other.blob_len().unwrap_or(0) as usize),
                 })
                 .collect(),
             _ => Vec::new(),
@@ -1326,6 +1345,15 @@ pub fn blob_len(path: &str) -> Option<usize> {
     .flatten()
 }
 
+/// Where `path`'s bytes are on disk, if it is a blob that is not in memory.
+pub fn away_ref(path: &str) -> Option<cas::ChunkRef> {
+    with(|s| {
+        let p = parse(&s.cwd, path);
+        tree::resolve(&s.root, &p).and_then(|n| n.away())
+    })
+    .flatten()
+}
+
 /// Create an empty directory, failing if the name is taken.
 ///
 /// `write_blob` already creates intermediate directories, so this exists for
@@ -1353,13 +1381,39 @@ pub fn is_dir(path: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// The attributes on the entry at `path`, if it has any.
+pub fn attr(path: &str) -> Option<tree::Attr> {
+    with(|s| {
+        let p = parse(&s.cwd, path);
+        tree::entry(&s.root, &p).and_then(|e| e.attr.as_deref().cloned())
+    })
+    .flatten()
+}
+
+/// Change the attributes on the entry at `path`, creating them if it had
+/// none. False when nothing is at `path`.
+pub fn edit_attr(path: &str, f: impl FnOnce(&mut tree::Attr, bool)) -> bool {
+    with(|s| {
+        let p = parse(&s.cwd, path);
+        match tree::entry_mut(&mut s.root, &p) {
+            Some(e) => {
+                let dir = e.node.is_dir();
+                f(e.attr.get_or_insert_with(Default::default), dir);
+                true
+            }
+            None => false,
+        }
+    })
+    .unwrap_or(false)
+}
+
 /// Entry names directly under `path`, in sorted order. Empty if it is missing
 /// or is a file.
 pub fn children(path: &str) -> Vec<String> {
     with(|s| {
         let p = parse(&s.cwd, path);
         match tree::resolve(&s.root, &p) {
-            Some(Node::Dir(es)) => es.iter().map(|(k, _)| k.clone()).collect(),
+            Some(Node::Dir(es)) => es.iter().map(|e| e.name.clone()).collect(),
             _ => Vec::new(),
         }
     })
@@ -1394,6 +1448,83 @@ pub fn selftest() -> bool {
     }
 
     let mut ok = true;
+
+    // Attributes, and the promise that they cost no existing tree its address.
+    // The golden value was computed from the hashing rule in Python before
+    // attributes existed, so it is a statement about the rule, not about
+    // whatever this code happens to compute today.
+    {
+        let mut g = Node::empty_dir();
+        let _ = tree::put(&mut g, &path_of("/a"), Node::Blob(b"hello".to_vec()));
+        let _ = tree::put(&mut g, &path_of("/d/b"), Node::Blob(Vec::new()));
+        let golden = "c802439c8d82b118f76291716afdfeb62ed988b21f929c85f6799c48ff330a17";
+        let h = tree::content_hash(&g);
+        let hx: String = h.iter().map(|b| alloc::format!("{:02x}", b)).collect();
+        ok &= check("a tree with no attributes keeps the address it had before they existed", hx == golden);
+        let before = h;
+        if let Some(e) = tree::entry_mut(&mut g, &path_of("/a")) {
+            e.attr = Some(alloc::boxed::Box::new(tree::Attr { mode: 0o100644, ..Default::default() }));
+        }
+        let with_mode = tree::content_hash(&g);
+        ok &= check("setting attributes on a file changes the root", with_mode != before);
+        if let Some(e) = tree::entry_mut(&mut g, &path_of("/a")) {
+            e.attr.as_mut().unwrap().mode = 0o100755;
+        }
+        ok &= check("and changing one bit of the mode changes it again", tree::content_hash(&g) != with_mode);
+        let a = tree::Attr {
+            mode: 0o100755,
+            uid: 1000,
+            gid: 100,
+            mtime_ns: 1_767_225_600_000_000_000,
+            xattrs: alloc::vec![(String::from("security.capability"), alloc::vec![1, 2, 3])],
+        };
+        ok &= check("attributes survive their own encoding", tree::Attr::decode(&a.encode()).as_ref() == Some(&a));
+        let cr = cas::ChunkRef { hash: [7; 32], lba: 9, len: 5 };
+        let enc = tree::encode_dir(&[
+            (String::from("plain"), tree::KIND_BLOB, cr, None),
+            (String::from("owned"), tree::KIND_BLOB_A, cr, Some(a.clone())),
+        ]);
+        let dec = tree::decode_dir(&enc);
+        ok &= check(
+            "a stored directory mixes plain and attributed entries and reads both back",
+            dec.as_ref().is_some_and(|d| d.len() == 2 && d[0].3.is_none() && d[1].3.as_ref() == Some(&a)),
+        );
+        let mut bad = enc.clone();
+        let k = 12 + 2 + 5; // first entry's kind byte
+        bad[k] = 9;
+        ok &= check("a kind this kernel does not know is refused, not half-read", tree::decode_dir(&bad).is_none());
+        // A move carries the attributes; a write in place keeps them.
+        let ent = tree::remove_ent(&mut g, &path_of("/a"));
+        let _ = ent.map(|e| tree::put_ent(&mut g, &path_of("/moved"), e));
+        let _ = tree::put(&mut g, &path_of("/moved"), Node::Blob(b"new body".to_vec()));
+        ok &= check(
+            "a moved file keeps its attributes, and so does one written in place",
+            tree::entry(&g, &path_of("/moved")).and_then(|e| e.attr.as_ref()).map(|a| a.mode) == Some(0o100755),
+        );
+    }
+
+    // Collection, the arithmetic. What is in use may overlap and arrive in
+    // any order; the free runs are exactly the gaps, and never touch a block
+    // in use -- the one property a collector must not get wrong.
+    {
+        let mut used = alloc::vec![(30u64, 5u64), (10, 10), (12, 2), (40, 1), (19, 3)];
+        let free = cas::sweep(2, 50, &mut used);
+        ok &= check("free runs are exactly the gaps between what is in use",
+            free == alloc::vec![(2, 8), (22, 8), (35, 5), (41, 9)]);
+        let touches = |f: &[(u64, u64)], u: &[(u64, u64)]| {
+            f.iter().any(|&(fs, fn_)| u.iter().any(|&(us, un)| fs < us + un && us < fs + fn_))
+        };
+        ok &= check("and no free run overlaps a block in use", !touches(&free, &used));
+        let mut none: Vec<(u64, u64)> = Vec::new();
+        ok &= check("nothing in use frees the whole range", cas::sweep(2, 9, &mut none) == alloc::vec![(2, 7)]);
+        let mut all = alloc::vec![(0u64, 100u64)];
+        ok &= check("everything in use frees nothing", cas::sweep(2, 50, &mut all).is_empty());
+        let mut f = alloc::vec![(5u64, 2u64), (20, 10)];
+        ok &= check("first fit skips a run too small rather than splitting a blob",
+            cas::take(&mut f, 4) == Some(20) && f == alloc::vec![(5, 2), (24, 6)]);
+        ok &= check("an exact fit removes the run", cas::take(&mut f, 2) == Some(5) && f == alloc::vec![(24, 6)]);
+        ok &= check("and a need nothing satisfies is refused", cas::take(&mut f, 7).is_none());
+    }
 
     let a = tree_with("/x/y/z", b"hello");
     let b = tree_with("/x/y/z", b"hello");
@@ -1667,7 +1798,8 @@ fn cmd_ls(arg: &str) {
                     kprintln!("  (empty)");
                     return;
                 }
-                for (name, child) in es {
+                for e in es {
+                    let (name, child) = (&e.name, &e.node);
                     let h = tree::content_hash(child);
                     let hx = tree::short(&h);
                     let hx = core::str::from_utf8(&hx).unwrap_or("?");
@@ -1735,7 +1867,8 @@ fn walk_tree(n: &Node, depth: usize) {
         return;
     }
     if let Node::Dir(es) = n {
-        for (name, child) in es {
+        for e in es {
+            let (name, child) = (&e.name, &e.node);
             let mut pad = String::new();
             for _ in 0..depth {
                 pad.push_str("  ");
@@ -1937,7 +2070,8 @@ fn find_walk(n: &Node, at: &mut Vec<String>, needle: &str, hits: &mut u32, skipp
             }
         }
         Node::Dir(es) => {
-            for (name, child) in es {
+            for e in es {
+                let (name, child) = (&e.name, &e.node);
                 at.push(name.clone());
                 find_walk(child, at, needle, hits, skipped);
                 at.pop();
@@ -2050,16 +2184,73 @@ fn cmd_move(a: &str, b: &str, detach: bool) {
 
 // --- persistence --------------------------------------------------------
 
+/// Cut the namespace loose from the store it was restored from, so that store
+/// can be erased under it.
+///
+/// Two things tie a running namespace to its store, and both go wrong in
+/// silence if the store is reformatted: **away blobs**, whose bytes are still
+/// on the old disk, and **`written`**, the memo of what is already stored and
+/// where. Left alone, the first snapshot into a new store would skip every
+/// object the memo names and commit a tree pointing at blocks that now hold
+/// something else. So every away blob is read back into memory first (that is
+/// also what carries a machine's memories into its new install), and the memo
+/// is emptied.
+///
+/// Answers how many blobs were fetched and their bytes, or the first path
+/// that could not be read -- in which case nothing has been changed.
+pub fn detach_from_store() -> Result<(usize, u64), String> {
+    // Collected under the lock, fetched outside it: a fetch is disk I/O and
+    // `with` holds interrupts off.
+    let mut away: Vec<(Vec<String>, cas::ChunkRef)> = Vec::new();
+    fn walk(n: &Node, at: &mut Vec<String>, out: &mut Vec<(Vec<String>, cas::ChunkRef)>) {
+        match n {
+            Node::Away(r) => out.push((at.clone(), *r)),
+            Node::Dir(es) => {
+                for e in es {
+                    at.push(e.name.clone());
+                    walk(&e.node, at, out);
+                    at.pop();
+                }
+            }
+            Node::Blob(_) => {}
+        }
+    }
+    with(|s| walk(&s.root, &mut Vec::new(), &mut away));
+    let mut fetched: Vec<(Vec<String>, Vec<u8>)> = Vec::new();
+    let mut bytes = 0u64;
+    for (path, r) in away {
+        match fetch(&r) {
+            Some(b) => {
+                bytes += b.len() as u64;
+                fetched.push((path, b));
+            }
+            None => return Err(format!("/{}", path.join("/"))),
+        }
+    }
+    let n = fetched.len();
+    with(|s| {
+        for (path, b) in fetched {
+            if let Some(slot) = tree::resolve_mut(&mut s.root, &path) {
+                *slot = Node::Blob(b);
+            }
+        }
+        s.written = Written::default();
+    });
+    unsafe { *LAST_ROOT.get() = None };
+    Ok((n, bytes))
+}
+
+/// Commit the working tree now, as `snap` does.
+pub fn snap_now() {
+    cmd_snap();
+}
+
 fn cmd_snap() {
     let ok = with(|s| {
         let res = store::with(|st| {
-            let before = st.sb.alloc_next;
-            let root = write_node(st, &s.root, &mut s.written)?;
-            let mut name = [0u8; cas::NAME_LEN];
-            name[..4].copy_from_slice(b"root");
-            let entry = cas::Entry { name, chunk: root };
-            let m = st.commit(core::slice::from_ref(&entry))?;
-            Ok::<_, cas::Error>((st.sb.seq, m, st.sb.alloc_next - before))
+            let before = st.written_blocks;
+            let m = commit_tree(s, st)?;
+            Ok::<_, cas::Error>((st.sb.seq, m, st.written_blocks - before))
         });
         match res {
             None => {
@@ -2113,32 +2304,275 @@ fn report_store_error(e: cas::Error) {
     }
 }
 
+/// How many checkpoints a collection keeps: the newest and the ones before
+/// it. **At least two, and that is the safety argument.** Mount takes the
+/// newer of two superblocks and falls back to the older when the newer is
+/// torn, so the older one's tree must survive any collection -- and the
+/// free runs are only in memory, so nothing freed here is reused until this
+/// boot writes over it, after which a commit names only live objects.
+pub const GC_KEEP: usize = 8;
+
+/// Write the tree and commit it. A store that is full collects once and
+/// tries again, so a machine that has used its space up by changing things
+/// keeps working rather than refusing every snapshot.
+fn commit_tree(s: &mut Sysbox, st: &mut cas::Store) -> Result<cas::ChunkRef, cas::Error> {
+    let attempt = |s: &mut Sysbox, st: &mut cas::Store| {
+        let root = write_node(st, &mut s.root, &mut s.written)?;
+        let mut name = [0u8; cas::NAME_LEN];
+        name[..4].copy_from_slice(b"root");
+        st.commit(core::slice::from_ref(&cas::Entry { name, chunk: root }))
+    };
+    match attempt(s, st) {
+        Err(cas::Error::Full) => {
+            let (freed, _) = collect(s, st, GC_KEEP)?;
+            kprintln!("  [store] full -- collected {} block(s), trying again", freed);
+            attempt(s, st)
+        }
+        r => r,
+    }
+}
+
+/// Find every block the last `keep` checkpoints and the live tree still
+/// reach, and make the rest allocatable. Answers blocks freed and
+/// checkpoints kept. Reads directory chunks only: a blob's chunk reference is
+/// its extent, so blobs are marked without being read.
+///
+/// **Any directory that will not read stops the whole collection** with
+/// nothing freed. A collection that skipped it would free everything under
+/// it, which is everything that directory's tree still names.
+fn collect(s: &mut Sysbox, st: &mut cas::Store, keep: usize) -> Result<(u64, usize), cas::Error> {
+    use alloc::collections::BTreeSet;
+    let bsz = crate::store::block::block_size() as u64;
+    let ext = |r: &cas::ChunkRef| (r.lba, r.len.div_ceil(bsz).max(1));
+    let mut used: Vec<(u64, u64)> = Vec::new();
+    let mut dirs: BTreeSet<u64> = BTreeSet::new();
+    fn mark(
+        st: &cas::Store,
+        r: &cas::ChunkRef,
+        dir: bool,
+        used: &mut Vec<(u64, u64)>,
+        dirs: &mut BTreeSet<u64>,
+        bsz: u64,
+        depth: usize,
+    ) -> Result<(), cas::Error> {
+        if r.is_none() {
+            return Ok(());
+        }
+        used.push((r.lba, r.len.div_ceil(bsz).max(1)));
+        if !dir || !dirs.insert(r.lba) {
+            return Ok(());
+        }
+        if depth > tree::MAX_DEPTH + 2 {
+            return Err(cas::Error::Corrupt);
+        }
+        let raw = st.get(r)?;
+        let entries = tree::decode_dir(&raw).ok_or(cas::Error::Corrupt)?;
+        for (_, k, cr, _) in entries {
+            mark(st, &cr, tree::base_kind(k) == tree::KIND_DIR, used, dirs, bsz, depth + 1)?;
+        }
+        Ok(())
+    }
+    let mut m = st.sb.root;
+    let mut kept = 0;
+    while !m.is_none() && kept < keep {
+        // An older checkpoint that will not read is past where history is
+        // intact; the newest must read, or there is nothing to keep.
+        let man = match st.read_manifest(&m) {
+            Ok(x) => x,
+            Err(e) if kept == 0 => return Err(e),
+            Err(_) => break,
+        };
+        used.push(ext(&m));
+        for e in &man.entries {
+            // A snapshot's entry is its tree; anything else committed beside
+            // one is told apart by whether it decodes as a directory.
+            let dir = st.get(&e.chunk).ok().is_some_and(|b| tree::decode_dir(&b).is_some());
+            mark(st, &e.chunk, dir, &mut used, &mut dirs, bsz, 0)?;
+        }
+        m = man.prev;
+        kept += 1;
+    }
+    // What the running tree names on disk, committed or not.
+    fn live(n: &Node, used: &mut Vec<(u64, u64)>, bsz: u64) {
+        match n {
+            Node::Away(r) => used.push((r.lba, r.len.div_ceil(bsz).max(1))),
+            Node::Dir(es) => es.iter().for_each(|e| live(&e.node, used, bsz)),
+            Node::Blob(_) => {}
+        }
+    }
+    live(&s.root, &mut used, bsz);
+    let free = cas::sweep(st.sb.region_start + 2, st.sb.alloc_next, &mut used);
+
+    // **A second walk, written separately, must agree before anything is
+    // freed.** A marker that misses part of a tree frees live blocks, and
+    // nothing notices until a later write lands on them -- which first fit
+    // may not do for a long time, so a test can pass with the bug in. So the
+    // newest checkpoint is walked again by `reach`, which follows the kinds
+    // its directories record rather than guessing, and the live tree's
+    // stored blobs are added; if any free run touches what it found, the
+    // collection is refused whole.
+    let mut must: Vec<(u64, u64)> = Vec::new();
+    let newest = st.read_manifest(&st.sb.root)?;
+    must.push(ext(&st.sb.root));
+    for e in &newest.entries {
+        let is_root = &e.name[..4] == b"root";
+        reach(st, &e.chunk, if is_root { tree::KIND_DIR } else { tree::KIND_BLOB }, 0, &mut must)?;
+    }
+    live(&s.root, &mut must, bsz);
+    let overlaps = free.iter().any(|&(fs, fl)| must.iter().any(|&(ms, ml)| fs < ms + ml && ms < fs + fl));
+    if overlaps {
+        return Err(cas::Error::Disagree);
+    }
+    st.free = free;
+    // The memo names chunks by where they were; some of those are free now.
+    s.written = Written::default();
+    unsafe { *LAST_ROOT.get() = None };
+    Ok((st.free.iter().map(|&(_, n)| n).sum(), kept))
+}
+
+/// Commit the tree now if it changed since the last commit and the store is
+/// writable. `Ok(false)` when there was nothing to do or nowhere to write --
+/// not an error: a machine with no store has always answered `fsync` as done.
+pub fn commit_now() -> Result<bool, cas::Error> {
+    if !store::mounted() || !crate::dev::nvme::holds(crate::dev::nvme::Holder::Store) {
+        return Ok(false);
+    }
+    let current = with(|s| tree::content_hash(&s.root));
+    let Some(current) = current else { return Ok(false) };
+    if unsafe { LAST_ROOT.get().map(|h| h == current).unwrap_or(false) } {
+        return Ok(false);
+    }
+    let r = with(|s| store::with(|st| commit_tree(s, st)).unwrap_or(Err(cas::Error::NotFormatted)))
+        .unwrap_or(Err(cas::Error::NotFormatted));
+    r.map(|_| {
+        unsafe { *LAST_ROOT.get() = Some(current) };
+        true
+    })
+}
+
+/// `store gc`.
+pub fn gc_now() -> Result<(u64, usize, u64), cas::Error> {
+    with(|s| {
+        store::with(|st| {
+            let r = collect(s, st, GC_KEEP)?;
+            Ok((r.0, r.1, st.free_blocks()))
+        })
+        .unwrap_or(Err(cas::Error::NotFormatted))
+    })
+    .unwrap_or(Err(cas::Error::NotFormatted))
+}
+
+/// Blobs at least this large leave memory once they are on disk.
+///
+/// **A snapshot used to double what it saved**: the bytes went to disk and
+/// stayed resident, so a desktop's packages (~1.8 GB) sat in the heap for the
+/// rest of the boot after being written. Past this size a committed blob
+/// becomes `Node::Away` -- its address and length, which is all the tree
+/// needs -- and is read back from disk when something opens it. Below it a
+/// file stays: the kernel's own configuration is read often and is a few
+/// hundred bytes, and an NVMe round trip per read of `/etc/desk` buys nothing.
+pub const EVICT_AT: usize = 64 * 1024;
+
+/// The same, for the Linux layer (`/linux/root`), and smaller on purpose.
+/// **A desktop is mostly small files**: of the 1,689 MiB `orange upgrade`
+/// adds, 284 MiB is in files under 64 KiB -- icons, translations, Python
+/// modules -- and only 40 MiB in files under 4 KiB. Measured on the built
+/// root, not guessed. At 64 KiB every one of those stayed resident after
+/// being stored, and an install took the heap from 87 MB to 578.
+pub const LAYER_EVICT_AT: usize = 4 * 1024;
+
+/// Where in the tree a node is, for which threshold applies to it.
+#[derive(Clone, Copy, PartialEq)]
+enum Region {
+    Top,
+    Linux,
+    Layer,
+}
+
+impl Region {
+    fn child(self, name: &str) -> Region {
+        match (self, name) {
+            (Region::Top, "linux") => Region::Linux,
+            (Region::Linux, "root") | (Region::Layer, _) => Region::Layer,
+            _ => Region::Top,
+        }
+    }
+    fn evict_at(self) -> usize {
+        if self == Region::Layer { LAYER_EVICT_AT } else { EVICT_AT }
+    }
+}
+
 fn write_node(
     st: &mut cas::Store,
-    n: &Node,
+    n: &mut Node,
     w: &mut Written,
 ) -> Result<cas::ChunkRef, cas::Error> {
+    write_in(st, n, w, Region::Top)
+}
+
+fn write_in(
+    st: &mut cas::Store,
+    n: &mut Node,
+    w: &mut Written,
+    at: Region,
+) -> Result<cas::ChunkRef, cas::Error> {
     let h = tree::content_hash(n);
-    if let Some(r) = w.get(&h) {
-        return Ok(r);
-    }
-    let r = match n {
-        Node::Blob(b) => st.put(b)?,
-        // Already stored, at this exact address, which is what the reference
-        // says. Re-writing it would allocate a second copy of identical bytes
-        // in an append-only store that never reclaims.
-        Node::Away(r) => *r,
-        Node::Dir(es) => {
-            let mut encoded = Vec::new();
-            for (name, child) in es {
-                let cr = write_node(st, child, w)?;
-                encoded.push((name.clone(), child.kind(), cr));
-            }
-            st.put(&tree::encode_dir(&encoded))?
+    let r = match w.get(&h) {
+        Some(r) => {
+            // Already stored, and so is everything under it -- but what is
+            // under it may still be resident: a file rewritten with the bytes
+            // it already had makes the whole tree hash as before, and this
+            // early exit at the root used to leave a 100 MB blob in the heap.
+            evict_written(n, w, at);
+            r
+        }
+        None => {
+            let r = match n {
+                Node::Blob(b) => st.put(b)?,
+                // Already stored, at this exact address, which is what the
+                // reference says. Re-writing it would allocate a second copy.
+                Node::Away(r) => *r,
+                Node::Dir(es) => {
+                    let mut encoded = Vec::new();
+                    for e in es.iter_mut() {
+                        let cr = write_in(st, &mut e.node, w, at.child(&e.name))?;
+                        encoded.push((e.name.clone(), e.kind(), cr, e.attr.as_deref().cloned()));
+                    }
+                    st.put(&tree::encode_dir(&encoded))?
+                }
+            };
+            w.insert(h, r);
+            r
         }
     };
-    w.insert(h, r);
+    // On disk now, whether this call put it there or an earlier one did; and
+    // its chunk reference *is* its content address and length, so swapping it
+    // in changes no address anywhere above it.
+    if let Node::Blob(b) = n {
+        if b.len() >= at.evict_at() {
+            *n = Node::Away(r);
+        }
+    }
     Ok(r)
+}
+
+/// Swap every large resident blob under `n` for the reference `w` already
+/// holds for it. Called where `n` is known to be stored whole, so every blob
+/// under it is in `w`; one that somehow is not is left resident, never guessed.
+fn evict_written(n: &mut Node, w: &Written, at: Region) {
+    match n {
+        Node::Blob(b) if b.len() >= at.evict_at() => {
+            if let Some(r) = w.get(&tree::content_hash(n)) {
+                *n = Node::Away(r);
+            }
+        }
+        Node::Dir(es) => {
+            for e in es.iter_mut() {
+                evict_written(&mut e.node, w, at.child(&e.name));
+            }
+        }
+        _ => {}
+    }
 }
 
 fn read_node(
@@ -2156,14 +2590,15 @@ fn read_node(
     // *directory* instead of one per node, plus a SHA-256 over every byte on
     // the disk. A machine whose snapshot held an 8,913-node forest did not
     // reach a prompt inside fifteen minutes because of the line this replaces.
-    if kind == tree::KIND_BLOB {
+    if tree::base_kind(kind) == tree::KIND_BLOB {
         return Ok(Node::Away(*r));
     }
     let raw = st.get(r)?;
     let entries = tree::decode_dir(&raw).ok_or(cas::Error::Corrupt)?;
     let mut out = Vec::new();
-    for (name, k, cr) in entries {
-        out.push((name, read_node(st, &cr, k, depth + 1)?));
+    for (name, k, cr, attr) in entries {
+        let node = read_node(st, &cr, k, depth + 1)?;
+        out.push(tree::Ent { name, attr: attr.map(alloc::boxed::Box::new), node });
     }
     Ok(Node::Dir(out))
 }
@@ -2354,28 +2789,34 @@ fn diff_walk(
             let mut j = 0;
             while i < ea.len() || j < eb.len() {
                 let ord = match (ea.get(i), eb.get(j)) {
-                    (Some((ka, _)), Some((kb, _))) => ka.cmp(kb),
+                    (Some(ea_), Some(eb_)) => ea_.name.cmp(&eb_.name),
                     (Some(_), None) => core::cmp::Ordering::Less,
                     (None, Some(_)) => core::cmp::Ordering::Greater,
                     (None, None) => break,
                 };
                 match ord {
                     core::cmp::Ordering::Equal => {
-                        at.push(ea[i].0.clone());
-                        diff_walk(&ea[i].1, &eb[j].1, at, changes, sink);
+                        at.push(ea[i].name.clone());
+                        // Same contents with different attributes is a change
+                        // too -- a chmod -- and the content walk cannot see it.
+                        if ea[i].attr != eb[j].attr && tree::content_hash(&ea[i].node) == tree::content_hash(&eb[j].node) {
+                            *changes += 1;
+                            sink("~", at);
+                        }
+                        diff_walk(&ea[i].node, &eb[j].node, at, changes, sink);
                         at.pop();
                         i += 1;
                         j += 1;
                     }
                     core::cmp::Ordering::Less => {
-                        at.push(ea[i].0.clone());
+                        at.push(ea[i].name.clone());
                         *changes += 1;
                         sink("-", at);
                         at.pop();
                         i += 1;
                     }
                     core::cmp::Ordering::Greater => {
-                        at.push(eb[j].0.clone());
+                        at.push(eb[j].name.clone());
                         *changes += 1;
                         sink("+", at);
                         at.pop();
@@ -2579,6 +3020,26 @@ fn cmd_fsck() {
     }
 }
 
+/// Every block reachable from `r`, for `collect`'s cross-check. Reads
+/// directories and not blobs, by the kinds the directories record.
+fn reach(st: &cas::Store, r: &cas::ChunkRef, kind: u8, depth: usize, out: &mut Vec<(u64, u64)>) -> Result<(), cas::Error> {
+    if r.is_none() {
+        return Ok(());
+    }
+    if depth > tree::MAX_DEPTH + 2 {
+        return Err(cas::Error::Corrupt);
+    }
+    let bsz = crate::store::block::block_size() as u64;
+    out.push((r.lba, r.len.div_ceil(bsz).max(1)));
+    if tree::base_kind(kind) == tree::KIND_DIR {
+        let raw = st.get(r)?;
+        for (_, k, cr, _) in tree::decode_dir(&raw).ok_or(cas::Error::Corrupt)? {
+            reach(st, &cr, k, depth + 1, out)?;
+        }
+    }
+    Ok(())
+}
+
 fn verify(
     st: &cas::Store,
     r: &cas::ChunkRef,
@@ -2593,9 +3054,9 @@ fn verify(
     let raw = st.get(r)?;
     *objects += 1;
     *bytes += raw.len() as u64;
-    if kind == tree::KIND_DIR {
+    if tree::base_kind(kind) == tree::KIND_DIR {
         let entries = tree::decode_dir(&raw).ok_or(cas::Error::Corrupt)?;
-        for (_, k, cr) in entries {
+        for (_, k, cr, _) in entries {
             verify(st, &cr, k, depth + 1, objects, bytes)?;
         }
     }
@@ -2673,7 +3134,7 @@ pub fn autosnap_poll() {
     if !AUTOSNAP_DUE.swap(false, Ordering::Relaxed) {
         return;
     }
-    if !crate::store::mounted() || !crate::dev::nvme::writes_unlocked() {
+    if !crate::store::mounted() || !crate::dev::nvme::holds(crate::dev::nvme::Holder::Store) {
         return;
     }
 
@@ -2689,14 +3150,8 @@ pub fn autosnap_poll() {
 
     let saved = with(|s| {
         crate::store::with(|st| {
-            let before = st.sb.alloc_next;
-            let root = write_node(st, &s.root, &mut s.written).ok()?;
-            let mut name = [0u8; cas::NAME_LEN];
-            name[..4].copy_from_slice(b"root");
-            let entry = cas::Entry { name, chunk: root };
-            st.commit(core::slice::from_ref(&entry))
-                .ok()
-                .map(|_| (st.sb.seq, st.sb.alloc_next - before, st.free_blocks()))
+            let before = st.written_blocks;
+            commit_tree(s, st).ok().map(|_| (st.sb.seq, st.written_blocks - before, st.free_blocks()))
         })
     })
     .flatten()
@@ -2705,10 +3160,9 @@ pub fn autosnap_poll() {
     if let Some((seq, blocks, free)) = saved {
         unsafe { *LAST_ROOT.get() = Some(current) };
         console::set_color(LTGRAY);
-        // The block count is not decoration. This store is append-only --
-        // `alloc_next` only ever goes up and nothing reclaims -- so anything
-        // large that changes often will fill it, and printing the cost each
-        // time is the only way to find out which thing that is.
+        // The block count is not decoration: anything large that changes
+        // often costs this every time, and printing it is how to find out
+        // which thing that is.
         kprintln!("\n[autosnap] snapshot {}, {} block(s), {} free", seq, blocks, free);
     }
 }
@@ -2735,7 +3189,7 @@ pub fn autosnap_report() {
         console::set_color(YELLOW);
         kprintln!("  but no store is mounted, so nothing will be written");
         console::set_color(LTGRAY);
-    } else if !crate::dev::nvme::writes_unlocked() {
+    } else if !crate::dev::nvme::holds(crate::dev::nvme::Holder::Store) {
         console::set_color(YELLOW);
         kprintln!("  but writes are locked -- 'store unlock'");
         console::set_color(LTGRAY);

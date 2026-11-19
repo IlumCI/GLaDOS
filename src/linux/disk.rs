@@ -125,6 +125,13 @@ pub fn mount(prefix: &str, index: u32) -> Result<(), &'static str> {
         .iter()
         .find(|p| p.index == index)
         .ok_or("no partition with that number -- 'fat' lists them")?;
+    // A system slot is the root or nothing. Mounted anywhere else -- the
+    // app scanner walks every partition -- the spare slot would count as in
+    // use and no system update could be written into it, and one that was
+    // would be rewritten under a reader that cached its old blocks.
+    if !prefix.is_empty() && p.type_guid == crate::install::plan::ROOT_TYPE_GUID {
+        return Err("that is a system slot, which mounts at / or not at all");
+    }
     let vol = match erofs::Image::mount(p.start_lba) {
         Ok(img) => Vol::Erofs(img),
         Err(_) if prefix.is_empty() => return Err("only an EROFS root image can be mounted at /"),
@@ -160,11 +167,82 @@ pub fn auto_root() -> Option<u32> {
     }
     // A root on the disk first: an installed system's. Then the one the ISO
     // carried into memory, answered as partition 0.
+    //
+    // **A disk carrying GLaDOS system slots is asked only about those**, and
+    // in the order the slot record says: the slot this boot chose first, then
+    // the other, so a slot that will not mount still leaves a system. Every
+    // partition used to be offered in table order and the first EROFS took,
+    // which on an installed disk is slot A whichever slot is active.
     let on_disk = crate::store::block::scan().ok().and_then(|layout| {
-        let indices: Vec<u32> = layout.partitions.iter().map(|p| p.index).collect();
-        indices.into_iter().find(|&i| mount("/", i).is_ok())
+        let mut slots: Vec<u32> = layout
+            .partitions
+            .iter()
+            .filter(|p| p.type_guid == crate::install::plan::ROOT_TYPE_GUID)
+            .map(|p| p.index)
+            .collect();
+        if let Some(c) = crate::install::slot::chosen() {
+            if (c as usize) < slots.len() {
+                let first = slots.remove(c as usize);
+                slots.insert(0, first);
+            }
+        }
+        let indices: Vec<u32> = if slots.is_empty() {
+            layout.partitions.iter().map(|p| p.index).collect()
+        } else {
+            slots.clone()
+        };
+        let got = indices.iter().copied().find(|&i| mount("/", i).is_ok());
+        if !slots.is_empty() && got.is_some() && got != slots.first().copied() {
+            crate::kprintln!("[linux] the chosen system slot would not mount; running the other one");
+            if let Some(c) = crate::install::slot::chosen() {
+                crate::install::slot::fell_back_to(1 - c.min(1));
+            }
+        }
+        got
     });
     on_disk.or_else(|| mount_ram().ok().map(|_| 0))
+}
+
+/// Whether anything mounted from the disk starts outside every one of `keep`
+/// (`(start, blocks)`): an install alongside rewrites only what it does not
+/// keep, so a volume mounted on a kept partition -- Windows' ESP, which the
+/// app scanner mounts -- is no obstacle.
+pub fn uses_disk_outside(keep: &[(u64, u64)]) -> bool {
+    let _g = big();
+    let inside = |b: u64| keep.iter().any(|&(s, n)| b >= s && b < s + n);
+    unsafe { MOUNTS.get() }.iter().chain(unsafe { RETIRED.get() }.iter()).any(|m| match &m.vol {
+        Vol::Fat { vol, .. } => !inside(vol.base()),
+        Vol::Erofs(img) => img.base() != erofs::RAM_BASE && !inside(img.base()),
+    })
+}
+
+/// Whether anything mounted is read from the NVMe disk rather than memory.
+/// The installer refuses to erase a disk a running guest is reading from.
+pub fn uses_disk() -> bool {
+    let _g = big();
+    unsafe { MOUNTS.get() }.iter().chain(unsafe { RETIRED.get() }.iter()).any(|m| match &m.vol {
+        Vol::Fat { .. } => true,
+        Vol::Erofs(img) => img.base() != erofs::RAM_BASE,
+    })
+}
+
+/// Where the image mounted at `/` lives, when it is read off the disk.
+pub fn root_base() -> Option<u64> {
+    let _g = big();
+    unsafe { MOUNTS.get() }.iter().find(|m| m.prefix.is_empty()).and_then(|m| match &m.vol {
+        Vol::Erofs(img) if img.base() != erofs::RAM_BASE => Some(img.base()),
+        _ => None,
+    })
+}
+
+/// Whether the image at `base` is mounted, so a system update never writes
+/// under a running system.
+pub fn slot_mounted(base: u64) -> bool {
+    let _g = big();
+    unsafe { MOUNTS.get() }.iter().chain(unsafe { RETIRED.get() }.iter()).any(|m| match &m.vol {
+        Vol::Erofs(img) => img.base() == base,
+        _ => false,
+    })
 }
 
 /// Mount the in-memory root (`erofs::set_ram`) at `/`.
@@ -363,6 +441,30 @@ static LISTINGS: Racy<alloc::collections::BTreeMap<(u64, u64), Listing>> =
 /// Entries kept across every cached listing before the cache starts again.
 const LISTING_CAP: usize = 200_000;
 
+/// The root image's own listing of a directory, ignoring the guest's layer
+/// *and* its whiteouts: what the system image ships, for `reconcile`, which
+/// has to see the image's files that an upgrade in the layer hid.
+pub fn image_entries(path: &str) -> Vec<(String, bool, usize)> {
+    let _g = big();
+    let m = unsafe { MOUNTS.get() };
+    let Some(root) = m.iter().find(|x| x.prefix.is_empty()) else { return Vec::new() };
+    let Vol::Erofs(img) = &root.vol else { return Vec::new() };
+    let Ok(ino) = img.lookup(path, true) else { return Vec::new() };
+    img.dir(&ino)
+        .map(|v| v.into_iter().filter(|e| e.0 != "." && e.0 != "..").map(|(name, _, t)| (name, t == 2, 0)).collect())
+        .unwrap_or_default()
+}
+
+/// A file's bytes as the root image has them, under the same rule.
+pub fn image_read(path: &str) -> Option<Vec<u8>> {
+    let _g = big();
+    let m = unsafe { MOUNTS.get() };
+    let root = m.iter().find(|x| x.prefix.is_empty())?;
+    let Vol::Erofs(img) = &root.vol else { return None };
+    let ino = img.lookup(path, true).ok()?;
+    img.read_all(&ino).ok()
+}
+
 pub fn entries(path: &str) -> Vec<(String, bool, usize)> {
     let _g = big();
     let Some(Some(n)) = lookup(path) else { return Vec::new() };
@@ -504,9 +606,15 @@ enum Body {
         cache: Vec<u8>,
     },
     Erofs(erofs::Inode),
+    /// A layer file whose bytes are in the store and not in memory: read by
+    /// range like an image file, rather than copied whole into the heap at
+    /// `open`, which for a 100 MB library is 100 MB per program that maps it.
+    /// Unverified, because a range is not the blob its address covers -- the
+    /// bargain every streamed read here makes.
+    Store(crate::store::cas::ChunkRef),
 }
 
-/// An open file on a mounted volume.
+/// An open file on a mounted volume, or a stored layer file read the same way.
 pub struct DiskFile {
     pub path: String,
     pub size: usize,
@@ -540,6 +648,12 @@ impl DiskFile {
         Ok(DiskFile { path: String::from(path), size: n.size, at: 0, mount: m.id, body })
     }
 
+    /// A layer file held in the store, read by range. No volume backs it, so
+    /// it names mount 0, which no mount ever has.
+    pub fn stored(path: &str, r: crate::store::cas::ChunkRef) -> DiskFile {
+        DiskFile { path: String::from(path), size: r.len as usize, at: 0, mount: 0, body: Body::Store(r) }
+    }
+
     /// What reading this file needs, copied out so the read can be made
     /// without the guest lock: the image's handle and the inode. `None` on
     /// FAT, whose reads go through state behind that lock.
@@ -562,10 +676,20 @@ impl DiskFile {
 
     /// Copy up to `out.len()` bytes from offset `off`. Answers how many.
     pub fn read_at(&mut self, off: usize, out: &mut [u8]) -> usize {
-        let _g = big();
         if off >= self.size || out.is_empty() {
             return 0;
         }
+        if let Body::Store(r) = &self.body {
+            let want = out.len().min(self.size - off);
+            return match crate::sysbox::stored::read_at(r, off as u64, want) {
+                Some(b) => {
+                    out[..b.len()].copy_from_slice(&b);
+                    b.len()
+                }
+                None => 0,
+            };
+        }
+        let _g = big();
         let Some(m) = by_id(self.mount) else { return 0 };
         match (&m.vol, &mut self.body) {
             (Vol::Erofs(img), Body::Erofs(ino)) => img.read(ino, off as u64, out).unwrap_or(0),

@@ -2936,6 +2936,17 @@ pub(super) fn sys_openat(dirfd: u64, path_at: u64, flags: u64, mode: u64) -> u64
             if size.is_some() && flags & (O_CREAT | O_EXCL) == (O_CREAT | O_EXCL) {
                 return EEXIST;
             }
+            // **A large stored file is read by range, not copied in.** Only a
+            // read-only open: a writer gets the whole contents as before,
+            // because writes buffer in memory and commit at the last close.
+            if !wants_write && flags & O_TRUNC == 0 {
+                if let Some(r) = super::ns::away_ref(&path) {
+                    if r.len as usize >= crate::sysbox::EVICT_AT {
+                        let f = super::disk::DiskFile::stored(&path, r);
+                        return place_fd(fds, super::fs::Fd::Disk(alloc::rc::Rc::new(core::cell::RefCell::new(f))));
+                    }
+                }
+            }
             // A reader of a file already open shares its contents.
             let reading = flags & O_TRUNC == 0 && size.is_some();
             let shared = if reading { super::fs::shared_contents(&path) } else { None };
@@ -3385,10 +3396,20 @@ pub(super) fn sys_linkat(olddir: u64, old_at: u64, newdir: u64, new_at: u64, fla
 /// reports the epoch -- so this answers whether the file is there and stores
 /// nothing, which is what `touch` needs to finish. A null path with a
 /// descriptor is `futimens`.
-pub(super) fn sys_utimensat(dirfd: u64, path_at: u64, flags: u64) -> u64 {
+pub(super) fn sys_utimensat(dirfd: u64, path_at: u64, times: u64, flags: u64) -> u64 {
     const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    let mtime = match mtime_arg(times) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
     if path_at == 0 {
-        return with_fds(|fds, _| if matches!(fds.get(dirfd as usize), Some(Some(_))) { 0 } else { EBADF }).unwrap_or(EBADF);
+        let Some(path) = path_of_fd(dirfd) else {
+            return with_fds(|fds, _| if matches!(fds.get(dirfd as usize), Some(Some(_))) { 0 } else { EBADF }).unwrap_or(EBADF);
+        };
+        if let Some(t) = mtime {
+            super::ns::edit_attr(&path, |a| a.mtime_ns = t);
+        }
+        return 0;
     }
     let raw = match read_cstr(path_at) {
         Ok(v) => v,
@@ -3412,7 +3433,273 @@ pub(super) fn sys_utimensat(dirfd: u64, path_at: u64, flags: u64) -> u64 {
         || super::ns::blob_len(&path).is_some()
         || super::ns::is_dir(&path)
         || super::dev::node(&path).is_some();
-    if there { 0 } else { ENOENT }
+    if !there {
+        return ENOENT;
+    }
+    // Kept on the layer's entry when there is one -- make, rsync and pacman
+    // compare these -- and answered as done for a file only the image has,
+    // which has nowhere to keep them, as before.
+    if let Some(t) = mtime {
+        super::ns::edit_attr(&path, |a| a.mtime_ns = t);
+    }
+    0
+}
+
+/// Now, in nanoseconds since 1970, off the RTC: there is no other wall clock.
+fn now_ns() -> i64 {
+    crate::dev::rtc::now().map(|d| crate::dev::rtc::unix_seconds(&d) as i64 * 1_000_000_000).unwrap_or(0)
+}
+
+/// The modification time a `utimensat` asks for: `None` to leave it.
+/// NULL `times` and `UTIME_NOW` both mean now; `UTIME_OMIT` means leave.
+fn mtime_arg(times: u64) -> Result<Option<i64>, u64> {
+    const UTIME_NOW: i64 = (1 << 30) - 1;
+    const UTIME_OMIT: i64 = (1 << 30) - 2;
+    if times == 0 {
+        return Ok(Some(now_ns()));
+    }
+    if !reachable(times, 32, false) {
+        return Err(EFAULT);
+    }
+    let sec = unsafe { core::ptr::read_unaligned((times + 16) as *const i64) };
+    let nsec = unsafe { core::ptr::read_unaligned((times + 24) as *const i64) };
+    match nsec {
+        UTIME_OMIT => Ok(None),
+        UTIME_NOW => Ok(Some(now_ns())),
+        n if (0..1_000_000_000).contains(&n) => Ok(Some(sec.saturating_mul(1_000_000_000).saturating_add(n))),
+        _ => Err(EINVAL),
+    }
+}
+
+/// The path an open descriptor was opened by, for the calls that take one.
+fn path_of_fd(fd: u64) -> Option<String> {
+    with_fds(|fds, _| match fds.get(fd as usize) {
+        Some(Some(super::fs::Fd::File(b))) => Some(b.borrow().path.clone()),
+        Some(Some(super::fs::Fd::Disk(b))) => Some(b.borrow().path.clone()),
+        Some(Some(super::fs::Fd::Dir(d))) => Some(d.borrow().path.clone()),
+        _ => None,
+    })
+    .flatten()
+}
+
+/// `chown` and its three relatives.
+///
+/// **Every guest is root, and that stays true; what changes is that the
+/// answer is kept.** pacman extracts a package's files with the owners its
+/// archive names, and a file that said root forever made `pacman -Qk`'s
+/// ownership check meaningless and broke the one program here that is not
+/// root, `alpm` as `DownloadUser`. An owner of -1 leaves that half alone. A
+/// path only the image has keeps accepting the call and recording nothing,
+/// which is all it ever did.
+fn sys_chown(nr: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64 {
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    let (path, uid, gid) = match nr {
+        SYS_FCHOWN => match path_of_fd(a) {
+            Some(p) => (p, b, c),
+            None => return if with_fds(|fds, _| matches!(fds.get(a as usize), Some(Some(_)))).unwrap_or(false) { 0 } else { EBADF },
+        },
+        _ => {
+            let (dirfd, at, uid, gid, flags) = match nr {
+                SYS_FCHOWNAT => (a, b, c, d, e),
+                SYS_LCHOWN => (super::fs::AT_FDCWD as u64, a, b, c, AT_SYMLINK_NOFOLLOW),
+                _ => (super::fs::AT_FDCWD as u64, a, b, c, 0),
+            };
+            let raw = match read_cstr(at) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            if raw.is_empty() {
+                if flags & AT_EMPTY_PATH == 0 {
+                    return ENOENT;
+                }
+                match path_of_fd(dirfd) {
+                    Some(p) => (p, uid, gid),
+                    None => return 0,
+                }
+            } else {
+                let p = match at_path(dirfd, &raw) {
+                    Ok(p) => p,
+                    Err(e) => return e,
+                };
+                let p = if flags & AT_SYMLINK_NOFOLLOW != 0 { p } else { super::link::follow(p) };
+                (p, uid, gid)
+            }
+        }
+    };
+    if !occupied(&path) && super::link::own(&path).is_none() && super::dev::node(&path).is_none() {
+        return ENOENT;
+    }
+    let keep = |v: u64| v as u32 == u32::MAX;
+    super::ns::edit_attr(&path, |a| {
+        if !keep(uid) {
+            a.uid = uid as u32;
+        }
+        if !keep(gid) {
+            a.gid = gid as u32;
+        }
+    });
+    0
+}
+
+/// Owner and times into a `struct stat` already written for `path`, from its
+/// layer entry. `statx` is built from this, so it agrees.
+fn patch_stat(buf: u64, path: &str) {
+    let Some(a) = super::ns::attr_of(path) else { return };
+    let w32 = |o: u64, v: u32| unsafe { core::ptr::write_unaligned((buf + o) as *mut u32, v) };
+    let w64 = |o: u64, v: i64| unsafe { core::ptr::write_unaligned((buf + o) as *mut i64, v) };
+    w32(28, a.uid);
+    w32(32, a.gid);
+    if a.mtime_ns != 0 {
+        let (sec, ns) = (a.mtime_ns.div_euclid(1_000_000_000), a.mtime_ns.rem_euclid(1_000_000_000));
+        // No separate access or change time is kept: both read as the
+        // modification time, which is what `noatime` mounts report too.
+        for o in [72u64, 88, 104] {
+            w64(o, sec);
+            w64(o + 8, ns);
+        }
+    }
+}
+
+/// Extended attributes: the twelve calls, 188 through 199.
+///
+/// **Kept on the layer's entry, under the namespaces a package uses** --
+/// `user.*`, `security.*` (file capabilities: `setcap` in an install script
+/// is how `ping` works without being setuid) and `trusted.*`. `system.*` is
+/// ACLs, which nothing here enforces, so setting one is refused with
+/// EOPNOTSUPP and reading one is ENODATA, the answers of a filesystem
+/// mounted without ACL support: `ls -l` and `cp -a` carry on. A file only
+/// the image has is copied up before an attribute is set on it.
+fn sys_xattr(nr: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64 {
+    const EOPNOTSUPP: u64 = (-95i64) as u64;
+    const E2BIG: u64 = (-7i64) as u64;
+    const XATTR_CREATE: u64 = 1;
+    const XATTR_REPLACE: u64 = 2;
+    const SIZE_MAX: usize = 65536;
+    // Which file: by path (following links or not) or by descriptor.
+    let by_fd = matches!(nr, 190 | 193 | 196 | 199);
+    let nofollow = matches!(nr, 189 | 192 | 195 | 198);
+    let path = if by_fd {
+        match path_of_fd(a) {
+            Some(p) => p,
+            None => return if with_fds(|fds, _| matches!(fds.get(a as usize), Some(Some(_)))).unwrap_or(false) { ENODATA } else { EBADF },
+        }
+    } else {
+        let raw = match read_cstr(a) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let p = match at_path(super::fs::AT_FDCWD as u64, &raw) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        if nofollow { p } else { super::link::follow(p) }
+    };
+    if !occupied(&path) {
+        return ENOENT;
+    }
+    let name = |at: u64| -> Result<String, u64> {
+        let n = read_cstr(at)?;
+        if n.is_empty() || n.len() > 255 {
+            return Err(ERANGE);
+        }
+        Ok(n)
+    };
+    let kept = |n: &str| n.starts_with("user.") || n.starts_with("security.") || n.starts_with("trusted.");
+    match nr {
+        // set
+        188..=190 => {
+            let n = match name(b) {
+                Ok(n) => n,
+                Err(e) => return e,
+            };
+            if !kept(&n) {
+                return EOPNOTSUPP;
+            }
+            let len = d as usize;
+            if len > SIZE_MAX {
+                return E2BIG;
+            }
+            if len > 0 && !reachable(c, len, false) {
+                return EFAULT;
+            }
+            let value = if len == 0 { Vec::new() } else { unsafe { core::slice::from_raw_parts(c as *const u8, len) }.to_vec() };
+            if !super::fs::writable(&path) {
+                return EROFS;
+            }
+            if super::ns::attr_of(&path).is_none() && super::ns::blob_len(&path).is_none() && !super::ns::is_dir(&path) {
+                // Only the image has it: copy it up so there is an entry.
+                if !super::ns::copy_up(&path) {
+                    return EIO;
+                }
+            }
+            let had = super::ns::attr_of(&path).is_some_and(|x| x.xattr(&n).is_some());
+            if e & XATTR_CREATE != 0 && had {
+                return EEXIST;
+            }
+            if e & XATTR_REPLACE != 0 && !had {
+                return ENODATA;
+            }
+            if super::ns::edit_attr(&path, |x| x.set_xattr(&n, value)) { 0 } else { EIO }
+        }
+        // get
+        191..=193 => {
+            let n = match name(b) {
+                Ok(n) => n,
+                Err(e) => return e,
+            };
+            let Some(v) = super::ns::attr_of(&path).and_then(|x| x.xattr(&n).map(Vec::from)) else { return ENODATA };
+            if d == 0 {
+                return v.len() as u64;
+            }
+            if (d as usize) < v.len() {
+                return ERANGE;
+            }
+            if !reachable(c, v.len(), true) {
+                return EFAULT;
+            }
+            unsafe { core::ptr::copy_nonoverlapping(v.as_ptr(), c as *mut u8, v.len()) };
+            v.len() as u64
+        }
+        // list: names, each NUL-terminated
+        194..=196 => {
+            let mut out = Vec::new();
+            if let Some(x) = super::ns::attr_of(&path) {
+                for (k, _) in &x.xattrs {
+                    out.extend_from_slice(k.as_bytes());
+                    out.push(0);
+                }
+            }
+            if c == 0 {
+                return out.len() as u64;
+            }
+            if (c as usize) < out.len() {
+                return ERANGE;
+            }
+            if !out.is_empty() {
+                if !reachable(b, out.len(), true) {
+                    return EFAULT;
+                }
+                unsafe { core::ptr::copy_nonoverlapping(out.as_ptr(), b as *mut u8, out.len()) };
+            }
+            out.len() as u64
+        }
+        // remove
+        _ => {
+            let n = match name(b) {
+                Ok(n) => n,
+                Err(e) => return e,
+            };
+            let had = super::ns::attr_of(&path).is_some_and(|x| x.xattr(&n).is_some());
+            if !had {
+                return ENODATA;
+            }
+            super::ns::edit_attr(&path, |x| {
+                x.remove_xattr(&n);
+            });
+            0
+        }
+    }
 }
 
 /// `rename`, `renameat` and `renameat2`, over the namespace's own move.
@@ -8061,6 +8348,16 @@ pub(super) fn sys_fstatfs(fd: u64, buf: u64) -> u64 {
 }
 
 pub(super) fn sys_fstat(fd: u64, buf: u64) -> u64 {
+    let r = fstat(fd, buf);
+    if r == 0 && super::ns::layered() {
+        if let Some(p) = path_of_fd(fd) {
+            patch_stat(buf, &p);
+        }
+    }
+    r
+}
+
+fn fstat(fd: u64, buf: u64) -> u64 {
     let found = with_fds(|fds, _| match fds.get(fd as usize) {
         Some(Some(super::fs::Fd::Disk(b))) => {
             let f = b.borrow();
@@ -8108,6 +8405,23 @@ pub(super) fn sys_fstat(fd: u64, buf: u64) -> u64 {
 }
 
 pub(super) fn sys_statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 {
+    let r = statat(dirfd, path_at, buf, flags);
+    if r == 0 && super::ns::layered() {
+        // The path again, resolved as `statat` did; an empty one is the
+        // descriptor, which `sys_fstat` already patched.
+        if let Ok(raw) = read_cstr(path_at) {
+            if !raw.is_empty() {
+                if let Ok(p) = at_path(dirfd, &raw) {
+                    let p = if flags & AT_SYMLINK_NOFOLLOW != 0 { p } else { super::link::follow(p) };
+                    patch_stat(buf, &p);
+                }
+            }
+        }
+    }
+    r
+}
+
+fn statat(dirfd: u64, path_at: u64, buf: u64, flags: u64) -> u64 {
     let raw = match read_cstr(path_at) {
         Ok(v) => v,
         Err(e) => return e,
@@ -9745,10 +10059,7 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
         // Advice about access patterns: there is no page cache to advise.
         SYS_FADVISE64 => (0, true),
         SYS_STATX => (sys_statx(f.rdi, f.rsi, f.rdx, f.r8), true),
-        // Extended attributes: none, on any file. ENODATA for a named one and
-        // an empty list, which is what a filesystem without them answers and
-        // what `ls -l` probes for ACLs on every entry.
-        191..=193 => (ENODATA, true),
+        188..=199 => (sys_xattr(nr, f.rdi, f.rsi, f.rdx, f.r10, f.r8), true),
         // sigaltstack: signal handlers here always run on the stack the
         // guest was on, so there is no alternate one to install. The old
         // stack reads back as disabled, which is the truth, and a new one is
@@ -9772,28 +10083,41 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
                 (0, true)
             }
         }
-        194..=196 => (0, true),
         SYS_UNLINKAT => (sys_unlinkat(f.rdi, f.rsi, f.rdx), true),
         SYS_SYMLINK => (sys_symlinkat(f.rdi, super::fs::AT_FDCWD as u64, f.rsi), true),
         SYS_SYMLINKAT => (sys_symlinkat(f.rdi, f.rsi, f.rdx), true),
         SYS_LINK => (sys_linkat(super::fs::AT_FDCWD as u64, f.rdi, super::fs::AT_FDCWD as u64, f.rsi, 0), true),
         SYS_LINKAT => (sys_linkat(f.rdi, f.rsi, f.rdx, f.r10, f.r8), true),
-        SYS_UTIMENSAT => (sys_utimensat(f.rdi, f.rsi, f.r10), true),
-        // What a program saving a file asks after writing it, and none of it
-        // has anything to do here. A write reaches the store at the last
-        // close whatever is synced; there are no permissions or owners to
-        // change, every file reporting one mode already; and there is one
-        // machine, so an advisory lock has nobody to exclude. Refused, they
-        // stopped LibreOffice saving anything: `impl_store ... Io General`
-        // on every document written into /tmp.
-        SYS_FSYNC | SYS_FDATASYNC | SYS_SYNC | SYS_SYNCFS | SYS_FLOCK => (0, true),
+        SYS_UTIMENSAT => (sys_utimensat(f.rdi, f.rsi, f.rdx, f.r10), true),
+        // **A sync is a commit now**, where it used to answer done and leave
+        // the bytes in memory until the next autosnap -- up to a minute in
+        // which a power cut lost what a program had been told was safe.
+        // `fsync` settles that file's pending writes, `sync` everybody's,
+        // and either commits the tree if it changed. Answering EIO when the
+        // commit fails is the honest half: the program asked precisely
+        // whether its data is on the disk. With no writable store there is
+        // nowhere to commit and the answer stays done, as it always was.
+        SYS_FSYNC | SYS_FDATASYNC | SYS_SYNC | SYS_SYNCFS => {
+            let open = nr == SYS_SYNC || nr == SYS_SYNCFS || path_of_fd(f.rdi).is_some()
+                || with_fds(|fds, _| matches!(fds.get(f.rdi as usize), Some(Some(_)))).unwrap_or(false);
+            if !open {
+                (EBADF, true)
+            } else {
+                match path_of_fd(f.rdi) {
+                    Some(p) if nr == SYS_FSYNC || nr == SYS_FDATASYNC => super::fs::settle(&p),
+                    _ if nr == SYS_SYNC || nr == SYS_SYNCFS => super::fs::settle_all(),
+                    _ => {}
+                }
+                (if crate::sysbox::commit_now().is_ok() { 0 } else { EIO }, true)
+            }
+        }
+        // One machine, so an advisory lock has nobody to exclude.
+        SYS_FLOCK => (0, true),
         SYS_CHMOD => (sys_chmodat(super::fs::AT_FDCWD as u64, f.rdi, f.rsi), true),
         SYS_FCHMODAT => (sys_chmodat(f.rdi, f.rsi, f.rdx), true),
         SYS_FCHMODAT2 => (sys_fchmodat2(f.rdi, f.rsi, f.rdx, f.r10), true),
         SYS_FCHMOD => (sys_fchmod(f.rdi, f.rsi), true),
-        // Every guest is root and owns everything, so a change of owner has
-        // nothing to record and is answered as done.
-        SYS_CHOWN | SYS_FCHOWN | SYS_LCHOWN | SYS_FCHOWNAT => (0, true),
+        SYS_CHOWN | SYS_FCHOWN | SYS_LCHOWN | SYS_FCHOWNAT => (sys_chown(nr, f.rdi, f.rsi, f.rdx, f.r10, f.r8), true),
         // Not served, and said so in the answer glibc's `posix_fallocate`
         // knows how to fall back from, which `ENOSYS` is not.
         SYS_FALLOCATE => ((-95i64) as u64, true),
@@ -9840,10 +10164,6 @@ pub extern "sysv64" fn glados_syscall_dispatch(f: &mut Frame) {
             }
         }
         SYS_SCHED_SETSCHEDULER => (if matches!(f.rsi as u32, 0 | 3 | 5) { 0 } else { EPERM }, true),
-        // Extended attributes: none of the filesystems a guest sees carries
-        // them, and EOPNOTSUPP is Linux's answer for exactly that -- the
-        // copy or archive asking carries on without them.
-        188..=199 => ((-95i64) as u64, true),
         SYS_ALARM => (super::signal::alarm(f.rdi), true),
         // `creat` is `open` with these flags and always was.
         SYS_CREAT => (sys_openat(super::fs::AT_FDCWD as u64, f.rdi, O_CREAT | O_WRONLY | O_TRUNC, f.rsi), true),

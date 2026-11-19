@@ -198,8 +198,6 @@ pub fn put(v: &Volume, path: &str, data: &[u8]) -> Result<(), String> {
         Some((d, n)) => (d, n),
         None => ("", path),
     };
-    let short = short_name(name)?;
-
     // Where the directory's entries live.
     let dir_cluster = if dir_path.is_empty() || dir_path == "/" {
         v.root_cluster()
@@ -208,6 +206,15 @@ pub fn put(v: &Volume, path: &str, data: &[u8]) -> Result<(), String> {
             Ok(e) => e.cluster,
             Err(_) => return Err(alloc::format!("no directory '{}'", dir_path)),
         }
+    };
+    // A name that is not 8.3 can still be *rewritten*: the file already has
+    // a short alias beside its long name (the installer's FAT formatter
+    // writes `TOKENI~1.BIN` for `tokenizer.bin`), and writing through the
+    // alias keeps the long-name entries valid, since their checksum is of the
+    // alias and it does not change. Creating such a file is still refused.
+    let short = match short_name(name) {
+        Ok(s) => s,
+        Err(e) => alias_of(v, dir_cluster, name).map_err(|_| String::from("read failed"))?.ok_or(e)?,
     };
 
     let fats = v.num_fats();
@@ -252,6 +259,42 @@ fn write_chain(v: &Volume, chain: &[u32], data: &[u8]) -> Result<(), Error> {
 
 /// Walk a directory's entries looking for a short name. Answers where the
 /// entry sits so it can be rewritten in place.
+/// The 8.3 alias of the file whose long name is `long`, in one directory.
+fn alias_of(v: &Volume, dir_cluster: u32, long: &str) -> Result<Option<[u8; 11]>, Error> {
+    let mut parts: Vec<(u8, String)> = Vec::new();
+    let want = long.to_ascii_lowercase();
+    each_entry(v, dir_cluster, |_, _, raw| {
+        if raw[0] == 0x00 {
+            return Some(None);
+        }
+        if raw[0] == 0xE5 {
+            parts.clear();
+            return None;
+        }
+        if raw[11] == 0x0F {
+            let mut s = String::new();
+            for o in (1..11).step_by(2).chain((14..26).step_by(2)).chain((28..32).step_by(2)) {
+                let c = u16::from_le_bytes([raw[o], raw[o + 1]]);
+                if c == 0 || c == 0xFFFF {
+                    break;
+                }
+                s.push(char::from_u32(c as u32).unwrap_or('?'));
+            }
+            parts.push((raw[0] & 0x1F, s));
+            return None;
+        }
+        let mut sorted = core::mem::take(&mut parts);
+        sorted.sort_by_key(|(n, _)| *n);
+        let name: String = sorted.into_iter().map(|(_, s)| s).collect();
+        if name.to_ascii_lowercase() == want {
+            let mut a = [0u8; 11];
+            a.copy_from_slice(&raw[..11]);
+            return Some(Some(a));
+        }
+        None
+    })
+}
+
 fn find_entry(
     v: &Volume,
     dir_cluster: u32,

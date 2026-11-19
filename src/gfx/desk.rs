@@ -622,7 +622,7 @@ const ICONS: [(&str, &str); 10] = [
 /// The Start menu, bottom of the bar upward -- the 98 half of the ancestry.
 /// Same entries as the icons plus the one thing that belongs behind a second
 /// look, exactly where 98 kept it.
-const START_ITEMS: [(&str, &str); 14] = [
+const START_ITEMS: [(&str, &str); 15] = [
     // "Search..." used to lead this list, opening a panel with one text field
     // in it. The query row at the foot of this menu does the same job in the
     // place a person already is, and dispatches through the same `open`, so
@@ -647,6 +647,8 @@ const START_ITEMS: [(&str, &str); 14] = [
     ("Mines", "mines"),
     ("Oracle", "oracle"),
     ("Settings", "settings"),
+    // Putting GLaDOS on this computer's disk -- see `install`.
+    ("Install", "install ui"),
     ("Reboot", "reboot"),
     ("Shut down", "shutdown"),
 ];

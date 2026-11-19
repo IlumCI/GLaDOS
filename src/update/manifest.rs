@@ -38,6 +38,28 @@ pub struct Manifest {
     pub size: usize,
     pub sha256: [u8; 32],
     pub notes: String,
+    /// The system image this release ships, when it names one. Absent on a
+    /// kernel-only release, and on every manifest written before 1.4.5,
+    /// which an older kernel reads the same as it always did: unknown keys
+    /// are ignored.
+    pub system: Option<System>,
+    /// The oldest kernel this release's system image runs under.
+    pub min_kernel: Option<String>,
+    /// The store format this release writes. A kernel that cannot read it
+    /// does not install the release.
+    pub store_format: Option<u32>,
+}
+
+/// A release's system image: whole, signed by the manifest that names it.
+#[derive(Clone)]
+pub struct System {
+    pub version: String,
+    pub url: Url,
+    pub size: u64,
+    pub sha256: [u8; 32],
+    /// The dated Arch snapshot the image was built against; packages the
+    /// user installs on top come from the same date.
+    pub snapshot: String,
 }
 
 /// Why a manifest was not accepted.
@@ -118,6 +140,13 @@ pub fn parse(text: &[u8]) -> Result<Manifest, Bad> {
     let mut size = None;
     let mut digest = None;
     let mut notes = String::new();
+    let mut sys_version = None;
+    let mut sys_url = None;
+    let mut sys_size = None;
+    let mut sys_digest = None;
+    let mut snapshot = String::new();
+    let mut min_kernel = None;
+    let mut store_format = None;
 
     for line in lines {
         let line = line.trim();
@@ -136,6 +165,13 @@ pub fn parse(text: &[u8]) -> Result<Manifest, Bad> {
             "size" => size = Some(value.parse::<usize>().map_err(|_| Bad::Malformed("size"))?),
             "sha256" => digest = Some(unhex32(value).ok_or(Bad::Malformed("sha256"))?),
             "notes" => notes = value.to_string(),
+            "system-version" => sys_version = Some(value.to_string()),
+            "system-url" => sys_url = Some(url(value).ok_or(Bad::Malformed("system-url"))?),
+            "system-size" => sys_size = Some(value.parse::<u64>().map_err(|_| Bad::Malformed("system-size"))?),
+            "system-sha256" => sys_digest = Some(unhex32(value).ok_or(Bad::Malformed("system-sha256"))?),
+            "arch-snapshot" => snapshot = value.to_string(),
+            "min-kernel" => min_kernel = Some(value.to_string()),
+            "store-format" => store_format = Some(value.parse::<u32>().map_err(|_| Bad::Malformed("store-format"))?),
             // Ignored rather than refused, so a later format can add a line
             // without every older kernel rejecting the whole file. The
             // signature covers it regardless; HEADER guards the change that
@@ -152,6 +188,19 @@ pub fn parse(text: &[u8]) -> Result<Manifest, Bad> {
         size: size.ok_or(Bad::Missing("size"))?,
         sha256: digest.ok_or(Bad::Missing("sha256"))?,
         notes,
+        // All four or none: a release that names an image without its digest
+        // is a release nothing could verify, and is refused rather than
+        // read as kernel-only.
+        system: match (sys_version, sys_url, sys_size, sys_digest) {
+            (None, None, None, None) => None,
+            (Some(version), Some(url), Some(size), Some(sha256)) => Some(System { version, url, size, sha256, snapshot }),
+            (None, ..) => return Err(Bad::Missing("system-version")),
+            (_, None, ..) => return Err(Bad::Missing("system-url")),
+            (_, _, None, _) => return Err(Bad::Missing("system-size")),
+            _ => return Err(Bad::Missing("system-sha256")),
+        },
+        min_kernel,
+        store_format,
     })
 }
 
@@ -270,7 +319,32 @@ notes a manifest that exists only in this test\n";
             m.matches(b"TEST").is_err(),
         );
         claim("and 9.9.9 is newer than what is running", m.is_upgrade());
+        claim("a manifest naming no system image is a kernel-only release", m.system.is_none());
     }
+
+    let mut with_sys = good.to_vec();
+    with_sys.extend_from_slice(b"system-version 1.4.6\n\
+system-url https://example.invalid/root-1.4.6.erofs\n\
+system-size 4\n\
+system-sha256 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\n\
+arch-snapshot 2026/11/15\n\
+min-kernel 1.4.5\n\
+store-format 2\n");
+    let ms = parse(&with_sys);
+    claim(
+        "a release's system image is read with its snapshot",
+        ms.as_ref().is_ok_and(|m| m.system.as_ref().is_some_and(|s| s.version == "1.4.6" && s.size == 4 && s.snapshot == "2026/11/15")),
+    );
+    claim(
+        "and its kernel floor and store format",
+        ms.as_ref().is_ok_and(|m| m.min_kernel.as_deref() == Some("1.4.5") && m.store_format == Some(2)),
+    );
+    let mut half = good.to_vec();
+    half.extend_from_slice(b"system-version 1.4.6\nsystem-size 4\n");
+    claim(
+        "an image named without its digest is refused, not read as kernel-only",
+        matches!(parse(&half), Err(Bad::Missing(_))),
+    );
 
     claim(
         "a future format is refused rather than read as this one",

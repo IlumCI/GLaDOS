@@ -151,7 +151,7 @@ const KNOWN_COMMANDS: &[&str] = &[
     "term", "perf", "desk", "todo", "paint", "write", "mines", "oracle", "enternet", "net", "dhcp", "mem",
     "mine", "uptime", "tasks", "status", "help", "app", "author", "maker", "video", "serial", "log", "snap",
     "update", "repair", "gpu", "abstract", "study", "work", "redqueen", "grammar",
-    "forest",
+    "forest", "install", "boot",
 ];
 
 /// How many steps an authoring run gets.
@@ -577,6 +577,117 @@ fn repair_cmd(rest: &str) {
     }
 }
 
+/// `update system`: whole system images, into the slot this boot is not
+/// running. The image is never held in memory -- a guest copies it to
+/// `/dev/glados/slot`, which hashes, writes, reads back and names it.
+fn update_system(rest: &str, manifest_now: fn() -> Option<crate::update::manifest::Manifest>) {
+    use crate::install::{feed, slot};
+    let mut w = rest.split_whitespace();
+    let verb = w.next().unwrap_or("");
+    let unhex = |s: &str| -> Option<[u8; 32]> {
+        if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let mut o = [0u8; 32];
+        for i in 0..32 {
+            o[i] = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()?;
+        }
+        Some(o)
+    };
+    match verb {
+        "" | "status" => {
+            console::set_color(YELLOW);
+            kprintln!("[update system]");
+            console::set_color(LTGRAY);
+            match (slot::chosen(), slot::current()) {
+                (None, _) => kprintln!("  running from install or live media -- system updates need an installed disk"),
+                (Some(c), None) => kprintln!("  slot {} running, no slot record yet", feed::slot_name(c)),
+                (Some(c), Some(r)) => {
+                    kprintln!("  slot {} running{}", feed::slot_name(c), if r.trial.is_some() && r.active == c { " on trial" } else { "" });
+                    kprintln!(
+                        "  record    seq {}, slot {} is {} -- system {}{}",
+                        r.seq,
+                        feed::slot_name(r.active),
+                        if r.trial.is_some() { "on trial" } else { "kept" },
+                        r.version(),
+                        if r.snapshot().is_empty() { alloc::string::String::new() } else { alloc::format!(", packages from {}", r.snapshot()) }
+                    );
+                }
+            }
+            if let Some(s) = feed::status() {
+                kprintln!("  {}", s);
+            }
+            kprintln!("  check | fetch | arm <bytes> <sha256> [version] [snapshot] | cancel");
+        }
+        "check" | "fetch" => {
+            let Some(m) = manifest_now() else { return };
+            let Some(s) = m.system.clone() else {
+                kprintln!("  {} {} names no system image -- a kernel-only release", m.channel, m.version);
+                return;
+            };
+            kprintln!("  system {} ({} MiB, packages from {})", s.version, s.size >> 20, if s.snapshot.is_empty() { "?" } else { &s.snapshot });
+            if slot::current().is_some_and(|r| r.digest == s.sha256) {
+                kprintln!("  that is the system already running -- nothing to fetch");
+                return;
+            }
+            if let Some(k) = &m.min_kernel {
+                if crate::version_newer(k, crate::VERSION) {
+                    console::set_color(LTRED);
+                    kprintln!("  it needs kernel {} and this is {} -- 'update fetch' and 'update stage' first", k, crate::VERSION);
+                    console::set_color(LTGRAY);
+                    return;
+                }
+            }
+            if m.store_format.is_some_and(|f| f > slot::STORE_FORMAT) {
+                console::set_color(LTRED);
+                kprintln!("  it writes store format {}, newer than this kernel reads ({})", m.store_format.unwrap_or(0), slot::STORE_FORMAT);
+                console::set_color(LTGRAY);
+                return;
+            }
+            if verb == "check" {
+                kprintln!("  'update system fetch' writes it into the spare slot");
+                return;
+            }
+            // A download that died half way leaves the feed armed; a fetch
+            // starts it over rather than refusing until somebody cancels.
+            feed::cancel();
+            match feed::arm(s.size, s.sha256, &s.version, &s.snapshot, false) {
+                Ok(line) => kprintln!("  {}", line),
+                Err(e) => {
+                    console::set_color(LTRED);
+                    kprintln!("  {}", e);
+                    console::set_color(LTGRAY);
+                    return;
+                }
+            }
+            let u = alloc::format!("https://{}{}", s.url.host, s.url.path);
+            match crate::linux::start_job("/usr/bin/curl", &["curl", "-fsSL", "-o", "/dev/glados/slot", &u]) {
+                Ok(j) => kprintln!("  downloading in job {} -- 'update system' shows how far it is", j),
+                Err(e) => {
+                    feed::cancel();
+                    kprintln!("  could not start the download: {}", e);
+                }
+            }
+        }
+        "arm" => {
+            let (Some(n), Some(d)) = (w.next().and_then(|s| s.parse::<u64>().ok()), w.next().and_then(unhex)) else {
+                kprintln!("  update system arm <bytes> <sha256> [version] [snapshot]");
+                return;
+            };
+            let v = w.next().unwrap_or("local");
+            let snap = w.next().unwrap_or("");
+            match feed::arm(n, d, v, snap, false) {
+                Ok(line) => kprintln!("  {}", line),
+                Err(e) => kprintln!("  {}", e),
+            }
+        }
+        "cancel" => {
+            kprintln!("  {}", if feed::cancel() { "called off; the slot record is unchanged" } else { "nothing was armed" });
+        }
+        _ => kprintln!("  update system [status|check|fetch|arm|cancel]"),
+    }
+}
+
 fn update_cmd(rest: &str) {
     use crate::store::sha256;
     use crate::update::{channel, fetch, stage};
@@ -621,6 +732,10 @@ fn update_cmd(rest: &str) {
     }
 
     match verb {
+        "system" => {
+            update_system(arg, manifest_now);
+            return;
+        }
         "" | "status" => {
             console::set_color(YELLOW);
             kprintln!("[update]");
@@ -2204,11 +2319,13 @@ fn store_cmd(rest: &str) {
             console::set_color(if sha_ok { LTGREEN } else { LTRED });
             kprintln!("  sha-256 vectors: {}", if sha_ok { "pass" } else { "FAIL" });
             console::set_color(WHITE);
-            if store::mounted() {
+            // The round trip writes, so it runs only when the store's window
+            // is open; a mounted, locked store is the ordinary state.
+            if store::mounted() && crate::dev::nvme::holds(crate::dev::nvme::Holder::Store) {
                 let st = store::cas::stream_selftest();
                 console::set_color(if st { LTGREEN } else { LTRED });
                 kprintln!(
-                    "  {}  a 300 KiB blob round-trips, and its middle reads without it",
+                    "  {}  300 KiB and 4 MiB blobs round-trip, read by range, and leak nothing",
                     if st { "ok " } else { "FAIL" }
                 );
                 console::set_color(WHITE);
@@ -2249,6 +2366,30 @@ fn store_cmd(rest: &str) {
             // bench` both give: a single sample measures whatever else the
             // machine was doing.
             cas::read_bench(5);
+        }
+
+        "gc" => match crate::sysbox::gc_now() {
+            Ok((freed, kept, free)) => {
+                console::set_color(LTGREEN);
+                kprintln!("  {} block(s) reclaimed, keeping the last {} snapshot(s)", freed, kept);
+                console::set_color(WHITE);
+                kprintln!("  {} block(s) free in all", free);
+            }
+            Err(e) => {
+                console::set_color(LTRED);
+                match e {
+                    crate::store::cas::Error::Disagree => kprintln!(
+                        "  collection stopped, nothing freed: its two walks of the store disagree -- a bug, not a bad disk"
+                    ),
+                    other => kprintln!("  collection stopped, nothing freed: {:?}", other),
+                }
+                console::set_color(WHITE);
+            }
+        },
+
+        r if r == "wbench" || r.starts_with("wbench ") => {
+            let mib = r[6..].trim().parse::<u64>().unwrap_or(256).clamp(4, 8192);
+            cas::write_bench(mib);
         }
 
         "init" => match store::init() {
@@ -2297,7 +2438,7 @@ fn store_cmd(rest: &str) {
                 console::set_color(WHITE);
                 return;
             }
-            if !crate::dev::nvme::writes_unlocked() {
+            if !crate::dev::nvme::holds(crate::dev::nvme::Holder::Store) {
                 console::set_color(LTRED);
                 kprintln!("  writes are locked -- run 'store unlock' first");
                 console::set_color(WHITE);
@@ -5309,6 +5450,13 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
             let (used, total) = mem::heap::HEAP.stats();
             kprintln!("  heap  {} B used / {} B total", used, total);
             kprintln!("  free  {} KiB", (total - used) / 1024);
+            // The two caches that grow with use and are bounded by design,
+            // so heap growth can be told apart from a leak by reading this.
+            kprintln!(
+                "  root image cache  {} MiB of 128, {} name(s) looked up",
+                crate::store::erofs::cached_blocks() * 4096 >> 20,
+                crate::store::erofs::cached_names()
+            );
             // Where a fixed-address image may be placed, which the heap figures
             // above say nothing about: they describe one contiguous allocation
             // the kernel already owns, and this is everything it does not.
@@ -6371,13 +6519,19 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
                 // exactly what it meant -- the gate held one bit and no
                 // range. The window is the answer to the question an operator
                 // is actually asking when they look at this line.
-                if let Some((start, end)) = crate::dev::nvme::write_window() {
-                    kprintln!(
-                        "          only LBA {}..{} ({} block(s)); everything else is refused",
-                        start,
-                        end,
-                        end.saturating_sub(start)
-                    );
+                for h in crate::dev::nvme::Holder::ALL {
+                    if let Some((start, end)) = crate::dev::nvme::window(h) {
+                        kprintln!(
+                            "          {:<10} LBA {}..{} ({} block(s))",
+                            h.name(),
+                            start,
+                            end,
+                            end.saturating_sub(start)
+                        );
+                    }
+                }
+                if crate::dev::nvme::writes_unlocked() {
+                    kprintln!("          everything outside those is refused");
                 }
                 console::set_color(WHITE);
 
@@ -6506,12 +6660,24 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         }
         "reboot" => {
             console::set_color(YELLOW);
+            // What changed since the last snapshot, kept before the power goes.
+            match crate::sysbox::commit_now() {
+                Ok(true) => kprintln!("  committed what changed since the last snapshot"),
+                Ok(false) => {}
+                Err(e) => kprintln!("  could not commit before going: {:?}", e),
+            }
             kprintln!("  asking the firmware for a cold reset...");
             console::set_color(LTGRAY);
             crate::cpu::reboot();
         }
         "shutdown" | "poweroff" | "halt" => {
             console::set_color(YELLOW);
+            // What changed since the last snapshot, kept before the power goes.
+            match crate::sysbox::commit_now() {
+                Ok(true) => kprintln!("  committed what changed since the last snapshot"),
+                Ok(false) => {}
+                Err(e) => kprintln!("  could not commit before going: {:?}", e),
+            }
             kprintln!("  asking the firmware to power down...");
             console::set_color(LTGRAY);
             crate::cpu::shutdown();
@@ -9243,6 +9409,8 @@ fn execute(line: &str, boot: &BootInfo, acpi: &Option<Acpi>, interp: &mut aiksi:
         // command.
         "repair" => repair_cmd(rest),
         "update" => update_cmd(rest),
+        "install" => crate::install::cmd(rest),
+        "boot" => crate::install::menu::cmd(rest),
         "words" => {
             console::set_color(YELLOW);
             kprintln!("builtins");
@@ -9812,7 +9980,7 @@ fn fat_cmd(rest: &str) {
                 kprintln!("  no such partition");
                 return;
             };
-            if crate::dev::nvme::unlock_writes(0xD15EA5E, p.start_lba, p.block_count) {
+            if crate::dev::nvme::claim(crate::dev::nvme::CONFIRM, crate::dev::nvme::Holder::Volume, p.start_lba, p.block_count) {
                 console::set_color(LTRED);
                 kprintln!(
                     "  partition {} is writable: lba {}..{}",
@@ -9824,8 +9992,15 @@ fn fat_cmd(rest: &str) {
                 kprintln!("  nothing outside that range can be written, including the table");
                 console::set_color(LTGRAY);
             } else {
-                kprintln!("  refused");
+                kprintln!("  refused -- that range overlaps a window another holder has open");
             }
+        }
+        // The way back from `unlock`. There was none short of a reboot, and
+        // a window held open blocks every other holder that overlaps it --
+        // the slot record's own write to the ESP among them.
+        "lock" => {
+            crate::dev::nvme::release(crate::dev::nvme::Holder::Volume);
+            kprintln!("  FAT writes locked again");
         }
         // Writing. Refused unless the operator has claimed a range covering
         // this partition, because that gate is the only thing standing between
@@ -9835,9 +10010,9 @@ fn fat_cmd(rest: &str) {
                 kprintln!("  no FAT filesystem found");
                 return;
             };
-            if !crate::dev::nvme::writes_unlocked() {
+            if !crate::dev::nvme::holds(crate::dev::nvme::Holder::Volume) {
                 console::set_color(YELLOW);
-                kprintln!("  writes are locked. 'store unlock' claims a range first.");
+                kprintln!("  writes are locked. 'fat unlock [partition]' claims its range first.");
                 console::set_color(LTGRAY);
                 return;
             }

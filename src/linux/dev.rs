@@ -65,13 +65,18 @@ pub enum Node {
     Snd(super::snd::Node),
     /// `/dev/dri/renderD128`, the GPU -- see `drm`.
     Drm,
+    /// `/dev/glados/slot`, the spare system slot while a system update is
+    /// armed -- see `install::feed`. Write-only, and absent otherwise.
+    Slot,
     /// A sync file: a fence the GPU signals, as a descriptor that polls
     /// readable once it has. Made by a submit, never opened by path.
     Fence,
 }
 
 pub fn is_dir(path: &str) -> bool {
-    matches!(path, "/dev" | "/dev/input" | "/dev/snd" | "/dev/pts") || (path == "/dev/dri" && super::drm::present().is_some())
+    matches!(path, "/dev" | "/dev/input" | "/dev/snd" | "/dev/pts")
+        || (path == "/dev/dri" && super::drm::present().is_some())
+        || (path == "/dev/glados" && crate::install::feed::armed())
 }
 
 /// Which node a path names, as a pure function of the path.
@@ -94,6 +99,9 @@ pub fn node(path: &str) -> Option<Node> {
         // then answers `ENODEV` to everything would be chosen by a library
         // that would otherwise have fallen back to software.
         super::drm::NODE if super::drm::present().is_some() => Some(Node::Drm),
+        // Only while armed, by the same rule: a slot device that exists and
+        // refuses every write is a node that opens and does nothing.
+        "/dev/glados/slot" if crate::install::feed::armed() => Some(Node::Slot),
         _ => None,
     }
 }
@@ -118,10 +126,14 @@ pub fn entries(dir: &str) -> Vec<(String, bool, usize)> {
             if super::drm::present().is_some() {
                 v.insert(0, ("dri".to_string(), true, 0usize));
             }
+            if crate::install::feed::armed() {
+                v.push(("glados".to_string(), true, 0usize));
+            }
             v
         }
         "/dev/dri" if super::drm::present().is_some() => alloc::vec![file("renderD128")],
         "/dev/input" => alloc::vec![file("event0"), file("event1")],
+        "/dev/glados" if crate::install::feed::armed() => alloc::vec![file("slot")],
         "/dev/snd" => alloc::vec![file("controlC0"), file("pcmC0D0p")],
         "/dev/pts" => super::pty::numbers().iter().map(|n| (alloc::format!("{}", n), false, 0usize)).collect(),
         _ => Vec::new(),
@@ -345,7 +357,7 @@ pub fn read(n: Node, at: usize, buf: &mut [u8]) -> usize {
         // Read through `sys_read` rather than here, because an event stream
         // needs the descriptor's own cursor advanced and a blocking caller put
         // to sleep, neither of which fits a call that takes an offset.
-        Node::Input(_) | Node::Snd(_) | Node::Drm | Node::Fence => 0,
+        Node::Input(_) | Node::Snd(_) | Node::Drm | Node::Fence | Node::Slot => 0,
     }
 }
 
@@ -366,6 +378,9 @@ pub fn write(n: Node, at: usize, buf: &[u8]) -> usize {
         // library conclude the device is broken and stop reading it.
         Node::Input(_) => buf.len(),
         Node::Snd(_) | Node::Drm | Node::Fence => 0,
+        // Sequential only: the cursor is the feed's, not the caller's, so a
+        // program seeking about cannot make it write anywhere but next.
+        Node::Slot => crate::install::feed::write(buf),
         Node::Fb => {
             let Some((base, _, _, len, _, _)) = fb() else { return 0 };
             if at >= len {

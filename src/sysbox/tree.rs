@@ -30,6 +30,7 @@
 
 use crate::store::cas::ChunkRef;
 use crate::store::sha256::Sha256;
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -37,6 +38,121 @@ pub type Hash = [u8; 32];
 
 pub const KIND_BLOB: u8 = 0;
 pub const KIND_DIR: u8 = 1;
+/// The same two kinds, for an entry that carries attributes. **Only** then:
+/// an entry with none hashes and encodes exactly as it always did, so every
+/// tree written before attributes existed keeps its address.
+pub const KIND_BLOB_A: u8 = 2;
+pub const KIND_DIR_A: u8 = 3;
+// 4 is reserved for a blob stored as a list of extents.
+
+/// A stored kind without its attribute bit: `KIND_BLOB` or `KIND_DIR`.
+pub fn base_kind(k: u8) -> u8 {
+    k & 1
+}
+
+/// What a Linux program means by a file's metadata: mode (with its type bits),
+/// owner, modification time, extended attributes.
+///
+/// **On the directory entry, never on the blob.** A blob is named by the hash
+/// of its bytes, and two files with the same bytes and different owners must
+/// still be one blob -- or a package's thousand identical license files stop
+/// deduplicating the moment pacman stamps them. So the entry carries the
+/// attributes and the content stays shared.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Attr {
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub mtime_ns: i64,
+    /// Sorted by name, so the encoding is canonical.
+    pub xattrs: Vec<(String, Vec<u8>)>,
+}
+
+impl Attr {
+    /// The canonical bytes, which are both what is hashed and what is stored.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut o = Vec::new();
+        o.extend_from_slice(&self.mode.to_le_bytes());
+        o.extend_from_slice(&self.uid.to_le_bytes());
+        o.extend_from_slice(&self.gid.to_le_bytes());
+        o.extend_from_slice(&self.mtime_ns.to_le_bytes());
+        o.extend_from_slice(&(self.xattrs.len() as u16).to_le_bytes());
+        for (k, v) in &self.xattrs {
+            o.extend_from_slice(&(k.len() as u16).to_le_bytes());
+            o.extend_from_slice(k.as_bytes());
+            o.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            o.extend_from_slice(v);
+        }
+        o
+    }
+
+    pub fn decode(b: &[u8]) -> Option<Attr> {
+        if b.len() < 22 {
+            return None;
+        }
+        let u32_ = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        let mut a = Attr {
+            mode: u32_(0),
+            uid: u32_(4),
+            gid: u32_(8),
+            mtime_ns: i64::from_le_bytes(b[12..20].try_into().unwrap()),
+            xattrs: Vec::new(),
+        };
+        let n = u16::from_le_bytes([b[20], b[21]]) as usize;
+        let mut o = 22;
+        for _ in 0..n {
+            let kl = u16::from_le_bytes([*b.get(o)?, *b.get(o + 1)?]) as usize;
+            o += 2;
+            let k = String::from_utf8(b.get(o..o + kl)?.to_vec()).ok()?;
+            o += kl;
+            let vl = u32::from_le_bytes(b.get(o..o + 4)?.try_into().ok()?) as usize;
+            o += 4;
+            let v = b.get(o..o + vl)?.to_vec();
+            o += vl;
+            a.xattrs.push((k, v));
+        }
+        (o == b.len()).then_some(a)
+    }
+
+    pub fn xattr(&self, name: &str) -> Option<&[u8]> {
+        self.xattrs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_slice())
+    }
+
+    pub fn set_xattr(&mut self, name: &str, value: Vec<u8>) {
+        match self.xattrs.binary_search_by(|(k, _)| k.as_str().cmp(name)) {
+            Ok(i) => self.xattrs[i].1 = value,
+            Err(i) => self.xattrs.insert(i, (String::from(name), value)),
+        }
+    }
+
+    pub fn remove_xattr(&mut self, name: &str) -> bool {
+        match self.xattrs.binary_search_by(|(k, _)| k.as_str().cmp(name)) {
+            Ok(i) => {
+                self.xattrs.remove(i);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+/// One name in a directory: what it is called, what is stored there, and the
+/// attributes, if anybody set any.
+pub struct Ent {
+    pub name: String,
+    pub attr: Option<Box<Attr>>,
+    pub node: Node,
+}
+
+impl Ent {
+    pub fn new(name: String, node: Node) -> Ent {
+        Ent { name, attr: None, node }
+    }
+    /// The kind byte this entry hashes and stores under.
+    pub fn kind(&self) -> u8 {
+        self.node.kind() + if self.attr.is_some() { 2 } else { 0 }
+    }
+}
 
 /// Bounds the recursion in `content_hash` and friends. Nothing here uses an
 /// explicit stack, and a kernel task stack is not large.
@@ -68,7 +184,7 @@ pub enum Node {
     /// Kept sorted by name. Sorting is not for lookup speed -- these are tiny
     /// -- but so that serialisation is canonical: the same contents must
     /// produce the same bytes, or the hash means nothing.
-    Dir(Vec<(String, Node)>),
+    Dir(Vec<Ent>),
 }
 
 impl Node {
@@ -116,7 +232,9 @@ pub fn clone_node(n: &Node) -> Node {
         // Forty-eight bytes, whatever the blob weighs. `cp` of an away subtree
         // is therefore nearly as cheap in memory as it always was on disk.
         Node::Away(r) => Node::Away(*r),
-        Node::Dir(es) => Node::Dir(es.iter().map(|(k, v)| (k.clone(), clone_node(v))).collect()),
+        Node::Dir(es) => Node::Dir(
+            es.iter().map(|e| Ent { name: e.name.clone(), attr: e.attr.clone(), node: clone_node(&e.node) }).collect(),
+        ),
     }
 }
 
@@ -145,11 +263,18 @@ pub fn content_hash(n: &Node) -> Hash {
             let mut h = Sha256::new();
             h.update(b"tree");
             h.update(&(es.len() as u64).to_le_bytes());
-            for (name, child) in es {
-                h.update(&(name.len() as u64).to_le_bytes());
-                h.update(name.as_bytes());
-                h.update(&[child.kind()]);
-                h.update(&content_hash(child));
+            for e in es {
+                h.update(&(e.name.len() as u64).to_le_bytes());
+                h.update(e.name.as_bytes());
+                h.update(&[e.kind()]);
+                h.update(&content_hash(&e.node));
+                // After the child, and only when there is one: an entry with
+                // no attributes is byte-for-byte what it always was.
+                if let Some(a) = &e.attr {
+                    let b = a.encode();
+                    h.update(&(b.len() as u64).to_le_bytes());
+                    h.update(&b);
+                }
             }
             h.finish()
         }
@@ -173,8 +298,8 @@ pub fn resolve<'a>(root: &'a Node, path: &[String]) -> Option<&'a Node> {
     for part in path {
         match cur {
             Node::Dir(es) => {
-                let i = es.binary_search_by(|(k, _)| k.as_str().cmp(part.as_str())).ok()?;
-                cur = &es[i].1;
+                let i = es.binary_search_by(|e| e.name.as_str().cmp(part.as_str())).ok()?;
+                cur = &es[i].node;
             }
             Node::Blob(_) | Node::Away(_) => return None,
         }
@@ -187,8 +312,8 @@ pub fn resolve_mut<'a>(root: &'a mut Node, path: &[String]) -> Option<&'a mut No
     for part in path {
         match cur {
             Node::Dir(es) => {
-                let i = es.binary_search_by(|(k, _)| k.as_str().cmp(part.as_str())).ok()?;
-                cur = &mut es[i].1;
+                let i = es.binary_search_by(|e| e.name.as_str().cmp(part.as_str())).ok()?;
+                cur = &mut es[i].node;
             }
             Node::Blob(_) | Node::Away(_) => return None,
         }
@@ -220,21 +345,23 @@ pub fn put(root: &mut Node, path: &[String], node: Node) -> Result<(), PutError>
             Node::Dir(es) => es,
             Node::Blob(_) | Node::Away(_) => return Err(PutError::NotADirectory),
         };
-        let i = match es.binary_search_by(|(k, _)| k.as_str().cmp(part.as_str())) {
+        let i = match es.binary_search_by(|e| e.name.as_str().cmp(part.as_str())) {
             Ok(i) => i,
             Err(i) => {
-                es.insert(i, (part.clone(), Node::empty_dir()));
+                es.insert(i, Ent::new(part.clone(), Node::empty_dir()));
                 i
             }
         };
-        cur = &mut es[i].1;
+        cur = &mut es[i].node;
     }
     let leaf = &path[path.len() - 1];
     match cur {
         Node::Dir(es) => {
-            match es.binary_search_by(|(k, _)| k.as_str().cmp(leaf.as_str())) {
-                Ok(i) => es[i].1 = node,
-                Err(i) => es.insert(i, (leaf.clone(), node)),
+            // Replacing what is stored keeps the attributes: a file written
+            // anew keeps its mode and owner, as on any filesystem.
+            match es.binary_search_by(|e| e.name.as_str().cmp(leaf.as_str())) {
+                Ok(i) => es[i].node = node,
+                Err(i) => es.insert(i, Ent::new(leaf.clone(), node)),
             }
             Ok(())
         }
@@ -246,6 +373,11 @@ pub fn put(root: &mut Node, path: &[String], node: Node) -> Result<(), PutError>
 /// it is still on disk and still reachable by address. Names are the only
 /// thing here that can be destroyed.
 pub fn remove(root: &mut Node, path: &[String]) -> Option<Node> {
+    remove_ent(root, path).map(|e| e.node)
+}
+
+/// `remove`, keeping the attributes, for a move that must carry them.
+pub fn remove_ent(root: &mut Node, path: &[String]) -> Option<Ent> {
     if path.is_empty() {
         return None;
     }
@@ -253,11 +385,39 @@ pub fn remove(root: &mut Node, path: &[String]) -> Option<Node> {
     let leaf = &path[path.len() - 1];
     match parent {
         Node::Dir(es) => {
-            let i = es.binary_search_by(|(k, _)| k.as_str().cmp(leaf.as_str())).ok()?;
-            Some(es.remove(i).1)
+            let i = es.binary_search_by(|e| e.name.as_str().cmp(leaf.as_str())).ok()?;
+            Some(es.remove(i))
         }
         Node::Blob(_) | Node::Away(_) => None,
     }
+}
+
+/// The entry at `path`, for its attributes. `None` for the root, which is
+/// nobody's child.
+pub fn entry<'a>(root: &'a Node, path: &[String]) -> Option<&'a Ent> {
+    let (leaf, parent) = path.split_last()?;
+    match resolve(root, parent)? {
+        Node::Dir(es) => es.binary_search_by(|e| e.name.as_str().cmp(leaf.as_str())).ok().map(|i| &es[i]),
+        _ => None,
+    }
+}
+
+pub fn entry_mut<'a>(root: &'a mut Node, path: &[String]) -> Option<&'a mut Ent> {
+    let (leaf, parent) = path.split_last()?;
+    match resolve_mut(root, parent)? {
+        Node::Dir(es) => es.binary_search_by(|e| e.name.as_str().cmp(leaf.as_str())).ok().map(move |i| &mut es[i]),
+        _ => None,
+    }
+}
+
+/// Place a whole entry, attributes and all, creating parents.
+pub fn put_ent(root: &mut Node, path: &[String], ent: Ent) -> Result<(), PutError> {
+    let attr = ent.attr;
+    put(root, path, ent.node)?;
+    if let Some(e) = entry_mut(root, path) {
+        e.attr = attr;
+    }
+    Ok(())
 }
 
 // --- accounting ---------------------------------------------------------
@@ -303,8 +463,8 @@ fn walk_stats(n: &Node, s: &mut Stats, seen: &mut Vec<Hash>) {
         }
         Node::Dir(es) => {
             s.dirs += 1;
-            for (_, c) in es {
-                walk_stats(c, s, seen);
+            for e in es {
+                walk_stats(&e.node, s, seen);
             }
         }
     }
@@ -341,22 +501,31 @@ impl Written {
     }
 }
 
-pub fn encode_dir(entries: &[(String, u8, ChunkRef)]) -> Vec<u8> {
+/// One stored directory entry: name, kind (0-3), where the child landed, and
+/// attributes when the kind says there are some.
+pub type Stored = (String, u8, ChunkRef, Option<Attr>);
+
+pub fn encode_dir(entries: &[Stored]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(DIR_MAGIC);
     out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-    for (name, kind, r) in entries {
+    for (name, kind, r, attr) in entries {
         out.extend_from_slice(&(name.len() as u16).to_le_bytes());
         out.extend_from_slice(name.as_bytes());
         out.push(*kind);
         out.extend_from_slice(&r.hash);
         out.extend_from_slice(&r.lba.to_le_bytes());
         out.extend_from_slice(&r.len.to_le_bytes());
+        if let Some(a) = attr {
+            let b = a.encode();
+            out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+            out.extend_from_slice(&b);
+        }
     }
     out
 }
 
-pub fn decode_dir(b: &[u8]) -> Option<Vec<(String, u8, ChunkRef)>> {
+pub fn decode_dir(b: &[u8]) -> Option<Vec<Stored>> {
     if b.len() < 12 || &b[0..8] != DIR_MAGIC {
         return None;
     }
@@ -383,7 +552,20 @@ pub fn decode_dir(b: &[u8]) -> Option<Vec<(String, u8, ChunkRef)>> {
         o += 8;
         let len = u64::from_le_bytes(b[o..o + 8].try_into().ok()?);
         o += 8;
-        out.push((name, kind, ChunkRef { hash, lba, len }));
+        let attr = match kind {
+            KIND_BLOB | KIND_DIR => None,
+            KIND_BLOB_A | KIND_DIR_A => {
+                let al = u32::from_le_bytes(b.get(o..o + 4)?.try_into().ok()?) as usize;
+                o += 4;
+                let a = Attr::decode(b.get(o..o + al)?)?;
+                o += al;
+                Some(a)
+            }
+            // A kind this kernel does not know is a directory it cannot read
+            // correctly, so it reads none of it rather than part.
+            _ => return None,
+        };
+        out.push((name, kind, ChunkRef { hash, lba, len }, attr));
     }
     Some(out)
 }

@@ -232,6 +232,7 @@ pub fn ready(fd: &Fd) -> u16 {
                 super::dev::Node::Fb => POLLOUT,
                 super::dev::Node::Null => POLLIN | POLLOUT,
                 super::dev::Node::Zero => POLLIN | POLLOUT,
+                super::dev::Node::Slot => POLLOUT,
                 super::dev::Node::Random => POLLIN,
                 super::dev::Node::Snd(super::snd::Node::Playback) => {
                     if super::snd::writable() { POLLOUT } else { 0 }

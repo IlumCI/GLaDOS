@@ -1,0 +1,9 @@
+# A package set the installer offers: playing video and sound.
+pkgname=glados-set-media
+pkgver=1
+pkgrel=1
+pkgdesc="GLaDOS package set: mpv for video and sound"
+arch=('any')
+url="https://github.com/IlumCI/GLaDOS"
+license=('custom')
+depends=('glados-set-desktop' 'mpv')

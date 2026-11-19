@@ -49,8 +49,19 @@ jobs:
         run: |
           install -d -m700 -o builder /home/builder/repo-gnupg
           printf '%s\n' "$KEY" | su builder -c 'GNUPGHOME=/home/builder/repo-gnupg gpg --batch --import'
+      # The model package's sources are the pinned payload release, which is a
+      # draft: no anonymous URL, so makepkg's own download 404s. Fetched here
+      # with the job's token; makepkg still checks each against its sha256sums.
+      - name: model sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          install -d -o builder /home/builder/src
+          gh release download payload-qwen3-0.6b-v1 --repo "$GITHUB_REPOSITORY" --dir /home/builder/src \
+            --pattern model.bin --pattern tokenizer.bin --pattern LICENSE.TXT
+          chown -R builder /home/builder/src
       - name: build and check
-        run: su builder -c "cd '$GITHUB_WORKSPACE' && python3 tools/pkgrepo.py build --key-home /home/builder/repo-gnupg"
+        run: su builder -c "cd '$GITHUB_WORKSPACE' && GLADOS_PKG_SRCDEST=/home/builder/src python3 tools/pkgrepo.py build --key-home /home/builder/repo-gnupg"
       - name: publish
         if: ${{ github.event_name == 'push' || inputs.dry_run == false }}
         env:

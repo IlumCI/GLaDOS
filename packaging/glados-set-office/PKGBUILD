@@ -1,0 +1,9 @@
+# A package set the installer offers: LibreOffice, which `office` drives.
+pkgname=glados-set-office
+pkgver=1
+pkgrel=1
+pkgdesc="GLaDOS package set: LibreOffice, for writing and spreadsheets"
+arch=('any')
+url="https://github.com/IlumCI/GLaDOS"
+license=('custom')
+depends=('glados-set-desktop' 'libreoffice-fresh')

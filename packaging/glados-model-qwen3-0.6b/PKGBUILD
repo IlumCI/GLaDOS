@@ -1,0 +1,28 @@
+# The model GLaDOS runs, as a package, for a machine installed from the
+# Netinstall image (which does not carry 570 MB of weights). The files land
+# in the guest's root; `model install` copies them onto the ESP, where the
+# firmware reads them at the next boot -- a model change takes effect after
+# a restart, which the installer decided.
+#
+# The bytes are the pinned payload release CI already fetches for the Base
+# image, at the digests payload/qwen3-0.6b.txt records, so the package and
+# the ISO cannot carry different weights.
+pkgname=glados-model-qwen3-0.6b
+pkgver=1
+pkgrel=1
+pkgdesc="Qwen3-0.6B, int8, converted for the GLaDOS kernel, with its tokenizer"
+arch=('any')
+url="https://github.com/IlumCI/GLaDOS"
+license=('Apache-2.0')
+_rel="https://github.com/IlumCI/GLaDOS/releases/download/payload-qwen3-0.6b-v1"
+source=("model.bin::${_rel}/model.bin" "tokenizer.bin::${_rel}/tokenizer.bin" "LICENSE.TXT::${_rel}/LICENSE.TXT")
+sha256sums=('68c68bf47ca086a639a65a02425b38e097e6d7f5377062842f74e15275081b05'
+            '4fdfaf8f7bd563d11e92b0475ba76c2b98a1ded04f997949f65ce6538694497e'
+            '832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e')
+noextract=('model.bin' 'tokenizer.bin')
+
+package() {
+  install -Dm644 model.bin "${pkgdir}/usr/share/glados/models/qwen3-0.6b/model.bin"
+  install -Dm644 tokenizer.bin "${pkgdir}/usr/share/glados/models/qwen3-0.6b/tokenizer.bin"
+  install -Dm644 LICENSE.TXT "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

@@ -48,7 +48,14 @@ FINGERPRINT = "83E75C5B98F2579892AF3019AB32E9629000D4EC"
 def run(cmd, **kw):
     r = subprocess.run(cmd, **kw)
     if r.returncode != 0:
-        sys.exit(f"pkgrepo: {' '.join(map(str, cmd))} failed ({r.returncode})")
+        # The tool's own words, which `capture_output` would otherwise throw
+        # away: "makepkg failed (1)" names neither the package nor the reason.
+        for stream in (r.stdout, r.stderr):
+            if stream:
+                text = stream.decode(errors="replace") if isinstance(stream, bytes) else stream
+                sys.stderr.write("\n".join(text.splitlines()[-30:]) + "\n")
+        where = f" in {kw['cwd']}" if kw.get("cwd") else ""
+        sys.exit(f"pkgrepo: {' '.join(map(str, cmd))} failed ({r.returncode}){where}")
     return r
 
 
@@ -83,13 +90,23 @@ def build(home):
         shutil.rmtree(arch)
     arch.mkdir(parents=True)
     pkgs = []
-    for d in sorted(p for p in PACKAGING.iterdir() if (p / "PKGBUILD").exists()):
+    # `GLADOS_PKG_SKIP=a,b` leaves packages out of a local build -- the model
+    # package downloads 600 MB of weights, which CI fetches anyway and a test
+    # of the package sets does not need. A published repository is built
+    # without it.
+    skip = {x for x in os.environ.get("GLADOS_PKG_SKIP", "").split(",") if x}
+    for d in sorted(p for p in PACKAGING.iterdir() if (p / "PKGBUILD").exists() and p.name not in skip):
         # Built in a scratch copy, so makepkg's src/ and pkg/ never land in
         # the tree, and signed by makepkg itself with the repository's key.
         with tempfile.TemporaryDirectory() as t:
             work = Path(t) / d.name
             shutil.copytree(d, work)
-            benv = dict(env, PKGDEST=str(arch), GPGKEY=FINGERPRINT, SRCDEST=t, BUILDDIR=t)
+            # `GLADOS_PKG_SRCDEST` is sources fetched beforehand: the model
+            # package's come from a draft release, which has no anonymous URL,
+            # so CI downloads them with its token and makepkg finds them here
+            # by name -- still checked against the PKGBUILD's sha256sums.
+            src = os.environ.get("GLADOS_PKG_SRCDEST") or t
+            benv = dict(env, PKGDEST=str(arch), GPGKEY=FINGERPRINT, SRCDEST=src, BUILDDIR=t)
             run(["makepkg", "--force", "--clean", "--sign", "--nodeps", "--noconfirm"],
                 cwd=work, env=benv, capture_output=True)
     for p in sorted(arch.glob("*.pkg.tar.zst")):

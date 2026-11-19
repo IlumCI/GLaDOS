@@ -48,9 +48,11 @@ AMBER = (0xF2, 0x8C, 0x1E)
 DARK = (0x0E, 0x0E, 0x0E)
 
 BLADES = 8
-# Fractions of the disc radius.
-R_IN = 0.46             # the opening: large, and the thing every wrong version shrinks
-SLASH = 0.035           # half-width of the cut between blades
+# Fractions of the disc radius. The opening is a regular octagon whose
+# vertices sit at 20/48 of the radius, which puts its inradius here.
+R_VERT = 20.0 / 48.0
+R_IN = R_VERT * math.cos(math.pi / BLADES)
+SLASH = 1.6 / 48.0      # half-width of the cut between blades
 DEG = 360.0 / BLADES
 
 
@@ -59,14 +61,8 @@ def unit(a):
 
 
 def in_opening(x, y, cx, cy, rin):
-    """True inside the central opening.
-
-    The opening is the polygon bounded by the same tangent lines the cuts run
-    along -- the intersection of seven half-planes -- not a circle. A circular
-    hole leaves a nub where each straight cut meets the curve; the polygon is
-    what gives the blades their sharp points, because each blade's inner edge
-    *is* one of those lines.
-    """
+    """True inside the central opening: the octagon bounded by the same lines
+    the cuts run along, so each blade's inner edge is one of them."""
     for i in range(BLADES):
         ux, uy = unit(math.radians(i * DEG))
         if (x - cx) * ux + (y - cy) * uy > rin:
@@ -74,41 +70,38 @@ def in_opening(x, y, cx, cy, rin):
     return True
 
 
-def in_tri(p, a, b, c):
-    """Point-in-triangle by consistent sign of the three edge cross products."""
-    def side(p1, p2, p3):
-        return (p1[0] - p3[0]) * (p2[1] - p3[1]) - (p2[0] - p3[0]) * (p1[1] - p3[1])
-    d1, d2, d3 = side(p, a, b), side(p, b, c), side(p, c, a)
-    return not (((d1 < 0) or (d2 < 0) or (d3 < 0)) and ((d1 > 0) or (d2 > 0) or (d3 > 0)))
+def vertices(cx, cy, r):
+    rv = r * R_VERT
+    return [(cx + rv * math.cos(math.radians(DEG / 2 + i * DEG)),
+             cy + rv * math.sin(math.radians(DEG / 2 + i * DEG)))
+            for i in range(BLADES)]
 
 
-def slashes(cx, cy, r):
-    """The cuts between blades, as triangle pairs.
+def cuts(cx, cy, r):
+    """The cuts between blades, one per octagon edge.
 
-    Each cut lies along a line **tangent to the central opening**, running from
-    its tangent point out to the rim. That tangency is the whole mark: a cut
-    aimed radially just notches the disc, while a tangent one leaves a blade
-    whose inner edge is a straight chord, which is what makes seven of them
-    read as a spiral. Every earlier attempt here got this wrong.
+    Cut k starts at vertex k, runs along the edge through vertex k+1 and on
+    out past the rim. It starts *at* the vertex with a square end and never
+    behind it -- the first version of this mark ran each cut as two
+    overlapping triangles under an even-odd fill, and every overlap punched
+    the colour back in, which is what made it look messy.
     """
-    tris = []
-    rin = r * R_IN
-    half = r * SLASH
-    reach = math.sqrt(max(0.0, r * r - rin * rin)) * 1.06   # past the rim, so it cuts clean
-    for i in range(BLADES):
-        a = math.radians(i * DEG)
-        ux, uy = unit(a)
-        px, py = cx + rin * ux, cy + rin * uy       # tangent point on the opening
-        tx, ty = -uy, ux                            # tangent direction
-        ex, ey = px + tx * reach, py + ty * reach   # out at the rim
-        # Constant width: offset both ends along the normal, which here is the
-        # radial direction.
-        ox, oy = ux * half, uy * half
-        a0, a1 = (px + ox, py + oy), (px - ox, py - oy)
-        b0, b1 = (ex + ox, ey + oy), (ex - ox, ey - oy)
-        tris.append((a0, a1, b1))
-        tris.append((a0, b1, b0))
-    return tris
+    v = vertices(cx, cy, r)
+    out = []
+    for k in range(BLADES):
+        a, b = v[k], v[(k + 1) % BLADES]
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        n = math.hypot(dx, dy)
+        out.append((a, (dx / n, dy / n)))
+    return out
+
+
+def in_cut(x, y, cs, half):
+    for (ax, ay), (dx, dy) in cs:
+        t = (x - ax) * dx + (y - ay) * dy
+        if t >= 0 and abs((x - ax) * dy - (y - ay) * dx) < half:
+            return True
+    return False
 
 
 def render(size, bg=None, ss=4):
@@ -116,7 +109,8 @@ def render(size, bg=None, ss=4):
     cx = cy = size / 2.0
     r = size / 2.0 * 0.96
     rin = r * R_IN
-    tris = slashes(cx, cy, r)
+    cs = cuts(cx, cy, r)
+    half = r * SLASH
     px = bytearray(size * size * 4)
     inv = 1.0 / (ss * ss)
 
@@ -131,7 +125,7 @@ def render(size, bg=None, ss=4):
                         continue
                     if in_opening(x, y, cx, cy, rin):
                         continue
-                    if any(in_tri((x, y), *t) for t in tris):
+                    if in_cut(x, y, cs, half):
                         continue
                     hits += 1
             i = (py_ * size + px_) * 4
@@ -167,28 +161,25 @@ def png(path, w, h, rgba):
 
 
 def svg():
-    """The same construction as vectors: outer disc, then the opening and the
-    seven cuts punched through it with fill-rule evenodd."""
+    """The same construction as vectors: a disc under a mask that punches out
+    the octagon and the eight cuts. A mask rather than an even-odd path,
+    because an even-odd path fills wherever two cuts overlap."""
     cx = cy = 50.0
     r = 48.0
-    rin = r * R_IN
-    d = [f"M {cx - r},{cy} a {r},{r} 0 1,0 {2 * r},0 a {r},{r} 0 1,0 {-2 * r},0"]
-    # Vertices of the opening: where consecutive tangent lines meet. For a
-    # regular polygon of inradius rin that is circumradius rin/cos(pi/n).
-    circ = rin / math.cos(math.pi / BLADES)
-    pts = []
-    for i in range(BLADES):
-        a = math.radians(i * DEG + DEG / 2)
-        pts.append(f"{cx + circ * math.cos(a):.2f},{cy + circ * math.sin(a):.2f}")
-    d.append("M " + " L ".join(pts) + " Z")
-    for t_ in slashes(cx, cy, r):
-        d.append("M {} L {} L {} Z".format(
-            *[f"{x:.2f},{y:.2f}" for x, y in t_]))
+    v = vertices(cx, cy, r)
+    poly = " ".join(f"{x:.2f},{y:.2f}" for x, y in v)
+    lines = []
+    for (ax, ay), (dx, dy) in cuts(cx, cy, r):
+        lines.append(f'<line x1="{ax:.2f}" y1="{ay:.2f}" '
+                     f'x2="{ax + dx * 80:.2f}" y2="{ay + dy * 80:.2f}"/>')
+    fill = f"#{AMBER[0]:02X}{AMBER[1]:02X}{AMBER[2]:02X}"
     return ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" '
             'role="img" aria-label="GLaDOS aperture mark">'
-            f'<path d="{" ".join(d)}" '
-            f'fill="#{AMBER[0]:02X}{AMBER[1]:02X}{AMBER[2]:02X}" '
-            'fill-rule="evenodd"/></svg>')
+            '<defs><mask id="m"><rect width="100" height="100" fill="#fff"/>'
+            f'<polygon points="{poly}" fill="#000"/>'
+            f'<g stroke="#000" stroke-width="{2 * r * SLASH:.1f}" stroke-linecap="butt">'
+            + "".join(lines) + '</g></mask></defs>'
+            f'<circle cx="{cx:g}" cy="{cy:g}" r="{r:g}" fill="{fill}" mask="url(#m)"/></svg>')
 
 
 def social(w, h, out):

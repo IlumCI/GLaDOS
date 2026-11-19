@@ -1705,7 +1705,7 @@ pub fn storage_panel() -> Panel {
     }
     // The distinction that decides whether anything survives a reboot, said
     // plainly rather than left to be discovered when a fact goes missing.
-    let unlocked = crate::dev::nvme::writes_unlocked();
+    let unlocked = crate::dev::nvme::holds(crate::dev::nvme::Holder::Store);
     ws.push(stat(
         "Writes",
         String::from(if unlocked { "unlocked" } else { "locked" }),

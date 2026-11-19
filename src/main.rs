@@ -34,6 +34,7 @@ mod edit;
 mod fmt;
 mod gfx;
 mod gpu;
+mod install;
 mod job;
 mod json;
 mod aiksi;
@@ -300,6 +301,48 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
 ");
     }
 
+    // --- which system slot, on an installed disk ---
+    //
+    // After the kernel's hook, because a kernel that was just undone takes
+    // the system image staged with it back too, and a kernel just written
+    // makes the image staged with it wait for it.
+    let slot_said = install::slot::at_boot(bs, image, update::kernel_event());
+    if let Some(line) = slot_said {
+        serial_println!("glados: {}", line);
+        con_out(st, "glados: ");
+        con_out(st, line);
+        con_out(st, "
+");
+    }
+    // **And then restart, when the boot image just changed.** The hook used
+    // to leave that to the next boot, on the strength of `ResetSystem` going
+    // silent when called here. It was not silent: the harness runs QEMU with
+    // `-no-reboot -action shutdown=pause`, so a reset *paused the VM*, which
+    // reads exactly like a firmware that took the call and did nothing.
+    // Restarting now means a release that moves the kernel and the system
+    // image together is one reboot, not two, and the image never waits on a
+    // kernel that is written but not running.
+    if matches!(update::kernel_event(), install::slot::Kernel::AppliedNow | install::slot::Kernel::RolledBack)
+        || install::slot::restored_kernel()
+    {
+        serial_println!("glados: restarting into the boot image just written");
+        cpu::reboot();
+    }
+
+    // --- the startup menu, when this disk has another system on it ---
+    //
+    // Only on an installed disk: install media and live boots are already
+    // the thing somebody chose in the firmware's menu.
+    //
+    // **Not on a trial boot.** The try is already counted and the kernel's
+    // health flag is open; leaving for another system here would read, at
+    // the next GLaDOS boot, as a release that never reached the desktop, and
+    // a good update would be rolled back.
+    let trial = install::slot::current().is_some_and(|r| r.trial.is_some()) || update::kernel_on_trial();
+    if install::slot::chosen().is_some() && !trial {
+        install::menu::at_boot(st, bs, image);
+    }
+
     // --- repairs this machine decided for itself on an earlier boot ---
     //
     // Here because it is the earliest point there is: the ESP is readable, and
@@ -402,6 +445,34 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     // The root bundle comes off the same volume for the same reason: this is
     // the only moment there is a filesystem to read it from.
     let roots = uefi::read_file(bs, image, net::trust::ROOTS_PATH);
+    // The kernel's own file, which nothing else reads: the image in memory is
+    // relocated and section-aligned, so it cannot be written back out as a
+    // file. Only the installer wants it.
+    let kernel_file = uefi::read_file(bs, image, "\\EFI\\BOOT\\BOOTX64.EFI");
+    // Written by the installer onto an installed disk's ESP and nowhere else,
+    // so this says which kind of medium this boot came from.
+    if let Some(b) = uefi::read_file(bs, image, install::firstboot::UEFI_PATH) {
+        install::firstboot::found(b.as_slice());
+    }
+    match uefi::read_file(bs, image, "\\GLADOS\\INSTALL.ID") {
+        Some(b) => serial_println!(
+            "glados: booted from an installed disk, id {}",
+            core::str::from_utf8(b.as_slice()).unwrap_or("?").trim()
+        ),
+        None => serial_println!("glados: booted from install or live media"),
+    }
+    for (path, blob) in [
+        ("EFI/BOOT/BOOTX64.EFI", &kernel_file),
+        ("GLADOS/model.bin", &model),
+        ("GLADOS/tokenizer.bin", &tokenizer),
+        ("GLADOS/brain.bin", &brain),
+        ("GLADOS/voice.bin", &voice_model),
+        ("GLADOS/roots.der", &roots),
+    ] {
+        if let Some(b) = blob {
+            install::carry(path, b.as_slice());
+        }
+    }
     // Device firmware, every file of it, for the same reason: which image a part
     // wants is read off its registers, and that is MMIO this path does not do.
     dev::firmware::load(bs, image);
@@ -797,9 +868,36 @@ pub extern "efiapi" fn efi_main(image: Handle, st: *mut SystemTable) -> Status {
     if let Some(r) = boot.linux_root.as_ref() {
         store::erofs::set_ram(r.ptr, r.len);
     }
-    if let Some(p) = linux::disk::auto_root() {
+    // The root first, then everything that edits the guests' layer -- the
+    // reconcile and the trial's verdict -- and only then the session, whose
+    // supervisor starts guests: the namespace is not safe to rearrange under
+    // a running guest (see `sysbox`'s preemption note).
+    let root = linux::disk::auto_root();
+    // A system image on trial: this boot reached here on it, so keep it --
+    // after the root is mounted, because what is kept is the slot that
+    // actually mounted, and before that nothing has.
+    if let Some(line) = linux::reconcile::at_boot() {
+        kprintln!("[update] {}", line);
+    }
+    if let Some(line) = install::slot::settle_now() {
+        kprintln!("[update] {}", line);
+    }
+    // Again, now the verdict is in: a kept image drops the attic and one that
+    // did not mount puts it back, this boot rather than the next.
+    if let Some(line) = linux::reconcile::at_boot() {
+        kprintln!("[update] {}", line);
+    }
+    if let Some(p) = root {
         linux::services::begin_session();
         kprintln!("[linux] the root filesystem is partition {}, with a session bus", p);
+    }
+    // A Netinstall's first boot: what was chosen in the installer comes down
+    // now, through the shell, as if typed -- so it prints where a person is
+    // looking and can be run again by hand if the network was not there.
+    if let Some(p) = install::firstboot::pending() {
+        kprintln!("[install] first boot: fetching {} -- 'install finish' does it again if this fails",
+            if p.packages().is_empty() { alloc::string::String::from("nothing") } else { p.packages().join(" ") });
+        gfx::desk::queue_command("install finish");
     }
 
     // What is installed, so the desktop can offer it. Read off every FAT
@@ -897,6 +995,24 @@ fn init_storage(acpi: &Option<acpi::Acpi>) -> bool {
                         bad = true;
                     }
                 });
+                // **An installed disk is writable from boot.** Mounting stays
+                // read-only everywhere else -- a store found in a disk's
+                // unclaimed tail, beside somebody's Windows, waits for a person
+                // to type `store unlock` -- but a disk the installer laid out
+                // carries a GLaDOS store partition *and* GLaDOS system slots,
+                // and on one of those the operator already said yes, once, by
+                // installing. Asking again every boot would mean nothing a user
+                // does persists until they learn a command.
+                let installed = store::block::scan().is_ok_and(|l| {
+                    l.partitions.iter().any(|p| p.type_guid == store::cas::GLADOS_TYPE_GUID && p.start_lba == start)
+                        && l.partitions.iter().any(|p| p.type_guid == install::plan::ROOT_TYPE_GUID)
+                });
+                if installed && !bad {
+                    match store::unlock() {
+                        Ok(_) => kprintln!("  writable: this is an installed disk"),
+                        Err(e) => kprintln!("  installed disk, but the store would not unlock: {:?}", e),
+                    }
+                }
                 bad
             }
             Err(_) => {
