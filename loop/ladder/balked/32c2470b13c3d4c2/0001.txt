@@ -1,0 +1,1 @@
+but has no claim to count   attempt 5 compiles but has no claim to count   attempt 6 compiles but has no claim to count   refused: 6 attempt(s) and none were usable; the last was: the selftest prints no claim, so the boot's count cannot rise and J1 has nothing to read -- it is missing "ok ", "FAIL" 
