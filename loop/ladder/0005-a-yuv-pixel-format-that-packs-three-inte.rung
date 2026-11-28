@@ -1,0 +1,8 @@
+looprung 1
+seq 5
+goal ce93af35a0b0364e0b918caaa96c0e6e685347d9b390091d2a3bd5430253be4f
+kind feature
+target src/fmt/yuv.rs
+title a YUV pixel format that packs three interleaved channels into one byte per channel
+witness a claim in `diag fmt` that reading and writing a 4x4 block of pixels through the YUV format produces identical output bytes, which fails today because the module does not exist yet
+why we need an intermediate representation between raw RGB data and compressed bitstreams; this is the first file under src/fmt/ since seq 4 created the base pixel_format module

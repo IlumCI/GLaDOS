@@ -1,0 +1,26 @@
+loopcert 1
+seq 36
+utc 2026-10-09T09:10:28Z
+point 4bf799966428c866cd89da7df39f54a9ab1c2f9c2dce8748722f54cb679df215
+kind event
+rung 1
+axis grid
+parent-tree b2f8e30962dc502513138af5b18b7f2801e03d2a
+candidate-tree 039ca8530d594414dc3f996e2f634fea8085e877
+rail none
+corpus 00000000
+alpha-k 0
+chi-bar -
+minutes 0
+half extend
+level 0
+boots 0
+queries 0
+sections 0/0
+suites 0/0
+claims 0/0
+witness -
+moved -
+why main overrode: src/task.rs 
+verdict superseded
+runner 37909546550/1

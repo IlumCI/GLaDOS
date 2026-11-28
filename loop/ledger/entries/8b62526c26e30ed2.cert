@@ -1,0 +1,26 @@
+loopcert 1
+seq 13
+utc 2026-09-22T15:24:42Z
+point 4b27d18ee1d7576fcd68d5e50daf455072576717947ab5496a43dd13dad5cc79
+kind feature
+rung 4
+axis model
+parent-tree 3c23585f23a3df6f718c52eedab7923dfef343aa
+candidate-tree 181a975a86182622e162bf97a862991c9ef7d57f
+rail none
+corpus ae595a23
+alpha-k 12
+chi-bar -
+minutes 40
+half extend
+level 0
+boots 1
+queries 250
+sections 29/29
+suites 68/68
+claims 1219/1221
+witness -
+moved -
+why 1 rail(s) regressed
+verdict refuse
+runner 35745337238/1
